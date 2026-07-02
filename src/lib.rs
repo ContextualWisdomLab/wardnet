@@ -20,16 +20,17 @@ use tokio::{
 };
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
-    enforce_event_limit, kpi_snapshot_at, select_route, threat_feed_freshness_snapshot,
-    upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed, validate_commercial_profile,
-    validate_dnsbl, validate_route, validate_threat, validate_threat_feed_import,
+    enforce_event_limit, kpi_snapshot_at, record_audit_log, select_route,
+    threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
+    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
+    validate_threat_feed_import,
 };
 pub use waf_ids_core::{
-    BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts, CommercialProfile,
-    CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus, ProductEdition,
-    ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest, SecurityEvent, Severity,
-    SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness, ThreatFeedImport,
-    ThreatFeedImportResult, ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone,
+    AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
+    CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
+    NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
+    SecurityEvent, Severity, SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness,
+    ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone,
     reverse_ipv4_for_dnsbl, score_request,
 };
 
@@ -218,6 +219,7 @@ pub struct SupportBundle {
     pub dnsbl_entry_count: usize,
     pub threat_feed_count: usize,
     pub event_count: usize,
+    pub audit_log_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -242,6 +244,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threats", get(list_threats).post(create_threat))
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
+        .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
         .route(
@@ -295,8 +298,13 @@ async fn create_route(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
+    let actor = audit_actor(&headers);
     match state
-        .mutate_and_persist(|data| upsert_route(&mut data.routes, route.clone()))
+        .mutate_and_persist(|data| {
+            let saved = upsert_route(&mut data.routes, route.clone());
+            record_successful_audit_log(data, actor, "upsert_route", "route", saved.id.clone());
+            saved
+        })
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
@@ -320,8 +328,19 @@ async fn create_threat(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
+    let actor = audit_actor(&headers);
     match state
-        .mutate_and_persist(|data| upsert_threat(&mut data.threats, indicator.clone()))
+        .mutate_and_persist(|data| {
+            let saved = upsert_threat(&mut data.threats, indicator.clone());
+            record_successful_audit_log(
+                data,
+                actor,
+                "upsert_threat",
+                "threat_indicator",
+                threat_resource_id(&saved),
+            );
+            saved
+        })
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
@@ -345,8 +364,19 @@ async fn create_dnsbl(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
+    let actor = audit_actor(&headers);
     match state
-        .mutate_and_persist(|data| upsert_dnsbl(&mut data.dnsbl, entry.clone()))
+        .mutate_and_persist(|data| {
+            let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
+            record_successful_audit_log(
+                data,
+                actor,
+                "upsert_dnsbl",
+                "dnsbl_entry",
+                saved.address.to_string(),
+            );
+            saved
+        })
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
@@ -356,6 +386,10 @@ async fn create_dnsbl(
 
 async fn list_events(State(state): State<AppState>) -> Json<Vec<SecurityEvent>> {
     Json(state.inner.read().await.events.clone())
+}
+
+async fn list_audit_logs(State(state): State<AppState>) -> Json<Vec<AuditLogEntry>> {
+    Json(state.inner.read().await.audit_logs.clone())
 }
 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
@@ -379,9 +413,17 @@ async fn update_commercial_license(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
+    let actor = audit_actor(&headers);
     match state
         .mutate_and_persist(|data| {
             data.commercial = profile.clone();
+            record_successful_audit_log(
+                data,
+                actor,
+                "update_commercial_license",
+                "commercial_license",
+                profile.tenant_id.clone(),
+            );
             profile
         })
         .await
@@ -428,6 +470,7 @@ async fn import_threat_feed(
     }
 
     let imported_at = now_unix();
+    let actor = audit_actor(&headers);
     match state
         .mutate_and_persist(|data| {
             for threat in feed.threats.iter().cloned() {
@@ -447,12 +490,20 @@ async fn import_threat_feed(
                     ttl_seconds: feed.ttl_seconds,
                 },
             );
-            ThreatFeedImportResult {
+            let result = ThreatFeedImportResult {
                 feed_id: feed.feed_id.clone(),
                 upserted_threats: feed.threats.len(),
                 upserted_dnsbl: feed.dnsbl.len(),
                 last_updated_unix: imported_at,
-            }
+            };
+            record_successful_audit_log(
+                data,
+                actor,
+                "import_threat_feed",
+                "threat_feed",
+                result.feed_id.clone(),
+            );
+            result
         })
         .await
     {
@@ -480,6 +531,7 @@ async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
         dnsbl_entry_count: data.dnsbl.len(),
         threat_feed_count: data.threat_feeds.len(),
         event_count: data.events.len(),
+        audit_log_count: data.audit_logs.len(),
     })
 }
 
@@ -712,6 +764,43 @@ fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
         .is_some_and(|actual| actual == expected)
 }
 
+fn audit_actor(headers: &HeaderMap) -> String {
+    headers
+        .get("x-admin-actor")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("admin-token")
+        .to_string()
+}
+
+fn record_successful_audit_log(
+    data: &mut AppData,
+    actor: String,
+    action: &str,
+    resource: &str,
+    resource_id: String,
+) -> AuditLogEntry {
+    record_audit_log(
+        data,
+        NewAuditLogEntry {
+            timestamp_unix: now_unix(),
+            actor,
+            action: action.to_string(),
+            resource: resource.to_string(),
+            resource_id,
+            outcome: "success".to_string(),
+        },
+    )
+}
+
+fn threat_resource_id(indicator: &ThreatIndicator) -> String {
+    format!(
+        "{}:{}:{}",
+        indicator.indicator_type, indicator.value, indicator.source
+    )
+}
+
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
@@ -759,6 +848,7 @@ const ADMIN_HTML: &str = r#"<!doctype html>
     <section><h2>Threat Feeds</h2><pre id="feeds">Loading</pre></section>
     <section><h2>Feed Freshness</h2><pre id="freshness">Loading</pre></section>
     <section><h2>Recent Events</h2><pre id="events">Loading</pre></section>
+    <section><h2>Audit Logs</h2><pre id="auditLogs">Loading</pre></section>
     <section><h2>SOC Event Export</h2><pre id="eventExport">Loading</pre></section>
     <section><h2>DNSBL Zone</h2><pre id="zone">Loading</pre></section>
   </main>
@@ -782,6 +872,7 @@ const ADMIN_HTML: &str = r#"<!doctype html>
         show("feeds", "/api/threat-feeds"),
         show("freshness", "/api/threat-feeds/freshness"),
         show("events", "/api/events"),
+        show("auditLogs", "/api/audit-logs"),
         show("eventExport", "/api/events.ndjson"),
         show("zone", "/dnsbl/zone"),
       ]);
@@ -1233,6 +1324,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audit_logs_record_successful_admin_writes_without_tokens() {
+        let path = temp_state_path("audit");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        let app = build_app(state);
+        let route = RouteConfig {
+            id: "audit-route".to_string(),
+            path_prefix: "/audit".to_string(),
+            upstream: "mock://audit".to_string(),
+            mode: EnforcementMode::Monitor,
+            enabled: true,
+        };
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", None, &route),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/routes")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", "secret")
+                    .header("x-admin-actor", "operator@example.com")
+                    .body(Body::from(serde_json::to_vec(&route).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let logs: Vec<AuditLogEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].actor, "operator@example.com");
+        assert_eq!(logs[0].action, "upsert_route");
+        assert_eq!(logs[0].resource, "route");
+        assert_eq!(logs[0].resource_id, "audit-route");
+        assert_eq!(logs[0].outcome, "success");
+        assert!(!serde_json::to_string(&logs).unwrap().contains("secret"));
+
+        let persisted: AppData =
+            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(persisted.audit_logs.len(), 1);
+        let persisted_json = serde_json::to_string(&persisted.audit_logs).unwrap();
+        assert!(!persisted_json.contains("secret"));
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
     async fn commercial_license_feed_readiness_and_bundle_surfaces_work() {
         let path = temp_state_path("commercial");
         let state = AppState::load(AppConfig {
@@ -1413,6 +1565,12 @@ mod tests {
         );
         assert!(
             manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/audit-logs" && endpoint.required_for_sale)
+        );
+        assert!(
+            manifest
                 .document_paths
                 .iter()
                 .any(|path| path == "docs/figma/enterprise-product-architecture.md")
@@ -1438,6 +1596,7 @@ mod tests {
         assert_eq!(support.threat_feed_count, 1);
         assert_eq!(support.kpis.fresh_threat_feed_count, 1);
         assert_eq!(support.kpis.stale_threat_feed_count, 0);
+        assert!(support.audit_log_count >= 2);
         assert_eq!(support.threat_feed_freshness.len(), 1);
         assert!(!support.threat_feed_freshness[0].stale);
         assert!(support.event_count >= 1);
@@ -1510,6 +1669,8 @@ mod tests {
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
+                audit_logs: Vec::new(),
+                next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
             },
@@ -2364,6 +2525,8 @@ mod tests {
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
+                audit_logs: Vec::new(),
+                next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
             },

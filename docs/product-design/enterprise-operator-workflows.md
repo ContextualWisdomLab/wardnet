@@ -15,8 +15,9 @@ Expected surface:
 - SOC event export availability
 - support bundle link
 - buyer evidence manifest link
+- management audit logs for successful admin writes
 
-Success state: buyer can reproduce readiness through `GET /api/commercial/readiness`, `GET /api/commercial/evidence-manifest`, `GET /api/support-bundle`, `GET /api/kpis`, `GET /api/threat-feeds/freshness`, `GET /api/events.ndjson`, and `GET /dnsbl/zone`.
+Success state: buyer can reproduce readiness through `GET /api/commercial/readiness`, `GET /api/commercial/evidence-manifest`, `GET /api/support-bundle`, `GET /api/kpis`, `GET /api/threat-feeds/freshness`, `GET /api/audit-logs`, `GET /api/events.ndjson`, and `GET /dnsbl/zone`.
 
 ## 2. Threat Feed Update Operation
 
@@ -27,6 +28,7 @@ Expected states:
 - unauthorized writes return a clear 401 without mutating state
 - invalid feed payloads return specific 400 blockers
 - accepted feeds update threat indicators, DNSBL entries, and feed status atomically
+- accepted writes add a management audit-log entry without storing the admin token
 - readiness reflects feed freshness immediately
 - stale feeds become explicit blockers instead of silently passing readiness
 
@@ -42,6 +44,7 @@ Expected states:
 - invalid route prefixes or upstream schemes return specific blockers
 - route-scoped block mode prevents accidental global enforcement
 - events record route id, action, score, reason, and path
+- audit logs record actor, action, route id, and success outcome for the write
 
 Success state: the gateway returns monitor/block decisions and records evidence without leaking admin tokens.
 
@@ -58,6 +61,7 @@ Expected contents:
 - readiness checks and blockers
 - buyer evidence manifest with endpoint, document, and deployment evidence paths
 - route, threat, DNSBL, feed, and event counts
+- management audit-log count
 - threat feed freshness records
 - SOC event export path
 
@@ -72,6 +76,7 @@ Expected states:
 - readiness status, blockers, and 2B KRW target are visible without scraping multiple screens
 - required endpoints include method, path, content type, and what each proves
 - document paths include commercial, analytics, Product Design, Figma/FigJam, and complexity-audit artifacts
+- audit-log endpoint proves successful admin writes without exposing `X-Admin-Token`
 - deployment assets are listed for lab validation
 
 Success state: a buyer can turn the manifest into a procurement checklist and verify each runtime surface independently.
