@@ -1,6 +1,9 @@
+#[cfg(not(test))]
 use std::{env, error::Error, io, path::PathBuf};
+#[cfg(not(test))]
 use waf_ids_ai_soc::{AppConfig, AppState, build_app};
 
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
@@ -17,6 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(not(test))]
 fn parse_event_limit() -> Result<usize, Box<dyn Error>> {
     let value = match env::var("EVENT_LIMIT") {
         Ok(raw) => raw.parse::<usize>()?,

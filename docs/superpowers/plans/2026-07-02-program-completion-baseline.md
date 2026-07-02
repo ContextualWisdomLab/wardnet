@@ -94,5 +94,5 @@
 - [x] Document completion criteria and runtime environment.
 - [x] Document state-file behavior and smoke testing.
 - [x] Document production limits and next real-engine adapters.
-- [x] Run `cargo fmt --check`, `cargo test --locked`, `cargo clippy --locked -- -D warnings`, `actionlint`, and `scripts/smoke.sh`.
+- [x] Run `cargo fmt --check`, `cargo test --locked`, `cargo llvm-cov --workspace --all-features --fail-under-lines 100 --show-missing-lines`, `cargo clippy --locked -- -D warnings`, `actionlint`, and `scripts/smoke.sh`.
 - [ ] Push a PR, wait for required checks, merge, and verify zero open PRs.
