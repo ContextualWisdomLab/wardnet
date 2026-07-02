@@ -8,6 +8,7 @@
 - **Mean Time To Triage**: time from first event in an incident cluster to analyst disposition.
 - **Feed Freshness**: percentage of active feeds updated within their expected interval.
 - **DNSBL Lookup Readiness**: zone export age and authoritative DNS publication status.
+- **Buyer Evidence Completeness**: required sale-readiness evidence endpoints, documents, and deployment assets listed in `GET /api/commercial/evidence-manifest`.
 
 ## Driver Metrics
 
@@ -20,6 +21,7 @@
 - top matched indicators
 - stale indicators past TTL
 - feed import error count
+- buyer evidence manifest endpoint count and missing required evidence blockers
 
 ## Guardrails
 
@@ -32,4 +34,4 @@
 
 ## MVP Measurement
 
-The baseline exposes `GET /api/kpis` with counts for routes, indicators, DNSBL entries, threat feeds, fresh feeds, stale feeds, events, blocked events, and monitored events. Latency, precision, triage time, and full feed freshness percentages require the next telemetry and analyst-disposition work.
+The baseline exposes `GET /api/kpis` with counts for routes, indicators, DNSBL entries, threat feeds, fresh feeds, stale feeds, events, blocked events, and monitored events. `GET /api/commercial/evidence-manifest` adds the buyer-facing checklist that maps those signals to required runtime endpoints, committed documents, and deployment assets. Latency, precision, triage time, and full feed freshness percentages require the next telemetry and analyst-disposition work.

@@ -159,6 +159,12 @@ assert_json_field "$readiness" 'data["ready_for_enterprise_sale"] is True'
 assert_json_field "$readiness" 'data["readiness_level"] == "sale_ready"'
 assert_json_field "$readiness" 'data["blockers"] == []'
 
+manifest="$(curl -fsS "$BASE_URL/api/commercial/evidence-manifest")"
+assert_json_field "$manifest" 'data["ready_for_enterprise_sale"] is True'
+assert_json_field "$manifest" 'data["runtime_counts"]["fresh_threat_feed_count"] == 1'
+assert_json_field "$manifest" 'any(endpoint["path"] == "/api/events.ndjson" for endpoint in data["required_endpoints"])'
+assert_json_field "$manifest" 'any(endpoint["path"] == "/dnsbl/zone" for endpoint in data["required_endpoints"])'
+
 feeds="$(curl -fsS "$BASE_URL/api/threat-feeds")"
 assert_json_field "$feeds" 'len(data) == 1'
 assert_json_field "$feeds" 'data[0]["feed_id"] == "misp-seoul"'
@@ -172,6 +178,7 @@ grep -q '"action":"blocked"' <<<"$event_export"
 
 support_bundle="$(curl -fsS "$BASE_URL/api/support-bundle")"
 assert_json_field "$support_bundle" 'data["readiness"]["ready_for_enterprise_sale"] is True'
+assert_json_field "$support_bundle" 'data["evidence_manifest"]["ready_for_enterprise_sale"] is True'
 assert_json_field "$support_bundle" 'data["commercial"]["annual_contract_value_krw"] == 2000000000'
 assert_json_field "$support_bundle" 'data["kpis"]["fresh_threat_feed_count"] == 1'
 assert_json_field "$support_bundle" 'data["threat_feed_freshness"][0]["stale"] is False'

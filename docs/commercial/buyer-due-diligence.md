@@ -13,6 +13,7 @@
 - SOC KPIs: `GET /api/kpis`
 - License profile: `GET /api/commercial/license`
 - Sale readiness: `GET /api/commercial/readiness`
+- Buyer evidence manifest: `GET /api/commercial/evidence-manifest`
 - Threat feed status: `GET /api/threat-feeds`
 - Threat feed freshness: `GET /api/threat-feeds/freshness`
 - Support bundle: `GET /api/support-bundle`
@@ -25,6 +26,7 @@
 - Route-scoped monitor/block mode to reduce accidental global enforcement.
 - Authenticated management writes through `X-Admin-Token`.
 - Automated tests for management APIs, gateway scoring, DNSBL export, event NDJSON export, feed freshness, persistence failures, commercial readiness, and legacy state compatibility.
+- Buyer evidence manifest that lists required runtime endpoints, committed document paths, deployment assets, blockers, and runtime evidence counts from one API.
 - `scripts/smoke.sh` verifies a full local lifecycle including restart persistence.
 
 ## Security Review Packet
@@ -55,6 +57,7 @@ Then inspect:
 
 ```bash
 curl -fsS http://127.0.0.1:8080/api/commercial/readiness
+curl -fsS http://127.0.0.1:8080/api/commercial/evidence-manifest
 curl -fsS http://127.0.0.1:8080/api/threat-feeds/freshness
 curl -fsS http://127.0.0.1:8080/api/events.ndjson
 curl -fsS http://127.0.0.1:8080/api/support-bundle

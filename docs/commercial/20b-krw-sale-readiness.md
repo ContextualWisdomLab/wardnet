@@ -14,10 +14,11 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 8. The product must retain threat feed status, imported HTTP indicators, DNSBL entries, gateway routes, and security events across restart when `WAF_IDS_STATE_PATH` is configured.
 9. The readiness API must report blockers instead of returning a vague success state.
 10. The support bundle API must return health, KPIs, license metadata, readiness checks, feed freshness, and evidence counts without secrets.
-11. Docker, Compose, and Kubernetes deployment assets must exist for buyer lab validation.
-12. Security, compliance, architecture, operations, and KPI evidence must be committed with the product.
-13. Reusable domain logic must be separated from HTTP/persistence code when that improves maintainability without adding release overhead.
-14. Product design, Figma/FigJam, analytics, complexity-audit, and implementation-plan evidence must be committed for buyer due diligence.
+11. The product must expose a buyer evidence manifest through `GET /api/commercial/evidence-manifest` so evaluators can verify required runtime APIs, committed documents, and deployment assets from one contract.
+12. Docker, Compose, and Kubernetes deployment assets must exist for buyer lab validation.
+13. Security, compliance, architecture, operations, and KPI evidence must be committed with the product.
+14. Reusable domain logic must be separated from HTTP/persistence code when that improves maintainability without adding release overhead.
+15. Product design, Figma/FigJam, analytics, complexity-audit, and implementation-plan evidence must be committed for buyer due diligence.
 
 ## Runtime Readiness API
 
@@ -29,6 +30,13 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 - `blockers`: failed check identifiers
 - `deployment_assets`: expected production packaging files
 - `buyer_evidence`: due-diligence document paths
+
+`GET /api/commercial/evidence-manifest` returns the buyer validation map:
+
+- current readiness state and blockers
+- runtime counts for routes, indicators, DNSBL entries, feeds, fresh/stale feeds, and events
+- required evidence endpoints with method, path, content type, and what each endpoint proves
+- committed document paths and deployment assets that should be reviewed during procurement
 
 ## Required Passing Checks
 
