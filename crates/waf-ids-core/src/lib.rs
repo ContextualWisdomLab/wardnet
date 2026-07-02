@@ -239,6 +239,40 @@ pub struct CommercialReadiness {
     pub buyer_evidence: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuyerEvidenceEndpoint {
+    pub id: String,
+    pub method: String,
+    pub path: String,
+    pub content_type: String,
+    pub proves: String,
+    pub required_for_sale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuyerEvidenceRuntimeCounts {
+    pub route_count: usize,
+    pub threat_indicator_count: usize,
+    pub dnsbl_entry_count: usize,
+    pub threat_feed_count: usize,
+    pub fresh_threat_feed_count: usize,
+    pub stale_threat_feed_count: usize,
+    pub event_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuyerEvidenceManifest {
+    pub generated_at_unix: u64,
+    pub target_sale_value_krw: u64,
+    pub ready_for_enterprise_sale: bool,
+    pub readiness_level: String,
+    pub blockers: Vec<String>,
+    pub runtime_counts: BuyerEvidenceRuntimeCounts,
+    pub required_endpoints: Vec<BuyerEvidenceEndpoint>,
+    pub document_paths: Vec<String>,
+    pub deployment_assets: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoredRequest {
     pub score: u16,
@@ -618,6 +652,129 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
             "docs/security/threat-model.md".to_string(),
             "docs/security/compliance-mapping.md".to_string(),
         ],
+    }
+}
+
+pub fn buyer_evidence_manifest(data: &AppData) -> BuyerEvidenceManifest {
+    buyer_evidence_manifest_at(data, unix_now())
+}
+
+pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenceManifest {
+    let readiness = commercial_readiness_snapshot_at(data, now_unix);
+    let kpis = kpi_snapshot_at(data, now_unix);
+
+    BuyerEvidenceManifest {
+        generated_at_unix: now_unix,
+        target_sale_value_krw: readiness.target_sale_value_krw,
+        ready_for_enterprise_sale: readiness.ready_for_enterprise_sale,
+        readiness_level: readiness.readiness_level,
+        blockers: readiness.blockers,
+        runtime_counts: BuyerEvidenceRuntimeCounts {
+            route_count: kpis.route_count,
+            threat_indicator_count: kpis.threat_indicator_count,
+            dnsbl_entry_count: kpis.dnsbl_entry_count,
+            threat_feed_count: kpis.threat_feed_count,
+            fresh_threat_feed_count: kpis.fresh_threat_feed_count,
+            stale_threat_feed_count: kpis.stale_threat_feed_count,
+            event_count: kpis.event_count,
+        },
+        required_endpoints: buyer_evidence_endpoints(),
+        document_paths: vec![
+            "docs/commercial/20b-krw-sale-readiness.md".to_string(),
+            "docs/commercial/buyer-due-diligence.md".to_string(),
+            "docs/analytics/soc-kpis.md".to_string(),
+            "docs/product-design/enterprise-operator-workflows.md".to_string(),
+            "docs/figma/enterprise-product-architecture.md".to_string(),
+            "docs/ponytail/2026-07-02-complexity-audit.md".to_string(),
+        ],
+        deployment_assets: readiness.deployment_assets,
+    }
+}
+
+fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
+    vec![
+        buyer_evidence_endpoint(
+            "health",
+            "GET",
+            "/healthz",
+            "application/json",
+            "runtime health, persistence mode, DNSBL origin, and event retention limit",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "license",
+            "GET",
+            "/api/commercial/license",
+            "application/json",
+            "tenant, edition, license, support, node count, and contract metadata",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "readiness",
+            "GET",
+            "/api/commercial/readiness",
+            "application/json",
+            "2B KRW readiness checks and explicit blockers",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "evidence_manifest",
+            "GET",
+            "/api/commercial/evidence-manifest",
+            "application/json",
+            "buyer-verifiable evidence map for runtime APIs, docs, and deployment assets",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "feed_freshness",
+            "GET",
+            "/api/threat-feeds/freshness",
+            "application/json",
+            "fresh and stale threat-feed evidence from TTL and last update time",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "soc_event_export",
+            "GET",
+            "/api/events.ndjson",
+            "application/x-ndjson",
+            "one-security-event-per-line SOC/SIEM ingestion evidence",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "support_bundle",
+            "GET",
+            "/api/support-bundle",
+            "application/json",
+            "support and due-diligence handoff package without admin secrets",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "dnsbl_zone",
+            "GET",
+            "/dnsbl/zone",
+            "text/plain",
+            "RFC 5782-style DNSBL zone export for buyer lab DNS validation",
+            true,
+        ),
+    ]
+}
+
+fn buyer_evidence_endpoint(
+    id: &str,
+    method: &str,
+    path: &str,
+    content_type: &str,
+    proves: &str,
+    required_for_sale: bool,
+) -> BuyerEvidenceEndpoint {
+    BuyerEvidenceEndpoint {
+        id: id.to_string(),
+        method: method.to_string(),
+        path: path.to_string(),
+        content_type: content_type.to_string(),
+        proves: proves.to_string(),
+        required_for_sale,
     }
 }
 

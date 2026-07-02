@@ -35,6 +35,7 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
 - `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
 - `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
+- `GET /api/commercial/evidence-manifest` returns the buyer-verifiable runtime, document, and deployment evidence map.
 - `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
 
 The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
@@ -45,6 +46,8 @@ The enterprise product package evidence is tracked in:
 - `docs/superpowers/plans/2026-07-02-enterprise-product-package.md`
 - `docs/superpowers/specs/2026-07-02-feed-freshness-siem-evidence-design.md`
 - `docs/superpowers/plans/2026-07-02-feed-freshness-siem-evidence.md`
+- `docs/superpowers/specs/2026-07-03-buyer-evidence-manifest-design.md`
+- `docs/superpowers/plans/2026-07-03-buyer-evidence-manifest.md`
 - `docs/figma/enterprise-product-architecture.md`
 - `docs/product-design/enterprise-operator-workflows.md`
 - `docs/analytics/enterprise-value-scorecard.md`
@@ -84,6 +87,7 @@ curl http://127.0.0.1:8080/api/threats
 curl http://127.0.0.1:8080/api/dnsbl
 curl http://127.0.0.1:8080/api/commercial/license
 curl http://127.0.0.1:8080/api/commercial/readiness
+curl http://127.0.0.1:8080/api/commercial/evidence-manifest
 curl http://127.0.0.1:8080/api/threat-feeds
 curl http://127.0.0.1:8080/api/threat-feeds/freshness
 curl http://127.0.0.1:8080/api/events.ndjson
@@ -150,8 +154,8 @@ Deployment assets:
 
 ## Workspace
 
-- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, and commercial readiness snapshots.
-- `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, support bundle assembly, and in-crate HTTP tests.
+- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and buyer evidence manifests.
+- `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests.
 - `src/main.rs`: process configuration and server startup.
 
 The core is a local workspace crate rather than a git submodule because it does not yet have a separate release cadence or external consumers.

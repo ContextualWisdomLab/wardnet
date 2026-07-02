@@ -14,8 +14,9 @@ Expected surface:
 - DNSBL zone availability
 - SOC event export availability
 - support bundle link
+- buyer evidence manifest link
 
-Success state: buyer can reproduce readiness through `GET /api/commercial/readiness`, `GET /api/support-bundle`, `GET /api/kpis`, `GET /api/threat-feeds/freshness`, `GET /api/events.ndjson`, and `GET /dnsbl/zone`.
+Success state: buyer can reproduce readiness through `GET /api/commercial/readiness`, `GET /api/commercial/evidence-manifest`, `GET /api/support-bundle`, `GET /api/kpis`, `GET /api/threat-feeds/freshness`, `GET /api/events.ndjson`, and `GET /dnsbl/zone`.
 
 ## 2. Threat Feed Update Operation
 
@@ -55,13 +56,27 @@ Expected contents:
 - SOC KPI snapshot
 - license profile
 - readiness checks and blockers
+- buyer evidence manifest with endpoint, document, and deployment evidence paths
 - route, threat, DNSBL, feed, and event counts
 - threat feed freshness records
 - SOC event export path
 
 Success state: the bundle can be attached to buyer due diligence or support intake without source-code access and without raw secrets.
 
-## 5. SOC/SIEM Evidence Export
+## 5. Buyer Evidence Manifest
+
+Entry: buyer engineer requests `GET /api/commercial/evidence-manifest`.
+
+Expected states:
+
+- readiness status, blockers, and 2B KRW target are visible without scraping multiple screens
+- required endpoints include method, path, content type, and what each proves
+- document paths include commercial, analytics, Product Design, Figma/FigJam, and complexity-audit artifacts
+- deployment assets are listed for lab validation
+
+Success state: a buyer can turn the manifest into a procurement checklist and verify each runtime surface independently.
+
+## 6. SOC/SIEM Evidence Export
 
 Entry: SOC engineer requests `GET /api/events.ndjson`.
 

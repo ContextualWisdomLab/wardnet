@@ -19,15 +19,16 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use waf_ids_core::{
-    AppData, BLOCK_SCORE, commercial_readiness_snapshot_at, enforce_event_limit, kpi_snapshot_at,
-    select_route, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat,
-    upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
-    validate_threat, validate_threat_feed_import,
+    AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
+    enforce_event_limit, kpi_snapshot_at, select_route, threat_feed_freshness_snapshot,
+    upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed, validate_commercial_profile,
+    validate_dnsbl, validate_route, validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
-    CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
-    ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest, SecurityEvent,
-    Severity, SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness, ThreatFeedImport,
+    BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts, CommercialProfile,
+    CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus, ProductEdition,
+    ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest, SecurityEvent, Severity,
+    SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness, ThreatFeedImport,
     ThreatFeedImportResult, ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone,
     reverse_ipv4_for_dnsbl, score_request,
 };
@@ -210,6 +211,7 @@ pub struct SupportBundle {
     pub kpis: SocKpiSnapshot,
     pub commercial: CommercialProfile,
     pub readiness: CommercialReadiness,
+    pub evidence_manifest: BuyerEvidenceManifest,
     pub threat_feed_freshness: Vec<ThreatFeedFreshness>,
     pub route_count: usize,
     pub threat_indicator_count: usize,
@@ -247,6 +249,10 @@ pub fn build_app(state: AppState) -> Router {
             get(get_commercial_license).post(update_commercial_license),
         )
         .route("/api/commercial/readiness", get(commercial_readiness))
+        .route(
+            "/api/commercial/evidence-manifest",
+            get(commercial_evidence_manifest),
+        )
         .route("/api/threat-feeds", get(list_threat_feeds))
         .route("/api/threat-feeds/freshness", get(threat_feed_freshness))
         .route("/api/threat-feeds/import", post(import_threat_feed))
@@ -390,6 +396,13 @@ async fn commercial_readiness(State(state): State<AppState>) -> Json<CommercialR
     Json(commercial_readiness_snapshot_at(&data, now_unix()))
 }
 
+async fn commercial_evidence_manifest(
+    State(state): State<AppState>,
+) -> Json<BuyerEvidenceManifest> {
+    let data = state.inner.read().await;
+    Json(buyer_evidence_manifest_at(&data, now_unix()))
+}
+
 async fn list_threat_feeds(State(state): State<AppState>) -> Json<Vec<ThreatFeedStatus>> {
     Json(state.inner.read().await.threat_feeds.clone())
 }
@@ -457,6 +470,7 @@ async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
         kpis: kpi_snapshot_at(&data, generated_at_unix),
         commercial: data.commercial.clone(),
         readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
+        evidence_manifest: buyer_evidence_manifest_at(&data, generated_at_unix),
         threat_feed_freshness: threat_feed_freshness_snapshot(
             &data.threat_feeds,
             generated_at_unix,
@@ -740,6 +754,7 @@ const ADMIN_HTML: &str = r#"<!doctype html>
     <section><h2>DNSBL Entries</h2><pre id="dnsbl">Loading</pre></section>
     <section><h2>SOC KPIs</h2><div class="metric" id="blocked">0</div><pre id="kpis">Loading</pre></section>
     <section><h2>Commercial Readiness</h2><pre id="readiness">Loading</pre></section>
+    <section><h2>Evidence Manifest</h2><pre id="manifest">Loading</pre></section>
     <section><h2>License</h2><pre id="license">Loading</pre></section>
     <section><h2>Threat Feeds</h2><pre id="feeds">Loading</pre></section>
     <section><h2>Feed Freshness</h2><pre id="freshness">Loading</pre></section>
@@ -762,6 +777,7 @@ const ADMIN_HTML: &str = r#"<!doctype html>
         show("threats", "/api/threats"),
         show("dnsbl", "/api/dnsbl"),
         show("readiness", "/api/commercial/readiness"),
+        show("manifest", "/api/commercial/evidence-manifest"),
         show("license", "/api/commercial/license"),
         show("feeds", "/api/threat-feeds"),
         show("freshness", "/api/threat-feeds/freshness"),
@@ -1375,11 +1391,46 @@ mod tests {
                 .any(|path| path == "Dockerfile")
         );
 
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(manifest.ready_for_enterprise_sale);
+        assert_eq!(manifest.target_sale_value_krw, TARGET_SALE_VALUE_KRW);
+        assert_eq!(manifest.runtime_counts.threat_feed_count, 1);
+        assert_eq!(manifest.runtime_counts.fresh_threat_feed_count, 1);
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/events.ndjson"
+                    && endpoint.content_type == "application/x-ndjson"
+                    && endpoint.required_for_sale)
+        );
+        assert!(
+            manifest
+                .document_paths
+                .iter()
+                .any(|path| path == "docs/figma/enterprise-product-architecture.md")
+        );
+
         let support: SupportBundle =
             json_body(app_request(&app, empty_request(Method::GET, "/api/support-bundle")).await)
                 .await;
         assert!(support.generated_at_unix > 0);
         assert!(support.readiness.ready_for_enterprise_sale);
+        assert!(support.evidence_manifest.ready_for_enterprise_sale);
+        assert!(
+            support
+                .evidence_manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/commercial/evidence-manifest")
+        );
         assert_eq!(
             support.commercial.license_id,
             Some("LIC-2B-KRW-0001".to_string())
@@ -2071,6 +2122,30 @@ mod tests {
         assert_eq!(
             wrapper_readiness.target_sale_value_krw,
             TARGET_SALE_VALUE_KRW
+        );
+        let wrapper_manifest = waf_ids_core::buyer_evidence_manifest(&data);
+        assert_eq!(
+            wrapper_manifest.target_sale_value_krw,
+            TARGET_SALE_VALUE_KRW
+        );
+
+        let manifest = waf_ids_core::buyer_evidence_manifest_at(&data, 1);
+        assert!(manifest.ready_for_enterprise_sale);
+        assert_eq!(manifest.runtime_counts.dnsbl_entry_count, data.dnsbl.len());
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.id == "dnsbl_zone" && endpoint.required_for_sale)
+        );
+
+        let stale_manifest = waf_ids_core::buyer_evidence_manifest_at(&data, 601);
+        assert!(!stale_manifest.ready_for_enterprise_sale);
+        assert!(
+            stale_manifest
+                .blockers
+                .iter()
+                .any(|item| item == "threat_feed_updates")
         );
     }
 
