@@ -19,16 +19,17 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use waf_ids_core::{
-    AppData, BLOCK_SCORE, commercial_readiness_snapshot, enforce_event_limit, kpi_snapshot,
-    select_route, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
-    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
-    validate_threat_feed_import,
+    AppData, BLOCK_SCORE, commercial_readiness_snapshot_at, enforce_event_limit, kpi_snapshot_at,
+    select_route, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat,
+    upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
+    validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
     ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest, SecurityEvent,
-    Severity, SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedImport, ThreatFeedImportResult,
-    ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone, reverse_ipv4_for_dnsbl, score_request,
+    Severity, SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness, ThreatFeedImport,
+    ThreatFeedImportResult, ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone,
+    reverse_ipv4_for_dnsbl, score_request,
 };
 
 #[derive(Clone)]
@@ -209,6 +210,7 @@ pub struct SupportBundle {
     pub kpis: SocKpiSnapshot,
     pub commercial: CommercialProfile,
     pub readiness: CommercialReadiness,
+    pub threat_feed_freshness: Vec<ThreatFeedFreshness>,
     pub route_count: usize,
     pub threat_indicator_count: usize,
     pub dnsbl_entry_count: usize,
@@ -238,6 +240,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threats", get(list_threats).post(create_threat))
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
+        .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
         .route(
             "/api/commercial/license",
@@ -245,11 +248,21 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/commercial/readiness", get(commercial_readiness))
         .route("/api/threat-feeds", get(list_threat_feeds))
+        .route("/api/threat-feeds/freshness", get(threat_feed_freshness))
         .route("/api/threat-feeds/import", post(import_threat_feed))
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
         .with_state(state)
+}
+
+pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_json::Error> {
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&serde_json::to_string(event)?);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
@@ -341,7 +354,7 @@ async fn list_events(State(state): State<AppState>) -> Json<Vec<SecurityEvent>> 
 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
     let data = state.inner.read().await;
-    Json(kpi_snapshot(&data))
+    Json(kpi_snapshot_at(&data, now_unix()))
 }
 
 async fn get_commercial_license(State(state): State<AppState>) -> Json<CommercialProfile> {
@@ -374,11 +387,19 @@ async fn update_commercial_license(
 
 async fn commercial_readiness(State(state): State<AppState>) -> Json<CommercialReadiness> {
     let data = state.inner.read().await;
-    Json(commercial_readiness_snapshot(&data))
+    Json(commercial_readiness_snapshot_at(&data, now_unix()))
 }
 
 async fn list_threat_feeds(State(state): State<AppState>) -> Json<Vec<ThreatFeedStatus>> {
     Json(state.inner.read().await.threat_feeds.clone())
+}
+
+async fn threat_feed_freshness(State(state): State<AppState>) -> Json<Vec<ThreatFeedFreshness>> {
+    let data = state.inner.read().await;
+    Json(threat_feed_freshness_snapshot(
+        &data.threat_feeds,
+        now_unix(),
+    ))
 }
 
 async fn import_threat_feed(
@@ -429,18 +450,43 @@ async fn import_threat_feed(
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
     let data = state.inner.read().await;
+    let generated_at_unix = now_unix();
     Json(SupportBundle {
-        generated_at_unix: now_unix(),
+        generated_at_unix,
         health: state.health_status(),
-        kpis: kpi_snapshot(&data),
+        kpis: kpi_snapshot_at(&data, generated_at_unix),
         commercial: data.commercial.clone(),
-        readiness: commercial_readiness_snapshot(&data),
+        readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
+        threat_feed_freshness: threat_feed_freshness_snapshot(
+            &data.threat_feeds,
+            generated_at_unix,
+        ),
         route_count: data.routes.len(),
         threat_indicator_count: data.threats.len(),
         dnsbl_entry_count: data.dnsbl.len(),
         threat_feed_count: data.threat_feeds.len(),
         event_count: data.events.len(),
     })
+}
+
+async fn events_ndjson(State(state): State<AppState>) -> Response {
+    let data = state.inner.read().await;
+    events_ndjson_response(export_events_ndjson(&data.events))
+}
+
+fn events_ndjson_response(export: Result<String, serde_json::Error>) -> Response {
+    match export {
+        Ok(body) => (
+            StatusCode::OK,
+            [("content-type", "application/x-ndjson; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(err) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize security events: {err}"),
+        ),
+    }
 }
 
 async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
@@ -696,7 +742,9 @@ const ADMIN_HTML: &str = r#"<!doctype html>
     <section><h2>Commercial Readiness</h2><pre id="readiness">Loading</pre></section>
     <section><h2>License</h2><pre id="license">Loading</pre></section>
     <section><h2>Threat Feeds</h2><pre id="feeds">Loading</pre></section>
+    <section><h2>Feed Freshness</h2><pre id="freshness">Loading</pre></section>
     <section><h2>Recent Events</h2><pre id="events">Loading</pre></section>
+    <section><h2>SOC Event Export</h2><pre id="eventExport">Loading</pre></section>
     <section><h2>DNSBL Zone</h2><pre id="zone">Loading</pre></section>
   </main>
   <script>
@@ -716,7 +764,9 @@ const ADMIN_HTML: &str = r#"<!doctype html>
         show("readiness", "/api/commercial/readiness"),
         show("license", "/api/commercial/license"),
         show("feeds", "/api/threat-feeds"),
+        show("freshness", "/api/threat-feeds/freshness"),
         show("events", "/api/events"),
+        show("eventExport", "/api/events.ndjson"),
         show("zone", "/dnsbl/zone"),
       ]);
       const kpiText = await show("kpis", "/api/kpis");
@@ -1145,11 +1195,18 @@ mod tests {
             events.last().unwrap().client_ip,
             Some("198.51.100.7".parse().unwrap())
         );
+        let events_export =
+            body_text(app_request(&app, empty_request(Method::GET, "/api/events.ndjson")).await)
+                .await;
+        assert!(events_export.contains(r#""action":"blocked""#));
+        assert!(events_export.ends_with('\n'));
 
         let kpis: SocKpiSnapshot =
             json_body(app_request(&app, empty_request(Method::GET, "/api/kpis")).await).await;
         assert_eq!(kpis.blocked_event_count, 1);
         assert_eq!(kpis.threat_feed_count, 0);
+        assert_eq!(kpis.fresh_threat_feed_count, 0);
+        assert_eq!(kpis.stale_threat_feed_count, 0);
 
         let zone =
             body_text(app_request(&app, empty_request(Method::GET, "/dnsbl/zone")).await).await;
@@ -1288,6 +1345,17 @@ mod tests {
                 .await;
         assert_eq!(feeds.len(), 1);
         assert_eq!(feeds[0].feed_id, "misp-seoul");
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(freshness.len(), 1);
+        assert_eq!(freshness[0].feed_id, "misp-seoul");
+        assert!(!freshness[0].stale);
 
         let final_readiness: CommercialReadiness = json_body(
             app_request(
@@ -1317,6 +1385,10 @@ mod tests {
             Some("LIC-2B-KRW-0001".to_string())
         );
         assert_eq!(support.threat_feed_count, 1);
+        assert_eq!(support.kpis.fresh_threat_feed_count, 1);
+        assert_eq!(support.kpis.stale_threat_feed_count, 0);
+        assert_eq!(support.threat_feed_freshness.len(), 1);
+        assert!(!support.threat_feed_freshness[0].stale);
         assert!(support.event_count >= 1);
 
         let persisted: AppData =
@@ -1973,13 +2045,61 @@ mod tests {
             path: "/demo".to_string(),
         });
 
-        let blocked = commercial_readiness_snapshot(&data);
+        let blocked = commercial_readiness_snapshot_at(&data, 1);
         assert!(!blocked.ready_for_enterprise_sale);
         assert!(blocked.blockers.iter().any(|item| item == "license"));
 
         data.commercial.license_id = Some("LIC-2B-KRW-0001".to_string());
-        let ready = commercial_readiness_snapshot(&data);
+        let ready = commercial_readiness_snapshot_at(&data, 1);
         assert!(ready.ready_for_enterprise_sale);
+
+        let stale = commercial_readiness_snapshot_at(&data, 601);
+        assert!(!stale.ready_for_enterprise_sale);
+        assert!(
+            stale
+                .blockers
+                .iter()
+                .any(|item| item == "threat_feed_updates")
+        );
+        let freshness = threat_feed_freshness_snapshot(&data.threat_feeds, 601);
+        assert!(freshness[0].stale);
+        assert_eq!(freshness[0].expires_at_unix, 601);
+
+        let wrapper_kpis = waf_ids_core::kpi_snapshot(&data);
+        assert_eq!(wrapper_kpis.route_count, data.routes.len());
+        let wrapper_readiness = waf_ids_core::commercial_readiness_snapshot(&data);
+        assert_eq!(
+            wrapper_readiness.target_sale_value_krw,
+            TARGET_SALE_VALUE_KRW
+        );
+    }
+
+    #[test]
+    fn exports_security_events_as_ndjson() {
+        let events = vec![SecurityEvent {
+            id: 1,
+            timestamp_unix: 10,
+            client_ip: Some("198.51.100.7".parse().unwrap()),
+            route_id: Some("demo".to_string()),
+            action: "blocked".to_string(),
+            reason: "unit".to_string(),
+            score: 100,
+            path: "/demo".to_string(),
+        }];
+
+        let export = export_events_ndjson(&events).unwrap();
+        assert_eq!(export.lines().count(), 1);
+        assert!(export.ends_with('\n'));
+        assert!(export.contains(r#""action":"blocked""#));
+    }
+
+    #[tokio::test]
+    async fn events_ndjson_serialization_errors_are_operator_visible() {
+        let response =
+            events_ndjson_response(Err(serde_json::Error::io(std::io::Error::other("boom"))));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_text(response).await.contains("failed to serialize"));
     }
 
     #[tokio::test]

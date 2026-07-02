@@ -2,6 +2,7 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BLOCK_SCORE: u16 = 50;
 pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
@@ -193,10 +194,24 @@ pub struct SocKpiSnapshot {
     pub threat_indicator_count: usize,
     pub dnsbl_entry_count: usize,
     pub threat_feed_count: usize,
+    pub fresh_threat_feed_count: usize,
+    pub stale_threat_feed_count: usize,
     pub event_count: usize,
     pub blocked_event_count: usize,
     pub monitor_event_count: usize,
     pub gateway_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreatFeedFreshness {
+    pub feed_id: String,
+    pub source: String,
+    pub last_updated_unix: u64,
+    pub threat_count: usize,
+    pub dnsbl_count: usize,
+    pub ttl_seconds: u64,
+    pub expires_at_unix: u64,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -464,12 +479,41 @@ pub fn enforce_event_limit(data: &mut AppData, limit: usize) {
     }
 }
 
+pub fn threat_feed_freshness_snapshot(
+    feeds: &[ThreatFeedStatus],
+    now_unix: u64,
+) -> Vec<ThreatFeedFreshness> {
+    feeds
+        .iter()
+        .map(|feed| {
+            let expires_at_unix = feed.last_updated_unix.saturating_add(feed.ttl_seconds);
+            ThreatFeedFreshness {
+                feed_id: feed.feed_id.clone(),
+                source: feed.source.clone(),
+                last_updated_unix: feed.last_updated_unix,
+                threat_count: feed.threat_count,
+                dnsbl_count: feed.dnsbl_count,
+                ttl_seconds: feed.ttl_seconds,
+                expires_at_unix,
+                stale: expires_at_unix <= now_unix,
+            }
+        })
+        .collect()
+}
+
 pub fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
+    kpi_snapshot_at(data, unix_now())
+}
+
+pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
+    let feed_freshness = threat_feed_freshness_snapshot(&data.threat_feeds, now_unix);
     SocKpiSnapshot {
         route_count: data.routes.len(),
         threat_indicator_count: data.threats.len(),
         dnsbl_entry_count: data.dnsbl.len(),
         threat_feed_count: data.threat_feeds.len(),
+        fresh_threat_feed_count: feed_freshness.iter().filter(|feed| !feed.stale).count(),
+        stale_threat_feed_count: feed_freshness.iter().filter(|feed| feed.stale).count(),
         event_count: data.events.len(),
         blocked_event_count: data
             .events
@@ -486,6 +530,10 @@ pub fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
 }
 
 pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
+    commercial_readiness_snapshot_at(data, unix_now())
+}
+
+pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> CommercialReadiness {
     let license_ready = matches!(
         data.commercial.license_status,
         LicenseStatus::Active | LicenseStatus::Evaluation
@@ -503,10 +551,9 @@ pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
         .commercial
         .annual_contract_value_krw
         .is_some_and(|value| value >= TARGET_SALE_VALUE_KRW);
-    let threat_feed_ready = data
-        .threat_feeds
+    let threat_feed_ready = threat_feed_freshness_snapshot(&data.threat_feeds, now_unix)
         .iter()
-        .any(|feed| feed.threat_count > 0 || feed.dnsbl_count > 0);
+        .any(|feed| !feed.stale && (feed.threat_count > 0 || feed.dnsbl_count > 0));
     let route_ready = data.routes.iter().any(|route| route.enabled);
     let dnsbl_ready = !data.dnsbl.is_empty();
     let support_evidence_ready = !data.events.is_empty();
@@ -525,7 +572,7 @@ pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
         readiness_check(
             "threat_feed_updates",
             threat_feed_ready,
-            "at least one imported threat feed is recorded",
+            "at least one imported threat feed is fresh within its TTL",
         ),
         readiness_check(
             "gateway_enforcement",
@@ -572,6 +619,13 @@ pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
             "docs/security/compliance-mapping.md".to_string(),
         ],
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck {

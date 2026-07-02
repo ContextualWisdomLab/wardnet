@@ -10,10 +10,12 @@ Expected surface:
 - configured route count
 - blocked and monitored event counts
 - commercial readiness status
+- feed freshness status
 - DNSBL zone availability
+- SOC event export availability
 - support bundle link
 
-Success state: buyer can reproduce readiness through `GET /api/commercial/readiness`, `GET /api/support-bundle`, `GET /api/kpis`, and `GET /dnsbl/zone`.
+Success state: buyer can reproduce readiness through `GET /api/commercial/readiness`, `GET /api/support-bundle`, `GET /api/kpis`, `GET /api/threat-feeds/freshness`, `GET /api/events.ndjson`, and `GET /dnsbl/zone`.
 
 ## 2. Threat Feed Update Operation
 
@@ -24,9 +26,10 @@ Expected states:
 - unauthorized writes return a clear 401 without mutating state
 - invalid feed payloads return specific 400 blockers
 - accepted feeds update threat indicators, DNSBL entries, and feed status atomically
-- readiness reflects feed evidence immediately
+- readiness reflects feed freshness immediately
+- stale feeds become explicit blockers instead of silently passing readiness
 
-Success state: the feed appears in `/api/threat-feeds`, and the support bundle includes updated feed and evidence counts.
+Success state: the feed appears in `/api/threat-feeds`, freshness appears in `/api/threat-feeds/freshness`, and the support bundle includes updated feed and evidence counts.
 
 ## 3. Enforcement Route Change
 
@@ -53,8 +56,23 @@ Expected contents:
 - license profile
 - readiness checks and blockers
 - route, threat, DNSBL, feed, and event counts
+- threat feed freshness records
+- SOC event export path
 
 Success state: the bundle can be attached to buyer due diligence or support intake without source-code access and without raw secrets.
+
+## 5. SOC/SIEM Evidence Export
+
+Entry: SOC engineer requests `GET /api/events.ndjson`.
+
+Expected states:
+
+- no events returns an empty NDJSON body with the same content type
+- each event is one JSON object per line
+- blocked and monitored actions remain visible for ingestion rules
+- export does not include admin tokens or mutable configuration secrets
+
+Success state: buyer can ingest the export into a lab parser without scraping the admin console.
 
 ## UI Direction
 

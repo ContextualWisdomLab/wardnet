@@ -150,6 +150,8 @@ kpis="$(curl -fsS "$BASE_URL/api/kpis")"
 assert_json_field "$kpis" 'data["blocked_event_count"] >= 1'
 assert_json_field "$kpis" 'data["event_count"] >= 1'
 assert_json_field "$kpis" 'data["threat_feed_count"] == 1'
+assert_json_field "$kpis" 'data["fresh_threat_feed_count"] == 1'
+assert_json_field "$kpis" 'data["stale_threat_feed_count"] == 0'
 
 readiness="$(curl -fsS "$BASE_URL/api/commercial/readiness")"
 assert_json_field "$readiness" 'data["target_sale_value_krw"] == 2000000000'
@@ -160,10 +162,19 @@ assert_json_field "$readiness" 'data["blockers"] == []'
 feeds="$(curl -fsS "$BASE_URL/api/threat-feeds")"
 assert_json_field "$feeds" 'len(data) == 1'
 assert_json_field "$feeds" 'data[0]["feed_id"] == "misp-seoul"'
+freshness="$(curl -fsS "$BASE_URL/api/threat-feeds/freshness")"
+assert_json_field "$freshness" 'len(data) == 1'
+assert_json_field "$freshness" 'data[0]["feed_id"] == "misp-seoul"'
+assert_json_field "$freshness" 'data[0]["stale"] is False'
+
+event_export="$(curl -fsS "$BASE_URL/api/events.ndjson")"
+grep -q '"action":"blocked"' <<<"$event_export"
 
 support_bundle="$(curl -fsS "$BASE_URL/api/support-bundle")"
 assert_json_field "$support_bundle" 'data["readiness"]["ready_for_enterprise_sale"] is True'
 assert_json_field "$support_bundle" 'data["commercial"]["annual_contract_value_krw"] == 2000000000'
+assert_json_field "$support_bundle" 'data["kpis"]["fresh_threat_feed_count"] == 1'
+assert_json_field "$support_bundle" 'data["threat_feed_freshness"][0]["stale"] is False'
 
 zone="$(curl -fsS "$BASE_URL/dnsbl/zone")"
 grep -q '^\$ORIGIN dnsbl.test\.$' <<<"$zone"

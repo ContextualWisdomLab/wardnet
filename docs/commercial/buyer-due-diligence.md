@@ -9,10 +9,12 @@
 - DNSBL entries: `GET /api/dnsbl`
 - DNSBL zone: `GET /dnsbl/zone`
 - Security events: `GET /api/events`
+- SOC event export: `GET /api/events.ndjson`
 - SOC KPIs: `GET /api/kpis`
 - License profile: `GET /api/commercial/license`
 - Sale readiness: `GET /api/commercial/readiness`
 - Threat feed status: `GET /api/threat-feeds`
+- Threat feed freshness: `GET /api/threat-feeds/freshness`
 - Support bundle: `GET /api/support-bundle`
 
 ## Engineering Evidence
@@ -22,7 +24,7 @@
 - In-memory rollback when persistence fails.
 - Route-scoped monitor/block mode to reduce accidental global enforcement.
 - Authenticated management writes through `X-Admin-Token`.
-- Automated tests for management APIs, gateway scoring, DNSBL export, persistence failures, commercial readiness, and legacy state compatibility.
+- Automated tests for management APIs, gateway scoring, DNSBL export, event NDJSON export, feed freshness, persistence failures, commercial readiness, and legacy state compatibility.
 - `scripts/smoke.sh` verifies a full local lifecycle including restart persistence.
 
 ## Security Review Packet
@@ -53,5 +55,7 @@ Then inspect:
 
 ```bash
 curl -fsS http://127.0.0.1:8080/api/commercial/readiness
+curl -fsS http://127.0.0.1:8080/api/threat-feeds/freshness
+curl -fsS http://127.0.0.1:8080/api/events.ndjson
 curl -fsS http://127.0.0.1:8080/api/support-bundle
 ```

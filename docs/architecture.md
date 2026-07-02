@@ -17,24 +17,28 @@ flowchart LR
   gateway --> upstream["Configured Upstream"]
   gateway --> events["Security Events"]
   events --> kpis["SOC KPIs"]
+  events --> eventExport["Events NDJSON"]
   state --> zone["DNSBL Zone Export"]
   api --> commercial["Commercial Readiness"]
   api --> feeds["Threat Feed Import"]
+  feeds --> freshness["Feed Freshness"]
   commercial --> bundle["Support Bundle"]
 ```
 
 ## Components
 
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
-- `src/lib.rs`: Axum app, management APIs, optional JSON persistence, gateway handler, upstream proxying, support bundle assembly, and in-crate HTTP tests.
-- `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, KPI snapshot, and commercial readiness logic.
+- `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests.
+- `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
 - `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
 - `/api/commercial/license`: tenant/license metadata for commercial packaging.
 - `/api/commercial/readiness`: computed 2B KRW sale-readiness checks and blockers.
 - `/api/threat-feeds/import`: authorized threat indicator and DNSBL import surface.
+- `/api/threat-feeds/freshness`: feed TTL expiry and stale/fresh evidence for buyer and SOC review.
 - `/api/support-bundle`: health, KPI, license, readiness, and evidence-count bundle for buyer or support review.
+- `/api/events.ndjson`: security events as newline-delimited JSON for lightweight SOC/SIEM ingestion tests.
 - `scripts/smoke.sh`: external smoke test for health, admin, auth, route writes, license writes, feed imports, block enforcement, KPIs, readiness, DNSBL export, support bundle, and restart persistence.
 
 ## Near-Term Integrations

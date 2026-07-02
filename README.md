@@ -13,6 +13,7 @@ The project starts small on purpose:
 - tenant/license-aware commercial readiness APIs
 - threat feed import status for real-time update operations
 - support bundle API for buyer due diligence and support handoff
+- threat-feed freshness evidence and SOC event NDJSON export
 - optional JSON state persistence for standalone operation
 - embedded admin console
 
@@ -32,6 +33,8 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `POST /api/commercial/license` updates that metadata with `X-Admin-Token`.
 - `POST /api/threat-feeds/import` imports operator-reviewed threat indicators and DNSBL entries.
 - `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
+- `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
+- `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
 - `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
 
 The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
@@ -40,6 +43,8 @@ The enterprise product package evidence is tracked in:
 
 - `docs/superpowers/specs/2026-07-02-enterprise-product-package-design.md`
 - `docs/superpowers/plans/2026-07-02-enterprise-product-package.md`
+- `docs/superpowers/specs/2026-07-02-feed-freshness-siem-evidence-design.md`
+- `docs/superpowers/plans/2026-07-02-feed-freshness-siem-evidence.md`
 - `docs/figma/enterprise-product-architecture.md`
 - `docs/product-design/enterprise-operator-workflows.md`
 - `docs/analytics/enterprise-value-scorecard.md`
@@ -80,6 +85,8 @@ curl http://127.0.0.1:8080/api/dnsbl
 curl http://127.0.0.1:8080/api/commercial/license
 curl http://127.0.0.1:8080/api/commercial/readiness
 curl http://127.0.0.1:8080/api/threat-feeds
+curl http://127.0.0.1:8080/api/threat-feeds/freshness
+curl http://127.0.0.1:8080/api/events.ndjson
 curl http://127.0.0.1:8080/api/support-bundle
 curl http://127.0.0.1:8080/dnsbl/zone
 curl http://127.0.0.1:8080/gateway/demo?q=union%20select
@@ -143,8 +150,8 @@ Deployment assets:
 
 ## Workspace
 
-- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, KPI snapshots, and commercial readiness snapshots.
-- `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, support bundle assembly, and in-crate HTTP tests.
+- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, and commercial readiness snapshots.
+- `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, support bundle assembly, and in-crate HTTP tests.
 - `src/main.rs`: process configuration and server startup.
 
 The core is a local workspace crate rather than a git submodule because it does not yet have a separate release cadence or external consumers.
@@ -156,6 +163,7 @@ The core is a local workspace crate rather than a git submodule because it does 
 3. STIX/TAXII and MISP/OpenCTI feed import jobs.
 4. Authoritative DNSBL service mode using Hickory DNS.
 5. AI SOC analyst assist with human approval gates for blocking changes.
+6. Full SIEM adapters after the NDJSON export contract is proven in buyer labs.
 
 ## Verification
 
