@@ -15,16 +15,23 @@ flowchart LR
   gateway --> events["Security Events"]
   events --> kpis["SOC KPIs"]
   state --> zone["DNSBL Zone Export"]
+  api --> commercial["Commercial Readiness"]
+  api --> feeds["Threat Feed Import"]
+  commercial --> bundle["Support Bundle"]
 ```
 
 ## Components
 
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
-- `src/lib.rs`: Axum app, management APIs, optional JSON persistence, gateway handler, scoring, DNSBL zone export, retention, and unit tests.
+- `src/lib.rs`: Axum app, management APIs, optional JSON persistence, gateway handler, scoring, DNSBL zone export, commercial readiness, support bundle, retention, and unit tests.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
 - `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
-- `scripts/smoke.sh`: external smoke test for health, admin, auth, route writes, block enforcement, KPIs, DNSBL export, and restart persistence.
+- `/api/commercial/license`: tenant/license metadata for commercial packaging.
+- `/api/commercial/readiness`: computed 2B KRW sale-readiness checks and blockers.
+- `/api/threat-feeds/import`: authorized threat indicator and DNSBL import surface.
+- `/api/support-bundle`: health, KPI, license, readiness, and evidence-count bundle for buyer or support review.
+- `scripts/smoke.sh`: external smoke test for health, admin, auth, route writes, license writes, feed imports, block enforcement, KPIs, readiness, DNSBL export, support bundle, and restart persistence.
 
 ## Near-Term Integrations
 
@@ -42,3 +49,4 @@ flowchart LR
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
 - JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
+- Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.

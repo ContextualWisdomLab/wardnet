@@ -4,7 +4,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
 };
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use tokio::{
 };
 
 const BLOCK_SCORE: u16 = 50;
+pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -133,6 +134,10 @@ struct AppData {
     dnsbl: Vec<DnsblEntry>,
     events: Vec<SecurityEvent>,
     next_event_id: u64,
+    #[serde(default = "CommercialProfile::seeded")]
+    commercial: CommercialProfile,
+    #[serde(default)]
+    threat_feeds: Vec<ThreatFeedStatus>,
 }
 
 impl AppData {
@@ -161,6 +166,8 @@ impl AppData {
             }],
             events: Vec::new(),
             next_event_id: 1,
+            commercial: CommercialProfile::seeded(),
+            threat_feeds: Vec::new(),
         }
     }
 }
@@ -250,6 +257,23 @@ pub enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductEdition {
+    Community,
+    Evaluation,
+    Enterprise,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseStatus {
+    Unlicensed,
+    Evaluation,
+    Active,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouteConfig {
     pub id: String,
     pub path_prefix: String,
@@ -277,6 +301,70 @@ pub struct DnsblEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommercialProfile {
+    pub tenant_id: String,
+    pub deployment_id: String,
+    pub edition: ProductEdition,
+    pub license_status: LicenseStatus,
+    pub license_id: Option<String>,
+    pub licensee: Option<String>,
+    pub licensed_until_unix: Option<u64>,
+    pub licensed_node_count: Option<u32>,
+    pub annual_contract_value_krw: Option<u64>,
+    pub support_contact: String,
+    pub features: Vec<String>,
+}
+
+impl CommercialProfile {
+    fn seeded() -> Self {
+        Self {
+            tenant_id: "local-lab".to_string(),
+            deployment_id: "standalone-dev".to_string(),
+            edition: ProductEdition::Community,
+            license_status: LicenseStatus::Unlicensed,
+            license_id: None,
+            licensee: None,
+            licensed_until_unix: None,
+            licensed_node_count: Some(1),
+            annual_contract_value_krw: None,
+            support_contact: "security@example.invalid".to_string(),
+            features: vec![
+                "rust-edge-gateway".to_string(),
+                "dnsbl-zone-export".to_string(),
+                "soc-kpi-api".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreatFeedStatus {
+    pub feed_id: String,
+    pub source: String,
+    pub last_updated_unix: u64,
+    pub threat_count: usize,
+    pub dnsbl_count: usize,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreatFeedImport {
+    pub feed_id: String,
+    pub source: String,
+    pub ttl_seconds: u64,
+    pub threats: Vec<ThreatIndicator>,
+    pub dnsbl: Vec<DnsblEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreatFeedImportResult {
+    pub feed_id: String,
+    pub upserted_threats: usize,
+    pub upserted_dnsbl: usize,
+    pub last_updated_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityEvent {
     pub id: u64,
     pub timestamp_unix: u64,
@@ -293,10 +381,50 @@ pub struct SocKpiSnapshot {
     pub route_count: usize,
     pub threat_indicator_count: usize,
     pub dnsbl_entry_count: usize,
+    pub threat_feed_count: usize,
     pub event_count: usize,
     pub blocked_event_count: usize,
     pub monitor_event_count: usize,
     pub gateway_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadinessCheck {
+    pub id: String,
+    pub status: ReadinessStatus,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommercialReadiness {
+    pub target_sale_value_krw: u64,
+    pub ready_for_enterprise_sale: bool,
+    pub readiness_level: String,
+    pub blockers: Vec<String>,
+    pub checks: Vec<ReadinessCheck>,
+    pub deployment_assets: Vec<String>,
+    pub buyer_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportBundle {
+    pub generated_at_unix: u64,
+    pub health: HealthStatus,
+    pub kpis: SocKpiSnapshot,
+    pub commercial: CommercialProfile,
+    pub readiness: CommercialReadiness,
+    pub route_count: usize,
+    pub threat_indicator_count: usize,
+    pub dnsbl_entry_count: usize,
+    pub threat_feed_count: usize,
+    pub event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -322,6 +450,14 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
         .route("/api/kpis", get(kpis))
+        .route(
+            "/api/commercial/license",
+            get(get_commercial_license).post(update_commercial_license),
+        )
+        .route("/api/commercial/readiness", get(commercial_readiness))
+        .route("/api/threat-feeds", get(list_threat_feeds))
+        .route("/api/threat-feeds/import", post(import_threat_feed))
+        .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
         .with_state(state)
@@ -417,6 +553,105 @@ async fn list_events(State(state): State<AppState>) -> Json<Vec<SecurityEvent>> 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
     let data = state.inner.read().await;
     Json(kpi_snapshot(&data))
+}
+
+async fn get_commercial_license(State(state): State<AppState>) -> Json<CommercialProfile> {
+    Json(state.inner.read().await.commercial.clone())
+}
+
+async fn update_commercial_license(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(profile): Json<CommercialProfile>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_commercial_profile(&profile) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    match state
+        .mutate_and_persist(|data| {
+            data.commercial = profile.clone();
+            profile
+        })
+        .await
+    {
+        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn commercial_readiness(State(state): State<AppState>) -> Json<CommercialReadiness> {
+    let data = state.inner.read().await;
+    Json(commercial_readiness_snapshot(&data))
+}
+
+async fn list_threat_feeds(State(state): State<AppState>) -> Json<Vec<ThreatFeedStatus>> {
+    Json(state.inner.read().await.threat_feeds.clone())
+}
+
+async fn import_threat_feed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(feed): Json<ThreatFeedImport>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    let imported_at = now_unix();
+    match state
+        .mutate_and_persist(|data| {
+            for threat in feed.threats.iter().cloned() {
+                upsert_threat(&mut data.threats, threat);
+            }
+            for entry in feed.dnsbl.iter().cloned() {
+                upsert_dnsbl(&mut data.dnsbl, entry);
+            }
+            upsert_threat_feed(
+                &mut data.threat_feeds,
+                ThreatFeedStatus {
+                    feed_id: feed.feed_id.clone(),
+                    source: feed.source.clone(),
+                    last_updated_unix: imported_at,
+                    threat_count: feed.threats.len(),
+                    dnsbl_count: feed.dnsbl.len(),
+                    ttl_seconds: feed.ttl_seconds,
+                },
+            );
+            ThreatFeedImportResult {
+                feed_id: feed.feed_id.clone(),
+                upserted_threats: feed.threats.len(),
+                upserted_dnsbl: feed.dnsbl.len(),
+                last_updated_unix: imported_at,
+            }
+        })
+        .await
+    {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
+    let data = state.inner.read().await;
+    Json(SupportBundle {
+        generated_at_unix: now_unix(),
+        health: state.health_status(),
+        kpis: kpi_snapshot(&data),
+        commercial: data.commercial.clone(),
+        readiness: commercial_readiness_snapshot(&data),
+        route_count: data.routes.len(),
+        threat_indicator_count: data.threats.len(),
+        dnsbl_entry_count: data.dnsbl.len(),
+        threat_feed_count: data.threat_feeds.len(),
+        event_count: data.events.len(),
+    })
 }
 
 async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
@@ -575,6 +810,67 @@ fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     }
 }
 
+fn validate_commercial_profile(profile: &CommercialProfile) -> Result<(), &'static str> {
+    if profile.tenant_id.trim().is_empty() {
+        return Err("commercial tenant_id is required");
+    }
+    if profile.deployment_id.trim().is_empty() {
+        return Err("commercial deployment_id is required");
+    }
+    if profile.support_contact.trim().is_empty() {
+        return Err("commercial support_contact is required");
+    }
+    if profile.features.is_empty() {
+        return Err("commercial features must not be empty");
+    }
+    if profile.licensed_node_count == Some(0) {
+        return Err("commercial licensed_node_count must be greater than 0");
+    }
+    if matches!(
+        profile.license_status,
+        LicenseStatus::Active | LicenseStatus::Evaluation
+    ) && profile
+        .license_id
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("commercial license_id is required for active or evaluation licenses");
+    }
+    if matches!(
+        profile.license_status,
+        LicenseStatus::Active | LicenseStatus::Evaluation
+    ) && profile
+        .licensee
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("commercial licensee is required for active or evaluation licenses");
+    }
+    Ok(())
+}
+
+fn validate_threat_feed_import(feed: &ThreatFeedImport) -> Result<(), &'static str> {
+    if feed.feed_id.trim().is_empty() {
+        return Err("threat feed_id is required");
+    }
+    if feed.source.trim().is_empty() {
+        return Err("threat feed source is required");
+    }
+    if feed.ttl_seconds == 0 {
+        return Err("threat feed ttl_seconds must be greater than 0");
+    }
+    if feed.threats.is_empty() && feed.dnsbl.is_empty() {
+        return Err("threat feed must include at least one threat or DNSBL entry");
+    }
+    for threat in &feed.threats {
+        validate_threat(threat)?;
+    }
+    for entry in &feed.dnsbl {
+        validate_dnsbl(entry)?;
+    }
+    Ok(())
+}
+
 fn upsert_route(routes: &mut Vec<RouteConfig>, route: RouteConfig) -> RouteConfig {
     if let Some(existing) = routes.iter_mut().find(|item| item.id == route.id) {
         *existing = route.clone();
@@ -610,6 +906,18 @@ fn upsert_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) -> DnsblEntry 
         entries.push(entry.clone());
     }
     entry
+}
+
+fn upsert_threat_feed(
+    feeds: &mut Vec<ThreatFeedStatus>,
+    feed: ThreatFeedStatus,
+) -> ThreatFeedStatus {
+    if let Some(existing) = feeds.iter_mut().find(|item| item.feed_id == feed.feed_id) {
+        *existing = feed.clone();
+    } else {
+        feeds.push(feed.clone());
+    }
+    feed
 }
 
 fn select_route<'a>(routes: &'a [RouteConfig], path: &str) -> Option<&'a RouteConfig> {
@@ -790,6 +1098,7 @@ fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
         route_count: data.routes.len(),
         threat_indicator_count: data.threats.len(),
         dnsbl_entry_count: data.dnsbl.len(),
+        threat_feed_count: data.threat_feeds.len(),
         event_count: data.events.len(),
         blocked_event_count: data
             .events
@@ -802,6 +1111,107 @@ fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
             .filter(|event| event.action == "monitored")
             .count(),
         gateway_mode: "rust-first edge gateway program baseline".to_string(),
+    }
+}
+
+fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
+    let license_ready = matches!(
+        data.commercial.license_status,
+        LicenseStatus::Active | LicenseStatus::Evaluation
+    ) && data
+        .commercial
+        .license_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && data
+            .commercial
+            .licensee
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    let commercial_value_ready = data
+        .commercial
+        .annual_contract_value_krw
+        .is_some_and(|value| value >= TARGET_SALE_VALUE_KRW);
+    let threat_feed_ready = data
+        .threat_feeds
+        .iter()
+        .any(|feed| feed.threat_count > 0 || feed.dnsbl_count > 0);
+    let route_ready = data.routes.iter().any(|route| route.enabled);
+    let dnsbl_ready = !data.dnsbl.is_empty();
+    let support_evidence_ready = !data.events.is_empty();
+
+    let checks = vec![
+        readiness_check(
+            "license",
+            license_ready,
+            "active/evaluation tenant license metadata is present",
+        ),
+        readiness_check(
+            "contract_value",
+            commercial_value_ready,
+            "annual contract value meets the 2B KRW sale target",
+        ),
+        readiness_check(
+            "threat_feed_updates",
+            threat_feed_ready,
+            "at least one imported threat feed is recorded",
+        ),
+        readiness_check(
+            "gateway_enforcement",
+            route_ready,
+            "at least one enabled gateway route is configured",
+        ),
+        readiness_check(
+            "dnsbl_publication",
+            dnsbl_ready,
+            "DNSBL entries are available for zone export",
+        ),
+        readiness_check(
+            "support_evidence",
+            support_evidence_ready,
+            "security event evidence is available for a support bundle",
+        ),
+    ];
+    let blockers: Vec<String> = checks
+        .iter()
+        .filter(|check| check.status == ReadinessStatus::Fail)
+        .map(|check| check.id.clone())
+        .collect();
+    let ready_for_enterprise_sale = blockers.is_empty();
+
+    CommercialReadiness {
+        target_sale_value_krw: TARGET_SALE_VALUE_KRW,
+        ready_for_enterprise_sale,
+        readiness_level: if ready_for_enterprise_sale {
+            "sale_ready".to_string()
+        } else {
+            "implementation_required".to_string()
+        },
+        blockers,
+        checks,
+        deployment_assets: vec![
+            "Dockerfile".to_string(),
+            "deploy/docker-compose.yml".to_string(),
+            "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string(),
+        ],
+        buyer_evidence: vec![
+            "docs/commercial/20b-krw-sale-readiness.md".to_string(),
+            "docs/commercial/buyer-due-diligence.md".to_string(),
+            "docs/security/threat-model.md".to_string(),
+            "docs/security/compliance-mapping.md".to_string(),
+        ],
+    }
+}
+
+fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck {
+    ReadinessCheck {
+        id: id.to_string(),
+        status: if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        evidence: evidence.to_string(),
     }
 }
 
@@ -880,6 +1290,9 @@ const ADMIN_HTML: &str = r#"<!doctype html>
     <section><h2>Threat Indicators</h2><pre id="threats">Loading</pre></section>
     <section><h2>DNSBL Entries</h2><pre id="dnsbl">Loading</pre></section>
     <section><h2>SOC KPIs</h2><div class="metric" id="blocked">0</div><pre id="kpis">Loading</pre></section>
+    <section><h2>Commercial Readiness</h2><pre id="readiness">Loading</pre></section>
+    <section><h2>License</h2><pre id="license">Loading</pre></section>
+    <section><h2>Threat Feeds</h2><pre id="feeds">Loading</pre></section>
     <section><h2>Recent Events</h2><pre id="events">Loading</pre></section>
     <section><h2>DNSBL Zone</h2><pre id="zone">Loading</pre></section>
   </main>
@@ -897,6 +1310,9 @@ const ADMIN_HTML: &str = r#"<!doctype html>
         show("routes", "/api/routes"),
         show("threats", "/api/threats"),
         show("dnsbl", "/api/dnsbl"),
+        show("readiness", "/api/commercial/readiness"),
+        show("license", "/api/commercial/license"),
+        show("feeds", "/api/threat-feeds"),
         show("events", "/api/events"),
         show("zone", "/dnsbl/zone"),
       ]);
@@ -932,6 +1348,49 @@ mod tests {
             upstream: "https://origin.example".to_string(),
             mode: EnforcementMode::Block,
             enabled: true,
+        }
+    }
+
+    fn enterprise_profile() -> CommercialProfile {
+        CommercialProfile {
+            tenant_id: "cwlab-enterprise".to_string(),
+            deployment_id: "prod-seoul-edge".to_string(),
+            edition: ProductEdition::Enterprise,
+            license_status: LicenseStatus::Active,
+            license_id: Some("LIC-2B-KRW-0001".to_string()),
+            licensee: Some("Contextual Wisdom Enterprise Buyer".to_string()),
+            licensed_until_unix: Some(1_829_088_000),
+            licensed_node_count: Some(12),
+            annual_contract_value_krw: Some(TARGET_SALE_VALUE_KRW),
+            support_contact: "soc-support@example.com".to_string(),
+            features: vec![
+                "rust-edge-gateway".to_string(),
+                "tenant-license-readiness".to_string(),
+                "threat-feed-import".to_string(),
+                "dnsbl-zone-export".to_string(),
+            ],
+        }
+    }
+
+    fn threat_feed_import() -> ThreatFeedImport {
+        ThreatFeedImport {
+            feed_id: "misp-seoul".to_string(),
+            source: "misp://soc.example".to_string(),
+            ttl_seconds: 600,
+            threats: vec![ThreatIndicator {
+                value: "credential_dump".to_string(),
+                indicator_type: "malware".to_string(),
+                severity: Severity::Critical,
+                source: "misp-seoul".to_string(),
+                ttl_seconds: 600,
+            }],
+            dnsbl: vec![DnsblEntry {
+                address: "198.51.100.23".parse().unwrap(),
+                code: "127.0.0.4".to_string(),
+                reason: "feed scanner".to_string(),
+                source: "misp-seoul".to_string(),
+                ttl_seconds: 600,
+            }],
         }
     }
 
@@ -1287,12 +1746,180 @@ mod tests {
         let kpis: SocKpiSnapshot =
             json_body(app_request(&app, empty_request(Method::GET, "/api/kpis")).await).await;
         assert_eq!(kpis.blocked_event_count, 1);
+        assert_eq!(kpis.threat_feed_count, 0);
 
         let zone =
             body_text(app_request(&app, empty_request(Method::GET, "/dnsbl/zone")).await).await;
         assert!(zone.contains("$ORIGIN dnsbl.example."));
         assert!(zone.contains("7.100.51.198 IN A 127.0.0.9"));
 
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn commercial_license_feed_readiness_and_bundle_surfaces_work() {
+        let path = temp_state_path("commercial");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        let app = build_app(state);
+
+        let initial_readiness: CommercialReadiness = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/readiness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(!initial_readiness.ready_for_enterprise_sale);
+        assert_eq!(initial_readiness.readiness_level, "implementation_required");
+        assert!(
+            initial_readiness
+                .blockers
+                .iter()
+                .any(|item| item == "license")
+        );
+
+        let initial_license: CommercialProfile = json_body(
+            app_request(&app, empty_request(Method::GET, "/api/commercial/license")).await,
+        )
+        .await;
+        assert_eq!(initial_license.license_status, LicenseStatus::Unlicensed);
+
+        let profile = enterprise_profile();
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/commercial/license", None, &profile),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bad_profile = CommercialProfile {
+            features: Vec::new(),
+            ..profile.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/commercial/license",
+                Some("secret"),
+                &bad_profile,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let saved_profile: CommercialProfile = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/commercial/license",
+                    Some("secret"),
+                    &profile,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_profile.annual_contract_value_krw, Some(2_000_000_000));
+
+        let feed = threat_feed_import();
+        let unauthorized_feed = app_request(
+            &app,
+            json_request(Method::POST, "/api/threat-feeds/import", None, &feed),
+        )
+        .await;
+        assert_eq!(unauthorized_feed.status(), StatusCode::UNAUTHORIZED);
+
+        let empty_feed = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: Vec::new(),
+            ..feed.clone()
+        };
+        let invalid_feed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &empty_feed,
+            ),
+        )
+        .await;
+        assert_eq!(invalid_feed.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    &feed,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "misp-seoul");
+        assert_eq!(import_result.upserted_threats, 1);
+        assert_eq!(import_result.upserted_dnsbl, 1);
+
+        let gateway_response = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/demo?q=union%20select"),
+        )
+        .await;
+        assert_eq!(gateway_response.status(), StatusCode::OK);
+
+        let feeds: Vec<ThreatFeedStatus> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threat-feeds")).await)
+                .await;
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].feed_id, "misp-seoul");
+
+        let final_readiness: CommercialReadiness = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/readiness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(final_readiness.ready_for_enterprise_sale);
+        assert_eq!(final_readiness.readiness_level, "sale_ready");
+        assert!(final_readiness.blockers.is_empty());
+        assert!(
+            final_readiness
+                .deployment_assets
+                .iter()
+                .any(|path| path == "Dockerfile")
+        );
+
+        let support: SupportBundle =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/support-bundle")).await)
+                .await;
+        assert!(support.generated_at_unix > 0);
+        assert!(support.readiness.ready_for_enterprise_sale);
+        assert_eq!(
+            support.commercial.license_id,
+            Some("LIC-2B-KRW-0001".to_string())
+        );
+        assert_eq!(support.threat_feed_count, 1);
+        assert!(support.event_count >= 1);
+
+        let persisted: AppData =
+            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(persisted.commercial.license_status, LicenseStatus::Active);
+        assert_eq!(persisted.threat_feeds.len(), 1);
         let _ = fs::remove_file(path).await;
     }
 
@@ -1357,6 +1984,8 @@ mod tests {
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
+                commercial: CommercialProfile::seeded(),
+                threat_feeds: Vec::new(),
             },
             AppConfig {
                 admin_token: None,
@@ -1555,6 +2184,42 @@ mod tests {
         assert_eq!(dnsbl.len(), 1);
         assert_eq!(dnsbl[0].code, "127.0.0.3");
         assert_eq!(dnsbl[0].reason, "botnet");
+
+        let mut feeds = vec![ThreatFeedStatus {
+            feed_id: "feed-a".to_string(),
+            source: "misp://old".to_string(),
+            last_updated_unix: 1,
+            threat_count: 1,
+            dnsbl_count: 0,
+            ttl_seconds: 60,
+        }];
+
+        upsert_threat_feed(
+            &mut feeds,
+            ThreatFeedStatus {
+                feed_id: "feed-a".to_string(),
+                source: "misp://new".to_string(),
+                last_updated_unix: 2,
+                threat_count: 2,
+                dnsbl_count: 1,
+                ttl_seconds: 120,
+            },
+        );
+        upsert_threat_feed(
+            &mut feeds,
+            ThreatFeedStatus {
+                feed_id: "feed-b".to_string(),
+                source: "taxii://new".to_string(),
+                last_updated_unix: 3,
+                threat_count: 1,
+                dnsbl_count: 1,
+                ttl_seconds: 300,
+            },
+        );
+
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[0].source, "misp://new");
+        assert_eq!(feeds[1].feed_id, "feed-b");
     }
 
     #[test]
@@ -1740,6 +2405,178 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn validates_commercial_profiles_and_threat_feed_imports() {
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                tenant_id: " ".to_string(),
+                ..enterprise_profile()
+            }),
+            Err("commercial tenant_id is required")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                deployment_id: " ".to_string(),
+                ..enterprise_profile()
+            }),
+            Err("commercial deployment_id is required")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                support_contact: " ".to_string(),
+                ..enterprise_profile()
+            }),
+            Err("commercial support_contact is required")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                features: Vec::new(),
+                ..enterprise_profile()
+            }),
+            Err("commercial features must not be empty")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                licensed_node_count: Some(0),
+                ..enterprise_profile()
+            }),
+            Err("commercial licensed_node_count must be greater than 0")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                license_id: Some(" ".to_string()),
+                ..enterprise_profile()
+            }),
+            Err("commercial license_id is required for active or evaluation licenses")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                licensee: None,
+                ..enterprise_profile()
+            }),
+            Err("commercial licensee is required for active or evaluation licenses")
+        );
+        assert!(validate_commercial_profile(&enterprise_profile()).is_ok());
+        assert!(
+            validate_commercial_profile(&CommercialProfile {
+                license_status: LicenseStatus::Expired,
+                license_id: None,
+                licensee: None,
+                ..CommercialProfile::seeded()
+            })
+            .is_ok()
+        );
+
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                feed_id: " ".to_string(),
+                ..threat_feed_import()
+            }),
+            Err("threat feed_id is required")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                source: " ".to_string(),
+                ..threat_feed_import()
+            }),
+            Err("threat feed source is required")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                ttl_seconds: 0,
+                ..threat_feed_import()
+            }),
+            Err("threat feed ttl_seconds must be greater than 0")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                threats: Vec::new(),
+                dnsbl: Vec::new(),
+                ..threat_feed_import()
+            }),
+            Err("threat feed must include at least one threat or DNSBL entry")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                threats: vec![ThreatIndicator {
+                    value: " ".to_string(),
+                    indicator_type: "malware".to_string(),
+                    severity: Severity::Critical,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                }],
+                ..threat_feed_import()
+            }),
+            Err("threat indicator value is required")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                dnsbl: vec![DnsblEntry {
+                    address: "203.0.113.10".parse().unwrap(),
+                    code: "not-ip".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                }],
+                ..threat_feed_import()
+            }),
+            Err("DNSBL response code must be an IP address")
+        );
+        assert!(validate_threat_feed_import(&threat_feed_import()).is_ok());
+    }
+
+    #[test]
+    fn legacy_state_json_defaults_commercial_fields() {
+        let legacy = r#"{
+          "routes": [],
+          "threats": [],
+          "dnsbl": [],
+          "events": [],
+          "next_event_id": 7
+        }"#;
+        let loaded: AppData = serde_json::from_str(legacy).unwrap();
+        assert_eq!(loaded.next_event_id, 7);
+        assert_eq!(loaded.commercial.tenant_id, "local-lab");
+        assert_eq!(loaded.commercial.license_status, LicenseStatus::Unlicensed);
+        assert!(loaded.threat_feeds.is_empty());
+    }
+
+    #[test]
+    fn readiness_rejects_blank_license_and_accepts_dnsbl_only_feeds() {
+        let mut data = AppData::seeded();
+        data.threats.clear();
+        data.commercial = CommercialProfile {
+            license_id: Some(" ".to_string()),
+            ..enterprise_profile()
+        };
+        data.threat_feeds = vec![ThreatFeedStatus {
+            feed_id: "dnsbl-only".to_string(),
+            source: "misp://dnsbl".to_string(),
+            last_updated_unix: 1,
+            threat_count: 0,
+            dnsbl_count: 1,
+            ttl_seconds: 600,
+        }];
+        data.events.push(SecurityEvent {
+            id: 1,
+            timestamp_unix: 1,
+            client_ip: None,
+            route_id: Some("demo".to_string()),
+            action: "monitored".to_string(),
+            reason: "unit".to_string(),
+            score: 0,
+            path: "/demo".to_string(),
+        });
+
+        let blocked = commercial_readiness_snapshot(&data);
+        assert!(!blocked.ready_for_enterprise_sale);
+        assert!(blocked.blockers.iter().any(|item| item == "license"));
+
+        data.commercial.license_id = Some("LIC-2B-KRW-0001".to_string());
+        let ready = commercial_readiness_snapshot(&data);
+        assert!(ready.ready_for_enterprise_sale);
     }
 
     #[tokio::test]
@@ -1929,6 +2766,8 @@ mod tests {
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
+                commercial: CommercialProfile::seeded(),
+                threat_feeds: Vec::new(),
             },
             AppConfig {
                 admin_token: None,
@@ -2001,6 +2840,39 @@ mod tests {
         let dnsbl: Vec<DnsblEntry> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
         assert!(dnsbl.is_empty());
+
+        let license_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/commercial/license",
+                None,
+                &enterprise_profile(),
+            ),
+        )
+        .await;
+        assert_eq!(license_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let license: CommercialProfile = json_body(
+            app_request(&app, empty_request(Method::GET, "/api/commercial/license")).await,
+        )
+        .await;
+        assert_eq!(license.license_status, LicenseStatus::Unlicensed);
+
+        let feed_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                None,
+                &threat_feed_import(),
+            ),
+        )
+        .await;
+        assert_eq!(feed_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let feeds: Vec<ThreatFeedStatus> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threat-feeds")).await)
+                .await;
+        assert!(feeds.is_empty());
 
         let gateway_response = app_request(&app, empty_request(Method::GET, "/gateway/mock")).await;
         assert_eq!(gateway_response.status(), StatusCode::OK);

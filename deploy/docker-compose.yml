@@ -1,0 +1,24 @@
+services:
+  waf-ids-ai-soc:
+    build:
+      context: ..
+    image: contextualwisdomlab/waf-ids-ai-soc:local
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      DNSBL_ORIGIN: ${DNSBL_ORIGIN:-dnsbl.local}
+      EVENT_LIMIT: ${EVENT_LIMIT:-1000}
+      WAF_IDS_STATE_PATH: /var/lib/waf-ids-ai-soc/state.json
+    ports:
+      - "8080:8080"
+    volumes:
+      - waf_ids_state:/var/lib/waf-ids-ai-soc
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  waf_ids_state:

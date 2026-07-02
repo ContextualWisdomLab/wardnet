@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: waf-ids-ai-soc
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: waf-ids-ai-soc-admin
+  namespace: waf-ids-ai-soc
+type: Opaque
+stringData:
+  ADMIN_TOKEN: replace-with-secret-manager-sync
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: waf-ids-ai-soc-state
+  namespace: waf-ids-ai-soc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+  labels:
+    app.kubernetes.io/name: waf-ids-ai-soc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: waf-ids-ai-soc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: waf-ids-ai-soc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: ghcr.io/contextualwisdomlab/waf-ids-ai-soc:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: BIND_ADDR
+              value: 0.0.0.0:8080
+            - name: DNSBL_ORIGIN
+              value: dnsbl.example
+            - name: EVENT_LIMIT
+              value: "1000"
+            - name: WAF_IDS_STATE_PATH
+              value: /var/lib/waf-ids-ai-soc/state.json
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/waf-ids-ai-soc
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: waf-ids-ai-soc-state
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  selector:
+    app.kubernetes.io/name: waf-ids-ai-soc
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

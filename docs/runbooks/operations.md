@@ -31,7 +31,7 @@ Expected fields:
 scripts/smoke.sh
 ```
 
-The smoke test starts the service on a temporary port with a temporary JSON state file, verifies admin and management surfaces, creates a blocking route, triggers a blocked gateway request, checks KPIs and DNSBL export, restarts the process, and verifies that the route persisted.
+The smoke test starts the service on a temporary port with a temporary JSON state file, verifies admin and management surfaces, creates a blocking route, registers a commercial license, imports a threat feed, triggers a blocked gateway request, checks KPIs, readiness, support bundle, and DNSBL export, restarts the process, and verifies that route/license/feed data persisted.
 
 When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling file and atomically replaces the configured state path. If a management write cannot be persisted, the in-memory mutation is rolled back and the API returns `500`.
 
@@ -43,6 +43,14 @@ When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling fil
 4. Keep the previous route JSON available for rollback.
 5. Disable the route or switch back to `monitor` if legitimate traffic is blocked.
 
+## Commercial Readiness Procedure
+
+1. Register buyer-approved license metadata through `POST /api/commercial/license`.
+2. Import reviewed threat feed data through `POST /api/threat-feeds/import`.
+3. Trigger at least one gateway event in monitor or block mode.
+4. Check `GET /api/commercial/readiness`.
+5. Export `GET /api/support-bundle` for buyer lab evidence or support handoff.
+
 ## Production Boundaries
 
 This baseline is suitable for local and controlled lab deployments. Internet-facing use still requires:
@@ -50,6 +58,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - TLS termination and identity-aware admin access
 - upstream allowlists and egress controls
 - durable database storage with backups
+- SSO/RBAC and immutable admin audit logging
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
 - Coraza/OWASP CRS WAF adapter
 - Suricata EVE ingest for IDS events

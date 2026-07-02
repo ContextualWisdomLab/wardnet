@@ -14,6 +14,7 @@
 - route count by enforcement mode
 - threat indicator count by source and severity
 - DNSBL entry count by response code, TTL, and source
+- threat feed count and last update age by feed
 - blocked versus monitored events by route
 - top matched indicators
 - stale indicators past TTL
@@ -30,4 +31,4 @@
 
 ## MVP Measurement
 
-The MVP exposes `GET /api/kpis` with counts for routes, indicators, DNSBL entries, events, blocked events, and monitored events. Latency, precision, triage time, and feed freshness require the next telemetry and analyst-disposition work.
+The baseline exposes `GET /api/kpis` with counts for routes, indicators, DNSBL entries, threat feeds, events, blocked events, and monitored events. Latency, precision, triage time, and full feed freshness percentages require the next telemetry and analyst-disposition work.

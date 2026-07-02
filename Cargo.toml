@@ -2,7 +2,7 @@
 name = "waf-ids-ai-soc"
 version = "0.1.0"
 edition = "2024"
-description = "Rust-first WAF/IDS/AI SOC gateway MVP with DNSBL publishing surfaces"
+description = "Rust-first WAF/IDS/AI SOC gateway with DNSBL and commercial readiness surfaces"
 license = "MIT"
 
 [dependencies]

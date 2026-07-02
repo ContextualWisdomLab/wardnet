@@ -9,6 +9,9 @@ The project starts small on purpose:
 - monitor/block enforcement modes
 - RFC 5782-style DNSBL zone export
 - SOC event and KPI APIs
+- tenant/license-aware commercial readiness APIs
+- threat feed import status for real-time update operations
+- support bundle API for buyer due diligence and support handoff
 - optional JSON state persistence for standalone operation
 - embedded admin console
 
@@ -19,6 +22,18 @@ It does not pretend to be a full WAF, IDS, SIEM, or SOAR yet. Production WAF and
 The program-complete baseline means the binary can run by itself, keep operator-managed routes/threats/DNSBL entries/events across restart when `WAF_IDS_STATE_PATH` is configured, enforce monitor/block decisions, export DNSBL records, and prove that loop through `scripts/smoke.sh`.
 
 It is still not a hardened internet-facing deployment. Use TLS, identity-aware access, upstream allowlists, and route rollback procedures before production traffic.
+
+## Commercial Readiness Baseline
+
+The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pilot state through API evidence:
+
+- `GET /api/commercial/license` returns tenant, edition, license, support, and annual contract metadata.
+- `POST /api/commercial/license` updates that metadata with `X-Admin-Token`.
+- `POST /api/threat-feeds/import` imports operator-reviewed threat indicators and DNSBL entries.
+- `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
+- `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
+
+The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
 
 ## Run
 
@@ -31,7 +46,7 @@ Open `http://127.0.0.1:8080/admin`.
 Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
-- `ADMIN_TOKEN`: optional write token for `POST /api/routes`, `POST /api/threats`, and `POST /api/dnsbl` via `X-Admin-Token`
+- `ADMIN_TOKEN`: optional write token for management writes via `X-Admin-Token`
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
@@ -52,6 +67,10 @@ curl http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:8080/api/routes
 curl http://127.0.0.1:8080/api/threats
 curl http://127.0.0.1:8080/api/dnsbl
+curl http://127.0.0.1:8080/api/commercial/license
+curl http://127.0.0.1:8080/api/commercial/readiness
+curl http://127.0.0.1:8080/api/threat-feeds
+curl http://127.0.0.1:8080/api/support-bundle
 curl http://127.0.0.1:8080/dnsbl/zone
 curl http://127.0.0.1:8080/gateway/demo?q=union%20select
 ```
@@ -78,6 +97,39 @@ Management writes are upserts:
 - DNSBL entries are keyed by `address`
 
 DNSBL response codes must be IPv4 loopback-style values in `127.0.0.0/8`.
+
+Import a reviewed threat feed:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/threat-feeds/import \
+  -H 'content-type: application/json' \
+  -H 'x-admin-token: dev-secret' \
+  -d '{
+    "feed_id": "misp-seoul",
+    "source": "misp://soc.example",
+    "ttl_seconds": 600,
+    "threats": [{
+      "value": "credential_dump",
+      "indicator_type": "malware",
+      "severity": "critical",
+      "source": "misp-seoul",
+      "ttl_seconds": 600
+    }],
+    "dnsbl": [{
+      "address": "198.51.100.23",
+      "code": "127.0.0.4",
+      "reason": "feed scanner",
+      "source": "misp-seoul",
+      "ttl_seconds": 600
+    }]
+  }'
+```
+
+Deployment assets:
+
+- `Dockerfile`
+- `deploy/docker-compose.yml`
+- `deploy/kubernetes/waf-ids-ai-soc.yaml`
 
 ## Roadmap
 
