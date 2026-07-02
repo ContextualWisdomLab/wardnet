@@ -1050,12 +1050,20 @@ name = "waf-ids-ai-soc"
 version = "0.1.0"
 dependencies = [
  "axum",
- "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tower",
+ "waf-ids-core",
+]
+
+[[package]]
+name = "waf-ids-core"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "serde",
 ]
 
 [[package]]

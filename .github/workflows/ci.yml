@@ -17,6 +17,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --workspace
       - name: Clippy
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings

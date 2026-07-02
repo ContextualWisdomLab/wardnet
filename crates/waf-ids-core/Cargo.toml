@@ -1,0 +1,10 @@
+[package]
+name = "waf-ids-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core WAF/IDS/AI SOC domain models, scoring, DNSBL, and commercial readiness logic"
+license = "MIT"
+
+[dependencies]
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
