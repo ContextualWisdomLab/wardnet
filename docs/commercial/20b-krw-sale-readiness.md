@@ -14,6 +14,8 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 8. The support bundle API must return health, KPIs, license metadata, readiness checks, and evidence counts without secrets.
 9. Docker, Compose, and Kubernetes deployment assets must exist for buyer lab validation.
 10. Security, compliance, architecture, operations, and KPI evidence must be committed with the product.
+11. Reusable domain logic must be separated from HTTP/persistence code when that improves maintainability without adding release overhead.
+12. Product design, Figma/FigJam, analytics, complexity-audit, and implementation-plan evidence must be committed for buyer due diligence.
 
 ## Runtime Readiness API
 
@@ -38,3 +40,5 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 ## Current Boundary
 
 The project is still a commercial baseline, not a complete enterprise WAF/IDS suite. Production buyers should require follow-on integration of Coraza/OWASP CRS, Suricata EVE ingest, durable database storage, SSO/RBAC, audit logs, and signed release artifacts before internet-edge deployment.
+
+The current library boundary is `crates/waf-ids-core`, a local workspace crate. A submodule is not justified until an independently versioned adapter or SDK exists.

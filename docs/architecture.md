@@ -6,10 +6,13 @@
 flowchart LR
   operator["Security Operator"] --> admin["Admin Console"]
   admin --> api["Management API"]
-  api --> state["Runtime State"]
+  api --> app["App Crate"]
+  app --> core["waf-ids-core"]
+  core --> state["Runtime State"]
   state --> file["Optional JSON State File"]
   client["HTTP Client"] --> gateway["Rust Gateway"]
   gateway --> scorer["Threat and DNSBL Scorer"]
+  scorer --> core
   scorer --> state
   gateway --> upstream["Configured Upstream"]
   gateway --> events["Security Events"]
@@ -23,7 +26,8 @@ flowchart LR
 ## Components
 
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
-- `src/lib.rs`: Axum app, management APIs, optional JSON persistence, gateway handler, scoring, DNSBL zone export, commercial readiness, support bundle, retention, and unit tests.
+- `src/lib.rs`: Axum app, management APIs, optional JSON persistence, gateway handler, upstream proxying, support bundle assembly, and integration tests.
+- `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, KPI snapshot, and commercial readiness logic.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
 - `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
@@ -50,3 +54,11 @@ flowchart LR
 - Block mode is route-scoped to avoid global accidental enforcement.
 - JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
 - Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.
+- The reusable core remains in-repo as a workspace crate. A git submodule is intentionally deferred until an independently versioned engine, SDK, or adapter needs a separate release lifecycle.
+
+## Product Architecture Evidence
+
+- FigJam: `docs/figma/enterprise-product-architecture.md`
+- Product workflows: `docs/product-design/enterprise-operator-workflows.md`
+- Enterprise scorecard: `docs/analytics/enterprise-value-scorecard.md`
+- Complexity audit: `docs/ponytail/2026-07-02-complexity-audit.md`

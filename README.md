@@ -5,6 +5,7 @@ Rust-first gateway and SOC control-plane baseline for ContextualWisdomLab.
 The project starts small on purpose:
 
 - web-managed API gateway routes
+- reusable `waf-ids-core` domain crate inside the same Cargo workspace
 - request scoring from threat indicators and DNSBL entries
 - monitor/block enforcement modes
 - RFC 5782-style DNSBL zone export
@@ -34,6 +35,15 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
 
 The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
+
+The enterprise product package evidence is tracked in:
+
+- `docs/superpowers/specs/2026-07-02-enterprise-product-package-design.md`
+- `docs/superpowers/plans/2026-07-02-enterprise-product-package.md`
+- `docs/figma/enterprise-product-architecture.md`
+- `docs/product-design/enterprise-operator-workflows.md`
+- `docs/analytics/enterprise-value-scorecard.md`
+- `docs/ponytail/2026-07-02-complexity-audit.md`
 
 ## Run
 
@@ -131,6 +141,14 @@ Deployment assets:
 - `deploy/docker-compose.yml`
 - `deploy/kubernetes/waf-ids-ai-soc.yaml`
 
+## Workspace
+
+- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, KPI snapshots, and commercial readiness snapshots.
+- `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, support bundle assembly, and integration tests.
+- `src/main.rs`: process configuration and server startup.
+
+The core is a local workspace crate rather than a git submodule because it does not yet have a separate release cadence or external consumers.
+
 ## Roadmap
 
 1. Coraza/OWASP CRS adapter for HTTP transaction scoring.
@@ -143,7 +161,7 @@ Deployment assets:
 
 ```bash
 cargo fmt --check
-cargo test --locked
-cargo clippy --locked -- -D warnings
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 scripts/smoke.sh
 ```
