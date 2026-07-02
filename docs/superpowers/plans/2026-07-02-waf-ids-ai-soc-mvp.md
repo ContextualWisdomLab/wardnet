@@ -89,5 +89,5 @@
 - [x] Add CI for formatting and tests.
 - [x] Add Scorecard workflow and Dependabot baseline.
 - [x] Run final local verification.
-- [ ] Create `ContextualWisdomLab/waf-ids-ai-soc` if absent.
-- [ ] Push the initial implementation to `main`.
+- [x] Create `ContextualWisdomLab/waf-ids-ai-soc` if absent.
+- [x] Push the initial implementation to `main`.
