@@ -9,6 +9,7 @@
 - **Feed Freshness**: percentage of active feeds updated within their expected interval.
 - **DNSBL Lookup Readiness**: zone export age and authoritative DNS publication status.
 - **Buyer Evidence Completeness**: required sale-readiness evidence endpoints, documents, and deployment assets listed in `GET /api/commercial/evidence-manifest`.
+- **Management Audit Coverage**: successful admin writes represented in `GET /api/audit-logs` without secrets.
 
 ## Driver Metrics
 
@@ -22,6 +23,7 @@
 - stale indicators past TTL
 - feed import error count
 - buyer evidence manifest endpoint count and missing required evidence blockers
+- management audit-log count by action, resource, actor, and outcome
 
 ## Guardrails
 
@@ -31,7 +33,8 @@
 - AI recommendation approval rate
 - policy rollback count
 - management API unauthorized write attempts
+- audit-log records containing secrets or raw request bodies
 
 ## MVP Measurement
 
-The baseline exposes `GET /api/kpis` with counts for routes, indicators, DNSBL entries, threat feeds, fresh feeds, stale feeds, events, blocked events, and monitored events. `GET /api/commercial/evidence-manifest` adds the buyer-facing checklist that maps those signals to required runtime endpoints, committed documents, and deployment assets. Latency, precision, triage time, and full feed freshness percentages require the next telemetry and analyst-disposition work.
+The baseline exposes `GET /api/kpis` with counts for routes, indicators, DNSBL entries, threat feeds, fresh feeds, stale feeds, events, blocked events, monitored events, and management audit logs. `GET /api/commercial/evidence-manifest` adds the buyer-facing checklist that maps those signals to required runtime endpoints, committed documents, and deployment assets. Latency, precision, triage time, and full feed freshness percentages require the next telemetry and analyst-disposition work.

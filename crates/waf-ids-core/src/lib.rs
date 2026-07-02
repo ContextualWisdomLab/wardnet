@@ -14,6 +14,10 @@ pub struct AppData {
     pub dnsbl: Vec<DnsblEntry>,
     pub events: Vec<SecurityEvent>,
     pub next_event_id: u64,
+    #[serde(default)]
+    pub audit_logs: Vec<AuditLogEntry>,
+    #[serde(default = "initial_audit_log_id")]
+    pub next_audit_log_id: u64,
     #[serde(default = "CommercialProfile::seeded")]
     pub commercial: CommercialProfile,
     #[serde(default)]
@@ -46,10 +50,16 @@ impl AppData {
             }],
             events: Vec::new(),
             next_event_id: 1,
+            audit_logs: Vec::new(),
+            next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
         }
     }
+}
+
+fn initial_audit_log_id() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +199,27 @@ pub struct SecurityEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditLogEntry {
+    pub id: u64,
+    pub timestamp_unix: u64,
+    pub actor: String,
+    pub action: String,
+    pub resource: String,
+    pub resource_id: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NewAuditLogEntry {
+    pub timestamp_unix: u64,
+    pub actor: String,
+    pub action: String,
+    pub resource: String,
+    pub resource_id: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SocKpiSnapshot {
     pub route_count: usize,
     pub threat_indicator_count: usize,
@@ -199,6 +230,7 @@ pub struct SocKpiSnapshot {
     pub event_count: usize,
     pub blocked_event_count: usize,
     pub monitor_event_count: usize,
+    pub audit_log_count: usize,
     pub gateway_mode: String,
 }
 
@@ -258,6 +290,7 @@ pub struct BuyerEvidenceRuntimeCounts {
     pub fresh_threat_feed_count: usize,
     pub stale_threat_feed_count: usize,
     pub event_count: usize,
+    pub audit_log_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -445,6 +478,21 @@ pub fn upsert_threat_feed(
     feed
 }
 
+pub fn record_audit_log(data: &mut AppData, entry: NewAuditLogEntry) -> AuditLogEntry {
+    let audit_log = AuditLogEntry {
+        id: data.next_audit_log_id,
+        timestamp_unix: entry.timestamp_unix,
+        actor: entry.actor,
+        action: entry.action,
+        resource: entry.resource,
+        resource_id: entry.resource_id,
+        outcome: entry.outcome,
+    };
+    data.next_audit_log_id = data.next_audit_log_id.saturating_add(1);
+    data.audit_logs.push(audit_log.clone());
+    audit_log
+}
+
 pub fn select_route<'a>(routes: &'a [RouteConfig], path: &str) -> Option<&'a RouteConfig> {
     routes
         .iter()
@@ -559,6 +607,7 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
             .iter()
             .filter(|event| event.action == "monitored")
             .count(),
+        audit_log_count: data.audit_logs.len(),
         gateway_mode: "rust-first edge gateway program baseline".to_string(),
     }
 }
@@ -677,6 +726,7 @@ pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenc
             fresh_threat_feed_count: kpis.fresh_threat_feed_count,
             stale_threat_feed_count: kpis.stale_threat_feed_count,
             event_count: kpis.event_count,
+            audit_log_count: kpis.audit_log_count,
         },
         required_endpoints: buyer_evidence_endpoints(),
         document_paths: vec![
@@ -739,6 +789,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "/api/events.ndjson",
             "application/x-ndjson",
             "one-security-event-per-line SOC/SIEM ingestion evidence",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "management_audit_logs",
+            "GET",
+            "/api/audit-logs",
+            "application/json",
+            "admin write history for buyer due-diligence without admin secrets",
             true,
         ),
         buyer_evidence_endpoint(
@@ -819,4 +877,43 @@ pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
 
 fn escape_txt(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_audit_logs_with_monotonic_ids() {
+        let mut data = AppData::seeded();
+
+        let first = record_audit_log(
+            &mut data,
+            NewAuditLogEntry {
+                timestamp_unix: 10,
+                actor: "operator@example.com".to_string(),
+                action: "upsert_route".to_string(),
+                resource: "route".to_string(),
+                resource_id: "edge".to_string(),
+                outcome: "success".to_string(),
+            },
+        );
+        let second = record_audit_log(
+            &mut data,
+            NewAuditLogEntry {
+                timestamp_unix: 11,
+                actor: "operator@example.com".to_string(),
+                action: "update_license".to_string(),
+                resource: "commercial_license".to_string(),
+                resource_id: "cwlab-enterprise".to_string(),
+                outcome: "success".to_string(),
+            },
+        );
+
+        assert_eq!(first.id, 1);
+        assert_eq!(second.id, 2);
+        assert_eq!(data.audit_logs.len(), 2);
+        assert_eq!(data.next_audit_log_id, 3);
+        assert_eq!(data.audit_logs[0].resource_id, "edge");
+    }
 }
