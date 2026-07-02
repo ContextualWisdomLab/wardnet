@@ -1118,13 +1118,24 @@ fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
     let license_ready = matches!(
         data.commercial.license_status,
         LicenseStatus::Active | LicenseStatus::Evaluation
-    ) && data.commercial.license_id.is_some()
-        && data.commercial.licensee.is_some();
+    ) && data
+        .commercial
+        .license_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && data
+            .commercial
+            .licensee
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
     let commercial_value_ready = data
         .commercial
         .annual_contract_value_krw
         .is_some_and(|value| value >= TARGET_SALE_VALUE_KRW);
-    let threat_feed_ready = !data.threat_feeds.is_empty() && !data.threats.is_empty();
+    let threat_feed_ready = data
+        .threat_feeds
+        .iter()
+        .any(|feed| feed.threat_count > 0 || feed.dnsbl_count > 0);
     let route_ready = data.routes.iter().any(|route| route.enabled);
     let dnsbl_ready = !data.dnsbl.is_empty();
     let support_evidence_ready = !data.events.is_empty();
@@ -2530,6 +2541,42 @@ mod tests {
         assert_eq!(loaded.commercial.tenant_id, "local-lab");
         assert_eq!(loaded.commercial.license_status, LicenseStatus::Unlicensed);
         assert!(loaded.threat_feeds.is_empty());
+    }
+
+    #[test]
+    fn readiness_rejects_blank_license_and_accepts_dnsbl_only_feeds() {
+        let mut data = AppData::seeded();
+        data.threats.clear();
+        data.commercial = CommercialProfile {
+            license_id: Some(" ".to_string()),
+            ..enterprise_profile()
+        };
+        data.threat_feeds = vec![ThreatFeedStatus {
+            feed_id: "dnsbl-only".to_string(),
+            source: "misp://dnsbl".to_string(),
+            last_updated_unix: 1,
+            threat_count: 0,
+            dnsbl_count: 1,
+            ttl_seconds: 600,
+        }];
+        data.events.push(SecurityEvent {
+            id: 1,
+            timestamp_unix: 1,
+            client_ip: None,
+            route_id: Some("demo".to_string()),
+            action: "monitored".to_string(),
+            reason: "unit".to_string(),
+            score: 0,
+            path: "/demo".to_string(),
+        });
+
+        let blocked = commercial_readiness_snapshot(&data);
+        assert!(!blocked.ready_for_enterprise_sale);
+        assert!(blocked.blockers.iter().any(|item| item == "license"));
+
+        data.commercial.license_id = Some("LIC-2B-KRW-0001".to_string());
+        let ready = commercial_readiness_snapshot(&data);
+        assert!(ready.ready_for_enterprise_sale);
     }
 
     #[tokio::test]

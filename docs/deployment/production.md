@@ -13,6 +13,7 @@ Run:
 ```bash
 docker run --rm \
   -p 8080:8080 \
+  -e BIND_ADDR=0.0.0.0:8080 \
   -e ADMIN_TOKEN=replace-me \
   -e DNSBL_ORIGIN=dnsbl.example \
   -v waf_ids_state:/var/lib/waf-ids-ai-soc \

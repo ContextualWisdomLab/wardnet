@@ -14,7 +14,7 @@ RUN apt-get update \
 
 COPY --from=build /app/target/release/waf-ids-ai-soc /usr/local/bin/waf-ids-ai-soc
 
-ENV BIND_ADDR=0.0.0.0:8080 \
+ENV BIND_ADDR=127.0.0.1:8080 \
     DNSBL_ORIGIN=dnsbl.local \
     EVENT_LIMIT=1000 \
     WAF_IDS_STATE_PATH=/var/lib/waf-ids-ai-soc/state.json
