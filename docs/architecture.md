@@ -1,12 +1,13 @@
 # Architecture
 
-## Current MVP
+## Current Baseline
 
 ```mermaid
 flowchart LR
   operator["Security Operator"] --> admin["Admin Console"]
   admin --> api["Management API"]
   api --> state["Runtime State"]
+  state --> file["Optional JSON State File"]
   client["HTTP Client"] --> gateway["Rust Gateway"]
   gateway --> scorer["Threat and DNSBL Scorer"]
   scorer --> state
@@ -18,11 +19,12 @@ flowchart LR
 
 ## Components
 
-- `src/main.rs`: process startup, bind address, optional admin token.
-- `src/lib.rs`: Axum app, management APIs, gateway handler, scoring, DNSBL zone export, and unit tests.
+- `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
+- `src/lib.rs`: Axum app, management APIs, optional JSON persistence, gateway handler, scoring, DNSBL zone export, retention, and unit tests.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
-- `/dnsbl/zone`: DNSBL zone text suitable for publication through an authoritative DNS server.
+- `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
+- `scripts/smoke.sh`: external smoke test for health, admin, auth, route writes, block enforcement, KPIs, DNSBL export, and restart persistence.
 
 ## Near-Term Integrations
 
@@ -36,5 +38,7 @@ flowchart LR
 
 - Default bind address is localhost.
 - Remote management requires `ADMIN_TOKEN` plus external TLS and identity controls.
-- The MVP stores runtime state in memory only. Durable storage should be added before production use.
+- `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone operation. Without it, the service uses seeded in-memory state.
+- File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
+- JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.

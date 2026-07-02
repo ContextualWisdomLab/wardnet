@@ -9,33 +9,124 @@ use axum::{
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::{
+    io::ErrorKind,
     net::IpAddr,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::RwLock;
+use tokio::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 
 const BLOCK_SCORE: u16 = 50;
 
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppData>>,
+    persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
     admin_token: Option<String>,
+    state_path: Option<PathBuf>,
+    dnsbl_origin: String,
+    event_limit: usize,
 }
 
 impl AppState {
     pub fn seeded(admin_token: Option<String>) -> Self {
+        Self::new(AppData::seeded(), AppConfig::memory(admin_token))
+    }
+
+    pub async fn load(config: AppConfig) -> Result<Self, String> {
+        let mut data = match config.state_path.as_deref() {
+            Some(path) => load_or_seed_state(path).await?,
+            None => AppData::seeded(),
+        };
+        let event_limit = config.event_limit.max(1);
+        enforce_event_limit(&mut data, event_limit);
+        if let Some(path) = config.state_path.as_deref() {
+            persist_state(path, &data).await?;
+        }
+        Ok(Self::new(data, config))
+    }
+
+    fn new(data: AppData, config: AppConfig) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(AppData::seeded())),
+            inner: Arc::new(RwLock::new(data)),
+            persist_lock: Arc::new(Mutex::new(())),
             http: reqwest::Client::new(),
-            admin_token,
+            admin_token: config.admin_token,
+            state_path: config.state_path,
+            dnsbl_origin: normalized_origin(&config.dnsbl_origin),
+            event_limit: config.event_limit.max(1),
+        }
+    }
+
+    async fn mutate_and_persist<T>(
+        &self,
+        mutate: impl FnOnce(&mut AppData) -> T,
+    ) -> Result<T, String> {
+        let _guard = self.persist_lock.lock().await;
+        let (result, snapshot, previous) = {
+            let mut data = self.inner.write().await;
+            let previous = data.clone();
+            let result = mutate(&mut data);
+            (result, data.clone(), previous)
+        };
+        if let Err(error) = self.persist_snapshot(&snapshot).await {
+            let mut data = self.inner.write().await;
+            *data = previous;
+            return Err(error);
+        }
+        Ok(result)
+    }
+
+    async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
+        let Some(path) = self.state_path.as_deref() else {
+            return Ok(());
+        };
+        persist_state(path, data).await
+    }
+
+    fn health_status(&self) -> HealthStatus {
+        HealthStatus {
+            status: "ok".to_string(),
+            persistence: if self.state_path.is_some() {
+                "file".to_string()
+            } else {
+                "memory".to_string()
+            },
+            dnsbl_origin: self.dnsbl_origin.clone(),
+            event_limit: self.event_limit,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub admin_token: Option<String>,
+    pub state_path: Option<PathBuf>,
+    pub dnsbl_origin: String,
+    pub event_limit: usize,
+}
+
+impl AppConfig {
+    pub const DEFAULT_DNSBL_ORIGIN: &'static str = "dnsbl.local";
+    pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
+
+    pub fn memory(admin_token: Option<String>) -> Self {
+        Self {
+            admin_token,
+            state_path: None,
+            dnsbl_origin: Self::DEFAULT_DNSBL_ORIGIN.to_string(),
+            event_limit: Self::DEFAULT_EVENT_LIMIT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct AppData {
     routes: Vec<RouteConfig>,
     threats: Vec<ThreatIndicator>,
@@ -71,6 +162,74 @@ impl AppData {
             events: Vec::new(),
             next_event_id: 1,
         }
+    }
+}
+
+async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
+    match fs::read_to_string(path).await {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|error| format!("state file {} is not valid JSON: {error}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let data = AppData::seeded();
+            persist_state(path, &data).await?;
+            Ok(data)
+        }
+        Err(error) => Err(format!(
+            "failed to read state file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).await.map_err(|error| {
+            format!(
+                "failed to create state directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let json =
+        serde_json::to_vec_pretty(data).expect("AppData contains only JSON-serializable fields");
+    let temp_path = temporary_state_path(path);
+    fs::write(&temp_path, json).await.map_err(|error| {
+        format!(
+            "failed to write temporary state file {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    if let Err(error) = fs::rename(&temp_path, path).await {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(format!(
+            "failed to replace state file {}: {error}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn temporary_state_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(".{file_name}.tmp-{}-{unique}", std::process::id()))
+}
+
+fn normalized_origin(origin: &str) -> String {
+    let trimmed = origin.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -140,6 +299,14 @@ pub struct SocKpiSnapshot {
     pub gateway_mode: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthStatus {
+    pub status: String,
+    pub persistence: String,
+    pub dnsbl_origin: String,
+    pub event_limit: usize,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -160,8 +327,8 @@ pub fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn healthz() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
+    Json(state.health_status())
 }
 
 async fn admin_console() -> Html<&'static str> {
@@ -184,13 +351,13 @@ async fn create_route(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let mut data = state.inner.write().await;
-    if let Some(existing) = data.routes.iter_mut().find(|item| item.id == route.id) {
-        *existing = route.clone();
-    } else {
-        data.routes.push(route.clone());
+    match state
+        .mutate_and_persist(|data| upsert_route(&mut data.routes, route.clone()))
+        .await
+    {
+        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
-    (StatusCode::CREATED, Json(route)).into_response()
 }
 
 async fn list_threats(State(state): State<AppState>) -> Json<Vec<ThreatIndicator>> {
@@ -205,15 +372,17 @@ async fn create_threat(
     if !admin_authorized(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
-    if indicator.value.trim().is_empty() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "threat indicator value is required",
-        );
+    if let Err(message) = validate_threat(&indicator) {
+        return error(StatusCode::BAD_REQUEST, message);
     }
 
-    state.inner.write().await.threats.push(indicator.clone());
-    (StatusCode::CREATED, Json(indicator)).into_response()
+    match state
+        .mutate_and_persist(|data| upsert_threat(&mut data.threats, indicator.clone()))
+        .await
+    {
+        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
 }
 
 async fn list_dnsbl(State(state): State<AppState>) -> Json<Vec<DnsblEntry>> {
@@ -228,15 +397,17 @@ async fn create_dnsbl(
     if !admin_authorized(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
-    if IpAddr::from_str(&entry.code).is_err() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "DNSBL response code must be an IP address",
-        );
+    if let Err(message) = validate_dnsbl(&entry) {
+        return error(StatusCode::BAD_REQUEST, message);
     }
 
-    state.inner.write().await.dnsbl.push(entry.clone());
-    (StatusCode::CREATED, Json(entry)).into_response()
+    match state
+        .mutate_and_persist(|data| upsert_dnsbl(&mut data.dnsbl, entry.clone()))
+        .await
+    {
+        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
 }
 
 async fn list_events(State(state): State<AppState>) -> Json<Vec<SecurityEvent>> {
@@ -253,7 +424,7 @@ async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
     (
         StatusCode::OK,
         [("content-type", "text/plain; charset=utf-8")],
-        export_dnsbl_zone("dnsbl.local", &data.dnsbl),
+        export_dnsbl_zone(&state.dnsbl_origin, &data.dnsbl),
     )
 }
 
@@ -355,10 +526,90 @@ fn validate_route(route: &RouteConfig) -> Result<(), &'static str> {
     if !route.path_prefix.starts_with('/') {
         return Err("route path_prefix must start with /");
     }
+    if route.path_prefix.contains('?') || route.path_prefix.contains('#') {
+        return Err("route path_prefix must not contain query or fragment characters");
+    }
     if route.upstream.trim().is_empty() {
         return Err("route upstream is required");
     }
+    if !route.upstream.starts_with("mock://")
+        && !route.upstream.starts_with("http://")
+        && !route.upstream.starts_with("https://")
+    {
+        return Err("route upstream must start with mock://, http://, or https://");
+    }
     Ok(())
+}
+
+fn validate_threat(indicator: &ThreatIndicator) -> Result<(), &'static str> {
+    if indicator.value.trim().is_empty() {
+        return Err("threat indicator value is required");
+    }
+    if indicator.indicator_type.trim().is_empty() {
+        return Err("threat indicator type is required");
+    }
+    if indicator.source.trim().is_empty() {
+        return Err("threat indicator source is required");
+    }
+    if indicator.ttl_seconds == 0 {
+        return Err("threat indicator ttl_seconds must be greater than 0");
+    }
+    Ok(())
+}
+
+fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
+    if entry.reason.trim().is_empty() {
+        return Err("DNSBL reason is required");
+    }
+    if entry.source.trim().is_empty() {
+        return Err("DNSBL source is required");
+    }
+    if entry.ttl_seconds == 0 {
+        return Err("DNSBL ttl_seconds must be greater than 0");
+    }
+    match IpAddr::from_str(&entry.code) {
+        Ok(IpAddr::V4(address)) if address.octets()[0] == 127 => Ok(()),
+        Ok(IpAddr::V4(_)) => Err("DNSBL response code must be in 127.0.0.0/8"),
+        Ok(IpAddr::V6(_)) => Err("DNSBL response code must be an IPv4 loopback address"),
+        Err(_) => Err("DNSBL response code must be an IP address"),
+    }
+}
+
+fn upsert_route(routes: &mut Vec<RouteConfig>, route: RouteConfig) -> RouteConfig {
+    if let Some(existing) = routes.iter_mut().find(|item| item.id == route.id) {
+        *existing = route.clone();
+    } else {
+        routes.push(route.clone());
+    }
+    route
+}
+
+fn upsert_threat(
+    threats: &mut Vec<ThreatIndicator>,
+    indicator: ThreatIndicator,
+) -> ThreatIndicator {
+    if let Some(existing) = threats.iter_mut().find(|item| {
+        item.indicator_type == indicator.indicator_type
+            && item.value == indicator.value
+            && item.source == indicator.source
+    }) {
+        *existing = indicator.clone();
+    } else {
+        threats.push(indicator.clone());
+    }
+    indicator
+}
+
+fn upsert_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) -> DnsblEntry {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|item| item.address == entry.address)
+    {
+        *existing = entry.clone();
+    } else {
+        entries.push(entry.clone());
+    }
+    entry
 }
 
 fn select_route<'a>(routes: &'a [RouteConfig], path: &str) -> Option<&'a RouteConfig> {
@@ -452,7 +703,7 @@ async fn proxy_request(
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
-        .map_err(|error| format!("unsupported method: {error}"))?;
+        .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = state
         .http
         .request(method, target)
@@ -461,7 +712,7 @@ async fn proxy_request(
         .await
         .map_err(|error| format!("upstream request failed: {error}"))?;
     let status = StatusCode::from_u16(response.status().as_u16())
-        .map_err(|error| format!("invalid upstream status: {error}"))?;
+        .expect("reqwest upstream status codes are valid axum status codes");
     let bytes = response
         .bytes()
         .await
@@ -502,19 +753,36 @@ async fn record_event(
     score: u16,
     path: &str,
 ) {
-    let mut data = state.inner.write().await;
-    let id = data.next_event_id;
-    data.next_event_id += 1;
-    data.events.push(SecurityEvent {
-        id,
-        timestamp_unix: now_unix(),
-        client_ip,
-        route_id,
-        action: action.to_string(),
-        reason,
-        score,
-        path: path.to_string(),
-    });
+    let action = action.to_string();
+    let path = path.to_string();
+    let event_limit = state.event_limit;
+    if let Err(error) = state
+        .mutate_and_persist(|data| {
+            let id = data.next_event_id;
+            data.next_event_id += 1;
+            data.events.push(SecurityEvent {
+                id,
+                timestamp_unix: now_unix(),
+                client_ip,
+                route_id,
+                action,
+                reason,
+                score,
+                path,
+            });
+            enforce_event_limit(data, event_limit);
+        })
+        .await
+    {
+        eprintln!("failed to persist security event: {error}");
+    }
+}
+
+fn enforce_event_limit(data: &mut AppData, limit: usize) {
+    if data.events.len() > limit {
+        let drain_count = data.events.len() - limit;
+        data.events.drain(0..drain_count);
+    }
 }
 
 fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
@@ -533,7 +801,7 @@ fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
             .iter()
             .filter(|event| event.action == "monitored")
             .count(),
-        gateway_mode: "rust-first edge gateway mvp".to_string(),
+        gateway_mode: "rust-first edge gateway program baseline".to_string(),
     }
 }
 
@@ -643,6 +911,19 @@ const ADMIN_HTML: &str = r#"<!doctype html>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{HeaderValue, Request},
+    };
+    use serde::de::DeserializeOwned;
+    use std::{
+        future::IntoFuture,
+        io::{Read, Write},
+        net::TcpListener as StdTcpListener,
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use tower::ServiceExt;
 
     fn route() -> RouteConfig {
         RouteConfig {
@@ -654,6 +935,45 @@ mod tests {
         }
     }
 
+    async fn app_request(app: &Router, request: Request<Body>) -> Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn empty_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn json_request<T: Serialize>(
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        payload: &T,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("x-admin-token", token);
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(payload).unwrap()))
+            .unwrap()
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    async fn json_body<T: DeserializeOwned>(response: Response) -> T {
+        serde_json::from_str(&body_text(response).await).unwrap()
+    }
+
     #[test]
     fn reverses_ipv4_for_dnsbl_zone_names() {
         assert_eq!(reverse_ipv4_for_dnsbl([192, 0, 2, 10]), "10.2.0.192");
@@ -663,18 +983,28 @@ mod tests {
     fn exports_rfc5782_style_zone_records() {
         let zone = export_dnsbl_zone(
             "dnsbl.example",
-            &[DnsblEntry {
-                address: "192.0.2.10".parse().unwrap(),
-                code: "127.0.0.2".to_string(),
-                reason: "scanner".to_string(),
-                source: "unit".to_string(),
-                ttl_seconds: 300,
-            }],
+            &[
+                DnsblEntry {
+                    address: "192.0.2.10".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                },
+                DnsblEntry {
+                    address: "2001:db8::10".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "ipv6 skip".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                },
+            ],
         );
 
         assert!(zone.contains("$ORIGIN dnsbl.example."));
         assert!(zone.contains("10.2.0.192 IN A 127.0.0.2"));
         assert!(zone.contains("10.2.0.192 IN TXT \"scanner source=unit\""));
+        assert!(!zone.contains("ipv6 skip"));
     }
 
     #[test]
@@ -725,6 +1055,26 @@ mod tests {
             upstream_target(&route(), "/api/v1/items", Some("limit=1")).unwrap(),
             "https://origin.example/v1/items?limit=1"
         );
+        assert_eq!(
+            upstream_target(&route(), "/api", None).unwrap(),
+            "https://origin.example/"
+        );
+        assert_eq!(
+            upstream_target(&route(), "relative", None).unwrap(),
+            "https://origin.example/relative"
+        );
+        assert_eq!(
+            upstream_target(
+                &RouteConfig {
+                    upstream: "mock://origin".to_string(),
+                    ..route()
+                },
+                "/api",
+                None,
+            )
+            .unwrap_err(),
+            "upstream must use http:// or https:// for proxy mode"
+        );
     }
 
     #[test]
@@ -743,6 +1093,993 @@ mod tests {
         assert_eq!(
             select_route(&routes, "/api/admin/users").unwrap().id,
             "admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_api_gateway_and_dnsbl_surfaces_work_together() {
+        let path = temp_state_path("api");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example.".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        let app = build_app(state);
+
+        let response = app_request(&app, empty_request(Method::GET, "/admin")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("WAF/IDS/AI SOC Gateway"));
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.persistence, "file");
+        assert_eq!(health.dnsbl_origin, "dnsbl.example");
+
+        let block_route = RouteConfig {
+            id: "secure".to_string(),
+            path_prefix: "/secure".to_string(),
+            upstream: "mock://secure".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+        };
+        let response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", None, &block_route),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &RouteConfig {
+                    path_prefix: "secure".to_string(),
+                    ..block_route.clone()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let saved_route: RouteConfig = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_route.id, "secure");
+
+        let updated_route: RouteConfig = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/routes",
+                    Some("secret"),
+                    &RouteConfig {
+                        upstream: "mock://secure-v2".to_string(),
+                        ..block_route.clone()
+                    },
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(updated_route.upstream, "mock://secure-v2");
+
+        let threat = ThreatIndicator {
+            value: "drop table".to_string(),
+            indicator_type: "sqli".to_string(),
+            severity: Severity::Critical,
+            source: "unit".to_string(),
+            ttl_seconds: 60,
+        };
+        let response = app_request(
+            &app,
+            json_request(Method::POST, "/api/threats", None, &threat),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &ThreatIndicator {
+                    value: " ".to_string(),
+                    ..threat.clone()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let saved_threat: ThreatIndicator = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/threats", Some("secret"), &threat),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_threat.value, "drop table");
+
+        let dnsbl = DnsblEntry {
+            address: "198.51.100.7".parse().unwrap(),
+            code: "127.0.0.9".to_string(),
+            reason: "botnet".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+        };
+        let response =
+            app_request(&app, json_request(Method::POST, "/api/dnsbl", None, &dnsbl)).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/dnsbl",
+                Some("secret"),
+                &DnsblEntry {
+                    code: "not-ip".to_string(),
+                    ..dnsbl.clone()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let saved_dnsbl: DnsblEntry = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/dnsbl", Some("secret"), &dnsbl),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_dnsbl.code, "127.0.0.9");
+
+        let gateway_request = Request::builder()
+            .method(Method::POST)
+            .uri("/gateway/secure/login?q=DROP%20TABLE")
+            .header("x-forwarded-for", "198.51.100.7, 10.0.0.1")
+            .body(Body::from("payload"))
+            .unwrap();
+        let response = app_request(&app, gateway_request).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(body_text(response).await.contains("\"action\":\"blocked\""));
+
+        let routes: Vec<RouteConfig> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/routes")).await).await;
+        assert!(routes.iter().any(|route| route.id == "secure"));
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(threats.iter().any(|item| item.value == "drop table"));
+
+        let dnsbl_entries: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl_entries
+                .iter()
+                .any(|entry| entry.address == "198.51.100.7".parse::<IpAddr>().unwrap())
+        );
+
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert_eq!(events.last().unwrap().action, "blocked");
+        assert_eq!(
+            events.last().unwrap().client_ip,
+            Some("198.51.100.7".parse().unwrap())
+        );
+
+        let kpis: SocKpiSnapshot =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/kpis")).await).await;
+        assert_eq!(kpis.blocked_event_count, 1);
+
+        let zone =
+            body_text(app_request(&app, empty_request(Method::GET, "/dnsbl/zone")).await).await;
+        assert!(zone.contains("$ORIGIN dnsbl.example."));
+        assert!(zone.contains("7.100.51.198 IN A 127.0.0.9"));
+
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
+        let upstream_app = Router::new().route(
+            "/v1/items",
+            any(|| async { (StatusCode::ACCEPTED, "proxied") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(axum::serve(listener, upstream_app).into_future());
+
+        let unused_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_addr = unused_listener.local_addr().unwrap();
+        drop(unused_listener);
+
+        let raw_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let raw_addr = raw_listener.local_addr().unwrap();
+        let raw_task = thread::spawn(move || {
+            let (mut stream, _) = raw_listener.accept().unwrap();
+            let mut buffer = [0; 512];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
+                .unwrap();
+        });
+
+        let state = AppState::new(
+            AppData {
+                routes: vec![
+                    RouteConfig {
+                        id: "mock".to_string(),
+                        path_prefix: "/mock".to_string(),
+                        upstream: "mock://mock".to_string(),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                    },
+                    RouteConfig {
+                        id: "proxy".to_string(),
+                        path_prefix: "/proxy".to_string(),
+                        upstream: format!("http://{upstream_addr}"),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                    },
+                    RouteConfig {
+                        id: "down".to_string(),
+                        path_prefix: "/down".to_string(),
+                        upstream: format!("http://{unused_addr}"),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                    },
+                    RouteConfig {
+                        id: "truncated".to_string(),
+                        path_prefix: "/truncated".to_string(),
+                        upstream: format!("http://{raw_addr}"),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                    },
+                ],
+                threats: Vec::new(),
+                dnsbl: Vec::new(),
+                events: Vec::new(),
+                next_event_id: 1,
+            },
+            AppConfig {
+                admin_token: None,
+                state_path: None,
+                dnsbl_origin: "dnsbl.local".to_string(),
+                event_limit: 20,
+            },
+        );
+        let app = build_app(state);
+
+        let no_route = app_request(&app, empty_request(Method::GET, "/gateway/none")).await;
+        assert_eq!(no_route.status(), StatusCode::NOT_FOUND);
+
+        let mock_request = Request::builder()
+            .method(Method::GET)
+            .uri("/gateway/mock")
+            .header("x-real-ip", "198.51.100.8")
+            .body(Body::empty())
+            .unwrap();
+        let mock_response = app_request(&app, mock_request).await;
+        assert_eq!(mock_response.status(), StatusCode::OK);
+        assert!(
+            body_text(mock_response)
+                .await
+                .contains("no matching indicator")
+        );
+
+        let proxy_response = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/proxy/v1/items?ok=1"),
+        )
+        .await;
+        assert_eq!(proxy_response.status(), StatusCode::ACCEPTED);
+        assert_eq!(body_text(proxy_response).await, "proxied");
+
+        let down_response = app_request(&app, empty_request(Method::GET, "/gateway/down")).await;
+        assert_eq!(down_response.status(), StatusCode::BAD_GATEWAY);
+
+        let truncated_response =
+            app_request(&app, empty_request(Method::GET, "/gateway/truncated")).await;
+        assert_eq!(truncated_response.status(), StatusCode::BAD_GATEWAY);
+        raw_task.join().unwrap();
+
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_request_rejects_non_http_upstreams_before_sending() {
+        let state = AppState::seeded(None);
+        let result = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "mock".to_string(),
+                path_prefix: "/mock".to_string(),
+                upstream: "mock://mock".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            },
+            &Method::GET,
+            "/mock",
+            None,
+            Bytes::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("upstream must use http://"));
+    }
+
+    fn temp_state_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "waf-ids-ai-soc-{name}-{}-{nanos}.json",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn loads_missing_state_file_from_seed_and_persists_it() {
+        let path = temp_state_path("seed");
+        let state = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example.".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+
+        let data = state.inner.read().await;
+        assert_eq!(data.routes[0].id, "demo");
+        drop(data);
+
+        let persisted = fs::read_to_string(&path).await.unwrap();
+        assert!(persisted.contains("\"next_event_id\": 1"));
+        assert!(persisted.contains("\"demo\""));
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn persists_management_upserts_to_state_file() {
+        let path = temp_state_path("upsert");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+
+        state
+            .mutate_and_persist(|data| {
+                upsert_route(
+                    &mut data.routes,
+                    RouteConfig {
+                        id: "api".to_string(),
+                        path_prefix: "/api".to_string(),
+                        upstream: "mock://api".to_string(),
+                        mode: EnforcementMode::Block,
+                        enabled: true,
+                    },
+                );
+            })
+            .await
+            .unwrap();
+
+        let loaded: AppData =
+            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            loaded
+                .routes
+                .iter()
+                .filter(|route| route.id == "api")
+                .count(),
+            1
+        );
+        assert_eq!(
+            loaded
+                .routes
+                .iter()
+                .find(|route| route.id == "api")
+                .unwrap()
+                .mode,
+            EnforcementMode::Block
+        );
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn upserts_threats_and_dnsbl_entries_by_stable_keys() {
+        let mut threats = vec![ThreatIndicator {
+            value: "union select".to_string(),
+            indicator_type: "sqli".to_string(),
+            severity: Severity::High,
+            source: "unit".to_string(),
+            ttl_seconds: 60,
+        }];
+
+        upsert_threat(
+            &mut threats,
+            ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::Critical,
+                source: "unit".to_string(),
+                ttl_seconds: 120,
+            },
+        );
+
+        assert_eq!(threats.len(), 1);
+        assert_eq!(threats[0].severity, Severity::Critical);
+        assert_eq!(threats[0].ttl_seconds, 120);
+
+        let mut dnsbl = vec![DnsblEntry {
+            address: "203.0.113.10".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "scanner".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+        }];
+
+        upsert_dnsbl(
+            &mut dnsbl,
+            DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.3".to_string(),
+                reason: "botnet".to_string(),
+                source: "feed".to_string(),
+                ttl_seconds: 600,
+            },
+        );
+
+        assert_eq!(dnsbl.len(), 1);
+        assert_eq!(dnsbl[0].code, "127.0.0.3");
+        assert_eq!(dnsbl[0].reason, "botnet");
+    }
+
+    #[test]
+    fn rejects_incomplete_management_records() {
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: " ".to_string(),
+                path_prefix: "/api".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            }),
+            Err("route id is required")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad-path".to_string(),
+                path_prefix: "api".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            }),
+            Err("route path_prefix must start with /")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad-query".to_string(),
+                path_prefix: "/api?debug=true".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            }),
+            Err("route path_prefix must not contain query or fragment characters")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad-fragment".to_string(),
+                path_prefix: "/api#frag".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            }),
+            Err("route path_prefix must not contain query or fragment characters")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "no-upstream".to_string(),
+                path_prefix: "/api".to_string(),
+                upstream: " ".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            }),
+            Err("route upstream is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: " ".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            }),
+            Err("threat indicator value is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: " ".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            }),
+            Err("threat indicator type is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: " ".to_string(),
+                ttl_seconds: 60,
+            }),
+            Err("threat indicator source is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 0,
+            }),
+            Err("threat indicator ttl_seconds must be greater than 0")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: " ".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }),
+            Err("DNSBL reason is required")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: " ".to_string(),
+                ttl_seconds: 300,
+            }),
+            Err("DNSBL source is required")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 0,
+            }),
+            Err("DNSBL ttl_seconds must be greater than 0")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "192.0.2.1".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }),
+            Err("DNSBL response code must be in 127.0.0.0/8")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "::1".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }),
+            Err("DNSBL response code must be an IPv4 loopback address")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "not-ip".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }),
+            Err("DNSBL response code must be an IP address")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad".to_string(),
+                path_prefix: "/api".to_string(),
+                upstream: "ftp://origin".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+            }),
+            Err("route upstream must start with mock://, http://, or https://")
+        );
+        assert!(validate_route(&route()).is_ok());
+        assert!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            })
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn defaults_scoring_and_state_error_paths_are_explicit() {
+        let seeded = AppState::seeded(None);
+        assert_eq!(seeded.health_status().persistence, "memory");
+
+        let loaded = AppState::load(AppConfig::memory(None)).await.unwrap();
+        assert_eq!(loaded.health_status().dnsbl_origin, "dnsbl.local");
+
+        let minimum = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: None,
+            dnsbl_origin: " . ".to_string(),
+            event_limit: 0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(minimum.health_status().dnsbl_origin, "dnsbl.local");
+        assert_eq!(minimum.health_status().event_limit, 1);
+
+        let score = score_request(
+            "/login",
+            None,
+            "alpha beta",
+            None,
+            &[
+                ThreatIndicator {
+                    value: "alpha".to_string(),
+                    indicator_type: "low".to_string(),
+                    severity: Severity::Low,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+                ThreatIndicator {
+                    value: "beta".to_string(),
+                    indicator_type: "medium".to_string(),
+                    severity: Severity::Medium,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+            ],
+            &[],
+        );
+        assert_eq!(score.score, 35);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(client_ip_from_headers(&headers), None);
+
+        let valid_path = temp_state_path("valid-load");
+        fs::write(
+            &valid_path,
+            serde_json::to_vec_pretty(&AppData::seeded()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let valid_state = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(valid_path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        assert_eq!(valid_state.inner.read().await.routes[0].id, "demo");
+        let _ = fs::remove_file(valid_path).await;
+
+        let local_path = PathBuf::from(format!(
+            "waf-ids-state-unit-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        persist_state(&local_path, &AppData::seeded())
+            .await
+            .unwrap();
+        let _ = fs::remove_file(local_path).await;
+
+        let invalid_path = temp_state_path("invalid-json");
+        fs::write(&invalid_path, "{").await.unwrap();
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(invalid_path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(error.contains("not valid JSON"));
+        let _ = fs::remove_file(invalid_path).await;
+
+        let dir_path = temp_state_path("state-dir");
+        fs::create_dir_all(&dir_path).await.unwrap();
+        let error = load_or_seed_state(&dir_path).await.unwrap_err();
+        assert!(error.contains("failed to read state file"));
+        let _ = fs::remove_dir_all(&dir_path).await;
+
+        let parent_file = temp_state_path("parent-file");
+        fs::write(&parent_file, "not a directory").await.unwrap();
+        let nested_path = parent_file.join("state.json");
+        let error = persist_state(&nested_path, &AppData::seeded())
+            .await
+            .unwrap_err();
+        assert!(error.contains("failed to create state directory"));
+        let _ = fs::remove_file(parent_file).await;
+
+        let write_dir = temp_state_path("write-dir");
+        fs::create_dir_all(&write_dir).await.unwrap();
+        let error = persist_state(&write_dir, &AppData::seeded())
+            .await
+            .unwrap_err();
+        assert!(error.contains("failed to replace state file"));
+        let _ = fs::remove_dir_all(write_dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_surfaces_state_rewrite_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let read_only_parent = temp_state_path("read-only-parent");
+        fs::create_dir_all(&read_only_parent).await.unwrap();
+        let read_only_file = read_only_parent.join("state.json");
+        fs::write(
+            &read_only_file,
+            serde_json::to_vec_pretty(&AppData::seeded()).unwrap(),
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(read_only_file.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("failed to write temporary state file")
+        );
+        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let _ = fs::remove_dir_all(read_only_parent).await;
+
+        let read_only_dir = temp_state_path("read-only-dir");
+        fs::create_dir_all(&read_only_dir).await.unwrap();
+        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(read_only_dir.join("state.json")),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("failed to write temporary state file")
+        );
+        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(read_only_dir).await;
+    }
+
+    #[tokio::test]
+    async fn persistence_failures_return_operator_visible_errors() {
+        let failing_path = temp_state_path("persist-dir");
+        fs::create_dir_all(&failing_path).await.unwrap();
+        let state = AppState::new(
+            AppData {
+                routes: vec![RouteConfig {
+                    id: "mock".to_string(),
+                    path_prefix: "/mock".to_string(),
+                    upstream: "mock://mock".to_string(),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                }],
+                threats: Vec::new(),
+                dnsbl: Vec::new(),
+                events: Vec::new(),
+                next_event_id: 1,
+            },
+            AppConfig {
+                admin_token: None,
+                state_path: Some(failing_path.clone()),
+                dnsbl_origin: "dnsbl.local".to_string(),
+                event_limit: 10,
+            },
+        );
+        let app = build_app(state);
+
+        let route_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                None,
+                &RouteConfig {
+                    id: "new".to_string(),
+                    path_prefix: "/new".to_string(),
+                    upstream: "mock://new".to_string(),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let routes: Vec<RouteConfig> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/routes")).await).await;
+        assert!(!routes.iter().any(|route| route.id == "new"));
+
+        let threat_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                None,
+                &ThreatIndicator {
+                    value: "union select".to_string(),
+                    indicator_type: "sqli".to_string(),
+                    severity: Severity::High,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(threat_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(threats.is_empty());
+
+        let dnsbl_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/dnsbl",
+                None,
+                &DnsblEntry {
+                    address: "203.0.113.10".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(dnsbl_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(dnsbl.is_empty());
+
+        let gateway_response = app_request(&app, empty_request(Method::GET, "/gateway/mock")).await;
+        assert_eq!(gateway_response.status(), StatusCode::OK);
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert!(events.is_empty());
+        let _ = fs::remove_dir_all(failing_path).await;
+    }
+
+    #[tokio::test]
+    async fn event_retention_keeps_latest_events_and_next_id() {
+        let state = AppState::new(
+            AppData::seeded(),
+            AppConfig {
+                admin_token: None,
+                state_path: None,
+                dnsbl_origin: "dnsbl.example".to_string(),
+                event_limit: 2,
+            },
+        );
+
+        record_event(
+            &state,
+            None,
+            None,
+            "monitored",
+            "one".to_string(),
+            0,
+            "/one",
+        )
+        .await;
+        record_event(
+            &state,
+            None,
+            None,
+            "monitored",
+            "two".to_string(),
+            0,
+            "/two",
+        )
+        .await;
+        record_event(
+            &state,
+            None,
+            None,
+            "blocked",
+            "three".to_string(),
+            100,
+            "/three",
+        )
+        .await;
+
+        let data = state.inner.read().await;
+        assert_eq!(data.events.len(), 2);
+        assert_eq!(data.events[0].id, 2);
+        assert_eq!(data.events[1].id, 3);
+        assert_eq!(data.next_event_id, 4);
+    }
+
+    #[test]
+    fn health_reports_runtime_configuration() {
+        let state = AppState::new(
+            AppData::seeded(),
+            AppConfig {
+                admin_token: None,
+                state_path: Some(PathBuf::from("state.json")),
+                dnsbl_origin: "dnsbl.example.".to_string(),
+                event_limit: 25,
+            },
+        );
+
+        assert_eq!(
+            state.health_status(),
+            HealthStatus {
+                status: "ok".to_string(),
+                persistence: "file".to_string(),
+                dnsbl_origin: "dnsbl.example".to_string(),
+                event_limit: 25,
+            }
         );
     }
 }
