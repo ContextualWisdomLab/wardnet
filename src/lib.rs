@@ -41,6 +41,9 @@ pub struct AppState {
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
     admin_token: Option<String>,
+    // RBAC: multiple admin tokens each mapped to an actor name for audit trails.
+    // Empty falls back to the single `admin_token`. Never logged as the actor.
+    admin_tokens: HashMap<String, String>,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
@@ -75,6 +78,7 @@ impl AppState {
             persist_lock: Arc::new(Mutex::new(())),
             http: reqwest::Client::new(),
             admin_token: config.admin_token,
+            admin_tokens: HashMap::new(),
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
@@ -91,6 +95,22 @@ impl AppState {
         self.rate_limit = limit;
         self.rate_limit_window = window_secs.max(1);
         self
+    }
+
+    /// Configure RBAC admin tokens (token -> actor name). A non-empty map takes
+    /// precedence over the single `admin_token`. Builder-style.
+    pub fn with_admin_tokens(mut self, tokens: HashMap<String, String>) -> Self {
+        self.admin_tokens = tokens;
+        self
+    }
+
+    /// The actor name mapped to the request's `X-Admin-Token`, if that token is a
+    /// configured RBAC token.
+    fn actor_for_token(&self, headers: &HeaderMap) -> Option<String> {
+        headers
+            .get("x-admin-token")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|token| self.admin_tokens.get(token).cloned())
     }
 
     /// Records one gateway request for `client_ip` and returns `true` if it is
@@ -338,7 +358,7 @@ async fn create_route(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_route(&mut data.routes, route.clone());
@@ -368,7 +388,7 @@ async fn create_threat(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_threat(&mut data.threats, indicator.clone());
@@ -404,7 +424,7 @@ async fn create_dnsbl(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
@@ -467,7 +487,7 @@ async fn update_commercial_license(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             data.commercial = profile.clone();
@@ -524,7 +544,7 @@ async fn import_threat_feed(
     }
 
     let imported_at = now_unix();
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             for threat in feed.threats.iter().cloned() {
@@ -837,16 +857,26 @@ async fn record_event(
 }
 
 fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok());
+    // RBAC tokens take precedence when configured.
+    if !state.admin_tokens.is_empty() {
+        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+    }
+    // Fallback: single shared token (None means auth is disabled).
     let Some(expected) = state.admin_token.as_deref() else {
         return true;
     };
-    headers
-        .get("x-admin-token")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| actual == expected)
+    presented.is_some_and(|actual| actual == expected)
 }
 
-fn audit_actor(headers: &HeaderMap) -> String {
+fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
+    // Prefer the actor bound to the presented RBAC token, then an explicit
+    // actor header, then a generic label. The token itself is never logged.
+    if let Some(actor) = state.actor_for_token(headers) {
+        return actor;
+    }
     headers
         .get("x-admin-actor")
         .and_then(|value| value.to_str().ok())
@@ -854,6 +884,25 @@ fn audit_actor(headers: &HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("admin-token")
         .to_string()
+}
+
+/// Parses an `ADMIN_TOKENS` string into a token -> actor map. Format is
+/// comma-separated `token` or `token:actor` items; an item without an explicit
+/// actor is labelled `admin`. Blank items and blank tokens are ignored.
+pub fn parse_admin_tokens(raw: &str) -> HashMap<String, String> {
+    raw.split(',')
+        .filter_map(|item| {
+            let (token, actor) = match item.split_once(':') {
+                Some((token, actor)) => (token.trim(), actor.trim()),
+                None => (item.trim(), ""),
+            };
+            if token.is_empty() {
+                return None;
+            }
+            let actor = if actor.is_empty() { "admin" } else { actor };
+            Some((token.to_string(), actor.to_string()))
+        })
+        .collect()
 }
 
 fn record_successful_audit_log(
@@ -1138,6 +1187,44 @@ mod tests {
         );
         let body = body_text(response).await;
         assert!(body.contains("waf_ids_security_events_blocked"));
+    }
+
+    #[test]
+    fn parse_admin_tokens_maps_tokens_to_actors() {
+        let map = parse_admin_tokens("tokA:alice, tokB:bob ,tokC, ,:noname, tokD:");
+        assert_eq!(map.get("tokA").map(String::as_str), Some("alice"));
+        assert_eq!(map.get("tokB").map(String::as_str), Some("bob"));
+        // No explicit actor, or an empty actor, is labelled "admin".
+        assert_eq!(map.get("tokC").map(String::as_str), Some("admin"));
+        assert_eq!(map.get("tokD").map(String::as_str), Some("admin"));
+        // Blank items and blank tokens (":noname") are ignored.
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn rbac_tokens_authorize_and_name_the_actor() {
+        let mut tokens = HashMap::new();
+        tokens.insert("tokA".to_string(), "alice".to_string());
+        let state = AppState::seeded(None).with_admin_tokens(tokens);
+
+        let mut valid = HeaderMap::new();
+        valid.insert("x-admin-token", "tokA".parse().unwrap());
+        assert!(admin_authorized(&state, &valid));
+        assert_eq!(audit_actor(&state, &valid), "alice");
+
+        // A token not in the RBAC set is rejected, and never used as the actor.
+        let mut wrong = HeaderMap::new();
+        wrong.insert("x-admin-token", "nope".parse().unwrap());
+        assert!(!admin_authorized(&state, &wrong));
+        assert_eq!(audit_actor(&state, &wrong), "admin-token");
+
+        // Missing token header is unauthorized under RBAC.
+        assert!(!admin_authorized(&state, &HeaderMap::new()));
+
+        // Without a matching RBAC token, audit_actor honours X-Admin-Actor.
+        let mut named = HeaderMap::new();
+        named.insert("x-admin-actor", "carol".parse().unwrap());
+        assert_eq!(audit_actor(&state, &named), "carol");
     }
 
     async fn json_body<T: DeserializeOwned>(response: Response) -> T {
