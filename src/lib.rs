@@ -958,7 +958,7 @@ async fn record_event(
         .mutate_and_persist(|data| {
             let id = data.next_event_id;
             data.next_event_id += 1;
-            data.events.push(SecurityEvent {
+            let event = SecurityEvent {
                 id,
                 timestamp_unix: now_unix(),
                 client_ip,
@@ -967,13 +967,24 @@ async fn record_event(
                 reason,
                 score,
                 path,
-            });
+            };
+            // Structured stdout log line for SIEM / log-collector ingestion.
+            // ponytail: one println per recorded event — fine at gateway volumes;
+            // add async batching if event throughput ever becomes a bottleneck.
+            println!("{}", security_event_log_line(&event));
+            data.events.push(event);
             enforce_event_limit(data, event_limit);
         })
         .await
     {
         eprintln!("failed to persist security event: {error}");
     }
+}
+
+/// Serializes a [`SecurityEvent`] as a single-line JSON record for structured
+/// stdout logging (SIEM / log-collector ingestion).
+fn security_event_log_line(event: &SecurityEvent) -> String {
+    serde_json::to_string(event).expect("SecurityEvent is JSON-serializable")
 }
 
 fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
@@ -1361,6 +1372,27 @@ mod tests {
         let mut named = HeaderMap::new();
         named.insert("x-admin-actor", "carol".parse().unwrap());
         assert_eq!(audit_actor(&state, &named), "carol");
+    }
+
+    #[test]
+    fn security_event_log_line_is_single_line_json() {
+        let event = SecurityEvent {
+            id: 7,
+            timestamp_unix: 1_700_000_000,
+            client_ip: Some("203.0.113.5".parse().unwrap()),
+            route_id: Some("app".to_string()),
+            action: "blocked".to_string(),
+            reason: "builtin sqli rule sqli-union-select".to_string(),
+            score: 100,
+            path: "/app".to_string(),
+        };
+        let line = security_event_log_line(&event);
+        assert!(!line.contains('\n'), "log line must be single-line");
+        // Round-trips as JSON with the expected fields.
+        let parsed: SecurityEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+        assert!(line.contains("\"action\":\"blocked\""));
+        assert!(line.contains("\"score\":100"));
     }
 
     async fn json_body<T: DeserializeOwned>(response: Response) -> T {
