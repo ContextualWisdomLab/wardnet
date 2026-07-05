@@ -1289,6 +1289,8 @@ mod tests {
             "2001:db8:dead:beef::1".parse().unwrap()
         ));
         assert!(!ip_in_network(net6, 32, "2001:db9::1".parse().unwrap()));
+        // IPv6 /0 matches everything.
+        assert!(ip_in_network(net6, 0, "fe80::1".parse().unwrap()));
     }
 
     #[test]
