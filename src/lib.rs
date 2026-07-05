@@ -1159,15 +1159,33 @@ mod tests {
         assert!(html.contains("--brand:#14213d"), "brand token missing");
         assert!(html.contains("--canvas:#f7f8fa"), "canvas token missing");
         // Designed components render, not the old raw-JSON <pre> dumps.
-        assert!(html.contains("id=\"routesBody\""), "routes table container missing");
-        assert!(html.contains("id=\"threatsBody\""), "threats table container missing");
+        assert!(
+            html.contains("id=\"routesBody\""),
+            "routes table container missing"
+        );
+        assert!(
+            html.contains("id=\"threatsBody\""),
+            "threats table container missing"
+        );
         // Create forms are wired to the real API endpoints.
-        assert!(html.contains("data-url=\"/api/routes\""), "add-route form missing");
-        assert!(html.contains("data-url=\"/api/threats\""), "add-threat form missing");
+        assert!(
+            html.contains("data-url=\"/api/routes\""),
+            "add-route form missing"
+        );
+        assert!(
+            html.contains("data-url=\"/api/threats\""),
+            "add-threat form missing"
+        );
         // Accessibility affordances present.
-        assert!(html.contains("id=\"hcToggle\""), "high-contrast toggle missing");
+        assert!(
+            html.contains("id=\"hcToggle\""),
+            "high-contrast toggle missing"
+        );
         assert!(html.contains("Skip to content"), "skip link missing");
-        assert!(html.contains(":focus-visible"), "focus-visible styling missing");
+        assert!(
+            html.contains(":focus-visible"),
+            "focus-visible styling missing"
+        );
     }
 
     #[test]
