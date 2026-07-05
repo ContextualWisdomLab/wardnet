@@ -1,0 +1,4 @@
+# KSV-0125 / AVD-KSV-0125: the deployment image is published to
+# ghcr.io/contextualwisdomlab, the project's own trusted GitHub Container
+# Registry. Registry is trusted by policy; suppression is intentional.
+AVD-KSV-0125
