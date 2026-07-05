@@ -720,21 +720,54 @@ pub fn signature_catalog() -> Vec<SignatureInfo> {
 /// This is the first-tier "AI SOC" behavioral signal — intentionally conservative
 /// so ordinary requests never trip it. Returns `(score_contribution, reason)`.
 pub fn anomaly_signal(haystack: &str) -> Option<(u16, String)> {
+    let mut score = 0u16;
+    let mut reasons = Vec::new();
+
+    // Signal 1: shell/markup metacharacter density.
     const META: &str = "<>'\"();|&$`";
     let suspicious = haystack.chars().filter(|c| META.contains(*c)).count();
-    let len = haystack.chars().count().max(1);
-    let ratio = suspicious as f64 / len as f64;
+    let ratio = suspicious as f64 / haystack.chars().count().max(1) as f64;
     if suspicious >= 6 && ratio >= 0.08 {
-        Some((
-            15,
-            format!(
-                "anomaly heuristic: {suspicious} metacharacters ({:.0}% density)",
-                ratio * 100.0
-            ),
-        ))
-    } else {
-        None
+        score += 15;
+        reasons.push(format!(
+            "{suspicious} metacharacters ({:.0}% density)",
+            ratio * 100.0
+        ));
     }
+
+    // Signal 2: high Shannon entropy over a non-trivial payload — a marker of
+    // encoded/obfuscated content (base64 blobs, packed exploit strings) that
+    // signature matching misses. Length-gated so short requests never trip it.
+    if haystack.len() >= 40 {
+        let entropy = shannon_entropy(haystack.as_bytes());
+        if entropy >= 4.5 {
+            score += 10;
+            reasons.push(format!("high entropy {entropy:.1} bits/byte"));
+        }
+    }
+
+    if score == 0 {
+        None
+    } else {
+        Some((score, format!("anomaly heuristic: {}", reasons.join("; "))))
+    }
+}
+
+/// Shannon entropy in bits per byte of a non-empty byte slice.
+fn shannon_entropy(bytes: &[u8]) -> f64 {
+    let mut counts = [0u32; 256];
+    for &byte in bytes {
+        counts[byte as usize] += 1;
+    }
+    let total = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / total;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 pub fn score_request(
@@ -1225,6 +1258,30 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anomaly_signal_flags_metacharacters_and_entropy() {
+        // Metacharacter density on a short payload (entropy check length-gated out).
+        let (score, reason) = anomaly_signal("a<b>c'd\"e(f)g;h|i&j").unwrap();
+        assert_eq!(score, 15);
+        assert!(reason.contains("metacharacters"));
+
+        // High-entropy encoded blob (40+ bytes, no metacharacters).
+        let blob = "aGVsbG8Xd29ybGQ0Zm9vYmFyMTIzNDU2Nzg5MDBhYmNkZWZn";
+        let (score, reason) = anomaly_signal(blob).unwrap();
+        assert_eq!(score, 10);
+        assert!(reason.contains("entropy"));
+
+        // Long but low-entropy (repeated byte) and ordinary short text: not flagged.
+        assert!(anomaly_signal(&"a".repeat(60)).is_none());
+        assert!(anomaly_signal("/account/profile?tab=settings").is_none());
+    }
+
+    #[test]
+    fn shannon_entropy_ranges_from_zero_to_high() {
+        assert_eq!(shannon_entropy(b"aaaaaaaa"), 0.0);
+        assert!(shannon_entropy(b"abcdefgh") > 2.9);
+    }
 
     #[test]
     fn records_audit_logs_with_monotonic_ids() {
