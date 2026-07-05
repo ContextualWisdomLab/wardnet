@@ -32,7 +32,7 @@ pub use waf_ids_core::{
     NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
     SecurityEvent, Severity, SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness,
     ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone,
-    reverse_ipv4_for_dnsbl, score_request,
+    ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
 #[derive(Clone)]
@@ -1081,6 +1081,7 @@ mod tests {
                 reason: "feed scanner".to_string(),
                 source: "misp-seoul".to_string(),
                 ttl_seconds: 600,
+                prefix_len: None,
             }],
         }
     }
@@ -1247,6 +1248,7 @@ mod tests {
                     reason: "scanner".to_string(),
                     source: "unit".to_string(),
                     ttl_seconds: 300,
+                    prefix_len: None,
                 },
                 DnsblEntry {
                     address: "2001:db8::10".parse().unwrap(),
@@ -1254,6 +1256,7 @@ mod tests {
                     reason: "ipv6 skip".to_string(),
                     source: "unit".to_string(),
                     ttl_seconds: 300,
+                    prefix_len: None,
                 },
             ],
         );
@@ -1346,11 +1349,96 @@ mod tests {
                 reason: "known scanner".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }],
         );
 
         assert_eq!(score.score, 100);
         assert!(score.reason.contains("DNSBL match"));
+    }
+
+    #[test]
+    fn ip_in_network_masks_by_prefix() {
+        let net: IpAddr = "203.0.113.0".parse().unwrap();
+        assert!(ip_in_network(net, 24, "203.0.113.200".parse().unwrap()));
+        assert!(ip_in_network(net, 24, "203.0.113.0".parse().unwrap()));
+        assert!(!ip_in_network(net, 24, "203.0.114.1".parse().unwrap()));
+        // /0 matches everything; a full /32 is an exact match.
+        assert!(ip_in_network(net, 0, "8.8.8.8".parse().unwrap()));
+        assert!(!ip_in_network(net, 32, "203.0.113.1".parse().unwrap()));
+        // Mixed address families never match.
+        assert!(!ip_in_network(net, 24, "2001:db8::1".parse().unwrap()));
+        // IPv6 prefix masking.
+        let net6: IpAddr = "2001:db8::".parse().unwrap();
+        assert!(ip_in_network(
+            net6,
+            32,
+            "2001:db8:dead:beef::1".parse().unwrap()
+        ));
+        assert!(!ip_in_network(net6, 32, "2001:db9::1".parse().unwrap()));
+        // IPv6 /0 matches everything.
+        assert!(ip_in_network(net6, 0, "fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn scores_dnsbl_cidr_subnet_matches() {
+        // A /24 DNSBL entry blocks any client IP inside the subnet.
+        let entry = DnsblEntry {
+            address: "198.51.100.0".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "botnet subnet".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+            prefix_len: Some(24),
+        };
+        let inside = score_request(
+            "/",
+            None,
+            "",
+            Some("198.51.100.77".parse().unwrap()),
+            &[],
+            std::slice::from_ref(&entry),
+        );
+        assert_eq!(inside.score, 100);
+        assert!(inside.reason.contains("DNSBL match"));
+
+        let outside = score_request(
+            "/",
+            None,
+            "",
+            Some("198.51.101.77".parse().unwrap()),
+            &[],
+            std::slice::from_ref(&entry),
+        );
+        assert_eq!(outside.score, 0);
+    }
+
+    #[test]
+    fn validate_dnsbl_checks_prefix_len() {
+        let base = DnsblEntry {
+            address: "10.0.0.0".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "range".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 60,
+            prefix_len: Some(24),
+        };
+        assert!(validate_dnsbl(&base).is_ok());
+        let too_wide = DnsblEntry {
+            prefix_len: Some(40),
+            ..base.clone()
+        };
+        assert_eq!(
+            validate_dnsbl(&too_wide),
+            Err("DNSBL prefix_len exceeds the address family width")
+        );
+        // IPv6 permits prefixes up to /128.
+        let v6 = DnsblEntry {
+            address: "2001:db8::".parse().unwrap(),
+            prefix_len: Some(64),
+            ..base.clone()
+        };
+        assert!(validate_dnsbl(&v6).is_ok());
     }
 
     #[test]
@@ -1524,6 +1612,7 @@ mod tests {
             reason: "botnet".to_string(),
             source: "unit".to_string(),
             ttl_seconds: 300,
+            prefix_len: None,
         };
         let response =
             app_request(&app, json_request(Method::POST, "/api/dnsbl", None, &dnsbl)).await;
@@ -2140,6 +2229,7 @@ mod tests {
             reason: "scanner".to_string(),
             source: "unit".to_string(),
             ttl_seconds: 300,
+            prefix_len: None,
         }];
 
         upsert_dnsbl(
@@ -2150,6 +2240,7 @@ mod tests {
                 reason: "botnet".to_string(),
                 source: "feed".to_string(),
                 ttl_seconds: 600,
+                prefix_len: None,
             },
         );
 
@@ -2293,6 +2384,7 @@ mod tests {
                 reason: " ".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }),
             Err("DNSBL reason is required")
         );
@@ -2303,6 +2395,7 @@ mod tests {
                 reason: "scanner".to_string(),
                 source: " ".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }),
             Err("DNSBL source is required")
         );
@@ -2313,6 +2406,7 @@ mod tests {
                 reason: "scanner".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 0,
+                prefix_len: None,
             }),
             Err("DNSBL ttl_seconds must be greater than 0")
         );
@@ -2323,6 +2417,7 @@ mod tests {
                 reason: "scanner".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }),
             Err("DNSBL response code must be in 127.0.0.0/8")
         );
@@ -2333,6 +2428,7 @@ mod tests {
                 reason: "scanner".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }),
             Err("DNSBL response code must be an IPv4 loopback address")
         );
@@ -2343,6 +2439,7 @@ mod tests {
                 reason: "scanner".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }),
             Err("DNSBL response code must be an IP address")
         );
@@ -2374,6 +2471,7 @@ mod tests {
                 reason: "scanner".to_string(),
                 source: "unit".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             })
             .is_ok()
         );
@@ -2491,6 +2589,7 @@ mod tests {
                     reason: "scanner".to_string(),
                     source: "unit".to_string(),
                     ttl_seconds: 300,
+                    prefix_len: None,
                 }],
                 ..threat_feed_import()
             }),
@@ -2878,6 +2977,7 @@ mod tests {
                     reason: "scanner".to_string(),
                     source: "unit".to_string(),
                     ttl_seconds: 300,
+                    prefix_len: None,
                 },
             ),
         )

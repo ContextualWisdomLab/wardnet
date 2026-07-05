@@ -47,6 +47,7 @@ impl AppData {
                 reason: "seed malicious scanner".to_string(),
                 source: "seed:dnsbl".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }],
             events: Vec::new(),
             next_event_id: 1,
@@ -120,6 +121,10 @@ pub struct DnsblEntry {
     pub reason: String,
     pub source: String,
     pub ttl_seconds: u64,
+    /// Optional CIDR prefix length. `None` is an exact-address entry; `Some(n)`
+    /// makes `address` the base of an `/n` network so a whole subnet is listed.
+    #[serde(default)]
+    pub prefix_len: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -360,11 +365,53 @@ pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     if entry.ttl_seconds == 0 {
         return Err("DNSBL ttl_seconds must be greater than 0");
     }
+    if let Some(prefix) = entry.prefix_len {
+        let max = if entry.address.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err("DNSBL prefix_len exceeds the address family width");
+        }
+    }
     match IpAddr::from_str(&entry.code) {
         Ok(IpAddr::V4(address)) if address.octets()[0] == 127 => Ok(()),
         Ok(IpAddr::V4(_)) => Err("DNSBL response code must be in 127.0.0.0/8"),
         Ok(IpAddr::V6(_)) => Err("DNSBL response code must be an IPv4 loopback address"),
         Err(_) => Err("DNSBL response code must be an IP address"),
+    }
+}
+
+/// True if `ip` matches a DNSBL `entry`: an exact address match when
+/// `prefix_len` is `None`, otherwise a CIDR network-prefix match. Mixed
+/// IPv4/IPv6 families never match.
+pub fn dnsbl_matches(entry: &DnsblEntry, ip: IpAddr) -> bool {
+    match entry.prefix_len {
+        None => entry.address == ip,
+        Some(prefix) => ip_in_network(entry.address, prefix, ip),
+    }
+}
+
+/// True if `ip` falls within the `network`/`prefix_len` CIDR block. No
+/// dependency — plain bit masking. Mixed address families never match.
+pub fn ip_in_network(network: IpAddr, prefix_len: u8, ip: IpAddr) -> bool {
+    match (network, ip) {
+        (IpAddr::V4(net), IpAddr::V4(addr)) => {
+            let bits = prefix_len.min(32);
+            let mask = if bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - bits)
+            };
+            (u32::from(net) & mask) == (u32::from(addr) & mask)
+        }
+        (IpAddr::V6(net), IpAddr::V6(addr)) => {
+            let bits = prefix_len.min(128);
+            let mask = if bits == 0 {
+                0
+            } else {
+                u128::MAX << (128 - bits)
+            };
+            (u128::from(net) & mask) == (u128::from(addr) & mask)
+        }
+        _ => false,
     }
 }
 
@@ -741,7 +788,7 @@ pub fn score_request(
 
     // DNSBL client reputation.
     if let Some(ip) = client_ip
-        && let Some(entry) = dnsbl.iter().find(|entry| entry.address == ip)
+        && let Some(entry) = dnsbl.iter().find(|entry| dnsbl_matches(entry, ip))
     {
         score += 100;
         reasons.push(format!(
