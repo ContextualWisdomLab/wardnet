@@ -1150,6 +1150,26 @@ mod tests {
         serde_json::from_str(&body_text(response).await).unwrap()
     }
 
+    #[tokio::test]
+    async fn admin_console_serves_designed_ui() {
+        let app = build_app(AppState::seeded(None));
+        let html = body_text(app_request(&app, empty_request(Method::GET, "/")).await).await;
+
+        // Foundation design tokens are source-true (must match Figma variables).
+        assert!(html.contains("--brand:#14213d"), "brand token missing");
+        assert!(html.contains("--canvas:#f7f8fa"), "canvas token missing");
+        // Designed components render, not the old raw-JSON <pre> dumps.
+        assert!(html.contains("id=\"routesBody\""), "routes table container missing");
+        assert!(html.contains("id=\"threatsBody\""), "threats table container missing");
+        // Create forms are wired to the real API endpoints.
+        assert!(html.contains("data-url=\"/api/routes\""), "add-route form missing");
+        assert!(html.contains("data-url=\"/api/threats\""), "add-threat form missing");
+        // Accessibility affordances present.
+        assert!(html.contains("id=\"hcToggle\""), "high-contrast toggle missing");
+        assert!(html.contains("Skip to content"), "skip link missing");
+        assert!(html.contains(":focus-visible"), "focus-visible styling missing");
+    }
+
     #[test]
     fn reverses_ipv4_for_dnsbl_zone_names() {
         assert_eq!(reverse_ipv4_for_dnsbl([192, 0, 2, 10]), "10.2.0.192");
