@@ -8,8 +8,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     io::ErrorKind,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,7 +21,7 @@ use tokio::{
 };
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
-    enforce_event_limit, kpi_snapshot_at, record_audit_log, select_route,
+    enforce_event_limit, kpi_snapshot_at, rate_limit_step, record_audit_log, select_route,
     threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
     validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
     validate_threat_feed_import,
@@ -43,6 +44,11 @@ pub struct AppState {
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
+    // Ephemeral per-client-IP fixed-window counters (not persisted).
+    // ponytail: unbounded map — add TTL eviction if client-IP cardinality grows.
+    rate_limiter: Arc<Mutex<HashMap<IpAddr, (u64, u32)>>>,
+    rate_limit: u32,
+    rate_limit_window: u64,
 }
 
 impl AppState {
@@ -72,7 +78,40 @@ impl AppState {
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit: 0,
+            rate_limit_window: 60,
         }
+    }
+
+    /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
+    /// `window_secs`. `limit == 0` disables it (the default). Builder-style so
+    /// callers keep using [`AppConfig`] unchanged.
+    pub fn with_rate_limit(mut self, limit: u32, window_secs: u64) -> Self {
+        self.rate_limit = limit;
+        self.rate_limit_window = window_secs.max(1);
+        self
+    }
+
+    /// Records one gateway request for `client_ip` and returns `true` if it is
+    /// within the configured rate limit. Unknown IPs share one bucket.
+    async fn allow_request(&self, client_ip: Option<IpAddr>) -> bool {
+        if self.rate_limit == 0 {
+            return true;
+        }
+        let key = client_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let now = now_unix();
+        let mut map = self.rate_limiter.lock().await;
+        let (window_start, count) = map.get(&key).copied().unwrap_or((now, 0));
+        let (allowed, new_start, new_count) = rate_limit_step(
+            now,
+            window_start,
+            count,
+            self.rate_limit,
+            self.rate_limit_window,
+        );
+        map.insert(key, (new_start, new_count));
+        allowed
     }
 
     async fn mutate_and_persist<T>(
@@ -589,6 +628,34 @@ async fn gateway(
     };
 
     let client_ip = client_ip_from_headers(&headers);
+
+    // Rate limiting runs before scoring/proxying so floods are shed cheaply.
+    if !state.allow_request(client_ip).await {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "rate_limited",
+            format!(
+                "rate limit exceeded ({} requests per {}s)",
+                state.rate_limit, state.rate_limit_window
+            ),
+            0,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "action": "rate_limited",
+                "route_id": route.id,
+                "limit": state.rate_limit,
+                "window_seconds": state.rate_limit_window
+            })),
+        )
+            .into_response();
+    }
+
     let body_text = String::from_utf8_lossy(&body);
     let scored = score_request(
         gateway_path,
@@ -982,6 +1049,45 @@ mod tests {
         builder
             .body(Body::from(serde_json::to_vec(payload).unwrap()))
             .unwrap()
+    }
+
+    fn gateway_get_from_ip(uri: &str, ip: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-forwarded-for", ip)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn rate_limit_step_enforces_fixed_window() {
+        // limit 0 disables limiting entirely.
+        assert_eq!(rate_limit_step(100, 0, 999, 0, 60), (true, 0, 999));
+        // First request in a fresh window is allowed and counted.
+        assert_eq!(rate_limit_step(100, 100, 0, 2, 60), (true, 100, 1));
+        // Second allowed; third (at the limit) rejected without advancing count.
+        assert_eq!(rate_limit_step(100, 100, 1, 2, 60), (true, 100, 2));
+        assert_eq!(rate_limit_step(100, 100, 2, 2, 60), (false, 100, 2));
+        // Once the window elapses the counter resets.
+        assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
+    }
+
+    #[tokio::test]
+    async fn gateway_rate_limits_per_client_ip() {
+        let app = build_app(AppState::seeded(None).with_rate_limit(2, 60));
+
+        // Two requests from one IP pass; the third exceeds the budget.
+        for i in 0..2 {
+            let resp = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} should pass");
+        }
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different client IP keeps its own independent budget.
+        let other = app_request(&app, gateway_get_from_ip("/gateway/demo", "198.51.100.7")).await;
+        assert_eq!(other.status(), StatusCode::OK);
     }
 
     async fn body_text(response: Response) -> String {

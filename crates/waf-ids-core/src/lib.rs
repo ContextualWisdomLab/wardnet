@@ -554,6 +554,31 @@ pub fn severity_score(severity: &Severity) -> u16 {
     }
 }
 
+/// Fixed-window rate-limit arithmetic for one client key. Given the current
+/// window state `(window_start, count)`, returns `(allowed, new_window_start,
+/// new_count)`. `limit == 0` disables limiting (always allowed).
+///
+/// ponytail: fixed window — permits up to ~2x `limit` across a boundary; swap
+/// for a sliding window if that burst matters.
+pub fn rate_limit_step(
+    now_unix: u64,
+    window_start: u64,
+    count: u32,
+    limit: u32,
+    window_secs: u64,
+) -> (bool, u64, u32) {
+    if limit == 0 {
+        return (true, window_start, count);
+    }
+    if now_unix.saturating_sub(window_start) >= window_secs.max(1) {
+        (true, now_unix, 1)
+    } else if count < limit {
+        (true, window_start, count + 1)
+    } else {
+        (false, window_start, count)
+    }
+}
+
 pub fn enforce_event_limit(data: &mut AppData, limit: usize) {
     if data.events.len() > limit {
         let drain_count = data.events.len() - limit;
