@@ -14,11 +14,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
         event_limit: parse_event_limit()?,
     };
+    let rate_limit = parse_u32_env("RATE_LIMIT", 0)?;
+    let rate_limit_window = parse_u64_env("RATE_LIMIT_WINDOW", 60)?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     println!("waf-ids-ai-soc listening on http://{bind_addr}");
     let state = AppState::load(config)
         .await
-        .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?
+        .with_rate_limit(rate_limit, rate_limit_window);
     axum::serve(listener, build_app(state)).await?;
     Ok(())
 }
@@ -51,4 +54,40 @@ fn parse_event_limit() -> Result<usize, Box<dyn Error>> {
     }
 
     Ok(value)
+}
+
+#[cfg(not(test))]
+fn parse_u32_env(name: &str, default: u32) -> Result<u32, Box<dyn Error>> {
+    match env::var(name) {
+        Ok(raw) => Ok(raw.parse::<u32>().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} must be a non-negative integer, got {raw:?}: {error}"),
+            )
+        })?),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} is not valid Unicode: {error}"),
+        )
+        .into()),
+    }
+}
+
+#[cfg(not(test))]
+fn parse_u64_env(name: &str, default: u64) -> Result<u64, Box<dyn Error>> {
+    match env::var(name) {
+        Ok(raw) => Ok(raw.parse::<u64>().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} must be a positive integer, got {raw:?}: {error}"),
+            )
+        })?),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} is not valid Unicode: {error}"),
+        )
+        .into()),
+    }
 }
