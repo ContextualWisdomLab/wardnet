@@ -844,7 +844,10 @@ a.skip{position:absolute;left:-9999px;top:0;background:var(--brand);color:var(--
 a.skip:focus{left:0}
 header.app{display:flex;align-items:center;gap:16px;padding:16px 24px;background:var(--brand);color:var(--on-brand)}
 header.app h1{font-size:var(--fs-h1);margin:0;font-weight:600;flex:1}
-.toolbar{display:flex;gap:8px}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.hdr-input{min-height:44px;border-radius:6px;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.12);color:var(--on-brand);padding:0 12px;font:inherit;width:200px}
+.hdr-input::placeholder{color:rgba(255,255,255,.75)}
+:root[data-theme=hc] .hdr-input{background:#fff;color:var(--ink);border-color:var(--on-brand)}
 button{font:inherit;min-height:44px;padding:0 16px;border-radius:6px;border:1px solid transparent;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #4c8dff;outline-offset:2px}
 .btn-primary{background:var(--brand);color:var(--on-brand);border-color:var(--brand)}
@@ -899,6 +902,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
 <header class="app">
   <h1>ContextualWisdomLab WAF/IDS/AI SOC Gateway</h1>
   <div class="toolbar">
+    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (if set)" autocomplete="off" aria-label="Admin token for write operations">
     <button class="btn-ghost" id="hcToggle" aria-pressed="false">High contrast</button>
     <button class="btn-ghost" id="refreshBtn">Refresh</button>
   </div>
@@ -908,20 +912,55 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
   <div class="grid">
     <section class="card"><h2>Routes</h2><div id="routesBody" class="muted">Loading…</div>
       <details><summary>+ Add route</summary>
-        <form class="stack" id="routeForm">
+        <form class="stack" id="routeForm" data-url="/api/routes" data-ok="Route">
           <label class="field">Path prefix<input name="path_prefix" placeholder="/demo" required pattern="/.*"><span class="field-help">must start with /</span></label>
           <label class="field">Upstream<input name="upstream" placeholder="mock://demo-upstream" required><span class="field-help">mock:// | http:// | https://</span></label>
           <label class="field">Enforcement mode<select name="mode"><option value="monitor">Monitor</option><option value="block">Block</option></select></label>
           <label class="field check"><input type="checkbox" name="enabled" checked> Enabled</label>
-          <label class="field">Admin token (only if server configured one)<input name="token" type="password" placeholder="X-Admin-Token" autocomplete="off"></label>
           <div class="row"><button type="submit" class="btn-primary">Save route</button><button type="reset" class="btn-secondary">Reset</button></div>
         </form>
       </details>
     </section>
-    <section class="card"><h2>Threat indicators</h2><div id="threatsBody" class="muted">Loading…</div></section>
-    <section class="card"><h2>DNSBL entries</h2><div id="dnsblBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Threat indicators</h2><div id="threatsBody" class="muted">Loading…</div>
+      <details><summary>+ Add threat indicator</summary>
+        <form class="stack" id="threatForm" data-url="/api/threats" data-ok="Threat indicator">
+          <label class="field">Value<input name="value" placeholder="union select" required></label>
+          <label class="field">Type<input name="indicator_type" placeholder="sqli" required></label>
+          <label class="field">Severity<select name="severity"><option value="low">Low</option><option value="medium">Medium</option><option value="high" selected>High</option><option value="critical">Critical</option></select></label>
+          <label class="field">Source<input name="source" placeholder="seed:owasp-crs-shape" required></label>
+          <label class="field">TTL (seconds)<input name="ttl_seconds" type="number" min="1" value="86400" required></label>
+          <div class="row"><button type="submit" class="btn-primary">Save indicator</button><button type="reset" class="btn-secondary">Reset</button></div>
+        </form>
+      </details>
+    </section>
+    <section class="card"><h2>DNSBL entries</h2><div id="dnsblBody" class="muted">Loading…</div>
+      <details><summary>+ Add DNSBL entry</summary>
+        <form class="stack" id="dnsblForm" data-url="/api/dnsbl" data-ok="DNSBL entry">
+          <label class="field">Address<input name="address" placeholder="203.0.113.10" required><span class="field-help">IP address</span></label>
+          <label class="field">Response code<input name="code" placeholder="127.0.0.2" required><span class="field-help">must be in 127.0.0.0/8</span></label>
+          <label class="field">Reason<input name="reason" placeholder="seed malicious scanner" required></label>
+          <label class="field">Source<input name="source" placeholder="seed:dnsbl" required></label>
+          <label class="field">TTL (seconds)<input name="ttl_seconds" type="number" min="1" value="300" required></label>
+          <div class="row"><button type="submit" class="btn-primary">Save entry</button><button type="reset" class="btn-secondary">Reset</button></div>
+        </form>
+      </details>
+    </section>
     <section class="card"><h2>Commercial readiness</h2><div id="readinessBody" class="muted">Loading…</div></section>
-    <section class="card"><h2>License</h2><div id="licenseBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>License</h2><div id="licenseBody" class="muted">Loading…</div>
+      <details><summary>+ Update license</summary>
+        <form class="stack" id="licenseForm" data-url="/api/commercial/license" data-ok="License">
+          <label class="field">Tenant ID<input name="tenant_id" placeholder="local-lab" required></label>
+          <label class="field">Deployment ID<input name="deployment_id" placeholder="standalone-dev" required></label>
+          <label class="field">Edition<select name="edition"><option value="community">Community</option><option value="evaluation">Evaluation</option><option value="enterprise">Enterprise</option></select></label>
+          <label class="field">License status<select name="license_status"><option value="unlicensed">Unlicensed</option><option value="evaluation">Evaluation</option><option value="active">Active</option><option value="expired">Expired</option></select></label>
+          <label class="field">Support contact<input name="support_contact" placeholder="security@example.invalid" required></label>
+          <label class="field">Features<input name="features" placeholder="rust-edge-gateway, dnsbl-zone-export" required><span class="field-help">comma-separated, at least one</span></label>
+          <label class="field">Licensee<input name="licensee" placeholder="required for active / evaluation"></label>
+          <label class="field">License ID<input name="license_id" placeholder="required for active / evaluation"></label>
+          <div class="row"><button type="submit" class="btn-primary">Save license</button><button type="reset" class="btn-secondary">Reset</button></div>
+        </form>
+      </details>
+    </section>
     <section class="card"><h2>Threat feeds</h2><div id="feedsBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
@@ -979,15 +1018,18 @@ async function refresh(){await Promise.allSettled([
   guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),
   guard('eventsBody',loadEvents),guard('auditBody',loadAudit),
   loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
-$('routeForm').addEventListener('submit',async ev=>{ev.preventDefault();
-  const fd=new FormData(ev.target);const pp=(fd.get('path_prefix')||'').trim();
-  const body={id:pp.replace(/^\//,'').replace(/[^a-zA-Z0-9_-]/g,'-')||'route',path_prefix:pp,upstream:(fd.get('upstream')||'').trim(),mode:fd.get('mode'),enabled:fd.get('enabled')==='on'};
-  const token=(fd.get('token')||'').trim();
-  try{const h={'content-type':'application/json'};if(token)h['x-admin-token']=token;
-    const r=await fetch('/api/routes',{method:'POST',headers:h,body:JSON.stringify(body)});
-    if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
-    toast('Route saved: '+pp,true);ev.target.reset();guard('routesBody',loadRoutes);guard('kpis',loadKpis);
-  }catch(e){toast('Save failed: '+e.message,false);}});
+function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;
+  f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}
+    const token=($('adminToken').value||'').trim();const h={'content-type':'application/json'};if(token)h['x-admin-token']=token;
+    try{const r=await fetch(f.dataset.url,{method:'POST',headers:h,body:JSON.stringify(body)});
+      if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+      toast(f.dataset.ok+' saved',true);f.reset();onOk();
+    }catch(e){toast('Save failed: '+e.message,false);}});}
+const num=v=>{const n=parseInt(v,10);return Number.isFinite(n)?n:0;};
+wireCreate('routeForm',fd=>{const pp=(fd.get('path_prefix')||'').trim();return {id:pp.replace(/^\//,'').replace(/[^a-zA-Z0-9_-]/g,'-')||'route',path_prefix:pp,upstream:(fd.get('upstream')||'').trim(),mode:fd.get('mode'),enabled:fd.get('enabled')==='on'};},()=>{guard('routesBody',loadRoutes);guard('kpis',loadKpis);});
+wireCreate('threatForm',fd=>({value:(fd.get('value')||'').trim(),indicator_type:(fd.get('indicator_type')||'').trim(),severity:fd.get('severity'),source:(fd.get('source')||'').trim(),ttl_seconds:num(fd.get('ttl_seconds'))}),()=>{guard('threatsBody',loadThreats);guard('kpis',loadKpis);});
+wireCreate('dnsblForm',fd=>({address:(fd.get('address')||'').trim(),code:(fd.get('code')||'').trim(),reason:(fd.get('reason')||'').trim(),source:(fd.get('source')||'').trim(),ttl_seconds:num(fd.get('ttl_seconds'))}),()=>{guard('dnsblBody',loadDnsbl);guard('kpis',loadKpis);loadRaw('zone','/dnsbl/zone',false);});
+wireCreate('licenseForm',fd=>{const feats=(fd.get('features')||'').split(',').map(s=>s.trim()).filter(Boolean);const b={tenant_id:(fd.get('tenant_id')||'').trim(),deployment_id:(fd.get('deployment_id')||'').trim(),edition:fd.get('edition'),license_status:fd.get('license_status'),support_contact:(fd.get('support_contact')||'').trim(),features:feats};const lic=(fd.get('licensee')||'').trim();if(lic)b.licensee=lic;const lid=(fd.get('license_id')||'').trim();if(lid)b.license_id=lid;return b;},()=>{guard('licenseBody',loadLicense);guard('readinessBody',loadReadiness);});
 const root=document.documentElement;
 if(localStorage.getItem('waf-theme')==='hc')root.dataset.theme='hc';
 function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==='hc'?'true':'false');}

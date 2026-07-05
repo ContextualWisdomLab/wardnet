@@ -139,7 +139,9 @@ never inline hex on an element; put it in a token first.
 
 ## Known scope / not done
 
-- Client covers the read surfaces + route create. Threat/DNSBL create and license
-  update share the same POST contract but have no form yet (API is ready).
+- Client covers all read surfaces plus create/update forms for routes, threat
+  indicators, DNSBL entries, and license — every write endpoint the API exposes.
+  A single admin-token field in the header authorizes writes (`X-Admin-Token`);
+  server validation is surfaced verbatim via toast.
 - Single brand; only Default + High Contrast themes (no dark, no density).
 - No automated a11y/visual regression test yet; contrast is verified manually.
