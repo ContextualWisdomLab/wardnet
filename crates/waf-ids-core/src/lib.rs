@@ -637,6 +637,71 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
     }
 }
 
+/// Renders a [`SocKpiSnapshot`] as Prometheus text exposition (0.0.4). Counters
+/// are current-state gauges, so a `gauge` type is correct for scrapers. No
+/// dependency — the format is a few lines of text.
+pub fn prometheus_exposition(kpi: &SocKpiSnapshot) -> String {
+    let metrics: [(&str, &str, usize); 10] = [
+        (
+            "waf_ids_routes",
+            "Configured gateway routes.",
+            kpi.route_count,
+        ),
+        (
+            "waf_ids_threat_indicators",
+            "Operator threat indicators loaded.",
+            kpi.threat_indicator_count,
+        ),
+        (
+            "waf_ids_dnsbl_entries",
+            "DNSBL reputation entries.",
+            kpi.dnsbl_entry_count,
+        ),
+        (
+            "waf_ids_threat_feeds",
+            "Imported threat feeds.",
+            kpi.threat_feed_count,
+        ),
+        (
+            "waf_ids_threat_feeds_fresh",
+            "Threat feeds within their TTL.",
+            kpi.fresh_threat_feed_count,
+        ),
+        (
+            "waf_ids_threat_feeds_stale",
+            "Threat feeds past their TTL.",
+            kpi.stale_threat_feed_count,
+        ),
+        (
+            "waf_ids_security_events",
+            "Total recorded security events.",
+            kpi.event_count,
+        ),
+        (
+            "waf_ids_security_events_blocked",
+            "Security events with a blocked action.",
+            kpi.blocked_event_count,
+        ),
+        (
+            "waf_ids_security_events_monitored",
+            "Security events with a monitored action.",
+            kpi.monitor_event_count,
+        ),
+        (
+            "waf_ids_audit_log_entries",
+            "Recorded management audit-log entries.",
+            kpi.audit_log_count,
+        ),
+    ];
+    let mut out = String::new();
+    for (name, help, value) in metrics {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+        ));
+    }
+    out
+}
+
 pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
     commercial_readiness_snapshot_at(data, unix_now())
 }

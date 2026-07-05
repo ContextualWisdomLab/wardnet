@@ -21,10 +21,10 @@ use tokio::{
 };
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
-    enforce_event_limit, kpi_snapshot_at, rate_limit_step, record_audit_log, select_route,
-    threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
-    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
-    validate_threat_feed_import,
+    enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
+    select_route, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat,
+    upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
+    validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
@@ -286,6 +286,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
+        .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
             get(get_commercial_license).post(update_commercial_license),
@@ -434,6 +435,20 @@ async fn list_audit_logs(State(state): State<AppState>) -> Json<Vec<AuditLogEntr
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
     let data = state.inner.read().await;
     Json(kpi_snapshot_at(&data, now_unix()))
+}
+
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let body = {
+        let data = state.inner.read().await;
+        prometheus_exposition(&kpi_snapshot_at(&data, now_unix()))
+    };
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 async fn get_commercial_license(State(state): State<AppState>) -> Json<CommercialProfile> {
@@ -1093,6 +1108,36 @@ mod tests {
     async fn body_text(response: Response) -> String {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn prometheus_exposition_emits_typed_gauges() {
+        let text = prometheus_exposition(&kpi_snapshot_at(&AppData::seeded(), 0));
+        // HELP/TYPE metadata plus a value line for a representative metric.
+        assert!(text.contains("# TYPE waf_ids_routes gauge"));
+        assert!(text.contains("waf_ids_routes 1")); // seed has one route
+        assert!(text.contains("waf_ids_dnsbl_entries 1")); // seed has one DNSBL entry
+        assert!(text.contains("waf_ids_security_events 0"));
+        assert!(text.contains("waf_ids_security_events_blocked 0"));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text() {
+        let app = build_app(AppState::seeded(None));
+        let response = app_request(&app, empty_request(Method::GET, "/metrics")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "unexpected content-type: {content_type}"
+        );
+        let body = body_text(response).await;
+        assert!(body.contains("waf_ids_security_events_blocked"));
     }
 
     async fn json_body<T: DeserializeOwned>(response: Response) -> T {
