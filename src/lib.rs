@@ -22,17 +22,17 @@ use tokio::{
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
     enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
-    select_route, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat,
-    upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
+    select_route, signature_catalog, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route,
+    upsert_threat, upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
     validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
     CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
     NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
-    SecurityEvent, Severity, SocKpiSnapshot, TARGET_SALE_VALUE_KRW, ThreatFeedFreshness,
-    ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone,
-    reverse_ipv4_for_dnsbl, score_request,
+    SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
+    ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus,
+    ThreatIndicator, export_dnsbl_zone, reverse_ipv4_for_dnsbl, score_request,
 };
 
 #[derive(Clone)]
@@ -306,6 +306,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
+        .route("/api/signatures", get(list_signatures))
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -455,6 +456,10 @@ async fn list_audit_logs(State(state): State<AppState>) -> Json<Vec<AuditLogEntr
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
     let data = state.inner.read().await;
     Json(kpi_snapshot_at(&data, now_unix()))
+}
+
+async fn list_signatures() -> Json<Vec<SignatureInfo>> {
+    Json(signature_catalog())
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -1187,6 +1192,21 @@ mod tests {
         );
         let body = body_text(response).await;
         assert!(body.contains("waf_ids_security_events_blocked"));
+    }
+
+    #[tokio::test]
+    async fn signatures_endpoint_lists_redacted_catalog() {
+        let app = build_app(AppState::seeded(None));
+        let response = app_request(&app, empty_request(Method::GET, "/api/signatures")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        // Exposes rule id, class, and severity for buyer/operator review.
+        assert!(body.contains("sqli-union-select"));
+        assert!(body.contains("\"class\":\"sqli\""));
+        assert!(body.contains("\"severity\":\"critical\"")); // the JNDI/Log4Shell rule
+        // But never the raw match patterns (which would aid evasion).
+        assert!(!body.contains("union select"));
+        assert!(!body.contains("${jndi:"));
     }
 
     #[test]

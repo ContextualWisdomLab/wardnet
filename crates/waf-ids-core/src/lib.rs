@@ -683,6 +683,30 @@ pub fn builtin_signatures() -> &'static [BuiltinSignature] {
     SIGS
 }
 
+/// A redacted view of a built-in signature for the public catalog. Intentionally
+/// omits the raw match `pattern` so the catalog does not hand attackers the exact
+/// evasion strings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignatureInfo {
+    pub id: String,
+    pub class: String,
+    pub severity: Severity,
+}
+
+/// The built-in signature catalog (id, class, severity) for operator and buyer
+/// review of out-of-the-box detection coverage. Patterns are deliberately not
+/// exposed.
+pub fn signature_catalog() -> Vec<SignatureInfo> {
+    builtin_signatures()
+        .iter()
+        .map(|sig| SignatureInfo {
+            id: sig.id.to_string(),
+            class: sig.class.to_string(),
+            severity: sig.severity.clone(),
+        })
+        .collect()
+}
+
 /// A lightweight behavioral anomaly heuristic (not ML): flags requests whose
 /// decoded payload has an unusually high density of shell/markup metacharacters.
 /// This is the first-tier "AI SOC" behavioral signal — intentionally conservative
