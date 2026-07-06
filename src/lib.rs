@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
@@ -479,8 +479,35 @@ async fn create_dnsbl(
     }
 }
 
-async fn list_events(State(state): State<AppState>) -> Json<Vec<SecurityEvent>> {
-    Json(state.inner.read().await.events.clone())
+#[derive(Deserialize)]
+struct EventQuery {
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Lists security events, optionally filtered by `action` and capped to the most
+/// recent `limit` (chronological order preserved) for SOC triage.
+async fn list_events(
+    State(state): State<AppState>,
+    Query(query): Query<EventQuery>,
+) -> Json<Vec<SecurityEvent>> {
+    let data = state.inner.read().await;
+    let mut events: Vec<SecurityEvent> = match &query.action {
+        Some(action) => data
+            .events
+            .iter()
+            .filter(|event| &event.action == action)
+            .cloned()
+            .collect(),
+        None => data.events.clone(),
+    };
+    if let Some(limit) = query.limit {
+        let start = events.len().saturating_sub(limit);
+        events.drain(..start);
+    }
+    Json(events)
 }
 
 async fn list_audit_logs(State(state): State<AppState>) -> Json<Vec<AuditLogEntry>> {
@@ -1399,6 +1426,59 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body: serde_json::Value = json_body(response).await;
         assert_eq!(body["ready"], false);
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_filters_by_action_and_limit() {
+        let app = build_app(AppState::seeded(None));
+
+        // Block-mode route to produce a blocked event.
+        let route = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({
+                "id": "app", "path_prefix": "/app", "upstream": "mock://x",
+                "mode": "block", "enabled": true
+            }),
+        );
+        assert!(app_request(&app, route).await.status().is_success());
+
+        // One blocked (SQLi) then one monitored (benign) event.
+        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9"),
+        )
+        .await;
+        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
+        )
+        .await;
+
+        // Unfiltered: both events.
+        let all: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert_eq!(all.len(), 2);
+
+        // Filter by action.
+        let blocked: Vec<serde_json::Value> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/events?action=blocked"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0]["action"], "blocked");
+
+        // Cap to the most recent event (chronological tail).
+        let recent: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await)
+                .await;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0]["action"], "monitored");
     }
 
     #[test]
