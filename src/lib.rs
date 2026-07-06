@@ -299,6 +299,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/", get(admin_console))
         .route("/admin", get(admin_console))
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/api/version", get(version))
         .route("/api/routes", get(list_routes).post(create_route))
         .route("/api/threats", get(list_threats).post(create_threat))
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
@@ -338,6 +340,37 @@ pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_js
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
     Json(state.health_status())
+}
+
+/// Build/version metadata for deployment verification.
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// Kubernetes readiness probe: distinct from `/healthz` (liveness), it reports
+/// whether the gateway is configured to serve — i.e. has an enabled route.
+async fn readyz(State(state): State<AppState>) -> Response {
+    let routes_enabled = {
+        let data = state.inner.read().await;
+        data.routes.iter().filter(|route| route.enabled).count()
+    };
+    let ready = routes_enabled > 0;
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "ready": ready,
+            "routes_enabled": routes_enabled,
+        })),
+    )
+        .into_response()
 }
 
 async fn admin_console() -> Html<&'static str> {
@@ -1332,6 +1365,40 @@ mod tests {
         let body: serde_json::Value = json_body(response).await;
         assert_eq!(body["score"], 0);
         assert_eq!(body["would_block"], false);
+    }
+
+    #[tokio::test]
+    async fn version_and_readiness_endpoints() {
+        let app = build_app(AppState::seeded(None));
+
+        // Version metadata.
+        let response = app_request(&app, empty_request(Method::GET, "/api/version")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["name"], env!("CARGO_PKG_NAME"));
+        assert!(!body["version"].as_str().unwrap().is_empty());
+
+        // Readiness: the seeded app has an enabled route -> ready (200).
+        let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["ready"], true);
+
+        // Disable the only route -> not ready (503).
+        let disable = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({
+                "id": "demo", "path_prefix": "/demo", "upstream": "mock://x",
+                "mode": "monitor", "enabled": false
+            }),
+        );
+        assert!(app_request(&app, disable).await.status().is_success());
+        let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["ready"], false);
     }
 
     #[test]
