@@ -306,6 +306,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
+        .route("/api/evaluate", post(evaluate_request))
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -455,6 +456,46 @@ async fn list_audit_logs(State(state): State<AppState>) -> Json<Vec<AuditLogEntr
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
     let data = state.inner.read().await;
     Json(kpi_snapshot_at(&data, now_unix()))
+}
+
+#[derive(Deserialize)]
+struct EvaluateRequest {
+    path: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    client_ip: Option<IpAddr>,
+}
+
+#[derive(Serialize)]
+struct EvaluateResponse {
+    score: u16,
+    reason: String,
+    would_block: bool,
+}
+
+/// Scores a synthetic request against the current detection state without
+/// proxying it, so operators can test payloads and tune rules offline.
+async fn evaluate_request(
+    State(state): State<AppState>,
+    Json(request): Json<EvaluateRequest>,
+) -> Json<EvaluateResponse> {
+    let data = state.inner.read().await;
+    let scored = score_request(
+        &request.path,
+        request.query.as_deref(),
+        request.body.as_deref().unwrap_or(""),
+        request.client_ip,
+        &data.threats,
+        &data.dnsbl,
+    );
+    Json(EvaluateResponse {
+        would_block: scored.score >= BLOCK_SCORE,
+        score: scored.score,
+        reason: scored.reason,
+    })
 }
 
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -1229,6 +1270,48 @@ mod tests {
 
     async fn json_body<T: DeserializeOwned>(response: Response) -> T {
         serde_json::from_str(&body_text(response).await).unwrap()
+    }
+
+    #[tokio::test]
+    async fn evaluate_endpoint_scores_payloads_offline() {
+        let app = build_app(AppState::seeded(None));
+
+        // A SQLi payload in the query is flagged and would block.
+        let sqli = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/products", "query": "id=1 UNION SELECT password"}),
+        );
+        let response = app_request(&app, sqli).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert!(body["score"].as_u64().unwrap() >= u64::from(BLOCK_SCORE));
+        assert_eq!(body["would_block"], true);
+        assert!(body["reason"].as_str().unwrap().contains("sqli"));
+
+        // A payload in the body is inspected too (query omitted).
+        let body_req = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/upload", "body": "x=1 union select 1"}),
+        );
+        let response = app_request(&app, body_req).await;
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["would_block"], true);
+
+        // A benign request is not flagged.
+        let benign = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/account", "query": "tab=settings"}),
+        );
+        let response = app_request(&app, benign).await;
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["score"], 0);
+        assert_eq!(body["would_block"], false);
     }
 
     #[test]
