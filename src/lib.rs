@@ -1403,20 +1403,32 @@ mod tests {
     #[tokio::test]
     async fn evaluate_endpoint_scores_payloads_offline() {
         let app = build_app(AppState::seeded(None));
-        let sqli = json_request(Method::POST, "/api/evaluate", None,
-            &serde_json::json!({"path": "/products", "query": "id=1 UNION SELECT password"}));
+        let sqli = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/products", "query": "id=1 UNION SELECT password"}),
+        );
         let response = app_request(&app, sqli).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = json_body(response).await;
         assert!(body["score"].as_u64().unwrap() >= u64::from(BLOCK_SCORE));
         assert_eq!(body["would_block"], true);
         assert!(body["reason"].as_str().unwrap().contains("sqli"));
-        let body_req = json_request(Method::POST, "/api/evaluate", None,
-            &serde_json::json!({"path": "/upload", "body": "x=1 union select 1"}));
+        let body_req = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/upload", "body": "x=1 union select 1"}),
+        );
         let body: serde_json::Value = json_body(app_request(&app, body_req).await).await;
         assert_eq!(body["would_block"], true);
-        let benign = json_request(Method::POST, "/api/evaluate", None,
-            &serde_json::json!({"path": "/account", "query": "tab=settings"}));
+        let benign = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/account", "query": "tab=settings"}),
+        );
         let body: serde_json::Value = json_body(app_request(&app, benign).await).await;
         assert_eq!(body["score"], 0);
         assert_eq!(body["would_block"], false);
@@ -1434,8 +1446,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = json_body(response).await;
         assert_eq!(body["ready"], true);
-        let disable = json_request(Method::POST, "/api/routes", None,
-            &serde_json::json!({"id": "demo", "path_prefix": "/demo", "upstream": "mock://x", "mode": "monitor", "enabled": false}));
+        let disable = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "demo", "path_prefix": "/demo", "upstream": "mock://x", "mode": "monitor", "enabled": false}),
+        );
         assert!(app_request(&app, disable).await.status().is_success());
         let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1446,20 +1462,39 @@ mod tests {
     #[tokio::test]
     async fn events_endpoint_filters_by_action_and_limit() {
         let app = build_app(AppState::seeded(None));
-        let route = json_request(Method::POST, "/api/routes", None,
-            &serde_json::json!({"id": "app", "path_prefix": "/app", "upstream": "mock://x", "mode": "block", "enabled": true}));
+        let route = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "app", "path_prefix": "/app", "upstream": "mock://x", "mode": "block", "enabled": true}),
+        );
         assert!(app_request(&app, route).await.status().is_success());
-        app_request(&app, gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9")).await;
-        app_request(&app, gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9")).await;
+        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9"),
+        )
+        .await;
+        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
+        )
+        .await;
         let all: Vec<serde_json::Value> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
         assert_eq!(all.len(), 2);
-        let blocked: Vec<serde_json::Value> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/events?action=blocked")).await).await;
+        let blocked: Vec<serde_json::Value> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/events?action=blocked"),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0]["action"], "blocked");
         let recent: Vec<serde_json::Value> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await).await;
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await)
+                .await;
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0]["action"], "monitored");
     }
@@ -1467,33 +1502,66 @@ mod tests {
     #[tokio::test]
     async fn per_route_block_threshold_overrides_global() {
         let app = build_app(AppState::seeded(None));
-        let indicator = json_request(Method::POST, "/api/threats", None,
-            &serde_json::json!({"value": "probe-xyz", "indicator_type": "test", "severity": "low", "source": "t", "ttl_seconds": 60}));
+        let indicator = json_request(
+            Method::POST,
+            "/api/threats",
+            None,
+            &serde_json::json!({"value": "probe-xyz", "indicator_type": "test", "severity": "low", "source": "t", "ttl_seconds": 60}),
+        );
         assert!(app_request(&app, indicator).await.status().is_success());
-        let low = json_request(Method::POST, "/api/routes", None,
-            &serde_json::json!({"id": "low", "path_prefix": "/low", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 5}));
+        let low = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "low", "path_prefix": "/low", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 5}),
+        );
         assert!(app_request(&app, low).await.status().is_success());
-        let hi = json_request(Method::POST, "/api/routes", None,
-            &serde_json::json!({"id": "hi", "path_prefix": "/hi", "upstream": "mock://x", "mode": "block", "enabled": true}));
+        let hi = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "hi", "path_prefix": "/hi", "upstream": "mock://x", "mode": "block", "enabled": true}),
+        );
         assert!(app_request(&app, hi).await.status().is_success());
-        let blocked = app_request(&app, empty_request(Method::GET, "/gateway/low?q=probe-xyz")).await;
+        let blocked =
+            app_request(&app, empty_request(Method::GET, "/gateway/low?q=probe-xyz")).await;
         assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
-        let allowed = app_request(&app, empty_request(Method::GET, "/gateway/hi?q=probe-xyz")).await;
+        let allowed =
+            app_request(&app, empty_request(Method::GET, "/gateway/hi?q=probe-xyz")).await;
         assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
-        let bad = json_request(Method::POST, "/api/routes", None,
-            &serde_json::json!({"id": "z", "path_prefix": "/z", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 0}));
-        assert_eq!(app_request(&app, bad).await.status(), StatusCode::BAD_REQUEST);
+        let bad = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "z", "path_prefix": "/z", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 0}),
+        );
+        assert_eq!(
+            app_request(&app, bad).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
     async fn oversized_request_body_is_rejected() {
         let app = build_app(AppState::seeded(None).with_max_body_size(16));
-        let big = Request::builder().method(Method::POST).uri("/gateway/demo")
-            .body(Body::from("x".repeat(64))).unwrap();
-        assert_eq!(app_request(&app, big).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let small = Request::builder().method(Method::POST).uri("/gateway/demo")
-            .body(Body::from("x")).unwrap();
-        assert_ne!(app_request(&app, small).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let big = Request::builder()
+            .method(Method::POST)
+            .uri("/gateway/demo")
+            .body(Body::from("x".repeat(64)))
+            .unwrap();
+        assert_eq!(
+            app_request(&app, big).await.status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let small = Request::builder()
+            .method(Method::POST)
+            .uri("/gateway/demo")
+            .body(Body::from("x"))
+            .unwrap();
+        assert_ne!(
+            app_request(&app, small).await.status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 
     #[test]
