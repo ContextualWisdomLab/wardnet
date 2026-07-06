@@ -701,7 +701,9 @@ async fn gateway(
         &dnsbl,
     );
 
-    if route.mode == EnforcementMode::Block && scored.score >= BLOCK_SCORE {
+    if route.mode == EnforcementMode::Block
+        && scored.score >= route.block_threshold.unwrap_or(BLOCK_SCORE)
+    {
         record_event(
             &state,
             client_ip,
@@ -1039,6 +1041,7 @@ mod tests {
             upstream: "https://origin.example".to_string(),
             mode: EnforcementMode::Block,
             enabled: true,
+            block_threshold: None,
         }
     }
 
@@ -1231,6 +1234,70 @@ mod tests {
         serde_json::from_str(&body_text(response).await).unwrap()
     }
 
+    #[tokio::test]
+    async fn per_route_block_threshold_overrides_global() {
+        let app = build_app(AppState::seeded(None));
+
+        // A low-severity indicator scores 10.
+        let indicator = json_request(
+            Method::POST,
+            "/api/threats",
+            None,
+            &serde_json::json!({
+                "value": "probe-xyz", "indicator_type": "test", "severity": "low",
+                "source": "t", "ttl_seconds": 60
+            }),
+        );
+        assert!(app_request(&app, indicator).await.status().is_success());
+
+        // Route with a low threshold blocks at score 10.
+        let low = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({
+                "id": "low", "path_prefix": "/low", "upstream": "mock://x",
+                "mode": "block", "enabled": true, "block_threshold": 5
+            }),
+        );
+        assert!(app_request(&app, low).await.status().is_success());
+
+        // Route with the default (global 50) threshold does not block at 10.
+        let hi = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({
+                "id": "hi", "path_prefix": "/hi", "upstream": "mock://x",
+                "mode": "block", "enabled": true
+            }),
+        );
+        assert!(app_request(&app, hi).await.status().is_success());
+
+        let blocked =
+            app_request(&app, empty_request(Method::GET, "/gateway/low?q=probe-xyz")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let allowed =
+            app_request(&app, empty_request(Method::GET, "/gateway/hi?q=probe-xyz")).await;
+        assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
+
+        // A zero threshold is rejected.
+        let bad = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({
+                "id": "z", "path_prefix": "/z", "upstream": "mock://x",
+                "mode": "block", "enabled": true, "block_threshold": 0
+            }),
+        );
+        assert_eq!(
+            app_request(&app, bad).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     #[test]
     fn reverses_ipv4_for_dnsbl_zone_names() {
         assert_eq!(reverse_ipv4_for_dnsbl([192, 0, 2, 10]), "10.2.0.192");
@@ -1391,6 +1458,7 @@ mod tests {
                 upstream: "mock://admin".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             },
         ];
 
@@ -1428,6 +1496,7 @@ mod tests {
             upstream: "mock://secure".to_string(),
             mode: EnforcementMode::Block,
             enabled: true,
+            block_threshold: None,
         };
         let response = app_request(
             &app,
@@ -1626,6 +1695,7 @@ mod tests {
             upstream: "mock://audit".to_string(),
             mode: EnforcementMode::Monitor,
             enabled: true,
+            block_threshold: None,
         };
 
         let unauthorized = app_request(
@@ -1927,6 +1997,7 @@ mod tests {
                         upstream: "mock://mock".to_string(),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                     RouteConfig {
                         id: "proxy".to_string(),
@@ -1934,6 +2005,7 @@ mod tests {
                         upstream: format!("http://{upstream_addr}"),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                     RouteConfig {
                         id: "down".to_string(),
@@ -1941,6 +2013,7 @@ mod tests {
                         upstream: format!("http://{unused_addr}"),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                     RouteConfig {
                         id: "truncated".to_string(),
@@ -1948,6 +2021,7 @@ mod tests {
                         upstream: format!("http://{raw_addr}"),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                 ],
                 threats: Vec::new(),
@@ -2015,6 +2089,7 @@ mod tests {
                 upstream: "mock://mock".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             },
             &Method::GET,
             "/mock",
@@ -2081,6 +2156,7 @@ mod tests {
                         upstream: "mock://api".to_string(),
                         mode: EnforcementMode::Block,
                         enabled: true,
+                        block_threshold: None,
                     },
                 );
             })
@@ -2203,6 +2279,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route id is required")
         );
@@ -2213,6 +2290,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route path_prefix must start with /")
         );
@@ -2223,6 +2301,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -2233,6 +2312,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -2243,6 +2323,7 @@ mod tests {
                 upstream: " ".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route upstream is required")
         );
@@ -2353,6 +2434,7 @@ mod tests {
                 upstream: "ftp://origin".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route upstream must start with mock://, http://, or https://")
         );
@@ -2805,6 +2887,7 @@ mod tests {
                     upstream: "mock://mock".to_string(),
                     mode: EnforcementMode::Monitor,
                     enabled: true,
+                    block_threshold: None,
                 }],
                 threats: Vec::new(),
                 dnsbl: Vec::new(),
@@ -2836,6 +2919,7 @@ mod tests {
                     upstream: "mock://new".to_string(),
                     mode: EnforcementMode::Monitor,
                     enabled: true,
+                    block_threshold: None,
                 },
             ),
         )
