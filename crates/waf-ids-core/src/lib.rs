@@ -33,6 +33,7 @@ impl AppData {
                 upstream: "mock://demo-upstream".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }],
             threats: vec![ThreatIndicator {
                 value: "union select".to_string(),
@@ -102,6 +103,10 @@ pub struct RouteConfig {
     pub upstream: String,
     pub mode: EnforcementMode,
     pub enabled: bool,
+    /// Per-route score at/above which a Block-mode route blocks. `None` uses the
+    /// global [`BLOCK_SCORE`], letting operators tune sensitivity per endpoint.
+    #[serde(default)]
+    pub block_threshold: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -330,6 +335,9 @@ pub fn validate_route(route: &RouteConfig) -> Result<(), &'static str> {
         && !route.upstream.starts_with("https://")
     {
         return Err("route upstream must start with mock://, http://, or https://");
+    }
+    if route.block_threshold == Some(0) {
+        return Err("route block_threshold must be greater than 0");
     }
     Ok(())
 }

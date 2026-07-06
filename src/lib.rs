@@ -819,7 +819,9 @@ async fn gateway(
         &dnsbl,
     );
 
-    if route.mode == EnforcementMode::Block && scored.score >= BLOCK_SCORE {
+    if route.mode == EnforcementMode::Block
+        && scored.score >= route.block_threshold.unwrap_or(BLOCK_SCORE)
+    {
         record_event(
             &state,
             client_ip,
@@ -1157,6 +1159,7 @@ mod tests {
             upstream: "https://origin.example".to_string(),
             mode: EnforcementMode::Block,
             enabled: true,
+            block_threshold: None,
         }
     }
 
@@ -1367,41 +1370,21 @@ mod tests {
     #[tokio::test]
     async fn evaluate_endpoint_scores_payloads_offline() {
         let app = build_app(AppState::seeded(None));
-
-        // A SQLi payload in the query is flagged and would block.
-        let sqli = json_request(
-            Method::POST,
-            "/api/evaluate",
-            None,
-            &serde_json::json!({"path": "/products", "query": "id=1 UNION SELECT password"}),
-        );
+        let sqli = json_request(Method::POST, "/api/evaluate", None,
+            &serde_json::json!({"path": "/products", "query": "id=1 UNION SELECT password"}));
         let response = app_request(&app, sqli).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = json_body(response).await;
         assert!(body["score"].as_u64().unwrap() >= u64::from(BLOCK_SCORE));
         assert_eq!(body["would_block"], true);
         assert!(body["reason"].as_str().unwrap().contains("sqli"));
-
-        // A payload in the body is inspected too (query omitted).
-        let body_req = json_request(
-            Method::POST,
-            "/api/evaluate",
-            None,
-            &serde_json::json!({"path": "/upload", "body": "x=1 union select 1"}),
-        );
-        let response = app_request(&app, body_req).await;
-        let body: serde_json::Value = json_body(response).await;
+        let body_req = json_request(Method::POST, "/api/evaluate", None,
+            &serde_json::json!({"path": "/upload", "body": "x=1 union select 1"}));
+        let body: serde_json::Value = json_body(app_request(&app, body_req).await).await;
         assert_eq!(body["would_block"], true);
-
-        // A benign request is not flagged.
-        let benign = json_request(
-            Method::POST,
-            "/api/evaluate",
-            None,
-            &serde_json::json!({"path": "/account", "query": "tab=settings"}),
-        );
-        let response = app_request(&app, benign).await;
-        let body: serde_json::Value = json_body(response).await;
+        let benign = json_request(Method::POST, "/api/evaluate", None,
+            &serde_json::json!({"path": "/account", "query": "tab=settings"}));
+        let body: serde_json::Value = json_body(app_request(&app, benign).await).await;
         assert_eq!(body["score"], 0);
         assert_eq!(body["would_block"], false);
     }
@@ -1409,30 +1392,17 @@ mod tests {
     #[tokio::test]
     async fn version_and_readiness_endpoints() {
         let app = build_app(AppState::seeded(None));
-
-        // Version metadata.
         let response = app_request(&app, empty_request(Method::GET, "/api/version")).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = json_body(response).await;
         assert_eq!(body["name"], env!("CARGO_PKG_NAME"));
         assert!(!body["version"].as_str().unwrap().is_empty());
-
-        // Readiness: the seeded app has an enabled route -> ready (200).
         let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = json_body(response).await;
         assert_eq!(body["ready"], true);
-
-        // Disable the only route -> not ready (503).
-        let disable = json_request(
-            Method::POST,
-            "/api/routes",
-            None,
-            &serde_json::json!({
-                "id": "demo", "path_prefix": "/demo", "upstream": "mock://x",
-                "mode": "monitor", "enabled": false
-            }),
-        );
+        let disable = json_request(Method::POST, "/api/routes", None,
+            &serde_json::json!({"id": "demo", "path_prefix": "/demo", "upstream": "mock://x", "mode": "monitor", "enabled": false}));
         assert!(app_request(&app, disable).await.status().is_success());
         let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1443,81 +1413,54 @@ mod tests {
     #[tokio::test]
     async fn events_endpoint_filters_by_action_and_limit() {
         let app = build_app(AppState::seeded(None));
-
-        // Block-mode route to produce a blocked event.
-        let route = json_request(
-            Method::POST,
-            "/api/routes",
-            None,
-            &serde_json::json!({
-                "id": "app", "path_prefix": "/app", "upstream": "mock://x",
-                "mode": "block", "enabled": true
-            }),
-        );
+        let route = json_request(Method::POST, "/api/routes", None,
+            &serde_json::json!({"id": "app", "path_prefix": "/app", "upstream": "mock://x", "mode": "block", "enabled": true}));
         assert!(app_request(&app, route).await.status().is_success());
-
-        // One blocked (SQLi) then one monitored (benign) event.
-        app_request(
-            &app,
-            gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9"),
-        )
-        .await;
-        app_request(
-            &app,
-            gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
-        )
-        .await;
-
-        // Unfiltered: both events.
+        app_request(&app, gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9")).await;
+        app_request(&app, gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9")).await;
         let all: Vec<serde_json::Value> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
         assert_eq!(all.len(), 2);
-
-        // Filter by action.
-        let blocked: Vec<serde_json::Value> = json_body(
-            app_request(
-                &app,
-                empty_request(Method::GET, "/api/events?action=blocked"),
-            )
-            .await,
-        )
-        .await;
+        let blocked: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events?action=blocked")).await).await;
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0]["action"], "blocked");
-
-        // Cap to the most recent event (chronological tail).
         let recent: Vec<serde_json::Value> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await)
-                .await;
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await).await;
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0]["action"], "monitored");
     }
 
     #[tokio::test]
+    async fn per_route_block_threshold_overrides_global() {
+        let app = build_app(AppState::seeded(None));
+        let indicator = json_request(Method::POST, "/api/threats", None,
+            &serde_json::json!({"value": "probe-xyz", "indicator_type": "test", "severity": "low", "source": "t", "ttl_seconds": 60}));
+        assert!(app_request(&app, indicator).await.status().is_success());
+        let low = json_request(Method::POST, "/api/routes", None,
+            &serde_json::json!({"id": "low", "path_prefix": "/low", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 5}));
+        assert!(app_request(&app, low).await.status().is_success());
+        let hi = json_request(Method::POST, "/api/routes", None,
+            &serde_json::json!({"id": "hi", "path_prefix": "/hi", "upstream": "mock://x", "mode": "block", "enabled": true}));
+        assert!(app_request(&app, hi).await.status().is_success());
+        let blocked = app_request(&app, empty_request(Method::GET, "/gateway/low?q=probe-xyz")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let allowed = app_request(&app, empty_request(Method::GET, "/gateway/hi?q=probe-xyz")).await;
+        assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
+        let bad = json_request(Method::POST, "/api/routes", None,
+            &serde_json::json!({"id": "z", "path_prefix": "/z", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 0}));
+        assert_eq!(app_request(&app, bad).await.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn oversized_request_body_is_rejected() {
         let app = build_app(AppState::seeded(None).with_max_body_size(16));
-
-        // A body over the limit is rejected with 413 before the handler runs.
-        let big = Request::builder()
-            .method(Method::POST)
-            .uri("/gateway/demo")
-            .body(Body::from("x".repeat(64)))
-            .unwrap();
-        assert_eq!(
-            app_request(&app, big).await.status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-
-        // A body within the limit is accepted and routed normally.
-        let small = Request::builder()
-            .method(Method::POST)
-            .uri("/gateway/demo")
-            .body(Body::from("x"))
-            .unwrap();
-        assert_ne!(
-            app_request(&app, small).await.status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
+        let big = Request::builder().method(Method::POST).uri("/gateway/demo")
+            .body(Body::from("x".repeat(64))).unwrap();
+        assert_eq!(app_request(&app, big).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let small = Request::builder().method(Method::POST).uri("/gateway/demo")
+            .body(Body::from("x")).unwrap();
+        assert_ne!(app_request(&app, small).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
@@ -1680,6 +1623,7 @@ mod tests {
                 upstream: "mock://admin".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             },
         ];
 
@@ -1717,6 +1661,7 @@ mod tests {
             upstream: "mock://secure".to_string(),
             mode: EnforcementMode::Block,
             enabled: true,
+            block_threshold: None,
         };
         let response = app_request(
             &app,
@@ -1915,6 +1860,7 @@ mod tests {
             upstream: "mock://audit".to_string(),
             mode: EnforcementMode::Monitor,
             enabled: true,
+            block_threshold: None,
         };
 
         let unauthorized = app_request(
@@ -2216,6 +2162,7 @@ mod tests {
                         upstream: "mock://mock".to_string(),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                     RouteConfig {
                         id: "proxy".to_string(),
@@ -2223,6 +2170,7 @@ mod tests {
                         upstream: format!("http://{upstream_addr}"),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                     RouteConfig {
                         id: "down".to_string(),
@@ -2230,6 +2178,7 @@ mod tests {
                         upstream: format!("http://{unused_addr}"),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                     RouteConfig {
                         id: "truncated".to_string(),
@@ -2237,6 +2186,7 @@ mod tests {
                         upstream: format!("http://{raw_addr}"),
                         mode: EnforcementMode::Monitor,
                         enabled: true,
+                        block_threshold: None,
                     },
                 ],
                 threats: Vec::new(),
@@ -2304,6 +2254,7 @@ mod tests {
                 upstream: "mock://mock".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             },
             &Method::GET,
             "/mock",
@@ -2370,6 +2321,7 @@ mod tests {
                         upstream: "mock://api".to_string(),
                         mode: EnforcementMode::Block,
                         enabled: true,
+                        block_threshold: None,
                     },
                 );
             })
@@ -2492,6 +2444,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route id is required")
         );
@@ -2502,6 +2455,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route path_prefix must start with /")
         );
@@ -2512,6 +2466,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -2522,6 +2477,7 @@ mod tests {
                 upstream: "mock://api".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -2532,6 +2488,7 @@ mod tests {
                 upstream: " ".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route upstream is required")
         );
@@ -2642,6 +2599,7 @@ mod tests {
                 upstream: "ftp://origin".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }),
             Err("route upstream must start with mock://, http://, or https://")
         );
@@ -3094,6 +3052,7 @@ mod tests {
                     upstream: "mock://mock".to_string(),
                     mode: EnforcementMode::Monitor,
                     enabled: true,
+                    block_threshold: None,
                 }],
                 threats: Vec::new(),
                 dnsbl: Vec::new(),
@@ -3125,6 +3084,7 @@ mod tests {
                     upstream: "mock://new".to_string(),
                     mode: EnforcementMode::Monitor,
                     enabled: true,
+                    block_threshold: None,
                 },
             ),
         )
