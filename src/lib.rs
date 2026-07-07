@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Path as PathParam, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
@@ -52,6 +52,21 @@ pub struct AppState {
     rate_limiter: Arc<Mutex<HashMap<IpAddr, (u64, u32)>>>,
     rate_limit: u32,
     rate_limit_window: u64,
+    // Optional Clearfolio document-viewer integration. `None` unless configured.
+    clearfolio: Option<ClearfolioConfig>,
+}
+
+/// Configuration for the optional Clearfolio document-viewer integration.
+/// Absent unless `CLEARFOLIO_BASE_URL` is set. Tenant headers default to the
+/// buyer-demo profile (unsigned).
+// ponytail: unsigned tenant headers only; add HMAC claim signing
+// (`X-Clearfolio-Claims-Signature`) when pointing at an HMAC-enforcing deployment.
+#[derive(Debug, Clone)]
+pub struct ClearfolioConfig {
+    pub base_url: String,
+    pub tenant_id: String,
+    pub subject_id: String,
+    pub permissions: String,
 }
 
 impl AppState {
@@ -85,7 +100,15 @@ impl AppState {
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
             rate_limit: 0,
             rate_limit_window: 60,
+            clearfolio: None,
         }
+    }
+
+    /// Enable the Clearfolio document-viewer integration. `None` disables it
+    /// (the default), so the admin console hides the viewer surface.
+    pub fn with_clearfolio(mut self, config: Option<ClearfolioConfig>) -> Self {
+        self.clearfolio = config;
+        self
     }
 
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
@@ -319,6 +342,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threat-feeds", get(list_threat_feeds))
         .route("/api/threat-feeds/freshness", get(threat_feed_freshness))
         .route("/api/threat-feeds/import", post(import_threat_feed))
+        .route("/api/clearfolio/config", get(clearfolio_config))
+        .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
+        .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
@@ -332,6 +358,153 @@ pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_js
         out.push('\n');
     }
     Ok(out)
+}
+
+// ---- Clearfolio document-viewer integration -------------------------------
+// The admin console can hand live SOC evidence to the Clearfolio viewer:
+// submit the document (plain text) to Clearfolio's async convert API, then embed
+// the resulting `/viewer/{docId}` iframe. Submit + status are thin single-call
+// proxies; the browser polls status and drives the iframe (no server-side loop).
+
+fn clearfolio_submit_url(base: &str) -> String {
+    format!("{}/api/v1/convert/jobs", base.trim_end_matches('/'))
+}
+
+fn clearfolio_status_url(base: &str, job_id: &str) -> String {
+    format!(
+        "{}/api/v1/convert/jobs/{job_id}",
+        base.trim_end_matches('/')
+    )
+}
+
+fn clearfolio_tenant_headers(config: &ClearfolioConfig) -> [(&'static str, &str); 3] {
+    [
+        ("X-Clearfolio-Tenant-Id", config.tenant_id.as_str()),
+        ("X-Clearfolio-Subject-Id", config.subject_id.as_str()),
+        ("X-Clearfolio-Permissions", config.permissions.as_str()),
+    ]
+}
+
+/// Renders a waf-ids document to plain-text bytes for Clearfolio ingest.
+/// Clearfolio only blocks `hwp`/`hwpx`, so text uploads convert normally.
+/// Returns `(filename, bytes)` or `None` for an unknown kind.
+fn clearfolio_document(kind: &str, data: &AppData) -> Option<(String, Vec<u8>)> {
+    let (name, text) = match kind {
+        "evidence-manifest" => (
+            "evidence-manifest.txt",
+            serde_json::to_string_pretty(&buyer_evidence_manifest_at(data, now_unix()))
+                .expect("evidence manifest is JSON-serializable"),
+        ),
+        "soc-export" => (
+            "soc-export.txt",
+            export_events_ndjson(&data.events).expect("security events are JSON-serializable"),
+        ),
+        _ => return None,
+    };
+    Some((name.to_string(), text.into_bytes()))
+}
+
+async fn clearfolio_relay_json(response: reqwest::Response) -> Response {
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .expect("clearfolio status codes are valid HTTP status codes");
+    let body = response.bytes().await.unwrap_or_default();
+    (status, [("content-type", "application/json")], body).into_response()
+}
+
+#[derive(Serialize)]
+struct ClearfolioConfigView {
+    enabled: bool,
+    base_url: Option<String>,
+    kinds: [&'static str; 2],
+}
+
+/// Reports whether the Clearfolio viewer is configured and its base URL, so the
+/// admin console can build viewer iframes. The base URL is not a secret.
+async fn clearfolio_config(State(state): State<AppState>) -> Json<ClearfolioConfigView> {
+    let base_url = state.clearfolio.as_ref().map(|c| c.base_url.clone());
+    Json(ClearfolioConfigView {
+        enabled: base_url.is_some(),
+        base_url,
+        kinds: ["evidence-manifest", "soc-export"],
+    })
+}
+
+/// Submits a live waf-ids document to Clearfolio for conversion and relays the
+/// async job envelope (`jobId`, `status`, `statusUrl`) back to the console.
+async fn clearfolio_submit(
+    State(state): State<AppState>,
+    PathParam(kind): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(config) = state.clearfolio.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Clearfolio integration is not configured",
+        );
+    };
+    let document = {
+        let data = state.inner.read().await;
+        clearfolio_document(&kind, &data)
+    };
+    let Some((filename, bytes)) = document else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("unknown document kind: {kind}"),
+        );
+    };
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename)
+        .mime_str("text/plain")
+        .expect("text/plain is a valid MIME type");
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let mut request = state
+        .http
+        .post(clearfolio_submit_url(&config.base_url))
+        .multipart(form);
+    for (name, value) in clearfolio_tenant_headers(&config) {
+        request = request.header(name, value);
+    }
+    match request.send().await {
+        Ok(response) => clearfolio_relay_json(response).await,
+        Err(err) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("clearfolio request failed: {err}"),
+        ),
+    }
+}
+
+/// Proxies one Clearfolio job-status read (tenant headers applied server-side),
+/// so the browser can poll conversion progress without holding the credentials.
+async fn clearfolio_status(
+    State(state): State<AppState>,
+    PathParam(job_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(config) = state.clearfolio.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Clearfolio integration is not configured",
+        );
+    };
+    let mut request = state
+        .http
+        .get(clearfolio_status_url(&config.base_url, &job_id));
+    for (name, value) in clearfolio_tenant_headers(&config) {
+        request = request.header(name, value);
+    }
+    match request.send().await {
+        Ok(response) => clearfolio_relay_json(response).await,
+        Err(err) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("clearfolio request failed: {err}"),
+        ),
+    }
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
@@ -1097,6 +1270,15 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
+    <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
+      <p class="muted">Render live SOC evidence in the Clearfolio document viewer.</p>
+      <div class="row">
+        <button type="button" class="btn-secondary" data-doc="evidence-manifest">Open evidence manifest</button>
+        <button type="button" class="btn-secondary" data-doc="soc-export">Open SOC export</button>
+      </div>
+      <div id="viewerStatus" class="muted" style="margin-top:8px"></div>
+      <iframe id="viewerFrame" title="Clearfolio document viewer" hidden style="width:100%;height:70vh;border:1px solid var(--border);border-radius:var(--radius);margin-top:8px"></iframe>
+    </section>
     <section class="card"><h2>DNSBL zone</h2><pre class="raw" id="zone">Loading…</pre></section>
   </div>
 </main>
@@ -1167,7 +1349,32 @@ function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==
 syncHc();
 $('hcToggle').addEventListener('click',()=>{const on=root.dataset.theme==='hc';if(on){delete root.dataset.theme;}else{root.dataset.theme='hc';}localStorage.setItem('waf-theme',on?'':'hc');syncHc();});
 $('refreshBtn').addEventListener('click',refresh);
+function cfHeaders(){const t=($('adminToken').value||'').trim();return t?{'x-admin-token':t}:{};}
+async function pollClearfolio(id){
+  for(let i=0;i<40;i++){
+    const r=await fetch('/api/clearfolio/jobs/'+encodeURIComponent(id),{headers:cfHeaders()});
+    if(r.ok){const j=await r.json();const s=String(j.status||'').toUpperCase();const doc=j.docId||j.doc_id;
+      if(s==='SUCCEEDED'||doc)return doc||id;
+      if(s==='FAILED'||j.deadLettered)throw new Error('conversion failed');}
+    await new Promise(res=>setTimeout(res,1500));}
+  throw new Error('conversion timed out');}
+async function openClearfolioDoc(kind,base){
+  const st=$('viewerStatus'),frame=$('viewerFrame');frame.hidden=true;st.textContent='Submitting conversion…';
+  try{
+    const sr=await fetch('/api/clearfolio/documents/'+encodeURIComponent(kind),{method:'POST',headers:cfHeaders()});
+    if(!sr.ok)throw new Error((await sr.json().catch(()=>({}))).error||sr.statusText);
+    const job=await sr.json();const id=job.jobId||job.job_id;if(!id)throw new Error('no job id returned');
+    st.textContent='Converting… (job '+id+')';
+    const doc=await pollClearfolio(id);
+    frame.src=base.replace(/\/+$/,'')+'/viewer/'+encodeURIComponent(doc);frame.hidden=false;st.textContent='Document ready.';
+  }catch(e){st.innerHTML='<span class="err">Viewer error: '+esc(e.message)+'</span>';}}
+async function initClearfolio(){
+  let cfg;try{cfg=await getJSON('/api/clearfolio/config');}catch(e){return;}
+  if(!cfg||!cfg.enabled||!cfg.base_url)return;
+  const card=$('viewerCard');if(!card)return;card.hidden=false;
+  card.querySelectorAll('button[data-doc]').forEach(b=>b.addEventListener('click',()=>openClearfolioDoc(b.dataset.doc,cfg.base_url)));}
 refresh();
+initClearfolio();
 </script>
 </body>
 </html>"##;
@@ -3193,6 +3400,200 @@ mod tests {
                 dnsbl_origin: "dnsbl.example".to_string(),
                 event_limit: 25,
             }
+        );
+    }
+
+    fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
+        ClearfolioConfig {
+            base_url: base_url.to_string(),
+            tenant_id: "buyer-demo".to_string(),
+            subject_id: "buyer-demo".to_string(),
+            permissions: "job:read".to_string(),
+        }
+    }
+
+    #[test]
+    fn clearfolio_helpers_build_urls_headers_and_documents() {
+        assert_eq!(
+            clearfolio_submit_url("http://c"),
+            "http://c/api/v1/convert/jobs"
+        );
+        assert_eq!(
+            clearfolio_submit_url("http://c/"),
+            "http://c/api/v1/convert/jobs"
+        );
+        assert_eq!(
+            clearfolio_status_url("http://c/", "J1"),
+            "http://c/api/v1/convert/jobs/J1"
+        );
+        let config = clearfolio_test_config("http://c");
+        let headers = clearfolio_tenant_headers(&config);
+        assert_eq!(headers[0], ("X-Clearfolio-Tenant-Id", "buyer-demo"));
+        assert_eq!(headers[1], ("X-Clearfolio-Subject-Id", "buyer-demo"));
+        assert_eq!(headers[2], ("X-Clearfolio-Permissions", "job:read"));
+
+        let data = AppData::seeded();
+        let (name, bytes) = clearfolio_document("evidence-manifest", &data).unwrap();
+        assert_eq!(name, "evidence-manifest.txt");
+        assert!(!bytes.is_empty());
+        let (name, _) = clearfolio_document("soc-export", &data).unwrap();
+        assert_eq!(name, "soc-export.txt");
+        assert!(clearfolio_document("unknown", &data).is_none());
+    }
+
+    #[tokio::test]
+    async fn clearfolio_config_reports_enabled_state() {
+        let off = build_app(AppState::seeded(None));
+        let disabled: serde_json::Value = json_body(
+            app_request(&off, empty_request(Method::GET, "/api/clearfolio/config")).await,
+        )
+        .await;
+        assert_eq!(disabled["enabled"], false);
+        assert_eq!(disabled["base_url"], serde_json::Value::Null);
+
+        let on = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config("http://viewer.example"))),
+        );
+        let enabled: serde_json::Value =
+            json_body(app_request(&on, empty_request(Method::GET, "/api/clearfolio/config")).await)
+                .await;
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["base_url"], "http://viewer.example");
+        assert_eq!(enabled["kinds"][0], "evidence-manifest");
+    }
+
+    #[tokio::test]
+    async fn clearfolio_submit_and_status_guard_paths() {
+        // Admin token required -> 401 without one.
+        let secured = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_clearfolio(Some(clearfolio_test_config("http://127.0.0.1:1"))),
+        );
+        assert_eq!(
+            app_request(
+                &secured,
+                empty_request(Method::POST, "/api/clearfolio/documents/evidence-manifest")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app_request(
+                &secured,
+                empty_request(Method::GET, "/api/clearfolio/jobs/J1")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Not configured -> 503.
+        let unconfigured = build_app(AppState::seeded(None));
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                empty_request(Method::POST, "/api/clearfolio/documents/evidence-manifest")
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                empty_request(Method::GET, "/api/clearfolio/jobs/J1")
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // Configured but unknown document kind -> 404 (before any upstream call).
+        let configured = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config("http://127.0.0.1:1"))),
+        );
+        assert_eq!(
+            app_request(
+                &configured,
+                empty_request(Method::POST, "/api/clearfolio/documents/unknown")
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn clearfolio_submit_and_status_relay_success_and_upstream_errors() {
+        let mock = Router::new()
+            .route(
+                "/api/v1/convert/jobs",
+                post(|| async {
+                    (
+                        StatusCode::ACCEPTED,
+                        [("content-type", "application/json")],
+                        r#"{"jobId":"J1","status":"PENDING","statusUrl":"/api/v1/convert/jobs/J1"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/convert/jobs/{id}",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"status":"SUCCEEDED","docId":"D1"}"#,
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config(&format!("http://{addr}")))),
+        );
+
+        let submit = app_request(
+            &app,
+            empty_request(Method::POST, "/api/clearfolio/documents/evidence-manifest"),
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::ACCEPTED);
+        let submit_body: serde_json::Value = json_body(submit).await;
+        assert_eq!(submit_body["jobId"], "J1");
+
+        let status = app_request(&app, empty_request(Method::GET, "/api/clearfolio/jobs/J1")).await;
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_body: serde_json::Value = json_body(status).await;
+        assert_eq!(status_body["docId"], "D1");
+
+        // Unreachable upstream -> 502 on both submit and status.
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let down = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config(&format!("http://{dead_addr}")))),
+        );
+        assert_eq!(
+            app_request(
+                &down,
+                empty_request(Method::POST, "/api/clearfolio/documents/soc-export")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            app_request(&down, empty_request(Method::GET, "/api/clearfolio/jobs/J1"))
+                .await
+                .status(),
+            StatusCode::BAD_GATEWAY
         );
     }
 }
