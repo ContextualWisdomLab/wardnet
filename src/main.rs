@@ -1,7 +1,9 @@
 #[cfg(not(test))]
 use std::{env, error::Error, io, path::PathBuf};
 #[cfg(not(test))]
-use waf_ids_ai_soc::{AppConfig, AppState, ClearfolioConfig, build_app, parse_admin_tokens};
+use waf_ids_ai_soc::{
+    AppConfig, AppState, ClearfolioConfig, SocLlmConfig, build_app, parse_admin_tokens,
+};
 
 #[cfg(not(test))]
 #[tokio::main]
@@ -29,6 +31,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             permissions: env::var("CLEARFOLIO_PERMISSIONS")
                 .unwrap_or_else(|_| "job:create,job:read,viewer:read".to_string()),
         });
+    let soc_llm = env::var("SOC_LLM_BASE_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .map(|base_url| SocLlmConfig {
+            base_url,
+            token: env::var("SOC_LLM_TOKEN").unwrap_or_default(),
+            model: env::var("SOC_LLM_MODEL")
+                .unwrap_or_else(|_| "contextual-orchestrator".to_string()),
+        });
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     println!("waf-ids-ai-soc listening on http://{bind_addr}");
     let state = AppState::load(config)
@@ -36,7 +47,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
-        .with_clearfolio(clearfolio);
+        .with_clearfolio(clearfolio)
+        .with_soc_llm(soc_llm);
     axum::serve(listener, build_app(state)).await?;
     Ok(())
 }

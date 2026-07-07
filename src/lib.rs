@@ -54,6 +54,19 @@ pub struct AppState {
     rate_limit_window: u64,
     // Optional Clearfolio document-viewer integration. `None` unless configured.
     clearfolio: Option<ClearfolioConfig>,
+    // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
+    // contextual-orchestrator gateway). `None` unless configured.
+    soc_llm: Option<SocLlmConfig>,
+}
+
+/// Configuration for the optional LLM-backed SOC analysis. Points at an
+/// OpenAI-compatible `/v1/chat/completions` endpoint (the contextual-orchestrator
+/// gateway fronts the org OpenAI key). Absent unless `SOC_LLM_BASE_URL` is set.
+#[derive(Debug, Clone)]
+pub struct SocLlmConfig {
+    pub base_url: String,
+    pub token: String,
+    pub model: String,
 }
 
 /// Configuration for the optional Clearfolio document-viewer integration.
@@ -101,6 +114,7 @@ impl AppState {
             rate_limit: 0,
             rate_limit_window: 60,
             clearfolio: None,
+            soc_llm: None,
         }
     }
 
@@ -108,6 +122,13 @@ impl AppState {
     /// (the default), so the admin console hides the viewer surface.
     pub fn with_clearfolio(mut self, config: Option<ClearfolioConfig>) -> Self {
         self.clearfolio = config;
+        self
+    }
+
+    /// Enable LLM-backed SOC analysis via an OpenAI-compatible endpoint. `None`
+    /// disables it (the default), hiding the analysis surface in the console.
+    pub fn with_soc_llm(mut self, config: Option<SocLlmConfig>) -> Self {
+        self.soc_llm = config;
         self
     }
 
@@ -345,6 +366,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
+        .route("/api/soc/llm-config", get(soc_llm_config))
+        .route("/api/soc/analyze", post(soc_analyze))
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
@@ -503,6 +526,139 @@ async fn clearfolio_status(
         Err(err) => error(
             StatusCode::BAD_GATEWAY,
             format!("clearfolio request failed: {err}"),
+        ),
+    }
+}
+
+// ---- LLM-backed SOC analysis ----------------------------------------------
+// Hands a recorded security event to an OpenAI-compatible chat endpoint (the
+// contextual-orchestrator gateway) for analyst-style triage. Single call; the
+// request/response shaping is pure and unit-tested, the HTTP glue is thin.
+
+/// Builds an OpenAI `/v1/chat/completions` request body that asks for concise
+/// SOC triage of one security event.
+fn soc_llm_chat_body(model: &str, event: &SecurityEvent) -> serde_json::Value {
+    let client_ip = event
+        .client_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let user = format!(
+        "WAF/IDS security event:\n- action: {}\n- reason: {}\n- score: {}\n- path: {}\n- client_ip: {}\n- timestamp_unix: {}",
+        event.action, event.reason, event.score, event.path, client_ip, event.timestamp_unix
+    );
+    serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a senior SOC analyst. For the WAF/IDS event, state the likely attack class, a severity judgement, and one recommended action. Answer in under 120 words."
+            },
+            { "role": "user", "content": user }
+        ]
+    })
+}
+
+/// Extracts the assistant message text from an OpenAI-compatible chat response.
+fn soc_llm_extract_content(body: &serde_json::Value) -> Option<String> {
+    body.get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(|text| text.to_string())
+}
+
+#[derive(Serialize)]
+struct SocLlmConfigView {
+    enabled: bool,
+    model: Option<String>,
+}
+
+/// Reports whether LLM SOC analysis is configured (and which model), so the
+/// admin console can show or hide the analysis surface.
+async fn soc_llm_config(State(state): State<AppState>) -> Json<SocLlmConfigView> {
+    let model = state.soc_llm.as_ref().map(|c| c.model.clone());
+    Json(SocLlmConfigView {
+        enabled: model.is_some(),
+        model,
+    })
+}
+
+#[derive(Deserialize)]
+struct SocAnalyzeRequest {
+    event_id: u64,
+}
+
+#[derive(Serialize)]
+struct SocAnalyzeResponse {
+    event_id: u64,
+    model: String,
+    analysis: String,
+}
+
+/// Analyzes one recorded security event with the configured LLM and returns the
+/// analyst summary. Admin-authorized; the event is looked up by id.
+async fn soc_analyze(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SocAnalyzeRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(config) = state.soc_llm.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM SOC analysis is not configured",
+        );
+    };
+    let event = {
+        let data = state.inner.read().await;
+        data.events
+            .iter()
+            .find(|event| event.id == request.event_id)
+            .cloned()
+    };
+    let Some(event) = event else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("unknown event id: {}", request.event_id),
+        );
+    };
+    let body = soc_llm_chat_body(&config.model, &event);
+    let endpoint = format!(
+        "{}/v1/chat/completions",
+        config.base_url.trim_end_matches('/')
+    );
+    let response = state
+        .http
+        .post(endpoint)
+        .bearer_auth(&config.token)
+        .json(&body)
+        .send()
+        .await;
+    match response {
+        Ok(response) => match response.json::<serde_json::Value>().await {
+            Ok(json) => match soc_llm_extract_content(&json) {
+                Some(analysis) => Json(SocAnalyzeResponse {
+                    event_id: event.id,
+                    model: config.model,
+                    analysis,
+                })
+                .into_response(),
+                None => error(
+                    StatusCode::BAD_GATEWAY,
+                    "llm response missing choices[0].message.content",
+                ),
+            },
+            Err(err) => error(
+                StatusCode::BAD_GATEWAY,
+                format!("llm response read failed: {err}"),
+            ),
+        },
+        Err(err) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("llm request failed: {err}"),
         ),
     }
 }
@@ -1267,6 +1423,14 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>Threat feeds</h2><div id="feedsBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
+    <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
+      <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
+      <div class="row">
+        <input id="socEventId" class="hdr-input" type="number" min="1" placeholder="Event id" aria-label="Security event id to analyze">
+        <button type="button" id="socAnalyzeBtn" class="btn-secondary">Analyze event</button>
+      </div>
+      <pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre>
+    </section>
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
@@ -1373,8 +1537,23 @@ async function initClearfolio(){
   if(!cfg||!cfg.enabled||!cfg.base_url)return;
   const card=$('viewerCard');if(!card)return;card.hidden=false;
   card.querySelectorAll('button[data-doc]').forEach(b=>b.addEventListener('click',()=>openClearfolioDoc(b.dataset.doc,cfg.base_url)));}
+async function analyzeSocEvent(){
+  const out=$('socAnalysis');const id=parseInt(($('socEventId').value||'').trim(),10);
+  if(!Number.isFinite(id)||id<1){out.innerHTML='<span class="err">Enter a valid event id.</span>';return;}
+  out.textContent='Analyzing…';
+  try{
+    const r=await fetch('/api/soc/analyze',{method:'POST',headers:{'content-type':'application/json',...cfHeaders()},body:JSON.stringify({event_id:id})});
+    if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.statusText);
+    const j=await r.json();out.textContent=j.analysis||'(no analysis)';
+  }catch(e){out.innerHTML='<span class="err">Analysis error: '+esc(e.message)+'</span>';}}
+async function initSocLlm(){
+  let cfg;try{cfg=await getJSON('/api/soc/llm-config');}catch(e){return;}
+  if(!cfg||!cfg.enabled)return;
+  const card=$('socLlmCard');if(!card)return;card.hidden=false;
+  $('socAnalyzeBtn').addEventListener('click',analyzeSocEvent);}
 refresh();
 initClearfolio();
+initSocLlm();
 </script>
 </body>
 </html>"##;
@@ -3593,6 +3772,231 @@ mod tests {
             app_request(&down, empty_request(Method::GET, "/api/clearfolio/jobs/J1"))
                 .await
                 .status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    fn soc_test_event() -> SecurityEvent {
+        SecurityEvent {
+            id: 1,
+            timestamp_unix: 1000,
+            client_ip: Some("203.0.113.5".parse().unwrap()),
+            route_id: Some("demo".to_string()),
+            action: "blocked".to_string(),
+            reason: "sqli signature".to_string(),
+            score: 90,
+            path: "/gateway/demo".to_string(),
+        }
+    }
+
+    fn state_with_event_and_llm(base_url: &str) -> AppState {
+        let mut data = AppData::seeded();
+        data.events.push(soc_test_event());
+        AppState::new(data, AppConfig::memory(None)).with_soc_llm(Some(SocLlmConfig {
+            base_url: base_url.to_string(),
+            token: "test-token".to_string(),
+            model: "contextual-orchestrator".to_string(),
+        }))
+    }
+
+    async fn spawn_chat_mock(response: &'static str) -> std::net::SocketAddr {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    response,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        addr
+    }
+
+    #[test]
+    fn soc_llm_chat_body_and_extract() {
+        let body = soc_llm_chat_body("m1", &soc_test_event());
+        assert_eq!(body["model"], "m1");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("sqli signature")
+        );
+        // client_ip None branch renders "unknown".
+        let mut anon = soc_test_event();
+        anon.client_ip = None;
+        let anon_body = soc_llm_chat_body("m1", &anon);
+        assert!(
+            anon_body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("client_ip: unknown")
+        );
+
+        let good = serde_json::json!({"choices":[{"message":{"content":"verdict"}}]});
+        assert_eq!(soc_llm_extract_content(&good).unwrap(), "verdict");
+        assert!(soc_llm_extract_content(&serde_json::json!({})).is_none());
+        assert!(
+            soc_llm_extract_content(&serde_json::json!({"choices":[{"message":{}}]})).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn soc_llm_config_reports_enabled_state() {
+        let off = build_app(AppState::seeded(None));
+        let disabled: serde_json::Value =
+            json_body(app_request(&off, empty_request(Method::GET, "/api/soc/llm-config")).await)
+                .await;
+        assert_eq!(disabled["enabled"], false);
+
+        let on = build_app(state_with_event_and_llm("http://llm.example"));
+        let enabled: serde_json::Value =
+            json_body(app_request(&on, empty_request(Method::GET, "/api/soc/llm-config")).await)
+                .await;
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["model"], "contextual-orchestrator");
+    }
+
+    #[tokio::test]
+    async fn soc_analyze_guard_paths() {
+        // Unauthorized.
+        let secured = build_app(
+            AppState::seeded(Some("secret".to_string())).with_soc_llm(Some(SocLlmConfig {
+                base_url: "http://127.0.0.1:1".to_string(),
+                token: "t".to_string(),
+                model: "m".to_string(),
+            })),
+        );
+        assert_eq!(
+            app_request(
+                &secured,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Not configured -> 503.
+        let unconfigured = build_app(AppState::seeded(None));
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // Configured but unknown event id -> 404.
+        let configured = build_app(state_with_event_and_llm("http://127.0.0.1:1"));
+        assert_eq!(
+            app_request(
+                &configured,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 999})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn soc_analyze_success_and_upstream_errors() {
+        // Success: mock returns a chat completion.
+        let ok_addr =
+            spawn_chat_mock(r#"{"choices":[{"message":{"content":"Likely SQLi. High severity. Block the source IP."}}]}"#)
+                .await;
+        let app = build_app(state_with_event_and_llm(&format!("http://{ok_addr}")));
+        let resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/soc/analyze",
+                None,
+                &serde_json::json!({"event_id": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(resp).await;
+        assert_eq!(body["event_id"], 1);
+        assert!(body["analysis"].as_str().unwrap().contains("SQLi"));
+
+        // Missing choices[0].message.content -> 502.
+        let empty_addr = spawn_chat_mock("{}").await;
+        let empty_app = build_app(state_with_event_and_llm(&format!("http://{empty_addr}")));
+        assert_eq!(
+            app_request(
+                &empty_app,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        // Non-JSON response -> 502.
+        let bad_addr = spawn_chat_mock("not json").await;
+        let bad_app = build_app(state_with_event_and_llm(&format!("http://{bad_addr}")));
+        assert_eq!(
+            app_request(
+                &bad_app,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        // Unreachable upstream -> 502.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let down = build_app(state_with_event_and_llm(&format!("http://{dead_addr}")));
+        assert_eq!(
+            app_request(
+                &down,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
             StatusCode::BAD_GATEWAY
         );
     }
