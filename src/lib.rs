@@ -1015,6 +1015,107 @@ const ADMIN_HTML: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
+/// Parse the `EVENT_LIMIT` value (already read from the environment as an
+/// optional string). Absent falls back to [`AppConfig::DEFAULT_EVENT_LIMIT`]; a
+/// non-integer or zero value is a hard configuration error. Kept in the library
+/// (rather than the binary) so it is exercised by unit tests.
+pub fn parse_event_limit(raw: Option<&str>) -> Result<usize, Box<dyn std::error::Error>> {
+    let value = match raw {
+        Some(raw) => raw.parse::<usize>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("EVENT_LIMIT must be a positive integer, got {raw:?}: {error}"),
+            )
+        })?,
+        None => AppConfig::DEFAULT_EVENT_LIMIT,
+    };
+    if value == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "EVENT_LIMIT must be greater than 0",
+        )
+        .into());
+    }
+    Ok(value)
+}
+
+/// Parse a `u32` environment value (already read as an optional string),
+/// returning `default` when absent and a configuration error when malformed.
+pub fn parse_u32_env(
+    name: &str,
+    raw: Option<&str>,
+    default: u32,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    match raw {
+        Some(raw) => Ok(raw.parse::<u32>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must be a non-negative integer, got {raw:?}: {error}"),
+            )
+        })?),
+        None => Ok(default),
+    }
+}
+
+/// Parse a `u64` environment value (already read as an optional string),
+/// returning `default` when absent and a configuration error when malformed.
+pub fn parse_u64_env(
+    name: &str,
+    raw: Option<&str>,
+    default: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    match raw {
+        Some(raw) => Ok(raw.parse::<u64>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must be a positive integer, got {raw:?}: {error}"),
+            )
+        })?),
+        None => Ok(default),
+    }
+}
+
+/// Read gateway configuration from the process environment, bind the listener,
+/// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
+/// over this function so every branch is reachable from tests (the parse/error
+/// paths in-process, the bind/serve path via an ephemeral listener and an
+/// immediate shutdown).
+pub async fn run_from_env(
+    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let config = AppConfig {
+        admin_token: std::env::var("ADMIN_TOKEN").ok(),
+        state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
+        dnsbl_origin: std::env::var("DNSBL_ORIGIN")
+            .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
+        event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
+    };
+    let rate_limit = parse_u32_env("RATE_LIMIT", std::env::var("RATE_LIMIT").ok().as_deref(), 0)?;
+    let rate_limit_window = parse_u64_env(
+        "RATE_LIMIT_WINDOW",
+        std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
+        60,
+    )?;
+    let admin_tokens = parse_admin_tokens(&std::env::var("ADMIN_TOKENS").unwrap_or_default());
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+    println!("waf-ids-ai-soc listening on http://{local_addr}");
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let state = AppState::load(config)
+        .await
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+        .with_rate_limit(rate_limit, rate_limit_window)
+        .with_admin_tokens(admin_tokens);
+    let served = axum::serve(listener, build_app(state))
+        .with_graceful_shutdown(shutdown)
+        .await;
+    served?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,6 +1132,125 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tower::ServiceExt;
+
+    // Serializes the environment-driven `run_from_env` tests, which mutate
+    // process-global environment variables.
+    // An async mutex so it can be held across the `run_from_env` await points
+    // while serializing the tests that mutate process-global environment vars.
+    static ENV_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    fn clear_run_env() {
+        for name in [
+            "BIND_ADDR",
+            "ADMIN_TOKEN",
+            "ADMIN_TOKENS",
+            "WAF_IDS_STATE_PATH",
+            "DNSBL_ORIGIN",
+            "EVENT_LIMIT",
+            "RATE_LIMIT",
+            "RATE_LIMIT_WINDOW",
+        ] {
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    #[test]
+    fn parse_event_limit_reads_optional_env() {
+        assert_eq!(
+            parse_event_limit(None).unwrap(),
+            AppConfig::DEFAULT_EVENT_LIMIT
+        );
+        assert_eq!(parse_event_limit(Some("25")).unwrap(), 25);
+        assert!(parse_event_limit(Some("0")).is_err());
+        assert!(parse_event_limit(Some("not-a-number")).is_err());
+    }
+
+    #[test]
+    fn parse_u32_env_reads_optional_env() {
+        assert_eq!(parse_u32_env("RATE_LIMIT", None, 7).unwrap(), 7);
+        assert_eq!(parse_u32_env("RATE_LIMIT", Some("120"), 0).unwrap(), 120);
+        assert!(parse_u32_env("RATE_LIMIT", Some("-1"), 0).is_err());
+    }
+
+    #[test]
+    fn parse_u64_env_reads_optional_env() {
+        assert_eq!(parse_u64_env("RATE_LIMIT_WINDOW", None, 60).unwrap(), 60);
+        assert_eq!(
+            parse_u64_env("RATE_LIMIT_WINDOW", Some("30"), 60).unwrap(),
+            30
+        );
+        assert!(parse_u64_env("RATE_LIMIT_WINDOW", Some("abc"), 60).is_err());
+    }
+
+    #[tokio::test]
+    async fn run_from_env_binds_and_serves_until_shutdown() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("RATE_LIMIT", "5");
+            std::env::set_var("RATE_LIMIT_WINDOW", "30");
+            std::env::set_var("ADMIN_TOKENS", "tok:operator");
+        }
+        // An already-ready shutdown makes the server bind, then return at once.
+        run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap();
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_defaults_bind_addr_when_unset() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        // With BIND_ADDR unset the default listen address is used (exercising the
+        // fallback). The result is ignored because the default port may be busy
+        // in CI; the immediate shutdown keeps any successful bind momentary.
+        let _ = run_from_env(Box::pin(std::future::ready(()))).await;
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_rejects_malformed_rate_limit_window() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("RATE_LIMIT_WINDOW", "not-a-number");
+        }
+        // A malformed window is a hard configuration error, surfaced before bind.
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_surfaces_state_load_failure() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        let path = std::env::temp_dir().join(format!(
+            "waf_ids_bad_state_{}_{}.json",
+            std::process::id(),
+            now_unix()
+        ));
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
+        }
+        // Bind succeeds, but loading corrupt persisted state maps to an error.
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+        std::fs::remove_file(&path).ok();
+    }
 
     fn route() -> RouteConfig {
         RouteConfig {

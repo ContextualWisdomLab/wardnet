@@ -1167,11 +1167,20 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
 }
 
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
-    let mut out = format!("$ORIGIN {}.\n$TTL 300\n", origin.trim_end_matches('.'));
+    let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
         if let IpAddr::V4(address) = entry.address {
+            // The response code is emitted as a bare, unquoted A-record token, so
+            // it must be a valid IP literal. An arbitrary `code` string (e.g. one
+            // carrying a newline plus a forged `IN TXT` line) would otherwise break
+            // out of the zone; reject anything that is not a parseable address and
+            // re-render the canonical form so no attacker-controlled bytes survive.
+            let code = match IpAddr::from_str(&entry.code) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
             let name = reverse_ipv4_for_dnsbl(address.octets());
-            out.push_str(&format!("{} IN A {}\n", name, entry.code));
+            out.push_str(&format!("{} IN A {}\n", name, code));
             out.push_str(&format!(
                 "{} IN TXT \"{}\"\n",
                 name,
@@ -1182,17 +1191,180 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     out
 }
 
+/// Sanitize a DNS zone origin so operator/threat-feed input can never break out
+/// of the generated zone file. A legitimate origin is a domain name, so only
+/// letters, digits, `-`, `_`, and `.` are kept; every other byte (newline,
+/// quote, space, control char) is dropped. Leading/trailing dots are trimmed
+/// because the caller re-appends the root dot. Empty input falls back to the
+/// RFC 6761 reserved `.invalid` TLD, which is guaranteed non-resolvable.
+fn sanitize_zone_origin(origin: &str) -> String {
+    let filtered: String = origin
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let trimmed = filtered.trim_matches('.');
+    if trimmed.is_empty() {
+        "dnsbl.invalid".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
 }
 
 fn escape_txt(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            // Control characters (notably raw newlines) would otherwise terminate
+            // the single-line TXT record and let a crafted reason/source inject
+            // subsequent zone lines. Emit them as BIND decimal escapes (`\DDD`)
+            // so the payload stays on one fully-quoted line.
+            c if c.is_control() => {
+                let mut buf = [0u8; 4];
+                for &b in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("\\{b:03}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
+    /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
+    /// so regressions in zone escaping fail as a plain unit test too.
+    fn assert_txt_quotes_escaped(zone: &str) {
+        for line in zone.lines().filter(|l| l.contains(" IN TXT ")) {
+            let start = line.find('"').expect("TXT record has an opening quote");
+            let end = line.rfind('"').expect("TXT record has a closing quote");
+            let payload = &line.as_bytes()[start + 1..end];
+            for (idx, &b) in payload.iter().enumerate() {
+                if b == b'"' {
+                    let mut backslashes = 0usize;
+                    let mut j = idx;
+                    while j > 0 && payload[j - 1] == b'\\' {
+                        backslashes += 1;
+                        j -= 1;
+                    }
+                    assert!(
+                        backslashes % 2 == 1,
+                        "unescaped quote in TXT payload: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn export_dnsbl_zone_resists_origin_zone_injection() {
+        // Reproduces the fuzz crash: a crafted origin carrying a newline plus a
+        // forged `IN TXT` line with bare double quotes must not break out of the
+        // generated zone.
+        let zone = export_dnsbl_zone(
+            "dn\nner\"\"\"\"\"\"\"\" IN TXT \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\";eed",
+            &[DnsblEntry {
+                address: "192.0.2.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }],
+        );
+        assert!(zone.starts_with("$ORIGIN "));
+        // The origin is sanitized down to DNS-safe characters on a single line.
+        assert_eq!(zone.lines().next().unwrap(), "$ORIGIN dnnerINTXTeed.");
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_escapes_quotes_and_backslashes_in_reason() {
+        // Reason carrying both a backslash and a double quote must be escaped so
+        // the quote stays inside the payload (`\"`) and the backslash is doubled
+        // (`\\`); this also exercises the escaped-quote path of the checker.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[DnsblEntry {
+                address: "192.0.2.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "back\\slash and \"quote\"".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }],
+        );
+        assert!(zone.contains("10.2.0.192 IN TXT \"back\\\\slash and \\\"quote\\\" source=unit\""));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_rejects_non_ip_code_injection() {
+        // A `code` that is not a valid IP literal would become a bare A-record
+        // token; a newline-bearing value must be dropped, never rendered.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[
+                DnsblEntry {
+                    address: "192.0.2.10".parse().unwrap(),
+                    code: "127.0.0.2\n10.2.0.192 IN TXT \"pwned".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                },
+                DnsblEntry {
+                    address: "192.0.2.20".parse().unwrap(),
+                    code: "127.0.0.9".to_string(),
+                    reason: "ok".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                },
+            ],
+        );
+        // The malformed-code entry is skipped entirely; the valid one renders.
+        assert!(!zone.contains("pwned"));
+        assert!(zone.contains("20.2.0.192 IN A 127.0.0.9"));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_escapes_control_chars_in_reason() {
+        // A raw newline in reason/source must be neutralized so the TXT record
+        // stays on one line and cannot inject subsequent zone entries.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[DnsblEntry {
+                address: "192.0.2.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "line1\n10.2.0.192 IN TXT \"break".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+            }],
+        );
+        // No raw newline survives inside the TXT payload: the whole record,
+        // including the injected `IN TXT` text, stays on a single line.
+        assert_eq!(zone.lines().filter(|l| l.contains(" IN TXT ")).count(), 1);
+        assert!(zone.contains("\\010"));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn sanitize_zone_origin_falls_back_when_empty() {
+        assert_eq!(sanitize_zone_origin("\"\n\t \""), "dnsbl.invalid");
+        assert_eq!(sanitize_zone_origin("dnsbl.example."), "dnsbl.example");
+        assert_eq!(
+            sanitize_zone_origin("dnsbl_feed.example-1"),
+            "dnsbl_feed.example-1"
+        );
+    }
 
     #[test]
     fn records_audit_logs_with_monotonic_ids() {
