@@ -177,3 +177,7 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 scripts/smoke.sh
 ```
+
+Untrusted-input surfaces (request scorer, state deserializer, admin-token and
+DNSBL parsers) are covered by coverage-guided fuzzing plus stable property
+tests. See [`docs/fuzzing.md`](docs/fuzzing.md).

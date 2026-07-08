@@ -19,3 +19,6 @@ waf-ids-core = { path = "crates/waf-ids-core" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Property-based testing (MIT OR Apache-2.0); mirrors the cargo-fuzz target for
+# parse_admin_tokens so its invariants stay green in primary CI.
+proptest = "1"
