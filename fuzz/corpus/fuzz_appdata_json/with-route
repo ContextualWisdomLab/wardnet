@@ -1,0 +1,1 @@
+{"routes":[{"id":"a","path_prefix":"/a","upstream":"mock://x","mode":"monitor","enabled":true}],"threats":[],"dnsbl":[],"events":[],"next_event_id":1}

@@ -8,7 +8,7 @@ Only the default branch is supported during initial development.
 
 ## Reporting Vulnerabilities
 
-Open a private security advisory in GitHub or contact the repository maintainers through the ContextualWisdomLab organization.
+Open a private security advisory at <https://github.com/ContextualWisdomLab/wardnet/security/advisories/new> or contact the repository maintainers through the ContextualWisdomLab organization.
 
 Do not include live customer secrets, packet captures, credentials, or production payloads in public issues.
 

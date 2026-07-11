@@ -1,4 +1,4 @@
-FROM rust:1.88-bookworm AS build
+FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS build
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -6,10 +6,12 @@ COPY src ./src
 COPY crates ./crates
 RUN cargo build --locked --release
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates=20230311+deb12u1 \
+    curl=7.88.1-10+deb12u14 \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 wafids \
   && useradd --uid 10001 --gid 10001 --create-home --home-dir /var/lib/waf-ids-ai-soc wafids

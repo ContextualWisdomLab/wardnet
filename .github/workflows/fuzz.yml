@@ -1,0 +1,75 @@
+name: Fuzz
+
+on:
+  # Bounded smoke fuzzing on every PR that touches fuzzable surfaces or the
+  # harness. Time budget is capped low to keep CI cost predictable.
+  pull_request:
+    paths:
+      - "src/**"
+      - "crates/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  # Longer nightly run for deeper exploration (optional, off the PR critical path).
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_score_request
+          - fuzz_appdata_json
+          - fuzz_parse_admin_tokens
+          - fuzz_dnsbl_zone
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo-fuzz build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            fuzz/target
+          key: cargo-fuzz-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.toml') }}
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked || true
+
+      # PRs: 60s per target. Nightly/manual: 300s per target.
+      - name: Set fuzz duration
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "FUZZ_SECONDS=60" >> "$GITHUB_ENV"
+          else
+            echo "FUZZ_SECONDS=300" >> "$GITHUB_ENV"
+          fi
+
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time="$FUZZ_SECONDS" \
+            -rss_limit_mb=2048
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

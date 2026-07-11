@@ -1,0 +1,58 @@
+# Coverage-guided fuzzing harness for waf-ids-ai-soc.
+#
+# This is a SEPARATE workspace (note the empty `[workspace]` table below) so it
+# is excluded from the root workspace. `cargo build`/`cargo test --workspace`
+# at the repo root never touch these targets, keeping the primary CI unaffected.
+# Fuzzing requires a nightly toolchain and `cargo install cargo-fuzz`.
+#
+# All dependencies are permissive (MIT/Apache-2.0):
+#   - cargo-fuzz    MIT OR Apache-2.0
+#   - libfuzzer-sys MIT OR Apache-2.0 OR NCSA
+#   - arbitrary     MIT OR Apache-2.0
+[package]
+name = "waf-ids-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+waf-ids-core = { path = "../crates/waf-ids-core" }
+waf-ids-ai-soc = { path = ".." }
+
+[[bin]]
+name = "fuzz_score_request"
+path = "fuzz_targets/fuzz_score_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_appdata_json"
+path = "fuzz_targets/fuzz_appdata_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_admin_tokens"
+path = "fuzz_targets/fuzz_parse_admin_tokens.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dnsbl_zone"
+path = "fuzz_targets/fuzz_dnsbl_zone.rs"
+test = false
+doc = false
+bench = false
+
+# Empty table => this crate is its own workspace root, isolated from the
+# repository's primary workspace. Do not remove.
+[workspace]

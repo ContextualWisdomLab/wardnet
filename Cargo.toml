@@ -11,11 +11,14 @@ resolver = "3"
 
 [dependencies]
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 waf-ids-core = { path = "crates/waf-ids-core" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Property-based testing (MIT OR Apache-2.0); mirrors the cargo-fuzz target for
+# parse_admin_tokens so its invariants stay green in primary CI.
+proptest = "1"
