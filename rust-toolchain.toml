@@ -1,0 +1,8 @@
+[toolchain]
+# Pin the coverage/CI toolchain and pull in the components every job needs.
+# `llvm-tools-preview` is required by `cargo llvm-cov`; without it the coverage
+# harness fails with "failed to find llvm-tools-preview" before it can measure
+# the workspace. Declaring it here lets rustup install it automatically in any
+# environment that runs cargo from this workspace (org coverage harness + CI).
+channel = "stable"
+components = ["llvm-tools-preview", "rustfmt", "clippy"]
