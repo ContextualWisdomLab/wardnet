@@ -49,7 +49,7 @@ jobs:
           key: cargo-fuzz-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.toml') }}
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked || true
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked || true
 
       # PRs: 60s per target. Nightly/manual: 300s per target.
       - name: Set fuzz duration
@@ -62,7 +62,7 @@ jobs:
 
       - name: Fuzz ${{ matrix.target }}
         run: |
-          cargo fuzz run ${{ matrix.target }} -- \
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
             -max_total_time="$FUZZ_SECONDS" \
             -rss_limit_mb=2048
 
