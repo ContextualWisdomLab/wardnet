@@ -1910,6 +1910,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_from_env_rejects_malformed_max_body_bytes() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("MAX_BODY_BYTES", "not-a-number");
+        }
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
     async fn run_from_env_surfaces_state_load_failure() {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
