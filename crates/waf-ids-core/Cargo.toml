@@ -8,3 +8,10 @@ license = "MIT"
 [dependencies]
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Property-based testing (MIT OR Apache-2.0). Runs on stable as part of the
+# normal `cargo test` suite; mirrors the coverage-guided cargo-fuzz targets in
+# ../../fuzz so the same untrusted-input invariants stay green in primary CI.
+proptest = "1"
+serde_json = "1"

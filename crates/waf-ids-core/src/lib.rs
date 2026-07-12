@@ -33,6 +33,7 @@ impl AppData {
                 upstream: "mock://demo-upstream".to_string(),
                 mode: EnforcementMode::Monitor,
                 enabled: true,
+                block_threshold: None,
             }],
             threats: vec![ThreatIndicator {
                 value: "union select".to_string(),
@@ -47,6 +48,7 @@ impl AppData {
                 reason: "seed malicious scanner".to_string(),
                 source: "seed:dnsbl".to_string(),
                 ttl_seconds: 300,
+                prefix_len: None,
             }],
             events: Vec::new(),
             next_event_id: 1,
@@ -102,6 +104,10 @@ pub struct RouteConfig {
     pub upstream: String,
     pub mode: EnforcementMode,
     pub enabled: bool,
+    /// Per-route score at/above which a Block-mode route blocks. `None` uses the
+    /// global [`BLOCK_SCORE`], letting operators tune sensitivity per endpoint.
+    #[serde(default)]
+    pub block_threshold: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,6 +126,10 @@ pub struct DnsblEntry {
     pub reason: String,
     pub source: String,
     pub ttl_seconds: u64,
+    /// Optional CIDR prefix length. `None` is an exact-address entry; `Some(n)`
+    /// makes `address` the base of an `/n` network so a whole subnet is listed.
+    #[serde(default)]
+    pub prefix_len: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,6 +341,9 @@ pub fn validate_route(route: &RouteConfig) -> Result<(), &'static str> {
     {
         return Err("route upstream must start with mock://, http://, or https://");
     }
+    if route.block_threshold == Some(0) {
+        return Err("route block_threshold must be greater than 0");
+    }
     Ok(())
 }
 
@@ -360,11 +373,53 @@ pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     if entry.ttl_seconds == 0 {
         return Err("DNSBL ttl_seconds must be greater than 0");
     }
+    if let Some(prefix) = entry.prefix_len {
+        let max = if entry.address.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err("DNSBL prefix_len exceeds the address family width");
+        }
+    }
     match IpAddr::from_str(&entry.code) {
         Ok(IpAddr::V4(address)) if address.octets()[0] == 127 => Ok(()),
         Ok(IpAddr::V4(_)) => Err("DNSBL response code must be in 127.0.0.0/8"),
         Ok(IpAddr::V6(_)) => Err("DNSBL response code must be an IPv4 loopback address"),
         Err(_) => Err("DNSBL response code must be an IP address"),
+    }
+}
+
+/// True if `ip` matches a DNSBL `entry`: an exact address match when
+/// `prefix_len` is `None`, otherwise a CIDR network-prefix match. Mixed
+/// IPv4/IPv6 families never match.
+pub fn dnsbl_matches(entry: &DnsblEntry, ip: IpAddr) -> bool {
+    match entry.prefix_len {
+        None => entry.address == ip,
+        Some(prefix) => ip_in_network(entry.address, prefix, ip),
+    }
+}
+
+/// True if `ip` falls within the `network`/`prefix_len` CIDR block. No
+/// dependency — plain bit masking. Mixed address families never match.
+pub fn ip_in_network(network: IpAddr, prefix_len: u8, ip: IpAddr) -> bool {
+    match (network, ip) {
+        (IpAddr::V4(net), IpAddr::V4(addr)) => {
+            let bits = prefix_len.min(32);
+            let mask = if bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - bits)
+            };
+            (u32::from(net) & mask) == (u32::from(addr) & mask)
+        }
+        (IpAddr::V6(net), IpAddr::V6(addr)) => {
+            let bits = prefix_len.min(128);
+            let mask = if bits == 0 {
+                0
+            } else {
+                u128::MAX << (128 - bits)
+            };
+            (u128::from(net) & mask) == (u128::from(addr) & mask)
+        }
+        _ => false,
     }
 }
 
@@ -683,26 +738,83 @@ pub fn builtin_signatures() -> &'static [BuiltinSignature] {
     SIGS
 }
 
+/// A redacted view of a built-in signature for the public catalog. Intentionally
+/// omits the raw match `pattern` so the catalog does not hand attackers the exact
+/// evasion strings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignatureInfo {
+    pub id: String,
+    pub class: String,
+    pub severity: Severity,
+}
+
+/// The built-in signature catalog (id, class, severity) for operator and buyer
+/// review of out-of-the-box detection coverage. Patterns are deliberately not
+/// exposed.
+pub fn signature_catalog() -> Vec<SignatureInfo> {
+    builtin_signatures()
+        .iter()
+        .map(|sig| SignatureInfo {
+            id: sig.id.to_string(),
+            class: sig.class.to_string(),
+            severity: sig.severity.clone(),
+        })
+        .collect()
+}
+
 /// A lightweight behavioral anomaly heuristic (not ML): flags requests whose
 /// decoded payload has an unusually high density of shell/markup metacharacters.
 /// This is the first-tier "AI SOC" behavioral signal — intentionally conservative
 /// so ordinary requests never trip it. Returns `(score_contribution, reason)`.
 pub fn anomaly_signal(haystack: &str) -> Option<(u16, String)> {
+    let mut score = 0u16;
+    let mut reasons = Vec::new();
+
+    // Signal 1: shell/markup metacharacter density.
     const META: &str = "<>'\"();|&$`";
     let suspicious = haystack.chars().filter(|c| META.contains(*c)).count();
-    let len = haystack.chars().count().max(1);
-    let ratio = suspicious as f64 / len as f64;
+    let ratio = suspicious as f64 / haystack.chars().count().max(1) as f64;
     if suspicious >= 6 && ratio >= 0.08 {
-        Some((
-            15,
-            format!(
-                "anomaly heuristic: {suspicious} metacharacters ({:.0}% density)",
-                ratio * 100.0
-            ),
-        ))
-    } else {
-        None
+        score += 15;
+        reasons.push(format!(
+            "{suspicious} metacharacters ({:.0}% density)",
+            ratio * 100.0
+        ));
     }
+
+    // Signal 2: high Shannon entropy over a non-trivial payload — a marker of
+    // encoded/obfuscated content (base64 blobs, packed exploit strings) that
+    // signature matching misses. Length-gated so short requests never trip it.
+    if haystack.len() >= 40 {
+        let entropy = shannon_entropy(haystack.as_bytes());
+        if entropy >= 4.5 {
+            score += 10;
+            reasons.push(format!("high entropy {entropy:.1} bits/byte"));
+        }
+    }
+
+    if score == 0 {
+        None
+    } else {
+        Some((score, format!("anomaly heuristic: {}", reasons.join("; "))))
+    }
+}
+
+/// Shannon entropy in bits per byte of a non-empty byte slice.
+fn shannon_entropy(bytes: &[u8]) -> f64 {
+    let mut counts = [0u32; 256];
+    for &byte in bytes {
+        counts[byte as usize] += 1;
+    }
+    let total = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = count as f64 / total;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 pub fn score_request(
@@ -741,7 +853,7 @@ pub fn score_request(
 
     // DNSBL client reputation.
     if let Some(ip) = client_ip
-        && let Some(entry) = dnsbl.iter().find(|entry| entry.address == ip)
+        && let Some(entry) = dnsbl.iter().find(|entry| dnsbl_matches(entry, ip))
     {
         score += 100;
         reasons.push(format!(
@@ -1167,11 +1279,20 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
 }
 
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
-    let mut out = format!("$ORIGIN {}.\n$TTL 300\n", origin.trim_end_matches('.'));
+    let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
         if let IpAddr::V4(address) = entry.address {
+            // The response code is emitted as a bare, unquoted A-record token, so
+            // it must be a valid IP literal. An arbitrary `code` string (e.g. one
+            // carrying a newline plus a forged `IN TXT` line) would otherwise break
+            // out of the zone; reject anything that is not a parseable address and
+            // re-render the canonical form so no attacker-controlled bytes survive.
+            let code = match IpAddr::from_str(&entry.code) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
             let name = reverse_ipv4_for_dnsbl(address.octets());
-            out.push_str(&format!("{} IN A {}\n", name, entry.code));
+            out.push_str(&format!("{} IN A {}\n", name, code));
             out.push_str(&format!(
                 "{} IN TXT \"{}\"\n",
                 name,
@@ -1182,17 +1303,209 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     out
 }
 
+/// Sanitize a DNS zone origin so operator/threat-feed input can never break out
+/// of the generated zone file. A legitimate origin is a domain name, so only
+/// letters, digits, `-`, `_`, and `.` are kept; every other byte (newline,
+/// quote, space, control char) is dropped. Leading/trailing dots are trimmed
+/// because the caller re-appends the root dot. Empty input falls back to the
+/// RFC 6761 reserved `.invalid` TLD, which is guaranteed non-resolvable.
+fn sanitize_zone_origin(origin: &str) -> String {
+    let filtered: String = origin
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let trimmed = filtered.trim_matches('.');
+    if trimmed.is_empty() {
+        "dnsbl.invalid".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
 }
 
 fn escape_txt(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            // Control characters (notably raw newlines) would otherwise terminate
+            // the single-line TXT record and let a crafted reason/source inject
+            // subsequent zone lines. Emit them as BIND decimal escapes (`\DDD`)
+            // so the payload stays on one fully-quoted line.
+            c if c.is_control() => {
+                let mut buf = [0u8; 4];
+                for &b in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("\\{b:03}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
+    /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
+    /// so regressions in zone escaping fail as a plain unit test too.
+    fn assert_txt_quotes_escaped(zone: &str) {
+        for line in zone.lines().filter(|l| l.contains(" IN TXT ")) {
+            let start = line.find('"').expect("TXT record has an opening quote");
+            let end = line.rfind('"').expect("TXT record has a closing quote");
+            let payload = &line.as_bytes()[start + 1..end];
+            for (idx, &b) in payload.iter().enumerate() {
+                if b == b'"' {
+                    let mut backslashes = 0usize;
+                    let mut j = idx;
+                    while j > 0 && payload[j - 1] == b'\\' {
+                        backslashes += 1;
+                        j -= 1;
+                    }
+                    assert!(
+                        backslashes % 2 == 1,
+                        "unescaped quote in TXT payload: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn export_dnsbl_zone_resists_origin_zone_injection() {
+        // Reproduces the fuzz crash: a crafted origin carrying a newline plus a
+        // forged `IN TXT` line with bare double quotes must not break out of the
+        // generated zone.
+        let zone = export_dnsbl_zone(
+            "dn\nner\"\"\"\"\"\"\"\" IN TXT \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\";eed",
+            &[DnsblEntry {
+                address: "192.0.2.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }],
+        );
+        assert!(zone.starts_with("$ORIGIN "));
+        // The origin is sanitized down to DNS-safe characters on a single line.
+        assert_eq!(zone.lines().next().unwrap(), "$ORIGIN dnnerINTXTeed.");
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_escapes_quotes_and_backslashes_in_reason() {
+        // Reason carrying both a backslash and a double quote must be escaped so
+        // the quote stays inside the payload (`\"`) and the backslash is doubled
+        // (`\\`); this also exercises the escaped-quote path of the checker.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[DnsblEntry {
+                address: "192.0.2.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "back\\slash and \"quote\"".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }],
+        );
+        assert!(zone.contains("10.2.0.192 IN TXT \"back\\\\slash and \\\"quote\\\" source=unit\""));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_rejects_non_ip_code_injection() {
+        // A `code` that is not a valid IP literal would become a bare A-record
+        // token; a newline-bearing value must be dropped, never rendered.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[
+                DnsblEntry {
+                    address: "192.0.2.10".parse().unwrap(),
+                    code: "127.0.0.2\n10.2.0.192 IN TXT \"pwned".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+                DnsblEntry {
+                    address: "192.0.2.20".parse().unwrap(),
+                    code: "127.0.0.9".to_string(),
+                    reason: "ok".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+            ],
+        );
+        // The malformed-code entry is skipped entirely; the valid one renders.
+        assert!(!zone.contains("pwned"));
+        assert!(zone.contains("20.2.0.192 IN A 127.0.0.9"));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_escapes_control_chars_in_reason() {
+        // A raw newline in reason/source must be neutralized so the TXT record
+        // stays on one line and cannot inject subsequent zone entries.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[DnsblEntry {
+                address: "192.0.2.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "line1\n10.2.0.192 IN TXT \"break".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }],
+        );
+        // No raw newline survives inside the TXT payload: the whole record,
+        // including the injected `IN TXT` text, stays on a single line.
+        assert_eq!(zone.lines().filter(|l| l.contains(" IN TXT ")).count(), 1);
+        assert!(zone.contains("\\010"));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn sanitize_zone_origin_falls_back_when_empty() {
+        assert_eq!(sanitize_zone_origin("\"\n\t \""), "dnsbl.invalid");
+        assert_eq!(sanitize_zone_origin("dnsbl.example."), "dnsbl.example");
+        assert_eq!(
+            sanitize_zone_origin("dnsbl_feed.example-1"),
+            "dnsbl_feed.example-1"
+        );
+    }
+
+    #[test]
+    fn anomaly_signal_flags_metacharacters_and_entropy() {
+        // Metacharacter density on a short payload (entropy check length-gated out).
+        let (score, reason) = anomaly_signal("a<b>c'd\"e(f)g;h|i&j").unwrap();
+        assert_eq!(score, 15);
+        assert!(reason.contains("metacharacters"));
+
+        // High-entropy encoded blob (40+ bytes, no metacharacters).
+        let blob = "aGVsbG8Xd29ybGQ0Zm9vYmFyMTIzNDU2Nzg5MDBhYmNkZWZn";
+        let (score, reason) = anomaly_signal(blob).unwrap();
+        assert_eq!(score, 10);
+        assert!(reason.contains("entropy"));
+
+        // Long but low-entropy (repeated byte) and ordinary short text: not flagged.
+        assert!(anomaly_signal(&"a".repeat(60)).is_none());
+        assert!(anomaly_signal("/account/profile?tab=settings").is_none());
+    }
+
+    #[test]
+    fn shannon_entropy_ranges_from_zero_to_high() {
+        assert_eq!(shannon_entropy(b"aaaaaaaa"), 0.0);
+        assert!(shannon_entropy(b"abcdefgh") > 2.9);
+    }
 
     #[test]
     fn records_audit_logs_with_monotonic_ids() {
