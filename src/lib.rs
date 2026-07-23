@@ -3628,8 +3628,14 @@ mod tests {
     #[tokio::test]
     async fn phishing_database_import_rejects_redirected_feed_fetches() {
         let target_feed = Router::new()
-            .route("/domains", get(|| async { (StatusCode::OK, "evil.example\n") }))
-            .route("/ips", get(|| async { (StatusCode::OK, "198.51.100.200\n") }));
+            .route(
+                "/domains",
+                get(|| async { (StatusCode::OK, "evil.example\n") }),
+            )
+            .route(
+                "/ips",
+                get(|| async { (StatusCode::OK, "198.51.100.200\n") }),
+            );
         let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_addr = target_listener.local_addr().unwrap();
         tokio::spawn(axum::serve(target_listener, target_feed).into_future());
