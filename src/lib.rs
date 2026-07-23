@@ -353,6 +353,8 @@ const PHISHING_DATABASE_DEFAULT_DOMAIN_LIMIT: usize = 5_000;
 const PHISHING_DATABASE_DEFAULT_IP_LIMIT: usize = 5_000;
 const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
 const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
+const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
+const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 fn phishing_database_default_feed_id() -> String {
     PHISHING_DATABASE_DEFAULT_FEED_ID.to_string()
@@ -1080,23 +1082,8 @@ async fn import_phishing_database_feed(
     if !admin_authorized(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
-    if !request.import_domains && !request.import_ips {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "at least one of import_domains or import_ips must be true",
-        );
-    }
-    if request.import_domains && request.domain_limit == 0 {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "domain_limit must be greater than zero when import_domains is enabled",
-        );
-    }
-    if request.import_ips && request.ip_limit == 0 {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "ip_limit must be greater than zero when import_ips is enabled",
-        );
+    if let Err(message) = validate_phishing_database_import_request(&request) {
+        return error(StatusCode::BAD_REQUEST, message);
     }
 
     let domain_fetch = async {
@@ -1163,7 +1150,7 @@ async fn import_phishing_database_feed(
     if let Err(message) = validate_threat_feed_import(&feed) {
         return error(
             StatusCode::BAD_GATEWAY,
-            format!("invalid phishing database feed payload: {message}"),
+            format!("invalid fetched feed data: {message}"),
         );
     }
 
@@ -1171,6 +1158,44 @@ async fn import_phishing_database_feed(
     match apply_threat_feed_import(&state, actor, feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn validate_phishing_database_import_request(
+    request: &PhishingDatabaseImportRequest,
+) -> Result<(), &'static str> {
+    if request.feed_id.trim().is_empty() {
+        return Err("feed_id is required");
+    }
+    if request.source.trim().is_empty() {
+        return Err("source is required");
+    }
+    if request.ttl_seconds == 0 {
+        return Err("ttl_seconds must be greater than zero");
+    }
+    if !request.import_domains && !request.import_ips {
+        return Err("at least one of import_domains or import_ips must be true");
+    }
+    if request.import_domains {
+        if request.domain_limit == 0 {
+            return Err("domain_limit must be greater than zero when import_domains is enabled");
+        }
+        validate_http_url(&request.domain_url)?;
+    }
+    if request.import_ips {
+        if request.ip_limit == 0 {
+            return Err("ip_limit must be greater than zero when import_ips is enabled");
+        }
+        validate_http_url(&request.ip_url)?;
+    }
+    Ok(())
+}
+
+fn validate_http_url(value: &str) -> Result<(), &'static str> {
+    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err("feed URL scheme must be http or https"),
     }
 }
 
@@ -1577,9 +1602,13 @@ async fn apply_threat_feed_import(
 }
 
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
+    validate_http_url(url).map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
         .http
         .get(url)
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ))
         .send()
         .await
         .map_err(|error| format!("failed to fetch feed {url}: {error}"))?;
@@ -1587,10 +1616,19 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
     if !status.is_success() {
         return Err(format!("feed {url} returned HTTP {status}"));
     }
-    response
-        .text()
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|error| format!("failed to read feed body from {url}: {error}"))
+        .map_err(|error| format!("failed to read feed body from {url}: {error}"))?;
+    if bytes.len() > PHISHING_DATABASE_MAX_BODY_BYTES {
+        return Err(format!(
+            "feed {url} body too large: {} bytes (limit: {})",
+            bytes.len(),
+            PHISHING_DATABASE_MAX_BODY_BYTES
+        ));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|error| format!("feed {url} is not valid UTF-8 text: {error}"))
 }
 
 fn parse_phishing_domains(feed: &str, limit: usize) -> Vec<String> {
@@ -1626,6 +1664,9 @@ fn normalize_phishing_domain(value: &str) -> Option<String> {
         .unwrap_or("")
         .trim_end_matches('.');
     if host.is_empty() || !host.contains('.') || host.starts_with('.') || host.contains("..") {
+        return None;
+    }
+    if host.parse::<IpAddr>().is_ok() {
         return None;
     }
     if !host
@@ -2133,7 +2174,7 @@ mod tests {
     #[test]
     fn parses_and_limits_phishing_database_feeds() {
         let domains = parse_phishing_domains(
-            "https://Phish.EXAMPLE/login\n#comment\n\nbad value\na..b.example\nphish.example\nphish.example\n",
+            "https://Phish.EXAMPLE/login\n#comment\n\nbad value\na..b.example\n203.0.113.7\nphish.example\nphish.example\n",
             2,
         );
         assert_eq!(domains, vec!["phish.example".to_string()]);
@@ -3470,6 +3511,23 @@ mod tests {
         )
         .await;
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_request = PhishingDatabaseImportRequest {
+            ttl_seconds: 0,
+            domain_url: "file:///tmp/not-allowed".to_string(),
+            ..payload.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                Some("secret"),
+                &invalid_request,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
 
         let import_result: ThreatFeedImportResult = json_body(
             app_request(
