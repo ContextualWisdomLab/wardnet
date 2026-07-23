@@ -32,6 +32,7 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `GET /api/commercial/license` returns tenant, edition, license, support, and annual contract metadata.
 - `POST /api/commercial/license` updates that metadata with `X-Admin-Token`.
 - `POST /api/threat-feeds/import` imports operator-reviewed threat indicators and DNSBL entries.
+- `POST /api/threat-feeds/import/phishing-database` pulls active domains/IPs from `Phishing-Database/Phishing.Database` and converts them into local block signals.
 - `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
 - `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
 - `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
@@ -90,6 +91,10 @@ curl http://127.0.0.1:8080/api/commercial/readiness
 curl http://127.0.0.1:8080/api/commercial/evidence-manifest
 curl http://127.0.0.1:8080/api/threat-feeds
 curl http://127.0.0.1:8080/api/threat-feeds/freshness
+curl -X POST http://127.0.0.1:8080/api/threat-feeds/import/phishing-database \
+  -H 'content-type: application/json' \
+  -H 'x-admin-token: dev-secret' \
+  -d '{}'
 curl http://127.0.0.1:8080/api/events.ndjson
 curl http://127.0.0.1:8080/api/support-bundle
 curl http://127.0.0.1:8080/dnsbl/zone
@@ -143,6 +148,21 @@ curl -X POST http://127.0.0.1:8080/api/threat-feeds/import \
       "source": "misp-seoul",
       "ttl_seconds": 600
     }]
+  }'
+```
+
+Import active phishing domains/IPs directly from the public Phishing.Database project:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/threat-feeds/import/phishing-database \
+  -H 'content-type: application/json' \
+  -H 'x-admin-token: dev-secret' \
+  -d '{
+    "feed_id": "phishing-db-seoul",
+    "domain_limit": 5000,
+    "ip_limit": 5000,
+    "severity": "high",
+    "ttl_seconds": 3600
   }'
 ```
 
