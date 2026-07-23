@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::ErrorKind,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
@@ -40,6 +40,7 @@ pub struct AppState {
     inner: Arc<RwLock<AppData>>,
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
+    feed_http: reqwest::Client,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor name for audit trails.
     // Empty falls back to the single `admin_token`. Never logged as the actor.
@@ -107,6 +108,10 @@ impl AppState {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
             http: reqwest::Client::new(),
+            feed_http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("failed to build no-redirect feed client"),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             state_path: config.state_path,
@@ -343,6 +348,56 @@ pub struct HealthStatus {
     pub event_limit: usize,
 }
 
+const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
+const PHISHING_DATABASE_DEFAULT_SOURCE: &str =
+    "https://github.com/Phishing-Database/Phishing.Database";
+const PHISHING_DATABASE_DEFAULT_DOMAIN_URL: &str = "https://raw.githubusercontent.com/Phishing-Database/Phishing.Database/master/phishing-domains-ACTIVE.txt";
+const PHISHING_DATABASE_DEFAULT_IP_URL: &str = "https://raw.githubusercontent.com/Phishing-Database/Phishing.Database/master/phishing-IPs-ACTIVE.txt";
+const PHISHING_DATABASE_DEFAULT_TTL_SECONDS: u64 = 3_600;
+const PHISHING_DATABASE_DEFAULT_DOMAIN_LIMIT: usize = 5_000;
+const PHISHING_DATABASE_DEFAULT_IP_LIMIT: usize = 5_000;
+const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
+const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
+const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
+const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
+
+fn phishing_database_default_feed_id() -> String {
+    PHISHING_DATABASE_DEFAULT_FEED_ID.to_string()
+}
+
+fn phishing_database_default_source() -> String {
+    PHISHING_DATABASE_DEFAULT_SOURCE.to_string()
+}
+
+fn phishing_database_default_domain_url() -> String {
+    PHISHING_DATABASE_DEFAULT_DOMAIN_URL.to_string()
+}
+
+fn phishing_database_default_ip_url() -> String {
+    PHISHING_DATABASE_DEFAULT_IP_URL.to_string()
+}
+
+fn phishing_database_default_ttl_seconds() -> u64 {
+    PHISHING_DATABASE_DEFAULT_TTL_SECONDS
+}
+
+fn phishing_database_default_domain_limit() -> usize {
+    PHISHING_DATABASE_DEFAULT_DOMAIN_LIMIT
+}
+
+fn phishing_database_default_ip_limit() -> usize {
+    PHISHING_DATABASE_DEFAULT_IP_LIMIT
+}
+
+fn phishing_database_default_severity() -> Severity {
+    Severity::High
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -378,6 +433,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threat-feeds", get(list_threat_feeds))
         .route("/api/threat-feeds/freshness", get(threat_feed_freshness))
         .route("/api/threat-feeds/import", post(import_threat_feed))
+        .route(
+            "/api/threat-feeds/import/phishing-database",
+            post(import_phishing_database_feed),
+        )
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -603,6 +662,32 @@ async fn soc_llm_config(State(state): State<AppState>) -> Json<SocLlmConfigView>
 #[derive(Deserialize)]
 struct SocAnalyzeRequest {
     event_id: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PhishingDatabaseImportRequest {
+    #[serde(default = "phishing_database_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "phishing_database_default_source")]
+    source: String,
+    #[serde(default = "phishing_database_default_domain_url")]
+    domain_url: String,
+    #[serde(default = "phishing_database_default_ip_url")]
+    ip_url: String,
+    #[serde(default = "phishing_database_default_ttl_seconds")]
+    ttl_seconds: u64,
+    #[serde(default = "phishing_database_default_domain_limit")]
+    domain_limit: usize,
+    #[serde(default = "phishing_database_default_ip_limit")]
+    ip_limit: usize,
+    #[serde(default = "phishing_database_default_severity")]
+    severity: Severity,
+    #[serde(default = "default_true")]
+    import_domains: bool,
+    #[serde(default = "default_true")]
+    import_ips: bool,
+    #[serde(default)]
+    allow_non_default_hosts: bool,
 }
 
 #[derive(Serialize)]
@@ -990,47 +1075,152 @@ async fn import_threat_feed(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let imported_at = now_unix();
     let actor = audit_actor(&state, &headers);
-    match state
-        .mutate_and_persist(|data| {
-            for threat in feed.threats.iter().cloned() {
-                upsert_threat(&mut data.threats, threat);
-            }
-            for entry in feed.dnsbl.iter().cloned() {
-                upsert_dnsbl(&mut data.dnsbl, entry);
-            }
-            upsert_threat_feed(
-                &mut data.threat_feeds,
-                ThreatFeedStatus {
-                    feed_id: feed.feed_id.clone(),
-                    source: feed.source.clone(),
-                    last_updated_unix: imported_at,
-                    threat_count: feed.threats.len(),
-                    dnsbl_count: feed.dnsbl.len(),
-                    ttl_seconds: feed.ttl_seconds,
-                },
-            );
-            let result = ThreatFeedImportResult {
-                feed_id: feed.feed_id.clone(),
-                upserted_threats: feed.threats.len(),
-                upserted_dnsbl: feed.dnsbl.len(),
-                last_updated_unix: imported_at,
-            };
-            record_successful_audit_log(
-                data,
-                actor,
-                "import_threat_feed",
-                "threat_feed",
-                result.feed_id.clone(),
-            );
-            result
-        })
-        .await
-    {
+    match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
+}
+
+async fn import_phishing_database_feed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PhishingDatabaseImportRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_phishing_database_import_request(&request) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    let (domains_text, ips_text) = match (request.import_domains, request.import_ips) {
+        (true, true) => {
+            match tokio::try_join!(
+                fetch_text_feed(&state, &request.domain_url),
+                fetch_text_feed(&state, &request.ip_url)
+            ) {
+                Ok((domains, ips)) => (domains, ips),
+                Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+            }
+        }
+        (true, false) => match fetch_text_feed(&state, &request.domain_url).await {
+            Ok(domains) => (domains, String::new()),
+            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        },
+        (false, true) => match fetch_text_feed(&state, &request.ip_url).await {
+            Ok(ips) => (String::new(), ips),
+            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        },
+        (false, false) => (String::new(), String::new()),
+    };
+
+    let source_tag = request.feed_id.clone();
+    let threats = if request.import_domains {
+        parse_phishing_domains(&domains_text, request.domain_limit)
+            .into_iter()
+            .map(|domain| ThreatIndicator {
+                value: domain,
+                indicator_type: "phishing_domain".to_string(),
+                severity: request.severity.clone(),
+                source: source_tag.clone(),
+                ttl_seconds: request.ttl_seconds,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let dnsbl = if request.import_ips {
+        parse_phishing_ips(&ips_text, request.ip_limit)
+            .into_iter()
+            .map(|address| DnsblEntry {
+                address,
+                code: PHISHING_DATABASE_DNSBL_CODE.to_string(),
+                reason: PHISHING_DATABASE_DNSBL_REASON.to_string(),
+                source: source_tag.clone(),
+                ttl_seconds: request.ttl_seconds,
+                prefix_len: None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id,
+        source: request.source,
+        ttl_seconds: request.ttl_seconds,
+        threats,
+        dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            format!("invalid fetched feed data: {message}"),
+        );
+    }
+
+    let actor = audit_actor(&state, &headers);
+    match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn validate_phishing_database_import_request(
+    request: &PhishingDatabaseImportRequest,
+) -> Result<(), &'static str> {
+    if request.feed_id.trim().is_empty() {
+        return Err("feed_id is required");
+    }
+    if request.source.trim().is_empty() {
+        return Err("source is required");
+    }
+    if request.ttl_seconds == 0 {
+        return Err("ttl_seconds must be greater than zero");
+    }
+    if !request.import_domains && !request.import_ips {
+        return Err("at least one of import_domains or import_ips must be true");
+    }
+    if request.import_domains {
+        if request.domain_limit == 0 {
+            return Err("domain_limit must be greater than zero when import_domains is enabled");
+        }
+        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
+    }
+    if request.import_ips {
+        if request.ip_limit == 0 {
+            return Err("ip_limit must be greater than zero when import_ips is enabled");
+        }
+        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
+    }
+    Ok(())
+}
+
+fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
+    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
+    let host = parsed.host_str().ok_or("feed URL host is required")?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => return Err("feed URL scheme must be https unless host is loopback"),
+        _ => return Err("feed URL scheme must be http or https"),
+    }
+    if !allow_non_default_hosts
+        && !PHISHING_DATABASE_ALLOWED_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err("feed URL host is not allowed");
+    }
+    Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
@@ -1390,6 +1580,143 @@ fn threat_resource_id(indicator: &ThreatIndicator) -> String {
         "{}:{}:{}",
         indicator.indicator_type, indicator.value, indicator.source
     )
+}
+
+async fn apply_threat_feed_import(
+    state: &AppState,
+    actor: String,
+    action: &'static str,
+    feed: ThreatFeedImport,
+) -> Result<ThreatFeedImportResult, String> {
+    let imported_at = now_unix();
+    state
+        .mutate_and_persist(|data| {
+            for threat in feed.threats.iter().cloned() {
+                upsert_threat(&mut data.threats, threat);
+            }
+            for entry in feed.dnsbl.iter().cloned() {
+                upsert_dnsbl(&mut data.dnsbl, entry);
+            }
+            upsert_threat_feed(
+                &mut data.threat_feeds,
+                ThreatFeedStatus {
+                    feed_id: feed.feed_id.clone(),
+                    source: feed.source.clone(),
+                    last_updated_unix: imported_at,
+                    threat_count: feed.threats.len(),
+                    dnsbl_count: feed.dnsbl.len(),
+                    ttl_seconds: feed.ttl_seconds,
+                },
+            );
+            let result = ThreatFeedImportResult {
+                feed_id: feed.feed_id.clone(),
+                upserted_threats: feed.threats.len(),
+                upserted_dnsbl: feed.dnsbl.len(),
+                last_updated_unix: imported_at,
+            };
+            record_successful_audit_log(data, actor, action, "threat_feed", result.feed_id.clone());
+            result
+        })
+        .await
+}
+
+async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    let response = state
+        .feed_http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch feed {url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("feed {url} returned HTTP {status}"));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("failed to read feed body from {url}: {error}"))?;
+    if bytes.len() > PHISHING_DATABASE_MAX_BODY_BYTES {
+        return Err(format!(
+            "feed {url} body too large: {} bytes (limit: {})",
+            bytes.len(),
+            PHISHING_DATABASE_MAX_BODY_BYTES
+        ));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|error| format!("feed {url} is not valid UTF-8 text: {error}"))
+}
+
+fn parse_phishing_domains(feed: &str, limit: usize) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut unique = HashSet::new();
+    for line in feed.lines() {
+        let Some(domain) = normalize_phishing_domain(line) else {
+            continue;
+        };
+        if unique.insert(domain.clone()) {
+            values.push(domain);
+            if values.len() >= limit {
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn normalize_phishing_domain(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let host_port = without_scheme.split('/').next().unwrap_or("");
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    if host.is_empty() || !host.contains('.') || host.starts_with('.') || host.contains("..") {
+        return None;
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    if !host
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+    {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn parse_phishing_ips(feed: &str, limit: usize) -> Vec<IpAddr> {
+    let mut values = Vec::new();
+    let mut unique = HashSet::new();
+    for line in feed.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Ok(address) = trimmed.parse::<IpAddr>() else {
+            continue;
+        };
+        if unique.insert(address) {
+            values.push(address);
+            if values.len() >= limit {
+                break;
+            }
+        }
+    }
+    values
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -1864,6 +2191,20 @@ mod tests {
         assert!(parse_u64_env("RATE_LIMIT_WINDOW", Some("abc"), 60).is_err());
     }
 
+    #[test]
+    fn parses_and_limits_phishing_database_feeds() {
+        let domains = parse_phishing_domains(
+            "https://Phish.EXAMPLE/login\n#comment\n\nbad value\na..b.example\n203.0.113.7\nphish.example\nphish.example\n",
+            2,
+        );
+        assert_eq!(domains, vec!["phish.example".to_string()]);
+
+        let ips = parse_phishing_ips("198.51.100.8\n#skip\nbad-ip\n198.51.100.8\n203.0.113.5", 2);
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0], "198.51.100.8".parse::<IpAddr>().unwrap());
+        assert_eq!(ips[1], "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
+
     #[tokio::test]
     async fn run_from_env_binds_and_serves_until_shutdown() {
         let _guard = ENV_GUARD.lock().await;
@@ -2001,6 +2342,22 @@ mod tests {
                 ttl_seconds: 600,
                 prefix_len: None,
             }],
+        }
+    }
+
+    fn phishing_database_import_request(base_url: &str) -> PhishingDatabaseImportRequest {
+        PhishingDatabaseImportRequest {
+            feed_id: "phishing-db-seoul".to_string(),
+            source: "https://github.com/Phishing-Database/Phishing.Database".to_string(),
+            domain_url: format!("{base_url}/domains"),
+            ip_url: format!("{base_url}/ips"),
+            ttl_seconds: 900,
+            domain_limit: 10,
+            ip_limit: 10,
+            severity: Severity::Critical,
+            import_domains: true,
+            import_ips: true,
+            allow_non_default_hosts: true,
         }
     }
 
@@ -3139,6 +3496,185 @@ mod tests {
         assert_eq!(persisted.commercial.license_status, LicenseStatus::Active);
         assert_eq!(persisted.threat_feeds.len(), 1);
         let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn phishing_database_import_endpoint_supports_blocking_flow() {
+        let feed_mock = Router::new()
+            .route(
+                "/domains",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        "evil.example\nhttps://evil.example/path\nlogin.bad.example\n",
+                    )
+                }),
+            )
+            .route(
+                "/ips",
+                get(|| async { (StatusCode::OK, "198.51.100.200\n203.0.113.77\nbad-ip\n") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = phishing_database_import_request(&format!("http://{addr}"));
+
+        let unauthorized = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                None,
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_request = PhishingDatabaseImportRequest {
+            ttl_seconds: 0,
+            domain_url: "file:///tmp/not-allowed".to_string(),
+            ..payload.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                Some("secret"),
+                &invalid_request,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import/phishing-database",
+                    Some("secret"),
+                    &payload,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "phishing-db-seoul");
+        assert_eq!(import_result.upserted_threats, 2);
+        assert_eq!(import_result.upserted_dnsbl, 2);
+        let audit_logs: Vec<AuditLogEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|item| item.action == "import_phishing_database_feed")
+        );
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(threat_entries.iter().any(
+            |entry| entry.value == "evil.example" && entry.indicator_type == "phishing_domain"
+        ));
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == "login.bad.example"
+                    && entry.source == "phishing-db-seoul")
+        );
+
+        let dnsbl_entries: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl_entries
+                .iter()
+                .any(|entry| entry.address == "198.51.100.200".parse::<IpAddr>().unwrap())
+        );
+        assert!(
+            dnsbl_entries
+                .iter()
+                .any(|entry| entry.address == "203.0.113.77".parse::<IpAddr>().unwrap())
+        );
+
+        let block_route = RouteConfig {
+            id: "phish".to_string(),
+            path_prefix: "/phish".to_string(),
+            upstream: "mock://phish".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: Some(50),
+        };
+        let route_response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::CREATED);
+
+        let blocked = app_request(
+            &app,
+            empty_request(
+                Method::GET,
+                "/gateway/phish?q=https%3A%2F%2Fevil.example%2Flogin",
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn phishing_database_import_rejects_redirected_feed_fetches() {
+        let target_feed = Router::new()
+            .route(
+                "/domains",
+                get(|| async { (StatusCode::OK, "evil.example\n") }),
+            )
+            .route(
+                "/ips",
+                get(|| async { (StatusCode::OK, "198.51.100.200\n") }),
+            );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_domains = format!("http://{target_addr}/domains");
+        let redirect_ips = format!("http://{target_addr}/ips");
+        let redirect_feed = Router::new()
+            .route(
+                "/domains",
+                get(move || {
+                    let location = redirect_domains.clone();
+                    async move { (StatusCode::FOUND, [("location", location)]) }
+                }),
+            )
+            .route(
+                "/ips",
+                get(move || {
+                    let location = redirect_ips.clone();
+                    async move { (StatusCode::FOUND, [("location", location)]) }
+                }),
+            );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = phishing_database_import_request(&format!("http://{redirect_addr}"));
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
