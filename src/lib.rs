@@ -40,6 +40,7 @@ pub struct AppState {
     inner: Arc<RwLock<AppData>>,
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
+    feed_http: reqwest::Client,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor name for audit trails.
     // Empty falls back to the single `admin_token`. Never logged as the actor.
@@ -107,6 +108,10 @@ impl AppState {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
             http: reqwest::Client::new(),
+            feed_http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("failed to build no-redirect feed client"),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             state_path: config.state_path,
@@ -1619,7 +1624,7 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
-        .http
+        .feed_http
         .get(url)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
@@ -3618,6 +3623,52 @@ mod tests {
         )
         .await;
         assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn phishing_database_import_rejects_redirected_feed_fetches() {
+        let target_feed = Router::new()
+            .route("/domains", get(|| async { (StatusCode::OK, "evil.example\n") }))
+            .route("/ips", get(|| async { (StatusCode::OK, "198.51.100.200\n") }));
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_domains = format!("http://{target_addr}/domains");
+        let redirect_ips = format!("http://{target_addr}/ips");
+        let redirect_feed = Router::new()
+            .route(
+                "/domains",
+                get(move || {
+                    let location = redirect_domains.clone();
+                    async move { (StatusCode::FOUND, [("location", location)]) }
+                }),
+            )
+            .route(
+                "/ips",
+                get(move || {
+                    let location = redirect_ips.clone();
+                    async move { (StatusCode::FOUND, [("location", location)]) }
+                }),
+            );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = phishing_database_import_request(&format!("http://{redirect_addr}"));
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
