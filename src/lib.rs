@@ -1068,7 +1068,7 @@ async fn import_threat_feed(
     }
 
     let actor = audit_actor(&state, &headers);
-    match apply_threat_feed_import(&state, actor, feed).await {
+    match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
@@ -1155,7 +1155,7 @@ async fn import_phishing_database_feed(
     }
 
     let actor = audit_actor(&state, &headers);
-    match apply_threat_feed_import(&state, actor, feed).await {
+    match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
@@ -1561,6 +1561,7 @@ fn threat_resource_id(indicator: &ThreatIndicator) -> String {
 async fn apply_threat_feed_import(
     state: &AppState,
     actor: String,
+    action: &'static str,
     feed: ThreatFeedImport,
 ) -> Result<ThreatFeedImportResult, String> {
     let imported_at = now_unix();
@@ -1589,13 +1590,7 @@ async fn apply_threat_feed_import(
                 upserted_dnsbl: feed.dnsbl.len(),
                 last_updated_unix: imported_at,
             };
-            record_successful_audit_log(
-                data,
-                actor,
-                "import_threat_feed",
-                "threat_feed",
-                result.feed_id.clone(),
-            );
+            record_successful_audit_log(data, actor, action, "threat_feed", result.feed_id.clone());
             result
         })
         .await
@@ -3545,6 +3540,13 @@ mod tests {
         assert_eq!(import_result.feed_id, "phishing-db-seoul");
         assert_eq!(import_result.upserted_threats, 2);
         assert_eq!(import_result.upserted_dnsbl, 2);
+        let audit_logs: Vec<AuditLogEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|item| item.action == "import_phishing_database_feed")
+        );
 
         let threat_entries: Vec<ThreatIndicator> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
