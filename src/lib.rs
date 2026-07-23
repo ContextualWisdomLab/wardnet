@@ -355,6 +355,7 @@ const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
 const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
 const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
 const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
     PHISHING_DATABASE_DEFAULT_FEED_ID.to_string()
@@ -680,6 +681,8 @@ struct PhishingDatabaseImportRequest {
     import_domains: bool,
     #[serde(default = "default_true")]
     import_ips: bool,
+    #[serde(default)]
+    allow_non_default_hosts: bool,
 }
 
 #[derive(Serialize)]
@@ -1086,28 +1089,25 @@ async fn import_phishing_database_feed(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let domain_fetch = async {
-        if request.import_domains {
-            fetch_text_feed(&state, &request.domain_url).await
-        } else {
-            Ok(String::new())
+    let (domains_text, ips_text) = match (request.import_domains, request.import_ips) {
+        (true, true) => {
+            match tokio::try_join!(
+                fetch_text_feed(&state, &request.domain_url),
+                fetch_text_feed(&state, &request.ip_url)
+            ) {
+                Ok((domains, ips)) => (domains, ips),
+                Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+            }
         }
-    };
-    let ip_fetch = async {
-        if request.import_ips {
-            fetch_text_feed(&state, &request.ip_url).await
-        } else {
-            Ok(String::new())
-        }
-    };
-    let (domain_result, ip_result) = tokio::join!(domain_fetch, ip_fetch);
-    let domains_text = match domain_result {
-        Ok(text) => text,
-        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
-    };
-    let ips_text = match ip_result {
-        Ok(text) => text,
-        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        (true, false) => match fetch_text_feed(&state, &request.domain_url).await {
+            Ok(domains) => (domains, String::new()),
+            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        },
+        (false, true) => match fetch_text_feed(&state, &request.ip_url).await {
+            Ok(ips) => (String::new(), ips),
+            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        },
+        (false, false) => (String::new(), String::new()),
     };
 
     let source_tag = request.feed_id.clone();
@@ -1180,23 +1180,42 @@ fn validate_phishing_database_import_request(
         if request.domain_limit == 0 {
             return Err("domain_limit must be greater than zero when import_domains is enabled");
         }
-        validate_http_url(&request.domain_url)?;
+        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
     }
     if request.import_ips {
         if request.ip_limit == 0 {
             return Err("ip_limit must be greater than zero when import_ips is enabled");
         }
-        validate_http_url(&request.ip_url)?;
+        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
     }
     Ok(())
 }
 
-fn validate_http_url(value: &str) -> Result<(), &'static str> {
+fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
+    let host = parsed.host_str().ok_or("feed URL host is required")?;
     match parsed.scheme() {
-        "http" | "https" => Ok(()),
-        _ => Err("feed URL scheme must be http or https"),
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => return Err("feed URL scheme must be https unless host is loopback"),
+        _ => return Err("feed URL scheme must be http or https"),
     }
+    if !allow_non_default_hosts
+        && !PHISHING_DATABASE_ALLOWED_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err("feed URL host is not allowed");
+    }
+    Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
@@ -1597,7 +1616,8 @@ async fn apply_threat_feed_import(
 }
 
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
-    validate_http_url(url).map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
         .http
         .get(url)
@@ -2332,6 +2352,7 @@ mod tests {
             severity: Severity::Critical,
             import_domains: true,
             import_ips: true,
+            allow_non_default_hosts: true,
         }
     }
 
