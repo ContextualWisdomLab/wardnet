@@ -112,12 +112,21 @@ proptest! {
 
         // Every published A-record response code is an IPv4 loopback literal
         // (RFC 5782 / the "response code in 127.0.0.0/8" invariant); non-127/8
-        // or IPv6 codes must be dropped, never emitted.
+        // or IPv6 codes must be dropped, never emitted. Parse by record structure
+        // (`<name> IN A <code>` = four whitespace fields) so a TXT line whose
+        // escaped reason/source payload contains the substring " IN A " is never
+        // misread as an A-record.
         for line in zone.lines() {
-            if !line.contains(" IN A ") {
+            let mut fields = line.split_whitespace();
+            let (Some(_name), Some("IN"), Some("A"), Some(code), None) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            ) else {
                 continue;
-            }
-            let code = line.rsplit(" IN A ").next().unwrap().trim();
+            };
             match code.parse::<IpAddr>() {
                 Ok(IpAddr::V4(v4)) => {
                     prop_assert_eq!(v4.octets()[0], 127, "non-loopback A code: {}", code)

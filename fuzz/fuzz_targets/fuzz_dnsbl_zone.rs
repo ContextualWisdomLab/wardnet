@@ -84,12 +84,22 @@ fuzz_target!(|input: Input| {
 
     // Every published A-record response code is an IPv4 loopback literal
     // (RFC 5782 / the "response code in 127.0.0.0/8" invariant). Codes outside
-    // 127/8, IPv6 literals, and unparseable strings must all be dropped.
+    // 127/8, IPv6 literals, and unparseable strings must all be dropped. Parse
+    // by record structure from the start of the line: an A record is exactly
+    // `<name> IN A <code>` (four whitespace fields, no spaces in name or code).
+    // Matching on the substring " IN A " instead would misread a TXT line whose
+    // escaped reason/source payload merely contains that substring as an A-record.
     for line in zone.lines() {
-        if !line.contains(" IN A ") {
+        let mut fields = line.split_whitespace();
+        let (Some(_name), Some("IN"), Some("A"), Some(code), None) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             continue;
-        }
-        let code = line.rsplit(" IN A ").next().unwrap().trim();
+        };
         match code.parse::<IpAddr>() {
             Ok(IpAddr::V4(v4)) => assert_eq!(
                 v4.octets()[0],
