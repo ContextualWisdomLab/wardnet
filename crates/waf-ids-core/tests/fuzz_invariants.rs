@@ -34,17 +34,34 @@ fn threat_strategy() -> impl Strategy<Value = ThreatIndicator> {
     )
 }
 
+// Response codes cover arbitrary strings plus real IP literals (loopback,
+// non-loopback IPv4, and IPv6) so the zone-export A-record invariant below is
+// actually exercised — a purely random string almost never parses as an IP.
+fn dnsbl_code_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        ".*",
+        any::<u32>().prop_map(|v| Ipv4Addr::from(v).to_string()),
+        (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(|(a, b, c)| format!("127.{a}.{b}.{c}")),
+        any::<u128>().prop_map(|v| std::net::Ipv6Addr::from(v).to_string()),
+    ]
+}
+
 fn dnsbl_strategy() -> impl Strategy<Value = DnsblEntry> {
-    (any::<u32>(), ".*", ".*", ".*", any::<u64>()).prop_map(
-        |(addr, code, reason, source, ttl_seconds)| DnsblEntry {
+    (
+        any::<u32>(),
+        dnsbl_code_strategy(),
+        ".*",
+        ".*",
+        any::<u64>(),
+    )
+        .prop_map(|(addr, code, reason, source, ttl_seconds)| DnsblEntry {
             address: IpAddr::V4(Ipv4Addr::from(addr)),
             code,
             reason,
             source,
             ttl_seconds,
             prefix_len: None,
-        },
-    )
+        })
 }
 
 proptest! {
@@ -92,6 +109,22 @@ proptest! {
         }
         let zone = export_dnsbl_zone(&origin, &entries);
         prop_assert!(zone.starts_with("$ORIGIN "));
+
+        // Every published A-record response code is an IPv4 loopback literal
+        // (RFC 5782 / the "response code in 127.0.0.0/8" invariant); non-127/8
+        // or IPv6 codes must be dropped, never emitted.
+        for line in zone.lines() {
+            if !line.contains(" IN A ") {
+                continue;
+            }
+            let code = line.rsplit(" IN A ").next().unwrap().trim();
+            match code.parse::<IpAddr>() {
+                Ok(IpAddr::V4(v4)) => {
+                    prop_assert_eq!(v4.octets()[0], 127, "non-loopback A code: {}", code)
+                }
+                other => prop_assert!(false, "illegal DNSBL A-record code: {:?}", other),
+            }
+        }
 
         for line in zone.lines() {
             if !line.contains(" IN TXT ") {
