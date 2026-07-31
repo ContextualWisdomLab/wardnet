@@ -1621,6 +1621,8 @@ async fn apply_threat_feed_import(
 }
 
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
+    use futures_util::StreamExt;
+
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
@@ -1636,19 +1638,28 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
     if !status.is_success() {
         return Err(format!("feed {url} returned HTTP {status}"));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("failed to read feed body from {url}: {error}"))?;
-    if bytes.len() > PHISHING_DATABASE_MAX_BODY_BYTES {
+    // Fail fast when the server advertises an oversized Content-Length.
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
         return Err(format!(
-            "feed {url} body too large: {} bytes (limit: {})",
-            bytes.len(),
-            PHISHING_DATABASE_MAX_BODY_BYTES
+            "feed {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
         ));
     }
-    String::from_utf8(bytes.to_vec())
-        .map_err(|error| format!("feed {url} is not valid UTF-8 text: {error}"))
+    // Stream chunks so a chunked/malicious body cannot OOM the process before the cap.
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|error| format!("failed to read feed body from {url}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "feed {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|error| format!("feed {url} is not valid UTF-8 text: {error}"))
 }
 
 fn parse_phishing_domains(feed: &str, limit: usize) -> Vec<String> {
