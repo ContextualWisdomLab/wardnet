@@ -11,7 +11,7 @@ This document maps the commercial baseline to common enterprise security review 
 | Change Control | Route-scoped monitor/block modes | Approval workflow and rollback attestations |
 | Availability | Health endpoint, Kubernetes probes | HA storage, multi-replica state backend |
 | Incident Response | Operations runbook and support bundle | On-call process, SLA/SLO reporting |
-| Threat Intelligence | Feed import API, STIX/MISP document ingest, TAXII 2.1 poll, feed status | Signed feeds, live MISP/OpenCTI adapters |
+| Threat Intelligence | Feed import API, STIX/MISP/OpenCTI document ingest, TAXII 2.1 poll, feed status | Signed feeds, live MISP REST / OpenCTI GraphQL pull |
 | DNSBL | Zone export and response-code validation | Authoritative DNS service and publication controls |
 | AI Governance | Human approval boundary documented | Model evals, prompt audit, recommendation traceability |
 

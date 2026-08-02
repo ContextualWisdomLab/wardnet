@@ -38,6 +38,7 @@ pub use waf_ids_core::{
 mod coraza_audit;
 mod credentials;
 mod misp_import;
+mod opencti_import;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
@@ -465,6 +466,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threat-intel/stix", post(import_stix_document))
         .route("/api/threat-intel/misp", post(import_misp_document))
         .route("/api/threat-intel/taxii/poll", post(poll_taxii_collection))
+        .route("/api/threat-intel/opencti", post(import_opencti_document))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -1284,6 +1286,102 @@ async fn import_misp_document(
                 upserted_threats: result.upserted_threats,
                 upserted_dnsbl: result.upserted_dnsbl,
                 skipped_attributes,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Optional OpenCTI import metadata via query string.
+#[derive(Debug, Deserialize)]
+struct OpenCtiImportQuery {
+    #[serde(default = "opencti_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "opencti_default_source")]
+    source: String,
+    #[serde(default = "opencti_default_ttl_seconds")]
+    ttl_seconds: u64,
+}
+
+fn opencti_default_feed_id() -> String {
+    "opencti-import".to_string()
+}
+fn opencti_default_source() -> String {
+    "opencti".to_string()
+}
+fn opencti_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct OpenCtiImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_objects: usize,
+    last_updated_unix: u64,
+}
+
+/// Ingest an OpenCTI observable/indicator export (JSON body). Admin-auth only.
+/// Query: `feed_id`, `source`, `ttl_seconds` (defaults: opencti-import / opencti / 86400).
+async fn import_opencti_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OpenCtiImportQuery>,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if query.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => {
+            return error(StatusCode::BAD_REQUEST, "OpenCTI body must be UTF-8 text");
+        }
+    };
+    let material = match opencti_import::parse_opencti_document(
+        body_text,
+        query.source.trim(),
+        query.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: query.feed_id.trim().to_string(),
+        source: query.source.trim().to_string(),
+        ttl_seconds: query.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let skipped_objects = material.skipped_objects;
+    match apply_threat_feed_import(&state, actor, "import_opencti_document", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(OpenCtiImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_objects,
                 last_updated_unix: result.last_updated_unix,
             }),
         )
@@ -2618,6 +2716,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>TAXII 2.1 collection poll</h2>
       <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>), optional Basic/Bearer credentials, and optional <code>added_after</code>. Fetches TAXII objects, normalizes to STIX, and upserts threats/DNSBL. Credentials are never written to audit logs.</p>
+    </section>
+    <section class="card"><h2>OpenCTI threat intelligence</h2>
+      <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -5053,6 +5154,153 @@ mod tests {
                 .required_endpoints
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/threat-intel/taxii/poll")
+        );
+    }
+
+    #[tokio::test]
+    async fn opencti_observable_ingest_updates_threats_dnsbl_and_feed_freshness() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/opencti")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"entities":[{"entity_type":"IPv4-Addr","observable_value":"1.2.3.4"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let export = r#"{
+          "data": {
+            "stixCyberObservables": {
+              "edges": [
+                {
+                  "node": {
+                    "entity_type": "IPv4-Addr",
+                    "observable_value": "203.0.113.93",
+                    "x_opencti_score": 95,
+                    "standard_id": "ipv4-addr--lab"
+                  }
+                },
+                {
+                  "node": {
+                    "entity_type": "Domain-Name",
+                    "observable_value": "opencti-evil.example",
+                    "x_opencti_score": 70
+                  }
+                },
+                {
+                  "node": {
+                    "entity_type": "Url",
+                    "observable_value": "http://opencti-evil.example/phish"
+                  }
+                },
+                {
+                  "node": {
+                    "entity_type": "Text",
+                    "observable_value": "noise"
+                  }
+                }
+              ]
+            }
+          }
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(
+                    "/api/threat-intel/opencti?feed_id=opencti-lab&source=opencti:lab&ttl_seconds=3600",
+                )
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(export))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "opencti-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+        assert!(body["skipped_objects"].as_u64().unwrap() >= 1);
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| { t.value == "opencti-evil.example" && t.indicator_type == "domain" })
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.93" && t.indicator_type == "client_ip")
+        );
+
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl
+                .iter()
+                .any(|d| d.address.to_string() == "203.0.113.93")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "opencti-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "opencti-block",
+                    "path_prefix": "/opencti",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/opencti", "203.0.113.93"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/opencti")
         );
     }
 
