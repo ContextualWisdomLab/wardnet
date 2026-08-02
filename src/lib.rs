@@ -37,6 +37,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod stix_import;
 mod suricata_eve;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
 
@@ -459,6 +460,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/ids/suricata/eve", post(import_suricata_eve))
         .route("/api/waf/coraza/audit", post(import_coraza_audit))
+        .route("/api/threat-intel/stix", post(import_stix_document))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -1100,6 +1102,97 @@ async fn import_threat_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Optional STIX import metadata via query string.
+#[derive(Debug, Deserialize)]
+struct StixImportQuery {
+    #[serde(default = "stix_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "stix_default_source")]
+    source: String,
+    #[serde(default = "stix_default_ttl_seconds")]
+    ttl_seconds: u64,
+}
+
+fn stix_default_feed_id() -> String {
+    "stix-import".to_string()
+}
+fn stix_default_source() -> String {
+    "stix".to_string()
+}
+fn stix_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct StixImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_objects: usize,
+    last_updated_unix: u64,
+}
+
+/// Ingest a STIX 2.x indicator or bundle (JSON body). Admin-auth only.
+/// Query: `feed_id`, `source`, `ttl_seconds` (defaults: stix-import / stix / 86400).
+async fn import_stix_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<StixImportQuery>,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if query.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "STIX body must be UTF-8 text"),
+    };
+    let material =
+        match stix_import::parse_stix_document(body_text, query.source.trim(), query.ttl_seconds) {
+            Ok(material) => material,
+            Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: query.feed_id.trim().to_string(),
+        source: query.source.trim().to_string(),
+        ttl_seconds: query.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let skipped_objects = material.skipped_objects;
+    match apply_threat_feed_import(&state, actor, "import_stix_document", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(StixImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_objects,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
@@ -2199,6 +2292,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
       <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p>
+    </section>
+    <section class="card"><h2>STIX threat intelligence</h2>
+      <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring (TAXII polling is a follow-up).</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -4210,6 +4306,135 @@ mod tests {
                 .required_endpoints
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/waf/coraza/audit")
+        );
+    }
+
+    #[tokio::test]
+    async fn stix_indicator_ingest_updates_threats_dnsbl_and_feed_freshness() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/stix")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"type":"indicator","pattern":"[ipv4-addr:value = '1.2.3.4']"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bundle = r#"{
+          "type": "bundle",
+          "id": "bundle--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "objects": [
+            {
+              "type": "indicator",
+              "id": "indicator--bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "name": "bad-ip",
+              "pattern": "[ipv4-addr:value = '203.0.113.88']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 90
+            },
+            {
+              "type": "indicator",
+              "id": "indicator--cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "name": "bad-domain",
+              "pattern": "[domain-name:value = 'phish.example']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 70
+            }
+          ]
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/stix?feed_id=stix-lab&source=stix:lab&ttl_seconds=3600")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(bundle))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "stix-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "phish.example" && t.indicator_type == "domain")
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.88" && t.indicator_type == "client_ip")
+        );
+
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl
+                .iter()
+                .any(|d| d.address.to_string() == "203.0.113.88")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "stix-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "stix-block",
+                    "path_prefix": "/stix",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/stix", "203.0.113.88")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/stix")
         );
     }
 
