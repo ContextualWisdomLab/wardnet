@@ -40,6 +40,7 @@ mod credentials;
 mod misp_import;
 mod stix_import;
 mod suricata_eve;
+mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
 
 #[derive(Clone)]
@@ -463,6 +464,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/waf/coraza/audit", post(import_coraza_audit))
         .route("/api/threat-intel/stix", post(import_stix_document))
         .route("/api/threat-intel/misp", post(import_misp_document))
+        .route("/api/threat-intel/taxii/poll", post(poll_taxii_collection))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -1288,6 +1290,228 @@ async fn import_misp_document(
             .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
+}
+
+/// TAXII 2.1 collection poll request (admin-auth).
+/// Provide either `objects_url` or (`api_root` + `collection_id`).
+#[derive(Debug, Deserialize)]
+struct TaxiiPollRequest {
+    #[serde(default)]
+    objects_url: Option<String>,
+    #[serde(default)]
+    api_root: Option<String>,
+    #[serde(default)]
+    collection_id: Option<String>,
+    #[serde(default = "taxii_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "taxii_default_source")]
+    source: String,
+    #[serde(default = "taxii_default_ttl_seconds")]
+    ttl_seconds: u64,
+    /// Optional ISO-8601 timestamp filter (`added_after` TAXII query param).
+    #[serde(default)]
+    added_after: Option<String>,
+    #[serde(default)]
+    bearer_token: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+fn taxii_default_feed_id() -> String {
+    "taxii-import".to_string()
+}
+fn taxii_default_source() -> String {
+    "taxii".to_string()
+}
+fn taxii_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct TaxiiPollResult {
+    feed_id: String,
+    objects_url: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_objects: usize,
+    last_updated_unix: u64,
+}
+
+/// Poll a TAXII 2.1 collection objects endpoint and import STIX indicators.
+/// Secrets in the request body are never written to audit logs.
+async fn poll_taxii_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TaxiiPollRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if request.feed_id.trim().is_empty() || request.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if request.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+
+    let base_url = match resolve_taxii_objects_url(&request) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("invalid TAXII objects URL: {message}"),
+        );
+    }
+    let objects_url = match taxii::with_taxii_filters(&base_url, request.added_after.as_deref()) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let body_text = match fetch_taxii_objects(
+        &state,
+        &objects_url,
+        request.bearer_token.as_deref(),
+        request.username.as_deref(),
+        request.password.as_deref(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+
+    let stix_json = match taxii::stix_json_from_taxii_response(&body_text) {
+        Ok(json) => json,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let material = match stix_import::parse_stix_document(
+        &stix_json,
+        request.source.trim(),
+        request.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id.trim().to_string(),
+        source: request.source.trim().to_string(),
+        ttl_seconds: request.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let skipped_objects = material.skipped_objects;
+    match apply_threat_feed_import(&state, actor, "poll_taxii_collection", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(TaxiiPollResult {
+                feed_id: result.feed_id,
+                objects_url: base_url,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_objects,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn resolve_taxii_objects_url(request: &TaxiiPollRequest) -> Result<String, String> {
+    if let Some(url) = request
+        .objects_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(url.to_string());
+    }
+    let api_root = request
+        .api_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let collection_id = request
+        .collection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (api_root, collection_id) {
+        (Some(root), Some(id)) => taxii::collection_objects_url(root, id),
+        _ => {
+            Err("provide objects_url or both api_root and collection_id for TAXII poll".to_string())
+        }
+    }
+}
+
+async fn fetch_taxii_objects(
+    state: &AppState,
+    url: &str,
+    bearer_token: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<String, String> {
+    use futures_util::StreamExt;
+
+    let mut request = state
+        .feed_http
+        .get(url)
+        .header(
+            "Accept",
+            "application/taxii+json;version=2.1, application/stix+json;version=2.1, application/json",
+        )
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ));
+
+    if let Some(token) = bearer_token.map(str::trim).filter(|s| !s.is_empty()) {
+        request = request.bearer_auth(token);
+    } else if let Some(user) = username.map(str::trim).filter(|s| !s.is_empty()) {
+        request = request.basic_auth(user, password);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("failed to poll TAXII collection: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("TAXII server returned HTTP {status}"));
+    }
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "TAXII response body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("failed to read TAXII body: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "TAXII response body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|error| format!("TAXII response is not valid UTF-8: {error}"))
 }
 
 /// Ingest Suricata EVE JSON (single object, array, or NDJSON). Admin-auth only.
@@ -2387,10 +2611,13 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p>
     </section>
     <section class="card"><h2>STIX threat intelligence</h2>
-      <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring (TAXII polling is a follow-up).</p>
+      <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p>
     </section>
     <section class="card"><h2>MISP threat intelligence</h2>
       <p class="muted">POST admin-authenticated MISP Event/attribute JSON to <code>/api/threat-intel/misp</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IDS-worthy attributes (ip-src/ip-dst, domain, url, composites, hashes) into threats/DNSBL; attributes with <code>to_ids=false</code> are skipped. Live MISP REST pull is a follow-up.</p>
+    </section>
+    <section class="card"><h2>TAXII 2.1 collection poll</h2>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>), optional Basic/Bearer credentials, and optional <code>added_after</code>. Fetches TAXII objects, normalizes to STIX, and upserts threats/DNSBL. Credentials are never written to audit logs.</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -4667,6 +4894,165 @@ mod tests {
                 .required_endpoints
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/threat-intel/misp")
+        );
+    }
+
+    #[tokio::test]
+    async fn taxii_collection_poll_imports_stix_and_blocks_gateway() {
+        let taxii_body = r#"{
+          "more": false,
+          "objects": [
+            {
+              "type": "indicator",
+              "id": "indicator--dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "name": "taxii-bad-ip",
+              "pattern": "[ipv4-addr:value = '203.0.113.92']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 90
+            },
+            {
+              "type": "indicator",
+              "id": "indicator--eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "name": "taxii-bad-domain",
+              "pattern": "[domain-name:value = 'taxii-evil.example']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 70
+            }
+          ]
+        }"#;
+        let taxii_app = Router::new().route(
+            "/api1/collections/lab/objects/",
+            axum::routing::get(move || {
+                let body = taxii_body.to_string();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/taxii+json;version=2.1")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let taxii_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taxii_addr = taxii_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(taxii_listener, taxii_app).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                None,
+                &serde_json::json!({
+                    "objects_url": format!("http://{taxii_addr}/api1/collections/lab/objects/")
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                Some("secret"),
+                &serde_json::json!({
+                    "api_root": format!("http://{taxii_addr}/api1"),
+                    "collection_id": "lab",
+                    "feed_id": "taxii-lab",
+                    "source": "taxii:lab",
+                    "ttl_seconds": 3600,
+                    "username": "analyst",
+                    "password": "not-logged"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "taxii-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+        // Objects URL is returned; credentials must not appear in the response.
+        let response_text = body.to_string();
+        assert!(!response_text.contains("not-logged"));
+        assert!(!response_text.contains("analyst"));
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "taxii-evil.example" && t.indicator_type == "domain")
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.92" && t.indicator_type == "client_ip")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "taxii-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "taxii-block",
+                    "path_prefix": "/taxii",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked =
+            app_request(&app, gateway_get_from_ip("/gateway/taxii", "203.0.113.92")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let audit: Vec<AuditLogEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        let taxii_audit = audit
+            .iter()
+            .find(|e| e.action == "poll_taxii_collection")
+            .expect("taxii poll audit entry");
+        let audit_text = serde_json::to_string(taxii_audit).unwrap();
+        assert!(!audit_text.contains("not-logged"));
+        assert!(!audit_text.contains("analyst"));
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/taxii/poll")
         );
     }
 

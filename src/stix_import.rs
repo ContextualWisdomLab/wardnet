@@ -2,8 +2,9 @@
 //!
 //! Parses STIX Indicator objects (standalone, array, or Bundle) into gateway
 //! [`ThreatIndicator`] / [`DnsblEntry`] rows. This is a proven threat-intel
-//! format boundary — not a hand-rolled detection engine. TAXII collection
-//! polling remains a follow-up; operators POST STIX documents here.
+//! format boundary — not a hand-rolled detection engine. Operators may POST
+//! STIX documents here, or poll TAXII 2.1 collections via
+//! `POST /api/threat-intel/taxii/poll` which reuses this parser.
 
 use std::net::IpAddr;
 

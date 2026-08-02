@@ -1276,6 +1276,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "MISP Event/attribute JSON ingest into threat indicators and DNSBL (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "taxii_collection_poll",
+            "POST",
+            "/api/threat-intel/taxii/poll",
+            "application/json",
+            "TAXII 2.1 collection objects poll into threat indicators and DNSBL (admin-auth)",
+            false,
+        ),
     ]
 }
 
