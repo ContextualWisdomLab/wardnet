@@ -1268,6 +1268,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "STIX 2.x indicator/bundle ingest into threat indicators and DNSBL (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "misp_event_ingest",
+            "POST",
+            "/api/threat-intel/misp",
+            "application/json",
+            "MISP Event/attribute JSON ingest into threat indicators and DNSBL (admin-auth)",
+            false,
+        ),
     ]
 }
 

@@ -37,6 +37,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod misp_import;
 mod stix_import;
 mod suricata_eve;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
@@ -461,6 +462,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/ids/suricata/eve", post(import_suricata_eve))
         .route("/api/waf/coraza/audit", post(import_coraza_audit))
         .route("/api/threat-intel/stix", post(import_stix_document))
+        .route("/api/threat-intel/misp", post(import_misp_document))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -1189,6 +1191,97 @@ async fn import_stix_document(
                 upserted_threats: result.upserted_threats,
                 upserted_dnsbl: result.upserted_dnsbl,
                 skipped_objects,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Optional MISP import metadata via query string.
+#[derive(Debug, Deserialize)]
+struct MispImportQuery {
+    #[serde(default = "misp_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "misp_default_source")]
+    source: String,
+    #[serde(default = "misp_default_ttl_seconds")]
+    ttl_seconds: u64,
+}
+
+fn misp_default_feed_id() -> String {
+    "misp-import".to_string()
+}
+fn misp_default_source() -> String {
+    "misp".to_string()
+}
+fn misp_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct MispImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_attributes: usize,
+    last_updated_unix: u64,
+}
+
+/// Ingest a MISP event/attribute export (JSON body). Admin-auth only.
+/// Query: `feed_id`, `source`, `ttl_seconds` (defaults: misp-import / misp / 86400).
+async fn import_misp_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MispImportQuery>,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if query.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "MISP body must be UTF-8 text"),
+    };
+    let material =
+        match misp_import::parse_misp_document(body_text, query.source.trim(), query.ttl_seconds) {
+            Ok(material) => material,
+            Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: query.feed_id.trim().to_string(),
+        source: query.source.trim().to_string(),
+        ttl_seconds: query.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let skipped_attributes = material.skipped_attributes;
+    match apply_threat_feed_import(&state, actor, "import_misp_document", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(MispImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_attributes,
                 last_updated_unix: result.last_updated_unix,
             }),
         )
@@ -2295,6 +2388,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>STIX threat intelligence</h2>
       <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring (TAXII polling is a follow-up).</p>
+    </section>
+    <section class="card"><h2>MISP threat intelligence</h2>
+      <p class="muted">POST admin-authenticated MISP Event/attribute JSON to <code>/api/threat-intel/misp</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IDS-worthy attributes (ip-src/ip-dst, domain, url, composites, hashes) into threats/DNSBL; attributes with <code>to_ids=false</code> are skipped. Live MISP REST pull is a follow-up.</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -4435,6 +4531,142 @@ mod tests {
                 .required_endpoints
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/threat-intel/stix")
+        );
+    }
+
+    #[tokio::test]
+    async fn misp_event_ingest_updates_threats_dnsbl_and_feed_freshness() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/misp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"Event":{"Attribute":[{"type":"ip-dst","value":"1.2.3.4","to_ids":true}]}}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let event = r#"{
+          "Event": {
+            "id": "99",
+            "info": "buyer-lab misp sample",
+            "threat_level_id": "1",
+            "Attribute": [
+              {
+                "type": "ip-dst",
+                "value": "203.0.113.91",
+                "to_ids": true,
+                "comment": "scanner"
+              },
+              {
+                "type": "domain",
+                "value": "misp-evil.example",
+                "to_ids": true
+              },
+              {
+                "type": "url",
+                "value": "http://misp-evil.example/phish",
+                "to_ids": true
+              },
+              {
+                "type": "comment",
+                "value": "ignored",
+                "to_ids": true
+              }
+            ]
+          }
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/misp?feed_id=misp-lab&source=misp:lab&ttl_seconds=3600")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(event))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "misp-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+        assert!(body["skipped_attributes"].as_u64().unwrap() >= 1);
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "misp-evil.example" && t.indicator_type == "domain")
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.91" && t.indicator_type == "client_ip")
+        );
+
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl
+                .iter()
+                .any(|d| d.address.to_string() == "203.0.113.91")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "misp-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "misp-block",
+                    "path_prefix": "/misp",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/misp", "203.0.113.91")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/misp")
         );
     }
 
