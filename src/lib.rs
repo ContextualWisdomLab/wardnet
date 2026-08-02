@@ -35,6 +35,7 @@ pub use waf_ids_core::{
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
+mod coraza_audit;
 mod credentials;
 mod suricata_eve;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
@@ -457,6 +458,7 @@ pub fn build_app(state: AppState) -> Router {
             post(import_phishing_database_feed),
         )
         .route("/api/ids/suricata/eve", post(import_suricata_eve))
+        .route("/api/waf/coraza/audit", post(import_coraza_audit))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -1181,6 +1183,94 @@ async fn import_suricata_eve(
             SuricataEveImportResult {
                 accepted_alerts: accepted,
                 skipped_non_alerts,
+                event_ids,
+            }
+        })
+        .await
+    {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Ingest Coraza / ModSecurity-compatible WAF audit JSON (object, array, or NDJSON).
+/// Maps interrupted transactions and CRS rule messages into security events.
+#[derive(Debug, Serialize)]
+struct CorazaAuditImportResult {
+    accepted_hits: usize,
+    skipped: usize,
+    event_ids: Vec<u64>,
+}
+
+async fn import_coraza_audit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "Coraza audit body must be UTF-8 text",
+            );
+        }
+    };
+    let parsed = match coraza_audit::parse_coraza_audit_body(body_text) {
+        Ok(parsed) => parsed,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if parsed.hits.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "no Coraza WAF hits found (need messages[] or interrupted transaction)",
+        );
+    }
+
+    let actor = audit_actor(&state, &headers);
+    let event_limit = state.event_limit;
+    let accepted = parsed.hits.len();
+    let skipped = parsed.skipped;
+    match state
+        .mutate_and_persist(|data| {
+            let mut created_ids = Vec::with_capacity(accepted);
+            let ingest_now = now_unix();
+            for hit in &parsed.hits {
+                let id = data.next_event_id;
+                data.next_event_id += 1;
+                let event = SecurityEvent {
+                    id,
+                    timestamp_unix: hit.timestamp_unix.unwrap_or(ingest_now),
+                    client_ip: hit.client_ip,
+                    route_id: None,
+                    action: hit.action.clone(),
+                    reason: hit.reason.clone(),
+                    score: hit.score,
+                    path: hit.path.clone(),
+                };
+                println!("{}", security_event_log_line(&event));
+                data.events.push(event);
+                created_ids.push(id);
+            }
+            enforce_event_limit(data, event_limit);
+            let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect();
+            let event_ids: Vec<u64> = created_ids
+                .into_iter()
+                .filter(|id| retained.contains(id))
+                .collect();
+            record_successful_audit_log(
+                data,
+                actor,
+                "import_coraza_audit",
+                "waf_coraza",
+                format!("{accepted}_hits"),
+            );
+            CorazaAuditImportResult {
+                accepted_hits: accepted,
+                skipped,
                 event_ids,
             }
         })
@@ -2003,6 +2093,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     <section class="card"><h2>Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Suricata IDS ingest</h2>
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
+    </section>
+    <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches and interrupted transactions become SOC events (run Coraza outside; do not invent WAF rules here).</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -3899,6 +3992,89 @@ mod tests {
                 .required_endpoints
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/ids/suricata/eve")
+        );
+    }
+
+    #[tokio::test]
+    async fn coraza_audit_ingest_maps_crs_hits_to_security_events() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/waf/coraza/audit")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"transaction":{"is_interrupted":true,"request":{"uri":"/"},"response":{"http_code":403}},"messages":[{"message":"x","data":{"id":1,"severity":2}}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let audit_json = r#"{
+          "transaction": {
+            "client_ip": "203.0.113.77",
+            "time_stamp": "2024-06-15T12:34:56+0000",
+            "is_interrupted": true,
+            "request": { "uri": "/search?q=1'+OR+1=1" },
+            "response": { "http_code": 403 }
+          },
+          "messages": [
+            {
+              "message": "SQL Injection Attack Detected via libinjection",
+              "data": { "id": 942100, "severity": 2 }
+            }
+          ]
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/waf/coraza/audit")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(audit_json))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["accepted_hits"], 1);
+        assert_eq!(body["event_ids"].as_array().unwrap().len(), 1);
+
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        let ingested = events
+            .iter()
+            .find(|e| e.reason.contains("942100"))
+            .expect("coraza crs event");
+        assert_eq!(ingested.action, "block");
+        assert_eq!(ingested.path, "/search?q=1'+OR+1=1");
+        assert_eq!(ingested.client_ip, Some("203.0.113.77".parse().unwrap()));
+        assert_eq!(ingested.timestamp_unix, 1_718_454_896);
+
+        let audit: Vec<AuditLogEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        assert!(
+            audit
+                .iter()
+                .any(|entry| entry.action == "import_coraza_audit")
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/waf/coraza/audit")
         );
     }
 

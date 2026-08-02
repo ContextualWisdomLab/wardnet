@@ -1246,6 +1246,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "Suricata EVE JSON/NDJSON alert ingest into SOC security events (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "coraza_audit_ingest",
+            "POST",
+            "/api/waf/coraza/audit",
+            "application/json",
+            "Coraza/OWASP CRS WAF audit JSON/NDJSON ingest into SOC security events (admin-auth)",
+            false,
+        ),
     ]
 }
 
