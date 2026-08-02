@@ -56,10 +56,13 @@ fn severity(byte: u8) -> Severity {
 }
 
 fuzz_target!(|input: Input| {
-    // Cap collection sizes so the fuzzer explores parsing/matching logic rather
-    // than trivially overflowing the u16 score accumulator with thousands of
-    // matching indicators (that would be an arithmetic DoS artifact, not a
-    // parser bug). 32 is plenty to exercise the multi-indicator paths.
+    // Cap collection sizes so the fuzzer spends its budget exploring
+    // parsing/matching logic rather than piling up thousands of identical
+    // matching indicators. The u16 score accumulator saturates
+    // (`saturating_add`), so large counts are correct-but-uninteresting here
+    // (the saturation path is pinned deterministically by the core unit test
+    // `score_request_saturates_instead_of_overflowing_on_many_matches`);
+    // 32 is plenty to exercise the multi-indicator paths.
     let threats: Vec<ThreatIndicator> = input
         .threats
         .into_iter()

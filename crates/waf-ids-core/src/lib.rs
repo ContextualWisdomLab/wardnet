@@ -829,13 +829,13 @@ pub fn score_request(
         .map(|value| percent_decode_str(value).decode_utf8_lossy())
         .unwrap_or_default();
     let haystack = format!("{}?{} {}", path, decoded_query, body).to_lowercase();
-    let mut score = 0;
+    let mut score: u16 = 0;
     let mut reasons = Vec::new();
 
     // Built-in OWASP-shape signatures (no operator configuration required).
     for sig in builtin_signatures() {
         if haystack.contains(sig.pattern) {
-            score += severity_score(&sig.severity);
+            score = score.saturating_add(severity_score(&sig.severity));
             reasons.push(format!("builtin {} rule {}", sig.class, sig.id));
         }
     }
@@ -843,7 +843,7 @@ pub fn score_request(
     // Operator-configured threat indicators.
     for indicator in threats {
         if haystack.contains(&indicator.value.to_lowercase()) {
-            score += severity_score(&indicator.severity);
+            score = score.saturating_add(severity_score(&indicator.severity));
             reasons.push(format!(
                 "{} indicator from {}",
                 indicator.indicator_type, indicator.source
@@ -855,7 +855,7 @@ pub fn score_request(
     if let Some(ip) = client_ip
         && let Some(entry) = dnsbl.iter().find(|entry| dnsbl_matches(entry, ip))
     {
-        score += 100;
+        score = score.saturating_add(100);
         reasons.push(format!(
             "DNSBL match {} from {}",
             entry.reason, entry.source
@@ -864,7 +864,7 @@ pub fn score_request(
 
     // Behavioral anomaly heuristic (first-tier AI SOC signal).
     if let Some((anomaly, reason)) = anomaly_signal(&haystack) {
-        score += anomaly;
+        score = score.saturating_add(anomaly);
         reasons.push(reason);
     }
 
@@ -1356,6 +1356,32 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn score_request_saturates_instead_of_overflowing_on_many_matches() {
+        // Regression: `score` is a u16 accumulator. With enough matching
+        // indicators (each Critical = 100), a plain `+=` overflows u16 (>65535):
+        // a debug/overflow-checked build panics -- violating the WAF invariant
+        // that scoring never panics on arbitrary input -- and a release build
+        // wraps the score down to a tiny value, silently letting a maximally
+        // malicious request slip under the block threshold. Saturating
+        // arithmetic must clamp the score at u16::MAX so the request still
+        // scores as blockable. 700 * 100 = 70000 exceeds u16::MAX (65535).
+        let threats: Vec<ThreatIndicator> = (0..700)
+            .map(|i| ThreatIndicator {
+                value: "attack".to_string(),
+                indicator_type: "keyword".to_string(),
+                severity: Severity::Critical,
+                source: format!("feed-{i}"),
+                ttl_seconds: 300,
+            })
+            .collect();
+
+        let scored = score_request("/attack", None, "attack", None, &threats, &[]);
+
+        assert_eq!(scored.score, u16::MAX);
+        assert!(scored.score >= BLOCK_SCORE);
+    }
 
     /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
     /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
