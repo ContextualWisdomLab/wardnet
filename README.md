@@ -184,7 +184,7 @@ The core is a local workspace crate rather than a git submodule because it does 
 
 1. Coraza/OWASP CRS adapter for HTTP transaction scoring.
 2. Suricata EVE JSON ingest and correlation with gateway events.
-3. STIX/TAXII and MISP/OpenCTI feed import jobs.
+3. TAXII collection polling and live MISP/OpenCTI feed import jobs (HTTP STIX/MISP document ingest already available).
 4. Authoritative DNSBL service mode using Hickory DNS.
 5. AI SOC analyst assist with human approval gates for blocking changes.
 6. Full SIEM adapters after the NDJSON export contract is proven in buyer labs.

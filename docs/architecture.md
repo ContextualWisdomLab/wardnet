@@ -45,7 +45,7 @@ flowchart LR
 
 - **WAF**: Coraza/OWASP CRS audit JSON/NDJSON ingest is available at `POST /api/waf/coraza/audit` (admin token). Interrupted transactions and CRS rule messages become `SecurityEvent` rows and feed gateway enforcement (DNSBL + `client_ip`/`path` threat indicators) so subsequent gateway decisions block matching clients. In-process Coraza embedding remains a follow-up — do not replace CRS with hand-rolled rules.
 - **IDS**: Suricata EVE JSON/NDJSON ingest is available at `POST /api/ids/suricata/eve` (admin token). Alert records become `SecurityEvent` rows for SOC export/KPI; full route correlation and live EVE tailing remain follow-ups.
-- **Threat Intelligence**: STIX 2.x indicator/bundle ingest is available at `POST /api/threat-intel/stix` (admin token) and updates `ThreatIndicator` / `DnsblEntry` plus feed freshness. TAXII collection polling, MISP, and OpenCTI remain follow-ups.
+- **Threat Intelligence**: STIX 2.x indicator/bundle ingest is available at `POST /api/threat-intel/stix` (admin token) and MISP Event/attribute JSON ingest at `POST /api/threat-intel/misp` (admin token); both update `ThreatIndicator` / `DnsblEntry` plus feed freshness. TAXII collection polling, live MISP REST pull, and OpenCTI remain follow-ups.
 - **DNSBL Serving**: Hickory DNS should serve authoritative DNSBL responses directly after zone export semantics stabilize.
 - **AI SOC**: AI triage should summarize events, map likely ATT&CK tactics, and recommend actions. Enforcement-changing recommendations require human approval.
 
