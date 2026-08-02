@@ -1283,13 +1283,17 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     for entry in entries {
         if let IpAddr::V4(address) = entry.address {
             // The response code is emitted as a bare, unquoted A-record token, so
-            // it must be a valid IP literal. An arbitrary `code` string (e.g. one
-            // carrying a newline plus a forged `IN TXT` line) would otherwise break
-            // out of the zone; reject anything that is not a parseable address and
-            // re-render the canonical form so no attacker-controlled bytes survive.
+            // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers
+            // live in 127.0.0.0/8). `validate_dnsbl` enforces this at the
+            // create/import boundary, but the persisted-state deserializer is an
+            // untrusted surface that is not re-validated on load, so a state file
+            // can carry a code outside 127/8, an IPv6 literal, or a zone-injection
+            // string (e.g. a newline plus a forged `IN TXT` line). Re-enforce the
+            // invariant here and re-render the canonical form so no non-loopback,
+            // non-IPv4, or attacker-controlled bytes survive into the zone.
             let code = match IpAddr::from_str(&entry.code) {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
+                Ok(IpAddr::V4(code)) if code.octets()[0] == 127 => code,
+                _ => continue,
             };
             let name = reverse_ipv4_for_dnsbl(address.octets());
             out.push_str(&format!("{} IN A {}\n", name, code));
@@ -1448,6 +1452,75 @@ mod tests {
         // The malformed-code entry is skipped entirely; the valid one renders.
         assert!(!zone.contains("pwned"));
         assert!(zone.contains("20.2.0.192 IN A 127.0.0.9"));
+        assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_omits_non_loopback_response_codes() {
+        // `validate_dnsbl` gates the create/import path to `127.0.0.0/8`, but the
+        // persisted-state deserializer (a documented untrusted-input surface) is
+        // NOT re-validated on load, so a state file can carry a DNSBL entry whose
+        // `code` is a valid IP outside 127/8 — or an IPv6 literal. The zone export
+        // is the output boundary that publishes each code as a bare A-record
+        // token, so it must re-enforce the "response code in 127.0.0.0/8"
+        // invariant itself: a non-loopback IPv4 answer breaks RFC 5782 semantics
+        // for every DNSBL consumer, and an IPv6 literal yields a syntactically
+        // invalid A record that fails the whole authoritative zone load.
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[
+                DnsblEntry {
+                    address: "192.0.2.10".parse().unwrap(),
+                    // Valid IPv4, but NOT in 127.0.0.0/8.
+                    code: "8.8.8.8".to_string(),
+                    reason: "spoofed".to_string(),
+                    source: "state-file".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+                DnsblEntry {
+                    address: "192.0.2.20".parse().unwrap(),
+                    // IPv6 literal — never a legal A-record response code.
+                    code: "::1".to_string(),
+                    reason: "spoofed6".to_string(),
+                    source: "state-file".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+                DnsblEntry {
+                    address: "192.0.2.30".parse().unwrap(),
+                    // Valid loopback code — must still render.
+                    code: "127.0.0.4".to_string(),
+                    reason: "ok".to_string(),
+                    source: "state-file".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+            ],
+        );
+        // No non-loopback or non-IPv4 answer may escape into the published zone.
+        assert!(
+            !zone.contains("IN A 8.8.8.8"),
+            "non-127/8 A record leaked into zone: {zone}"
+        );
+        assert!(
+            !zone.contains("IN A ::1"),
+            "IPv6 A record leaked into zone: {zone}"
+        );
+        // Every emitted A record's response code is an IPv4 loopback address.
+        for line in zone.lines().filter(|l| l.contains(" IN A ")) {
+            let code = line.rsplit(" IN A ").next().unwrap().trim();
+            match IpAddr::from_str(code).expect("A-record code is an IP literal") {
+                IpAddr::V4(v4) => assert_eq!(
+                    v4.octets()[0],
+                    127,
+                    "non-loopback DNSBL response code published: {code}"
+                ),
+                IpAddr::V6(_) => panic!("IPv6 DNSBL response code published: {code}"),
+            }
+        }
+        // The legitimate loopback entry is unaffected.
+        assert!(zone.contains("30.2.0.192 IN A 127.0.0.4"));
         assert_txt_quotes_escaped(&zone);
     }
 
