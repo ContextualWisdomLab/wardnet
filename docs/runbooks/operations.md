@@ -28,9 +28,21 @@ Example credentials file:
 ```json
 {
   "admin_token": "replace-me",
-  "admin_tokens": "ops-token:ops,readonly-token:readonly"
+  "admin_tokens": "ops-token:ops:admin,audit-token:auditor:readonly"
 }
 ```
+
+`ADMIN_TOKENS` / `admin_tokens` items are `token`, `token:actor`, or
+`token:actor:role`. Roles:
+
+| Role labels | Capability |
+| --- | --- |
+| `admin`, `write`, `writer`, `operator` (default) | Management writes + audit-log read |
+| `readonly`, `read`, `reader`, `ro` | Audit-log read only (no policy mutation) |
+
+`GET /api/audit-logs` requires a valid admin credential when auth is configured
+(readonly tokens work). Write APIs still require a write-capable principal.
+Token values never appear in audit log payloads.
 
 ```bash
 WAF_IDS_CREDENTIALS_PATH=./credentials.local.json \
@@ -89,7 +101,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - TLS termination and identity-aware admin access
 - upstream allowlists and egress controls
 - durable database storage with backups
-- SSO/RBAC and immutable admin audit logging
+- SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
 - In-process Coraza embedding (HTTP audit ingest at `POST /api/waf/coraza/audit` already fuses block hits into DNSBL/`client_ip` indicators for gateway enforcement)
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)

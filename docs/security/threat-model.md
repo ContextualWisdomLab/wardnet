@@ -22,7 +22,7 @@
 
 | Threat | Impact | Current Control | Required Hardening |
 | --- | --- | --- | --- |
-| Unauthorized management write | Route takeover or false blocking | `X-Admin-Token` write gate | SSO/RBAC, audit log, mTLS or identity proxy |
+| Unauthorized management write | Route takeover or false blocking | `X-Admin-Token` write gate; multi-token RBAC with actor labels and readonly role; audit log for successful writes | SSO/OIDC, mTLS or identity proxy, SCIM |
 | Malicious threat feed import | False positives or broad blocks | Validation, route-scoped enforcement | Source signing, feed confidence, staged promotion |
 | State file corruption | Startup failure or stale policy | JSON parse failure surfaces startup error | Database, backup, schema migration |
 | Upstream SSRF through routes | Internal network exposure | Upstream scheme validation | Upstream allowlists, egress policy |

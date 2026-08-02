@@ -12,9 +12,9 @@ proptest! {
     #[test]
     fn parse_admin_tokens_upholds_invariants(raw in ".*") {
         let tokens = parse_admin_tokens(&raw);
-        for (token, actor) in &tokens {
+        for (token, principal) in &tokens {
             prop_assert!(!token.is_empty(), "token key must never be empty");
-            prop_assert!(!actor.is_empty(), "actor value must never be empty");
+            prop_assert!(!principal.actor.is_empty(), "actor value must never be empty");
         }
     }
 }
