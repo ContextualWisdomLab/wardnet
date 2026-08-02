@@ -36,6 +36,7 @@ pub use waf_ids_core::{
 };
 
 mod credentials;
+mod suricata_eve;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
 
 #[derive(Clone)]
@@ -455,6 +456,7 @@ pub fn build_app(state: AppState) -> Router {
             "/api/threat-feeds/import/phishing-database",
             post(import_phishing_database_feed),
         )
+        .route("/api/ids/suricata/eve", post(import_suricata_eve))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -1095,6 +1097,95 @@ async fn import_threat_feed(
 
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Ingest Suricata EVE JSON (single object, array, or NDJSON). Admin-auth only.
+/// Maps `event_type=alert` records into gateway security events for SOC export.
+#[derive(Debug, Serialize)]
+struct SuricataEveImportResult {
+    accepted_alerts: usize,
+    skipped_non_alerts: usize,
+    event_ids: Vec<u64>,
+}
+
+async fn import_suricata_eve(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "Suricata EVE body must be UTF-8 text",
+            );
+        }
+    };
+    let parsed = match suricata_eve::parse_suricata_eve_body(body_text) {
+        Ok(parsed) => parsed,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if parsed.alerts.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "no Suricata alert events found (event_type=alert required)",
+        );
+    }
+
+    let actor = audit_actor(&state, &headers);
+    let event_limit = state.event_limit;
+    let accepted = parsed.alerts.len();
+    let skipped_non_alerts = parsed.skipped_non_alerts;
+    match state
+        .mutate_and_persist(|data| {
+            let mut created_ids = Vec::with_capacity(accepted);
+            let ingest_now = now_unix();
+            for alert in &parsed.alerts {
+                let id = data.next_event_id;
+                data.next_event_id += 1;
+                let event = SecurityEvent {
+                    id,
+                    timestamp_unix: alert.timestamp_unix.unwrap_or(ingest_now),
+                    client_ip: alert.client_ip,
+                    route_id: None,
+                    action: alert.action.clone(),
+                    reason: alert.reason.clone(),
+                    score: alert.score,
+                    path: alert.path.clone(),
+                };
+                println!("{}", security_event_log_line(&event));
+                data.events.push(event);
+                created_ids.push(id);
+            }
+            enforce_event_limit(data, event_limit);
+            // Only report IDs still retained after the event ring buffer trim.
+            let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect();
+            let event_ids: Vec<u64> = created_ids
+                .into_iter()
+                .filter(|id| retained.contains(id))
+                .collect();
+            record_successful_audit_log(
+                data,
+                actor,
+                "import_suricata_eve",
+                "ids_suricata",
+                format!("{accepted}_alerts"),
+            );
+            SuricataEveImportResult {
+                accepted_alerts: accepted,
+                skipped_non_alerts,
+                event_ids,
+            }
+        })
+        .await
+    {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
@@ -1910,6 +2001,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>Threat feeds</h2><div id="feedsBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Suricata IDS ingest</h2>
+      <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
+    </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
       <div class="row">
@@ -3722,6 +3816,90 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn suricata_eve_ingest_maps_alerts_to_security_events() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ids/suricata/eve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"event_type":"alert","src_ip":"203.0.113.50","alert":{"signature":"x","severity":1}}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let ndjson = r#"
+{"event_type":"stats"}
+{"event_type":"alert","src_ip":"203.0.113.50","dest_ip":"198.51.100.1","dest_port":80,"alert":{"signature":"ET WEB_SERVER SQLi","category":"Web Application Attack","severity":1},"http":{"url":"/x?id=1"}}
+"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ids/suricata/eve")
+                .header("content-type", "application/x-ndjson")
+                .header("x-admin-token", "secret")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["accepted_alerts"], 1);
+        assert_eq!(body["skipped_non_alerts"], 1);
+        assert_eq!(body["event_ids"].as_array().unwrap().len(), 1);
+
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        let ingested = events
+            .iter()
+            .find(|e| e.reason.contains("ET WEB_SERVER SQLi"))
+            .expect("suricata alert event");
+        assert_eq!(ingested.action, "block");
+        assert_eq!(ingested.score, 80);
+        assert_eq!(ingested.path, "/x?id=1");
+        assert_eq!(ingested.client_ip, Some("203.0.113.50".parse().unwrap()));
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/audit-logs")
+                    .header("x-admin-token", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit
+                .iter()
+                .any(|entry| entry.action == "import_suricata_eve")
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/ids/suricata/eve")
+        );
     }
 
     #[tokio::test]
