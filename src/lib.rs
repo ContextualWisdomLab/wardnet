@@ -1111,6 +1111,8 @@ struct SuricataEveImportResult {
     accepted_alerts: usize,
     skipped_non_alerts: usize,
     event_ids: Vec<u64>,
+    /// DNSBL / threat-indicator rows written so gateway scoring enforces engine hits.
+    enforcement_hints: usize,
 }
 
 async fn import_suricata_eve(
@@ -1148,6 +1150,7 @@ async fn import_suricata_eve(
     match state
         .mutate_and_persist(|data| {
             let mut created_ids = Vec::with_capacity(accepted);
+            let mut enforcement_hints = 0usize;
             let ingest_now = now_unix();
             for alert in &parsed.alerts {
                 let id = data.next_event_id;
@@ -1165,6 +1168,16 @@ async fn import_suricata_eve(
                 println!("{}", security_event_log_line(&event));
                 data.events.push(event);
                 created_ids.push(id);
+                enforcement_hints =
+                    enforcement_hints.saturating_add(apply_engine_enforcement_hints(
+                        data,
+                        "engine:suricata",
+                        &alert.action,
+                        alert.client_ip,
+                        &alert.path,
+                        &alert.reason,
+                        alert.score,
+                    ));
             }
             enforce_event_limit(data, event_limit);
             // Only report IDs still retained after the event ring buffer trim.
@@ -1184,6 +1197,7 @@ async fn import_suricata_eve(
                 accepted_alerts: accepted,
                 skipped_non_alerts,
                 event_ids,
+                enforcement_hints,
             }
         })
         .await
@@ -1200,6 +1214,8 @@ struct CorazaAuditImportResult {
     accepted_hits: usize,
     skipped: usize,
     event_ids: Vec<u64>,
+    /// DNSBL / threat-indicator rows written so gateway scoring enforces engine hits.
+    enforcement_hints: usize,
 }
 
 async fn import_coraza_audit(
@@ -1237,6 +1253,7 @@ async fn import_coraza_audit(
     match state
         .mutate_and_persist(|data| {
             let mut created_ids = Vec::with_capacity(accepted);
+            let mut enforcement_hints = 0usize;
             let ingest_now = now_unix();
             for hit in &parsed.hits {
                 let id = data.next_event_id;
@@ -1254,6 +1271,16 @@ async fn import_coraza_audit(
                 println!("{}", security_event_log_line(&event));
                 data.events.push(event);
                 created_ids.push(id);
+                enforcement_hints =
+                    enforcement_hints.saturating_add(apply_engine_enforcement_hints(
+                        data,
+                        "engine:coraza",
+                        &hit.action,
+                        hit.client_ip,
+                        &hit.path,
+                        &hit.reason,
+                        hit.score,
+                    ));
             }
             enforce_event_limit(data, event_limit);
             let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect();
@@ -1272,6 +1299,7 @@ async fn import_coraza_audit(
                 accepted_hits: accepted,
                 skipped,
                 event_ids,
+                enforcement_hints,
             }
         })
         .await
@@ -1279,6 +1307,81 @@ async fn import_coraza_audit(
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
+}
+
+/// Feed proven-engine hits into gateway scoring: DNSBL for client IPs and
+/// threat indicators for IP/path. Only block-grade hits become enforcement hints.
+fn apply_engine_enforcement_hints(
+    data: &mut AppData,
+    source: &str,
+    action: &str,
+    client_ip: Option<IpAddr>,
+    path: &str,
+    reason: &str,
+    score: u16,
+) -> usize {
+    if action != "block" && score < BLOCK_SCORE {
+        return 0;
+    }
+    const TTL_SECONDS: u64 = 3_600;
+    let mut written = 0usize;
+    let severity = if score >= 80 {
+        Severity::High
+    } else {
+        Severity::Medium
+    };
+    let reason = {
+        let trimmed = reason.trim();
+        if trimmed.len() > 200 {
+            format!("{}…", &trimmed[..199])
+        } else if trimmed.is_empty() {
+            format!("{source} engine hit")
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    if let Some(ip) = client_ip {
+        let dnsbl = DnsblEntry {
+            address: ip,
+            code: "127.0.0.2".to_string(),
+            reason: reason.clone(),
+            source: source.to_string(),
+            ttl_seconds: TTL_SECONDS,
+            prefix_len: None,
+        };
+        if validate_dnsbl(&dnsbl).is_ok() {
+            upsert_dnsbl(&mut data.dnsbl, dnsbl);
+            written += 1;
+        }
+        let ip_indicator = ThreatIndicator {
+            value: ip.to_string(),
+            indicator_type: "client_ip".to_string(),
+            severity: severity.clone(),
+            source: source.to_string(),
+            ttl_seconds: TTL_SECONDS,
+        };
+        if validate_threat(&ip_indicator).is_ok() {
+            upsert_threat(&mut data.threats, ip_indicator);
+            written += 1;
+        }
+    }
+
+    let path_only = path.split('?').next().unwrap_or(path).trim();
+    if path_only.starts_with('/') && path_only.len() > 1 {
+        let path_indicator = ThreatIndicator {
+            value: path_only.to_string(),
+            indicator_type: "path".to_string(),
+            severity,
+            source: source.to_string(),
+            ttl_seconds: TTL_SECONDS,
+        };
+        if validate_threat(&path_indicator).is_ok() {
+            upsert_threat(&mut data.threats, path_indicator);
+            written += 1;
+        }
+    }
+    written
 }
 
 async fn import_phishing_database_feed(
@@ -2095,7 +2198,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
     </section>
     <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
-      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches and interrupted transactions become SOC events (run Coraza outside; do not invent WAF rules here).</p>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -4042,6 +4145,7 @@ mod tests {
         let body: serde_json::Value = json_body(response).await;
         assert_eq!(body["accepted_hits"], 1);
         assert_eq!(body["event_ids"].as_array().unwrap().len(), 1);
+        assert!(body["enforcement_hints"].as_u64().unwrap() >= 1);
 
         let events: Vec<SecurityEvent> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
@@ -4053,6 +4157,37 @@ mod tests {
         assert_eq!(ingested.path, "/search?q=1'+OR+1=1");
         assert_eq!(ingested.client_ip, Some("203.0.113.77".parse().unwrap()));
         assert_eq!(ingested.timestamp_unix, 1_718_454_896);
+
+        // Engine hit feeds DNSBL + client_ip indicators so gateway block mode enforces.
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "search-block",
+                    "path_prefix": "/search",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/search?q=1", "203.0.113.77"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/search?q=1", "198.51.100.9"),
+        )
+        .await;
+        assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
 
         let audit: Vec<AuditLogEntry> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
