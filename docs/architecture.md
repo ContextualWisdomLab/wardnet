@@ -44,7 +44,7 @@ flowchart LR
 ## Near-Term Integrations
 
 - **WAF**: Coraza/OWASP CRS adapter should produce anomaly scores and matched rule metadata. The gateway should consume those scores instead of replacing CRS.
-- **IDS**: Suricata EVE JSON ingest should create `SecurityEvent` records and correlate them with gateway route/client context.
+- **IDS**: Suricata EVE JSON/NDJSON ingest is available at `POST /api/ids/suricata/eve` (admin token). Alert records become `SecurityEvent` rows for SOC export/KPI; full route correlation and live EVE tailing remain follow-ups.
 - **Threat Intelligence**: STIX/TAXII, MISP, and OpenCTI importers should update `ThreatIndicator` and `DnsblEntry` records with source, TTL, and confidence.
 - **DNSBL Serving**: Hickory DNS should serve authoritative DNSBL responses directly after zone export semantics stabilize.
 - **AI SOC**: AI triage should summarize events, map likely ATT&CK tactics, and recommend actions. Enforcement-changing recommendations require human approval.

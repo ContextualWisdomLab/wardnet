@@ -1238,6 +1238,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "RFC 5782-style DNSBL zone export for buyer lab DNS validation",
             true,
         ),
+        buyer_evidence_endpoint(
+            "suricata_eve_ingest",
+            "POST",
+            "/api/ids/suricata/eve",
+            "application/json",
+            "Suricata EVE JSON/NDJSON alert ingest into SOC security events (admin-auth)",
+            false,
+        ),
     ]
 }
 

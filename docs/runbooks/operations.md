@@ -92,6 +92,6 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - SSO/RBAC and immutable admin audit logging
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
 - Coraza/OWASP CRS WAF adapter
-- Suricata EVE ingest for IDS events
+- Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - STIX/TAXII, MISP, or OpenCTI feed import
 - human approval workflow for AI SOC recommendations that change enforcement
