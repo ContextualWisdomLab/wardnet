@@ -30,7 +30,7 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 
 - Org rule: do **not** read config/secrets from raw environment variables (`std::env::var` / `os.getenv`) at runtime. Read them from a KV / credential registry. Org Actions secrets (e.g. `OPENAI_API_KEY`) flow **into** the KV via a bootstrap/CI step; runtime reads from the KV — env is only transport into the KV, never the runtime source.
 - Reference implementation: xtrmLLMBatchPython's pgcrypto-encrypted Postgres credential registry (`get_credential(name)`). Reuse that pattern (a DB-backed KV is fine) unless a dedicated KV is adopted.
-- **Known deviation to migrate:** `src/main.rs` currently reads secrets/config directly via `std::env::var` — auth tokens `ADMIN_TOKEN` / `ADMIN_TOKENS` plus operational config (`BIND_ADDR`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, `EVENT_LIMIT`, `RATE_LIMIT`). Move the secret-bearing values (the admin tokens first) behind a `get_credential`-style KV lookup; env may remain only as the bootstrap transport that seeds the KV.
+- **Secrets path:** Admin tokens (`ADMIN_TOKEN` / `ADMIN_TOKENS`, optional `WAF_IDS_CREDENTIALS_PATH` JSON) bootstrap a process-local `CredentialRegistry` (`get_credential`) at startup; runtime auth reads the registry, not env. **Remaining deviation:** non-secret operational config (`BIND_ADDR`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, `EVENT_LIMIT`, `RATE_LIMIT`, …) still reads env directly — migrate those behind the same registry/KV when a durable credential store is adopted.
 
 ### This repo's role in the ecosystem
 

@@ -35,6 +35,9 @@ pub use waf_ids_core::{
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
+mod credentials;
+pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppData>>,
@@ -45,6 +48,8 @@ pub struct AppState {
     // RBAC: multiple admin tokens each mapped to an actor name for audit trails.
     // Empty falls back to the single `admin_token`. Never logged as the actor.
     admin_tokens: HashMap<String, String>,
+    /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
+    credentials_source: CredentialSource,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
@@ -114,6 +119,7 @@ impl AppState {
                 .expect("failed to build no-redirect feed client"),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
+            credentials_source: CredentialSource::None,
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
@@ -160,6 +166,12 @@ impl AppState {
     /// precedence over the single `admin_token`. Builder-style.
     pub fn with_admin_tokens(mut self, tokens: HashMap<String, String>) -> Self {
         self.admin_tokens = tokens;
+        self
+    }
+
+    /// Record how admin secrets were bootstrapped into the process (never values).
+    pub fn with_credentials_source(mut self, source: CredentialSource) -> Self {
+        self.credentials_source = source;
         self
     }
 
@@ -229,6 +241,8 @@ impl AppState {
             },
             dnsbl_origin: self.dnsbl_origin.clone(),
             event_limit: self.event_limit,
+            credentials_source: self.credentials_source.as_str().to_string(),
+            admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
         }
     }
 }
@@ -346,6 +360,10 @@ pub struct HealthStatus {
     pub persistence: String,
     pub dnsbl_origin: String,
     pub event_limit: usize,
+    /// Bootstrap origin for admin secrets: `file`, `env`, or `none` (never secret values).
+    pub credentials_source: String,
+    /// True when at least one admin write token is configured.
+    pub admin_auth_configured: bool,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -2096,8 +2114,20 @@ pub async fn run_from_env(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    // Secret-bearing values go through the credential registry (env/file are
+    // bootstrap transports only). Operational config remains env for now.
+    let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
+        .ok()
+        .map(PathBuf::from);
+    let credentials = CredentialRegistry::bootstrap_secrets(
+        credentials_path.as_deref(),
+        std::env::var("ADMIN_TOKEN").ok(),
+        std::env::var("ADMIN_TOKENS").ok(),
+    )?;
     let config = AppConfig {
-        admin_token: std::env::var("ADMIN_TOKEN").ok(),
+        admin_token: credentials
+            .get_credential(CRED_ADMIN_TOKEN)
+            .map(str::to_owned),
         state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
         dnsbl_origin: std::env::var("DNSBL_ORIGIN")
             .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
@@ -2109,7 +2139,11 @@ pub async fn run_from_env(
         std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
         60,
     )?;
-    let admin_tokens = parse_admin_tokens(&std::env::var("ADMIN_TOKENS").unwrap_or_default());
+    let admin_tokens = parse_admin_tokens(
+        credentials
+            .get_credential(CRED_ADMIN_TOKENS)
+            .unwrap_or_default(),
+    );
     let max_body_bytes = parse_u64_env(
         "MAX_BODY_BYTES",
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
@@ -2126,6 +2160,7 @@ pub async fn run_from_env(
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
+        .with_credentials_source(credentials.source())
         .with_max_body_size(max_body_bytes);
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
@@ -2164,6 +2199,7 @@ mod tests {
             "ADMIN_TOKEN",
             "ADMIN_TOKENS",
             "WAF_IDS_STATE_PATH",
+            "WAF_IDS_CREDENTIALS_PATH",
             "DNSBL_ORIGIN",
             "EVENT_LIMIT",
             "RATE_LIMIT",
@@ -4817,8 +4853,18 @@ mod tests {
                 persistence: "file".to_string(),
                 dnsbl_origin: "dnsbl.example".to_string(),
                 event_limit: 25,
+                credentials_source: "none".to_string(),
+                admin_auth_configured: false,
             }
         );
+
+        let authed = state
+            .clone()
+            .with_admin_tokens(HashMap::from([("tok".to_string(), "operator".to_string())]))
+            .with_credentials_source(CredentialSource::File);
+        let health = authed.health_status();
+        assert_eq!(health.credentials_source, "file");
+        assert!(health.admin_auth_configured);
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
