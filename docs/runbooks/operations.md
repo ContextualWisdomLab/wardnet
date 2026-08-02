@@ -93,5 +93,5 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
 - In-process Coraza embedding (HTTP audit ingest at `POST /api/waf/coraza/audit` already fuses block hits into DNSBL/`client_ip` indicators for gateway enforcement)
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
-- Live MISP REST pull or OpenCTI feed import (HTTP STIX/MISP document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, and `POST /api/threat-intel/taxii/poll`)
+- Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement

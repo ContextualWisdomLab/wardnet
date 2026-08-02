@@ -1284,6 +1284,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "TAXII 2.1 collection objects poll into threat indicators and DNSBL (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "opencti_observable_ingest",
+            "POST",
+            "/api/threat-intel/opencti",
+            "application/json",
+            "OpenCTI observable/indicator JSON ingest into threat indicators and DNSBL (admin-auth)",
+            false,
+        ),
     ]
 }
 
