@@ -1145,13 +1145,14 @@ async fn import_suricata_eve(
     let skipped_non_alerts = parsed.skipped_non_alerts;
     match state
         .mutate_and_persist(|data| {
-            let mut event_ids = Vec::with_capacity(accepted);
+            let mut created_ids = Vec::with_capacity(accepted);
+            let ingest_now = now_unix();
             for alert in &parsed.alerts {
                 let id = data.next_event_id;
                 data.next_event_id += 1;
                 let event = SecurityEvent {
                     id,
-                    timestamp_unix: now_unix(),
+                    timestamp_unix: alert.timestamp_unix.unwrap_or(ingest_now),
                     client_ip: alert.client_ip,
                     route_id: None,
                     action: alert.action.clone(),
@@ -1161,9 +1162,15 @@ async fn import_suricata_eve(
                 };
                 println!("{}", security_event_log_line(&event));
                 data.events.push(event);
-                event_ids.push(id);
+                created_ids.push(id);
             }
             enforce_event_limit(data, event_limit);
+            // Only report IDs still retained after the event ring buffer trim.
+            let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect();
+            let event_ids: Vec<u64> = created_ids
+                .into_iter()
+                .filter(|id| retained.contains(id))
+                .collect();
             record_successful_audit_log(
                 data,
                 actor,

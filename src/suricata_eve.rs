@@ -14,6 +14,9 @@ pub struct SuricataIngestedAlert {
     pub reason: String,
     pub score: u16,
     pub path: String,
+    /// Event occurrence time from EVE `timestamp` when parseable; otherwise `None`
+    /// so the gateway can fall back to ingest time.
+    pub timestamp_unix: Option<u64>,
 }
 
 /// Parse a single Suricata EVE JSON value into an ingested alert.
@@ -97,13 +100,82 @@ pub fn suricata_alert_from_value(value: &serde_json::Value) -> Option<SuricataIn
             format!("suricata://{dest}:{port}")
         });
 
+    let timestamp_unix = value
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(parse_suricata_timestamp);
+
     Some(SuricataIngestedAlert {
         client_ip,
         action,
         reason,
         score,
         path,
+        timestamp_unix,
     })
+}
+
+/// Parse common Suricata EVE timestamp forms to Unix seconds (UTC).
+///
+/// Accepts `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds and a
+/// trailing `Z`, `+0000`, or `+00:00` timezone. Other offsets are treated as UTC
+/// (lab ingest); unparseable values return `None`.
+pub fn parse_suricata_timestamp(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.len() < 19 {
+        return None;
+    }
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    if s.as_bytes().get(4) != Some(&b'-') {
+        return None;
+    }
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    if s.as_bytes().get(7) != Some(&b'-') {
+        return None;
+    }
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let sep = s.as_bytes().get(10).copied()?;
+    if sep != b'T' && sep != b' ' {
+        return None;
+    }
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    if s.as_bytes().get(13) != Some(&b':') {
+        return None;
+    }
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    if s.as_bytes().get(16) != Some(&b':') {
+        return None;
+    }
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    days_from_civil(year, month, day).and_then(|days| {
+        let secs = i64::from(days) * 86_400
+            + i64::from(hour) * 3_600
+            + i64::from(minute) * 60
+            + i64::from(second);
+        u64::try_from(secs).ok()
+    })
+}
+
+/// Howard Hinnant civil-from-days inverse: days since Unix epoch for a UTC date.
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i32> {
+    let mut y = year;
+    let m = month as i32;
+    let d = day as i32;
+    y -= i32::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u32;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u32;
+    Some(era * 146_097 + doe as i32 - 719_468)
 }
 
 /// Result of parsing a Suricata EVE body (alerts kept; other EVE types skipped).
@@ -202,6 +274,7 @@ mod tests {
     #[test]
     fn maps_high_severity_http_alert_to_block() {
         let raw = r#"{
+          "timestamp": "2024-06-15T12:34:56.123456+0000",
           "event_type": "alert",
           "src_ip": "203.0.113.10",
           "dest_ip": "198.51.100.1",
@@ -224,6 +297,36 @@ mod tests {
         assert_eq!(alert.path, "/search?q=1'+OR+1%3D1");
         assert!(alert.reason.contains("SQL Injection"));
         assert!(alert.reason.contains("Web Application Attack"));
+        // 2024-06-15T12:34:56Z
+        assert_eq!(alert.timestamp_unix, Some(1_718_454_896));
+    }
+
+    #[test]
+    fn parse_suricata_timestamp_handles_common_eve_forms() {
+        assert_eq!(
+            parse_suricata_timestamp("2024-06-15T12:34:56.123456+0000"),
+            Some(1_718_454_896)
+        );
+        assert_eq!(
+            parse_suricata_timestamp("2024-06-15T12:34:56Z"),
+            Some(1_718_454_896)
+        );
+        assert!(parse_suricata_timestamp("not-a-timestamp").is_none());
+    }
+
+    #[test]
+    fn parse_suricata_eve_body_never_panics_on_arbitrary_text() {
+        for sample in [
+            "",
+            "{",
+            "[]",
+            "null",
+            "{\"event_type\":\"alert\"}",
+            "\u{0000}\u{ffff}💥",
+            "{\"event_type\":\"alert\",\"alert\":{\"signature\":\"x\"}}\n{",
+        ] {
+            let _ = parse_suricata_eve_body(sample);
+        }
     }
 
     #[test]
