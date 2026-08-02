@@ -1260,6 +1260,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "Coraza/OWASP CRS WAF audit JSON/NDJSON ingest into SOC security events (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "stix_indicator_ingest",
+            "POST",
+            "/api/threat-intel/stix",
+            "application/json",
+            "STIX 2.x indicator/bundle ingest into threat indicators and DNSBL (admin-auth)",
+            false,
+        ),
     ]
 }
 
