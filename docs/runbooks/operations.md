@@ -12,6 +12,35 @@ cargo run
 
 Open `http://127.0.0.1:8080/admin`.
 
+### Admin secrets (credential registry)
+
+Secret-bearing admin tokens are loaded into a process-local **credential registry**
+at bootstrap. Runtime auth reads from that registry — not by re-reading the env
+on each request.
+
+| Bootstrap transport | Variable / path | Notes |
+| --- | --- | --- |
+| Env (dev / CI) | `ADMIN_TOKEN`, `ADMIN_TOKENS` | Still supported; seeds the registry only |
+| Credentials file (preferred for lab/prod packaging) | `WAF_IDS_CREDENTIALS_PATH` | JSON object with `admin_token` and/or `admin_tokens` keys; file values win per key over env |
+
+Example credentials file:
+
+```json
+{
+  "admin_token": "replace-me",
+  "admin_tokens": "ops-token:ops,readonly-token:readonly"
+}
+```
+
+```bash
+WAF_IDS_CREDENTIALS_PATH=./credentials.local.json \
+WAF_IDS_STATE_PATH=./waf-ids-state.local.json \
+cargo run
+```
+
+Health reports `credentials_source` (`file` / `env` / `none`) and
+`admin_auth_configured` (boolean) without exposing secret values.
+
 ## Health Check
 
 ```bash
@@ -24,6 +53,8 @@ Expected fields:
 - `persistence`: `memory` or `file`
 - `dnsbl_origin`: configured DNSBL origin without a trailing dot
 - `event_limit`: retained security event count
+- `credentials_source`: `file`, `env`, or `none`
+- `admin_auth_configured`: whether any admin write token is configured
 
 ## Smoke Test
 

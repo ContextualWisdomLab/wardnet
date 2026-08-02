@@ -28,7 +28,7 @@
 | Upstream SSRF through routes | Internal network exposure | Upstream scheme validation | Upstream allowlists, egress policy |
 | Gateway DoS | Availability loss | Rust memory safety, event retention limit | Rate limits, body limits, async event sink |
 | DNSBL abuse | Reputation damage | Loopback response-code validation | Authoritative DNS service, signing, publisher workflow |
-| Secret disclosure | Admin compromise | Support bundle excludes admin token | Secret manager, redaction tests, access review |
+| Secret disclosure | Admin compromise | Support bundle excludes admin token; secrets bootstrapped into credential registry (`WAF_IDS_CREDENTIALS_PATH` preferred over long-lived env); health exposes source label only | External secret manager / SSO, rotation, access review |
 
 ## Human Approval Boundary
 
