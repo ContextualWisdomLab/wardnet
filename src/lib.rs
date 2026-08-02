@@ -51,9 +51,9 @@ pub struct AppState {
     http: reqwest::Client,
     feed_http: reqwest::Client,
     admin_token: Option<String>,
-    // RBAC: multiple admin tokens each mapped to an actor name for audit trails.
-    // Empty falls back to the single `admin_token`. Never logged as the actor.
-    admin_tokens: HashMap<String, String>,
+    // RBAC: multiple admin tokens each mapped to an actor + write capability.
+    // Empty falls back to the single `admin_token`. Token values are never logged.
+    admin_tokens: HashMap<String, AdminPrincipal>,
     /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
     credentials_source: CredentialSource,
     state_path: Option<PathBuf>,
@@ -168,9 +168,9 @@ impl AppState {
         self
     }
 
-    /// Configure RBAC admin tokens (token -> actor name). A non-empty map takes
+    /// Configure RBAC admin tokens (token -> principal). A non-empty map takes
     /// precedence over the single `admin_token`. Builder-style.
-    pub fn with_admin_tokens(mut self, tokens: HashMap<String, String>) -> Self {
+    pub fn with_admin_tokens(mut self, tokens: HashMap<String, AdminPrincipal>) -> Self {
         self.admin_tokens = tokens;
         self
     }
@@ -181,13 +181,19 @@ impl AppState {
         self
     }
 
-    /// The actor name mapped to the request's `X-Admin-Token`, if that token is a
-    /// configured RBAC token.
-    fn actor_for_token(&self, headers: &HeaderMap) -> Option<String> {
+    /// The principal mapped to the request's `X-Admin-Token`, if configured.
+    fn principal_for_token(&self, headers: &HeaderMap) -> Option<&AdminPrincipal> {
         headers
             .get("x-admin-token")
             .and_then(|value| value.to_str().ok())
-            .and_then(|token| self.admin_tokens.get(token).cloned())
+            .and_then(|token| self.admin_tokens.get(token))
+    }
+
+    /// The actor name mapped to the request's `X-Admin-Token`, if that token is a
+    /// configured RBAC token.
+    fn actor_for_token(&self, headers: &HeaderMap) -> Option<String> {
+        self.principal_for_token(headers)
+            .map(|principal| principal.actor.clone())
     }
 
     /// Records one gateway request for `client_ip` and returns `true` if it is
@@ -966,8 +972,13 @@ async fn list_events(
     Json(events)
 }
 
-async fn list_audit_logs(State(state): State<AppState>) -> Json<Vec<AuditLogEntry>> {
-    Json(state.inner.read().await.audit_logs.clone())
+async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    // Audit logs are operator-sensitive: any valid admin principal may read
+    // (including readonly); unauthenticated callers are rejected when auth is on.
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    Json(state.inner.read().await.audit_logs.clone()).into_response()
 }
 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
@@ -2316,13 +2327,44 @@ fn security_event_log_line(event: &SecurityEvent) -> String {
     serde_json::to_string(event).expect("SecurityEvent is JSON-serializable")
 }
 
+/// RBAC principal bound to an admin token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminPrincipal {
+    pub actor: String,
+    /// When false, the token may authenticate for read-only operator surfaces
+    /// (e.g. audit logs) but cannot perform management writes.
+    pub can_write: bool,
+}
+
+/// True when the request presents a valid admin credential (write or readonly).
+/// When no admin credentials are configured, returns true (auth disabled).
+fn admin_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok());
+    if !state.admin_tokens.is_empty() {
+        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+    }
+    let Some(expected) = state.admin_token.as_deref() else {
+        return true;
+    };
+    presented.is_some_and(|actual| actual == expected)
+}
+
+/// True when the request may perform management **writes**.
+/// Readonly RBAC tokens authenticate but cannot write.
 fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     let presented = headers
         .get("x-admin-token")
         .and_then(|value| value.to_str().ok());
     // RBAC tokens take precedence when configured.
     if !state.admin_tokens.is_empty() {
-        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+        return presented.is_some_and(|token| {
+            state
+                .admin_tokens
+                .get(token)
+                .is_some_and(|principal| principal.can_write)
+        });
     }
     // Fallback: single shared token (None means auth is disabled).
     let Some(expected) = state.admin_token.as_deref() else {
@@ -2346,21 +2388,46 @@ fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
         .to_string()
 }
 
-/// Parses an `ADMIN_TOKENS` string into a token -> actor map. Format is
-/// comma-separated `token` or `token:actor` items; an item without an explicit
-/// actor is labelled `admin`. Blank items and blank tokens are ignored.
-pub fn parse_admin_tokens(raw: &str) -> HashMap<String, String> {
+/// Parses an `ADMIN_TOKENS` string into a token -> [`AdminPrincipal`] map.
+///
+/// Format is comma-separated items:
+/// - `token` → actor `admin`, write enabled
+/// - `token:actor` → named actor, write enabled
+/// - `token:actor:readonly` (or `:read`) → named actor, write **disabled**
+/// - `token:actor:admin` / `:write` / `:writer` → named actor, write enabled
+///
+/// Blank items and blank tokens are ignored. Unknown role labels default to
+/// write-enabled so legacy `token:actor` configs keep full access.
+pub fn parse_admin_tokens(raw: &str) -> HashMap<String, AdminPrincipal> {
     raw.split(',')
         .filter_map(|item| {
-            let (token, actor) = match item.split_once(':') {
-                Some((token, actor)) => (token.trim(), actor.trim()),
-                None => (item.trim(), ""),
-            };
+            let item = item.trim();
+            if item.is_empty() {
+                return None;
+            }
+            let mut parts = item.splitn(3, ':').map(str::trim);
+            let token = parts.next().unwrap_or("");
             if token.is_empty() {
                 return None;
             }
-            let actor = if actor.is_empty() { "admin" } else { actor };
-            Some((token.to_string(), actor.to_string()))
+            let actor_raw = parts.next().unwrap_or("");
+            let role_raw = parts.next().unwrap_or("");
+            let actor = if actor_raw.is_empty() {
+                "admin".to_string()
+            } else {
+                actor_raw.to_string()
+            };
+            if actor.is_empty() {
+                return None;
+            }
+            let can_write = match role_raw.to_ascii_lowercase().as_str() {
+                "" | "admin" | "write" | "writer" | "operator" => true,
+                "readonly" | "read" | "reader" | "ro" => false,
+                // Unknown role: fail open to write so mis-typed labels do not
+                // silently strand operators without recovery — document known roles.
+                _ => true,
+            };
+            Some((token.to_string(), AdminPrincipal { actor, can_write }))
         })
         .collect()
 }
@@ -2641,7 +2708,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
 <header class="app">
   <h1>ContextualWisdomLab WAF/IDS/AI SOC Gateway</h1>
   <div class="toolbar">
-    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (if set)" autocomplete="off" aria-label="Admin token for write operations">
+    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (write or readonly)" autocomplete="off" aria-label="Admin token for management writes and audit log reads">
     <button class="btn-ghost" id="hcToggle" aria-pressed="false">High contrast</button>
     <button class="btn-ghost" id="refreshBtn">Refresh</button>
   </div>
@@ -2784,8 +2851,14 @@ async function loadFeeds(){const f=await getJSON('/api/threat-feeds/freshness');
   $('feedsBody').innerHTML=table('Threat feeds',['Feed','Source','Threats','DNSBL','Freshness'],f.map(x=>[esc(x.feed_id),esc(x.source),esc(x.threat_count),esc(x.dnsbl_count),x.stale?badge('Stale','b-fail'):badge('Fresh','b-pass')]));}
 async function loadEvents(){const e=await getJSON('/api/events');
   $('eventsBody').innerHTML=table('Recent events',['ID','Client IP','Action','Score','Path'],e.slice(0,25).map(x=>[esc(x.id),esc(x.client_ip??'—'),esc(x.action),esc(x.score),esc(x.path)]));}
-async function loadAudit(){const a=await getJSON('/api/audit-logs');
-  $('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));}
+async function loadAudit(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/audit-logs',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const a=await r.json();
+  $('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));
+}
 async function loadRaw(id,url,json){try{const t=json?JSON.stringify(await getJSON(url),null,2):await getText(url);$(id).textContent=t&&t.trim()?t:'(empty)';}catch(e){$(id).textContent='Error: '+e.message;}}
 async function refresh(){await Promise.allSettled([
   guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),
@@ -3230,6 +3303,15 @@ mod tests {
             .unwrap()
     }
 
+    fn authed_empty_request(method: Method, uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-admin-token", token)
+            .body(Body::empty())
+            .unwrap()
+    }
+
     fn json_request<T: Serialize>(
         method: Method,
         uri: &str,
@@ -3339,40 +3421,113 @@ mod tests {
 
     #[test]
     fn parse_admin_tokens_maps_tokens_to_actors() {
-        let map = parse_admin_tokens("tokA:alice, tokB:bob ,tokC, ,:noname, tokD:");
-        assert_eq!(map.get("tokA").map(String::as_str), Some("alice"));
-        assert_eq!(map.get("tokB").map(String::as_str), Some("bob"));
+        let map = parse_admin_tokens(
+            "tokA:alice, tokB:bob ,tokC, ,:noname, tokD:, tokR:reader:readonly, tokW:writer:write",
+        );
+        assert_eq!(map.get("tokA").map(|p| p.actor.as_str()), Some("alice"));
+        assert!(map.get("tokA").is_some_and(|p| p.can_write));
+        assert_eq!(map.get("tokB").map(|p| p.actor.as_str()), Some("bob"));
         // No explicit actor, or an empty actor, is labelled "admin".
-        assert_eq!(map.get("tokC").map(String::as_str), Some("admin"));
-        assert_eq!(map.get("tokD").map(String::as_str), Some("admin"));
+        assert_eq!(map.get("tokC").map(|p| p.actor.as_str()), Some("admin"));
+        assert_eq!(map.get("tokD").map(|p| p.actor.as_str()), Some("admin"));
+        assert_eq!(map.get("tokR").map(|p| p.actor.as_str()), Some("reader"));
+        assert!(map.get("tokR").is_some_and(|p| !p.can_write));
+        assert_eq!(map.get("tokW").map(|p| p.actor.as_str()), Some("writer"));
+        assert!(map.get("tokW").is_some_and(|p| p.can_write));
         // Blank items and blank tokens (":noname") are ignored.
-        assert_eq!(map.len(), 4);
+        assert_eq!(map.len(), 6);
     }
 
     #[test]
     fn rbac_tokens_authorize_and_name_the_actor() {
-        let mut tokens = HashMap::new();
-        tokens.insert("tokA".to_string(), "alice".to_string());
+        let tokens = parse_admin_tokens("tokA:alice,tokR:reader:readonly");
         let state = AppState::seeded(None).with_admin_tokens(tokens);
 
         let mut valid = HeaderMap::new();
         valid.insert("x-admin-token", "tokA".parse().unwrap());
+        assert!(admin_authenticated(&state, &valid));
         assert!(admin_authorized(&state, &valid));
         assert_eq!(audit_actor(&state, &valid), "alice");
+
+        // Readonly authenticates but cannot write.
+        let mut readonly = HeaderMap::new();
+        readonly.insert("x-admin-token", "tokR".parse().unwrap());
+        assert!(admin_authenticated(&state, &readonly));
+        assert!(!admin_authorized(&state, &readonly));
+        assert_eq!(audit_actor(&state, &readonly), "reader");
 
         // A token not in the RBAC set is rejected, and never used as the actor.
         let mut wrong = HeaderMap::new();
         wrong.insert("x-admin-token", "nope".parse().unwrap());
         assert!(!admin_authorized(&state, &wrong));
+        assert!(!admin_authenticated(&state, &wrong));
         assert_eq!(audit_actor(&state, &wrong), "admin-token");
 
         // Missing token header is unauthorized under RBAC.
         assert!(!admin_authorized(&state, &HeaderMap::new()));
+        assert!(!admin_authenticated(&state, &HeaderMap::new()));
 
         // Without a matching RBAC token, audit_actor honours X-Admin-Actor.
         let mut named = HeaderMap::new();
         named.insert("x-admin-actor", "carol".parse().unwrap());
         assert_eq!(audit_actor(&state, &named), "carol");
+    }
+
+    #[tokio::test]
+    async fn readonly_token_can_read_audit_logs_but_cannot_write() {
+        let tokens = parse_admin_tokens("write:ops:admin,read:auditor:readonly");
+        let app = build_app(AppState::seeded(None).with_admin_tokens(tokens));
+
+        let denied = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("read"),
+                &serde_json::json!({
+                    "id": "ro-block",
+                    "path_prefix": "/ro",
+                    "upstream": "mock://x",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("write"),
+                &serde_json::json!({
+                    "id": "ro-block",
+                    "path_prefix": "/ro",
+                    "upstream": "mock://x",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let unauth = app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "read"),
+            )
+            .await,
+        )
+        .await;
+        assert!(logs.iter().any(|e| e.action == "upsert_route"));
+        assert!(!serde_json::to_string(&logs).unwrap().contains("write"));
+        assert!(!serde_json::to_string(&logs).unwrap().contains("read"));
     }
 
     #[test]
@@ -4113,8 +4268,14 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let logs: Vec<AuditLogEntry> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        let logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].actor, "operator@example.com");
         assert_eq!(logs[0].action, "upsert_route");
@@ -4423,8 +4584,14 @@ mod tests {
         assert_eq!(import_result.feed_id, "phishing-db-seoul");
         assert_eq!(import_result.upserted_threats, 2);
         assert_eq!(import_result.upserted_dnsbl, 2);
-        let audit_logs: Vec<AuditLogEntry> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        let audit_logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
         assert!(
             audit_logs
                 .iter()
@@ -4709,8 +4876,14 @@ mod tests {
         .await;
         assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
 
-        let audit: Vec<AuditLogEntry> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
         assert!(
             audit
                 .iter()
@@ -5131,8 +5304,14 @@ mod tests {
             app_request(&app, gateway_get_from_ip("/gateway/taxii", "203.0.113.92")).await;
         assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
 
-        let audit: Vec<AuditLogEntry> =
-            json_body(app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await).await;
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
         let taxii_audit = audit
             .iter()
             .find(|e| e.action == "poll_taxii_collection")
@@ -6440,7 +6619,7 @@ mod tests {
 
         let authed = state
             .clone()
-            .with_admin_tokens(HashMap::from([("tok".to_string(), "operator".to_string())]))
+            .with_admin_tokens(parse_admin_tokens("tok:operator"))
             .with_credentials_source(CredentialSource::File);
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");

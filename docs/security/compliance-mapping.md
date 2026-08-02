@@ -5,7 +5,7 @@ This document maps the commercial baseline to common enterprise security review 
 | Area | Baseline Evidence | Gap Before Regulated Production |
 | --- | --- | --- |
 | Secure SDLC | Rust implementation, tests, clippy, smoke script | Signed releases, SBOM, SAST/DAST gates |
-| Access Control | `ADMIN_TOKEN` for write APIs | SSO, RBAC, SCIM, MFA enforcement |
+| Access Control | `ADMIN_TOKEN` / multi-token RBAC (`token:actor:role`, including readonly) for write APIs and audit-log read | SSO/OIDC, SCIM, MFA enforcement |
 | Auditability | Security events and support bundle | Immutable admin audit log |
 | Data Protection | No default external telemetry, no secrets in support bundle | Encryption at rest, retention policy |
 | Change Control | Route-scoped monitor/block modes | Approval workflow and rollback attestations |
