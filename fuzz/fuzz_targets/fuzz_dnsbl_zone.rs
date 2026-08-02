@@ -13,13 +13,35 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use waf_ids_core::{export_dnsbl_zone, validate_dnsbl, DnsblEntry};
+
+/// A response code drawn from the raw fuzz bytes: arbitrary strings plus real IP
+/// literals (loopback, non-loopback IPv4, IPv6) so the zone A-record invariant
+/// below is exercised — a random string almost never parses as an IP.
+#[derive(Arbitrary, Debug)]
+enum Code {
+    Raw(String),
+    V4(u32),
+    Loopback(u8, u8, u8),
+    V6(u128),
+}
+
+impl Code {
+    fn into_string(self) -> String {
+        match self {
+            Code::Raw(s) => s,
+            Code::V4(v) => Ipv4Addr::from(v).to_string(),
+            Code::Loopback(a, b, c) => format!("127.{a}.{b}.{c}"),
+            Code::V6(v) => Ipv6Addr::from(v).to_string(),
+        }
+    }
+}
 
 #[derive(Arbitrary, Debug)]
 struct Entry {
     addr: u32,
-    code: String,
+    code: Code,
     reason: String,
     source: String,
     ttl: u64,
@@ -38,7 +60,7 @@ fuzz_target!(|input: Input| {
         .take(64)
         .map(|e| DnsblEntry {
             address: IpAddr::V4(Ipv4Addr::from(e.addr)),
-            code: e.code,
+            code: e.code.into_string(),
             reason: e.reason,
             source: e.source,
             ttl_seconds: e.ttl,
@@ -59,6 +81,34 @@ fuzz_target!(|input: Input| {
         zone.starts_with("$ORIGIN "),
         "zone must start with $ORIGIN directive"
     );
+
+    // Every published A-record response code is an IPv4 loopback literal
+    // (RFC 5782 / the "response code in 127.0.0.0/8" invariant). Codes outside
+    // 127/8, IPv6 literals, and unparseable strings must all be dropped. Parse
+    // by record structure from the start of the line: an A record is exactly
+    // `<name> IN A <code>` (four whitespace fields, no spaces in name or code).
+    // Matching on the substring " IN A " instead would misread a TXT line whose
+    // escaped reason/source payload merely contains that substring as an A-record.
+    for line in zone.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(_name), Some("IN"), Some("A"), Some(code), None) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        match code.parse::<IpAddr>() {
+            Ok(IpAddr::V4(v4)) => assert_eq!(
+                v4.octets()[0],
+                127,
+                "non-loopback DNSBL A-record code emitted: {code}"
+            ),
+            other => panic!("illegal DNSBL A-record code emitted: {other:?}"),
+        }
+    }
 
     // Every TXT record payload must be properly escaped: inside the wrapping
     // quotes, each `"` must be backslash-escaped. Extract the payload between
