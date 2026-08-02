@@ -840,9 +840,15 @@ pub fn score_request(
         }
     }
 
-    // Operator-configured threat indicators.
+    // Operator-configured threat indicators (and engine-fed IP/path hits).
     for indicator in threats {
-        if haystack.contains(&indicator.value.to_lowercase()) {
+        let kind = indicator.indicator_type.to_ascii_lowercase();
+        let matched = if matches!(kind.as_str(), "ip" | "client_ip" | "source_ip" | "src_ip") {
+            client_ip.is_some_and(|ip| indicator.value.parse::<IpAddr>().ok() == Some(ip))
+        } else {
+            haystack.contains(&indicator.value.to_lowercase())
+        };
+        if matched {
             score = score.saturating_add(severity_score(&indicator.severity));
             reasons.push(format!(
                 "{} indicator from {}",
@@ -1372,6 +1378,36 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn score_request_matches_client_ip_threat_indicators() {
+        let threats = vec![ThreatIndicator {
+            value: "203.0.113.50".to_string(),
+            indicator_type: "client_ip".to_string(),
+            severity: Severity::High,
+            source: "engine:coraza".to_string(),
+            ttl_seconds: 3600,
+        }];
+        let hit = score_request(
+            "/index",
+            None,
+            "",
+            Some("203.0.113.50".parse().unwrap()),
+            &threats,
+            &[],
+        );
+        assert!(hit.score >= BLOCK_SCORE);
+        assert!(hit.reason.contains("client_ip"));
+        let miss = score_request(
+            "/index",
+            None,
+            "",
+            Some("198.51.100.1".parse().unwrap()),
+            &threats,
+            &[],
+        );
+        assert_eq!(miss.score, 0);
+    }
 
     #[test]
     fn score_request_saturates_instead_of_overflowing_on_many_matches() {
