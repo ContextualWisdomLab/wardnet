@@ -6357,6 +6357,27 @@ mod tests {
     async fn load_surfaces_state_rewrite_failures() {
         use std::os::unix::fs::PermissionsExt;
 
+        // This test injects a persist failure by making a directory unwritable
+        // (mode 0o500). Root and permission-ignoring filesystems bypass DAC, so
+        // the injection cannot fire there and `AppState::load` would succeed,
+        // panicking the assertions below. Probe whether directory write-blocking
+        // is actually enforced for the current user; skip rather than fail
+        // spuriously when it is not (e.g. the suite run as root). wardnet CI runs
+        // unprivileged, so the assertions still execute there.
+        let dac_probe = temp_state_path("rewrite-dac-probe");
+        fs::create_dir_all(&dac_probe).await.unwrap();
+        std::fs::set_permissions(&dac_probe, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let dac_write_blocking_enforced = std::fs::write(dac_probe.join("probe"), b"x").is_err();
+        std::fs::set_permissions(&dac_probe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&dac_probe).await;
+        if !dac_write_blocking_enforced {
+            eprintln!(
+                "skipping load_surfaces_state_rewrite_failures: this user/filesystem does not \
+                 enforce directory write permissions (e.g. running as root)"
+            );
+            return;
+        }
+
         let read_only_parent = temp_state_path("read-only-parent");
         fs::create_dir_all(&read_only_parent).await.unwrap();
         let read_only_file = read_only_parent.join("state.json");
