@@ -29,10 +29,10 @@ ADMIN_TOKEN=replace-me docker compose up --build
 
 ## Kubernetes
 
-Review `deploy/kubernetes/waf-ids-ai-soc.yaml` before applying. Replace the placeholder admin secret with a secret-manager synchronization flow.
+Review `deploy/kubernetes/wardnet.yaml` before applying. Replace the placeholder admin secret with a secret-manager synchronization flow.
 
 ```bash
-kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
+kubectl apply -f deploy/kubernetes/wardnet.yaml
 ```
 
 ## Production Requirements
