@@ -29,7 +29,11 @@ ADMIN_TOKEN=replace-me docker compose up --build
 
 ## Kubernetes
 
-Review `deploy/kubernetes/waf-ids-ai-soc.yaml` before applying. Replace the placeholder admin secret with a secret-manager synchronization flow.
+The manifest does not include an admin Secret. Before applying it, create the
+Secret `waf-ids-ai-soc-admin` (key `ADMIN_TOKEN`) in the `waf-ids-ai-soc`
+namespace via your secret-manager synchronization flow (External Secrets
+Operator, Vault agent, or equivalent). The Deployment references it with
+`secretKeyRef` and the pod will not start until it exists.
 
 ```bash
 kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
