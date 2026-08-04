@@ -43,3 +43,11 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 - Org rule: substantive feature/process PRs should find the relevant academic papers and **commit their PDFs into the PR** (e.g. a `docs/papers/` or `references/` dir) with full citations, respecting copyright — attach the PDF only when redistribution is permissible; otherwise cite + link + summarize.
 - For this repo's domain, ground changes in the relevant literature — e.g. **load-balancing and anomaly-detection** research (WAF/IDS detection models, adaptive/DDoS-aware load balancing) for detection, routing, and rate-limiting work.
 <!-- END cwl-agent-guidance -->
+
+## Code-owner review gates — disabled (on hold)
+
+As of 2026-08-04, code-owner review requirements (`require_code_owner_reviews` in branch
+protection, `require_code_owner_review` in rulesets) are disabled across the ContextualWisdomLab
+org: there is a single maintainer (solo developer), so a code-owner approval gate can never be
+satisfied. This is ON HOLD until the org has multiple maintainers — do NOT re-enable these
+settings or add CODEOWNERS-based merge gates before then.
