@@ -42,7 +42,7 @@
 
 - [Dockerfile](../../Dockerfile)
 - [Compose stack](../../deploy/docker-compose.yml)
-- [Kubernetes manifest](../../deploy/kubernetes/waf-ids-ai-soc.yaml)
+- [Kubernetes manifest](../../deploy/kubernetes/wardnet.yaml)
 
 ## Buyer Lab Script
 

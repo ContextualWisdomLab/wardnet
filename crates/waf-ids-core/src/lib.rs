@@ -1122,7 +1122,7 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
         deployment_assets: vec![
             "Dockerfile".to_string(),
             "deploy/docker-compose.yml".to_string(),
-            "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string(),
+            "deploy/kubernetes/wardnet.yaml".to_string(),
         ],
         buyer_evidence: vec![
             "docs/commercial/20b-krw-sale-readiness.md".to_string(),
