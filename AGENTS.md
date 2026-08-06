@@ -34,9 +34,9 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 
 ### This repo's role in the ecosystem
 
-- **This repo (`waf-ids-ai-soc`) is the WAF / IDS / AI SOC / software load balancer / APIM for the ecosystem.** It fronts and protects the other components and mediates their traffic.
+- **This repo (`wardnet`) is the WAF / IDS / AI SOC / software load balancer / APIM for the ecosystem.** It fronts and protects the other components and mediates their traffic.
 - The org is an ecosystem around **naruon** (the hub: an email/PIM that DOM-decomposes emails and files into a persisted knowledge graph). Every component is a standalone program that must **also** work as a git submodule, grown separately and together.
-- Sibling components: **clearfolio** (document viewer), **pg-erd-cloud** (ERD tool), **contextual-orchestrator** (LLM cost/perf/upstream-LB gateway, beyond LiteLLM), **codec-carver** (STT/omni-modal speech-video codec), **fast-mlsirm** (LLM-as-a-Judge calibration + evaluation-item quality, using aFIPC FIPC + kaefa item-fit), **feelanet-adfs** (passwordless SSO: OIDC/SCIM/ADFS/LDAP/FIDO2/OAuth2.1, eliminate passwords), **newsdom-api** (PDF→DOM sidecar), and **semantic-data-portal** (upper-ontology/catalog/governance plane with its own graph engine).
+- Sibling components: **clearfolio** (document viewer), **pg-erd-cloud** (ERD tool), **contextual-orchestrator** (LLM cost/perf/upstream-LB gateway, beyond LiteLLM), **codec-carver** (STT/omni-modal speech-video codec), **fast-mlsirm** (LLM-as-a-Judge calibration + evaluation-item quality, using aFIPC FIPC + kaefa item-fit), **keyverse** (passwordless SSO: OIDC/SCIM/ADFS/LDAP/FIDO2/OAuth2.1, eliminate passwords), **newsdom-api** (PDF→DOM sidecar), and **semantic-data-portal** (upper-ontology/catalog/governance plane with its own graph engine).
 
 ### Research grounding (attach paper PDFs)
 
