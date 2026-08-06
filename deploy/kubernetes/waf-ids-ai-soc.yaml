@@ -3,15 +3,11 @@ kind: Namespace
 metadata:
   name: waf-ids-ai-soc
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: waf-ids-ai-soc-admin
-  namespace: waf-ids-ai-soc
-type: Opaque
-stringData:
-  ADMIN_TOKEN: replace-with-secret-manager-sync
----
+# This manifest deliberately ships no admin Secret. Before applying it, your
+# secret-manager synchronization (External Secrets Operator, Vault agent, or
+# equivalent) must create an Opaque Secret named `waf-ids-ai-soc-admin` in the
+# `waf-ids-ai-soc` namespace with key `ADMIN_TOKEN`. The Deployment references
+# it through secretKeyRef and fails closed if the Secret or key is absent.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
