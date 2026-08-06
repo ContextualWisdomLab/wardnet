@@ -19,9 +19,9 @@ fn mapping_value<'a>(
     parent_indent: usize,
     child_key: &str,
 ) -> Option<&'a str> {
-    let parent_index = lines.iter().position(|line| {
-        leading_spaces(line) == parent_indent && line.trim() == parent_key
-    })?;
+    let parent_index = lines
+        .iter()
+        .position(|line| leading_spaces(line) == parent_indent && line.trim() == parent_key)?;
 
     lines[parent_index + 1..]
         .iter()
