@@ -22,3 +22,62 @@ jobs:
         run: cargo test --locked --workspace
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Install pinned nightly coverage toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: nightly-2026-08-06
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov 0.8.7
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Enforce 100% production line and branch coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +nightly-2026-08-06 llvm-cov \
+            --branch \
+            --all-features \
+            --workspace \
+            --fail-under-lines 100 \
+            --json \
+            --summary-only \
+            --output-path coverage.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path("coverage.json")
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          data = report.get("data")
+          if not isinstance(data, list) or len(data) != 1:
+              raise SystemExit("coverage gate: expected exactly one llvm-cov data object")
+
+          totals = data[0].get("totals")
+          if not isinstance(totals, dict):
+              raise SystemExit("coverage gate: llvm-cov totals are missing")
+
+          failures = []
+          for metric in ("lines", "branches"):
+              summary = totals.get(metric)
+              if not isinstance(summary, dict):
+                  failures.append(f"{metric}: summary missing")
+                  continue
+
+              count = summary.get("count")
+              covered = summary.get("covered")
+              if not isinstance(count, int) or not isinstance(covered, int):
+                  failures.append(f"{metric}: invalid count/covered values")
+                  continue
+
+              if covered != count:
+                  failures.append(f"{metric}: {covered}/{count} covered")
+
+          if failures:
+              raise SystemExit("coverage gate failed: " + "; ".join(failures))
+
+          print(
+              "coverage gate passed: "
+              f"lines={totals['lines']['covered']}/{totals['lines']['count']}, "
+              f"branches={totals['branches']['covered']}/{totals['branches']['count']}"
+          )
+          PY
