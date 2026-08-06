@@ -5,9 +5,7 @@ const MANIFEST: &str = include_str!("../deploy/kubernetes/waf-ids-ai-soc.yaml");
 #[test]
 fn shipped_manifest_contains_no_admin_secret_object() {
     assert!(
-        !MANIFEST
-            .lines()
-            .any(|line| line.trim() == "kind: Secret"),
+        !MANIFEST.lines().any(|line| line.trim() == "kind: Secret"),
         "the distributable manifest must not create an administrator Secret"
     );
     assert!(
