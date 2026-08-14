@@ -34,6 +34,44 @@ fn mapping_value<'a>(
         })
 }
 
+fn nested_block<'a>(lines: &[&'a str], parent_key: &str, parent_indent: usize) -> Vec<&'a str> {
+    let Some(parent_index) = lines
+        .iter()
+        .position(|line| leading_spaces(line) == parent_indent && line.trim() == parent_key)
+    else {
+        return Vec::new();
+    };
+
+    lines[parent_index + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || leading_spaces(line) > parent_indent)
+        .copied()
+        .collect()
+}
+
+fn named_list_item_block<'a>(
+    lines: &[&'a str],
+    item_name: &str,
+    item_indent: usize,
+) -> Vec<&'a str> {
+    let expected = format!("- name: {item_name}");
+    let Some(item_index) = lines
+        .iter()
+        .position(|line| leading_spaces(line) == item_indent && line.trim() == expected)
+    else {
+        return Vec::new();
+    };
+
+    lines[item_index..]
+        .iter()
+        .enumerate()
+        .take_while(|(offset, line)| {
+            *offset == 0 || line.trim().is_empty() || leading_spaces(line) > item_indent
+        })
+        .map(|(_, line)| *line)
+        .collect()
+}
+
 fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_>> {
     manifest.split("\n---\n").find_map(|document| {
         let lines = document.lines().collect::<Vec<_>>();
@@ -41,16 +79,18 @@ fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_
             return None;
         }
 
+        if mapping_value(&lines, "metadata:", 0, "name:") != Some("waf-ids-ai-soc") {
+            return None;
+        }
+
         let namespace = mapping_value(&lines, "metadata:", 0, "namespace:")?;
-        let env_index = lines
-            .iter()
-            .position(|line| line.trim() == "- name: ADMIN_TOKEN")?;
-        let env_indent = leading_spaces(lines[env_index]);
-        let env_block = lines[env_index + 1..]
-            .iter()
-            .take_while(|line| line.trim().is_empty() || leading_spaces(line) > env_indent)
-            .copied()
-            .collect::<Vec<_>>();
+        let workload_spec = nested_block(&lines, "spec:", 0);
+        let pod_template = nested_block(&workload_spec, "template:", 2);
+        let pod_spec = nested_block(&pod_template, "spec:", 4);
+        let containers = nested_block(&pod_spec, "containers:", 6);
+        let gateway = named_list_item_block(&containers, "gateway", 8);
+        let env = nested_block(&gateway, "env:", 10);
+        let env_block = named_list_item_block(&env, "ADMIN_TOKEN", 12);
         let secret_ref_index = env_block
             .iter()
             .position(|line| line.trim() == "secretKeyRef:")?;
@@ -134,6 +174,91 @@ spec:
             namespace: "waf-ids-ai-soc",
             secret_name: "waf-ids-ai-soc-admin",
             secret_key: "ADMIN_TOKEN",
+        })
+    );
+}
+
+#[test]
+fn another_deployment_cannot_satisfy_the_target_secret_contract() {
+    let reverse_order_manifest = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unrelated-worker
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: wrong-secret
+                  key: WRONG_KEY
+"#;
+
+    assert_eq!(
+        external_admin_secret_ref(reverse_order_manifest),
+        Some(ExternalAdminSecretRef {
+            namespace: "waf-ids-ai-soc",
+            secret_name: "wrong-secret",
+            secret_key: "WRONG_KEY",
+        })
+    );
+}
+
+#[test]
+fn init_container_cannot_satisfy_the_gateway_secret_contract() {
+    let init_container_decoy = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: decoy
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: wrong-secret
+                  key: WRONG_KEY
+"#;
+
+    assert_eq!(
+        external_admin_secret_ref(init_container_decoy),
+        Some(ExternalAdminSecretRef {
+            namespace: "waf-ids-ai-soc",
+            secret_name: "wrong-secret",
+            secret_key: "WRONG_KEY",
         })
     );
 }

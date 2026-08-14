@@ -23,7 +23,17 @@ fn shutdown_signal() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> +
     })
 }
 
-#[cfg(all(not(test), not(unix)))]
+#[cfg(all(not(test), windows))]
+fn shutdown_signal() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    // Register before returning the future, matching the eager Unix listener.
+    // `tokio::signal::ctrl_c()` would defer registration until first poll.
+    let mut interrupt = tokio::signal::windows::ctrl_c().expect("install Windows Ctrl-C handler");
+    Box::pin(async move {
+        let _ = interrupt.recv().await;
+    })
+}
+
+#[cfg(all(not(test), not(any(unix, windows))))]
 fn shutdown_signal() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async {
         tokio::signal::ctrl_c()

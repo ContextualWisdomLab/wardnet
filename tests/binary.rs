@@ -9,6 +9,27 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 #[test]
+fn windows_ctrl_c_listener_is_created_before_the_shutdown_future() {
+    let source = include_str!("../src/main.rs");
+    let windows_impl = source
+        .split("#[cfg(all(not(test), windows))]")
+        .nth(1)
+        .and_then(|section| section.split("#[cfg(").next())
+        .expect("main.rs must define a Windows-specific shutdown listener");
+    let listener = windows_impl
+        .find("tokio::signal::windows::ctrl_c()")
+        .expect("Windows shutdown must create its Ctrl-C listener eagerly");
+    let future = windows_impl
+        .find("Box::pin(async move")
+        .expect("Windows shutdown must move the listener into its future");
+
+    assert!(
+        listener < future,
+        "the Windows Ctrl-C listener must exist before the shutdown future is returned"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn binary_serves_then_shuts_down_on_sigterm() {
     let mut child = spawn_ready_gateway();

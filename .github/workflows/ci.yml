@@ -34,6 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo +nightly-2026-08-06 llvm-cov \
+            --locked \
             --branch \
             --all-features \
             --workspace \
@@ -49,26 +50,50 @@ jobs:
           report_path = Path("coverage.json")
           report = json.loads(report_path.read_text(encoding="utf-8"))
           data = report.get("data")
-          if not isinstance(data, list) or len(data) != 1:
-              raise SystemExit("coverage gate: expected exactly one llvm-cov data object")
+          if not isinstance(data, list) or not data:
+              raise SystemExit("coverage gate: expected a non-empty llvm-cov data list")
 
-          totals = data[0].get("totals")
-          if not isinstance(totals, dict):
-              raise SystemExit("coverage gate: llvm-cov totals are missing")
+          metrics = ("lines", "branches")
+          totals = {metric: {"count": 0, "covered": 0} for metric in metrics}
+          for export_index, export in enumerate(data):
+              if not isinstance(export, dict):
+                  raise SystemExit(
+                      f"coverage gate: data[{export_index}] is not an object"
+                  )
+              export_totals = export.get("totals")
+              if not isinstance(export_totals, dict):
+                  raise SystemExit(
+                      f"coverage gate: data[{export_index}].totals is missing"
+                  )
+
+              for metric in metrics:
+                  summary = export_totals.get(metric)
+                  if not isinstance(summary, dict):
+                      raise SystemExit(
+                          f"coverage gate: data[{export_index}].{metric} is missing"
+                      )
+                  count = summary.get("count")
+                  covered = summary.get("covered")
+                  if (
+                      not isinstance(count, int)
+                      or isinstance(count, bool)
+                      or not isinstance(covered, int)
+                      or isinstance(covered, bool)
+                      or count < 0
+                      or covered < 0
+                      or covered > count
+                  ):
+                      raise SystemExit(
+                          "coverage gate: "
+                          f"data[{export_index}].{metric} has invalid count/covered values"
+                      )
+                  totals[metric]["count"] += count
+                  totals[metric]["covered"] += covered
 
           failures = []
-          for metric in ("lines", "branches"):
-              summary = totals.get(metric)
-              if not isinstance(summary, dict):
-                  failures.append(f"{metric}: summary missing")
-                  continue
-
-              count = summary.get("count")
-              covered = summary.get("covered")
-              if not isinstance(count, int) or not isinstance(covered, int):
-                  failures.append(f"{metric}: invalid count/covered values")
-                  continue
-
+          for metric in metrics:
+              count = totals[metric]["count"]
+              covered = totals[metric]["covered"]
               if covered != count:
                   failures.append(f"{metric}: {covered}/{count} covered")
 
