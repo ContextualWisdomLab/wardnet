@@ -113,6 +113,15 @@ fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         })?;
+        match secret_ref_block.iter().find_map(|line| {
+            line.trim()
+                .strip_prefix("optional:")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }) {
+            None | Some("false") => {}
+            Some(_) => return None,
+        }
 
         Some(ExternalAdminSecretRef {
             namespace,
@@ -259,6 +268,61 @@ spec:
             namespace: "waf-ids-ai-soc",
             secret_name: "wrong-secret",
             secret_key: "WRONG_KEY",
+        })
+    );
+}
+
+#[test]
+fn optional_admin_secret_reference_fails_closed() {
+    let optional_secret = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: true
+"#;
+
+    assert_eq!(external_admin_secret_ref(optional_secret), None);
+}
+
+#[test]
+fn explicitly_required_admin_secret_reference_is_accepted() {
+    let required_secret = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+"#;
+
+    assert_eq!(
+        external_admin_secret_ref(required_secret),
+        Some(ExternalAdminSecretRef {
+            namespace: "waf-ids-ai-soc",
+            secret_name: "waf-ids-ai-soc-admin",
+            secret_key: "ADMIN_TOKEN",
         })
     );
 }

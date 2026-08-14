@@ -11,6 +11,16 @@ use std::process::{Child, Command, Stdio};
 #[test]
 fn windows_ctrl_c_listener_is_created_before_the_shutdown_future() {
     let source = include_str!("../src/main.rs");
+    let main_impl = source
+        .split("async fn main()")
+        .nth(1)
+        .and_then(|section| section.split("#[cfg(").next())
+        .expect("main.rs must define the production entrypoint");
+    assert!(
+        main_impl.contains("waf_ids_ai_soc::run_from_env(shutdown_signal()).await"),
+        "main must create shutdown_signal before run_from_env can bind and announce readiness"
+    );
+
     let windows_impl = source
         .split("#[cfg(all(not(test), windows))]")
         .nth(1)
