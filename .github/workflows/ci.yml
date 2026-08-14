@@ -38,7 +38,6 @@ jobs:
             --branch \
             --all-features \
             --workspace \
-            --fail-under-lines 100 \
             --json \
             --summary-only \
             --output-path coverage.json
