@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -41,6 +43,13 @@ jobs:
             --json \
             --summary-only \
             --output-path coverage.json
+
+          cargo +nightly-2026-08-06 llvm-cov report \
+            --branch \
+            --text \
+            --show-missing-lines \
+            --output-path coverage-missing.txt
+          cat coverage-missing.txt
 
           python3 - <<'PY'
           import json
