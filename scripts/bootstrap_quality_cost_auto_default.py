@@ -21,21 +21,44 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 
 def write_test() -> None:
-    """Add only the adaptive request assertion for the RED commit."""
+    """Add the adaptive gateway and generic-provider compatibility assertions."""
     replace_once(
         SOURCE_PATH,
-        '        assert_eq!(body["model"], "m1");\n        assert_eq!(body["messages"][0]["role"], "system");',
-        '        assert_eq!(body["model"], "m1");\n        assert_eq!(body["orchestration_mode"], "auto");\n        assert_eq!(body["messages"][0]["role"], "system");',
+        '        let body = soc_llm_chat_body("m1", &soc_test_event());\n        assert_eq!(body["model"], "m1");',
+        '        let body = soc_llm_chat_body("contextual-orchestrator", &soc_test_event());\n        assert_eq!(body["model"], "contextual-orchestrator");\n        assert_eq!(body["orchestration_mode"], "auto");',
+    )
+    replace_once(
+        SOURCE_PATH,
+        '        assert_eq!(extract_soc_llm_content(&payload).as_deref(), Some("analysis"));\n    }',
+        '        assert_eq!(extract_soc_llm_content(&payload).as_deref(), Some("analysis"));\n\n        let generic_body = soc_llm_chat_body("generic-model", &soc_test_event());\n        assert!(generic_body.get("orchestration_mode").is_none());\n    }',
     )
 
 
 def implement() -> None:
-    """Delegate the ordinary SOC analysis topology to adaptive orchestration."""
-    replace_once(
-        SOURCE_PATH,
-        '        "model": model,\n        "messages": [',
-        '        "model": model,\n        "orchestration_mode": "auto",\n        "messages": [',
+    """Delegate contextual-orchestrator topology without breaking generic providers."""
+    text = SOURCE_PATH.read_text(encoding="utf-8")
+    start = text.find("fn soc_llm_chat_body(")
+    end = text.find("\n}\n\nfn extract_soc_llm_content", start)
+    if start < 0 or end < 0:
+        raise SystemExit("soc_llm_chat_body function boundary was not found")
+    block = text[start : end + 2]
+    if block.count("serde_json::json!({") != 1:
+        raise SystemExit("soc_llm_chat_body must contain exactly one JSON body")
+    block = block.replace("    serde_json::json!({", "    let mut body = serde_json::json!({", 1)
+    closing = "        ]\n    })\n}"
+    replacement = (
+        "        ]\n"
+        "    });\n"
+        "    if model == \"contextual-orchestrator\" {\n"
+        "        body[\"orchestration_mode\"] = serde_json::Value::String(\"auto\".to_string());\n"
+        "    }\n"
+        "    body\n"
+        "}"
     )
+    if block.count(closing) != 1:
+        raise SystemExit("soc_llm_chat_body closing shape was not found")
+    block = block.replace(closing, replacement, 1)
+    SOURCE_PATH.write_text(text[:start] + block + text[end + 2 :], encoding="utf-8")
 
     if CHANGELOG_PATH.exists():
         raise SystemExit(f"refusing to overwrite existing {CHANGELOG_PATH}")
@@ -46,7 +69,7 @@ def implement() -> None:
 
 ### Changed
 
-- LLM-backed SOC analysis now explicitly requests contextual-orchestrator `auto` mode, allowing the orchestration plane to choose the quality-sufficient model/workflow and then minimize known execution cost instead of fixing the consumer to one model call.
+- SOC analysis configured with model `contextual-orchestrator` now explicitly requests adaptive `auto` mode, while other OpenAI-compatible model identifiers retain their original generic payload.
 """,
         encoding="utf-8",
     )
@@ -62,19 +85,19 @@ def implement() -> None:
 
 ## Context
 
-Wardnet's optional SOC-analysis adapter sent an OpenAI-compatible chat request without an explicit orchestration mode. The gateway currently interprets omission as adaptive behavior, but the consumer contract did not make that requirement reviewable or prevent future drift to a fixed single-worker route.
+Wardnet's optional SOC-analysis adapter accepts an OpenAI-compatible model identifier. It omitted an explicit orchestration mode, so contextual-orchestrator's adaptive requirement was not reviewable. Sending an orchestration-only field to every provider would break generic providers that reject unknown parameters.
 
 ## Decision
 
-Every ordinary SOC-analysis request includes `orchestration_mode: "auto"`.
+When and only when the configured model is exactly `contextual-orchestrator`, the SOC-analysis request includes `orchestration_mode: "auto"`.
 
 Contextual-orchestrator owns provider/model selection, test-time compute, workflow depth, verification, fallback, and known-price optimization. Quality sufficiency is the first constraint; cost is minimized among paths that satisfy it. Missing or untrusted price metadata is classified as unpriced rather than free.
 
-Wardnet continues to own event lookup, admin authorization, the bounded SOC prompt, response-shape validation, and operator-visible failure handling. Explicit fixed modes may be used only in controlled ablation or a documented incident override and are not product defaults.
+Other model identifiers receive the unchanged generic OpenAI-compatible payload. Wardnet continues to own event lookup, admin authorization, the bounded SOC prompt, response-shape validation, and operator-visible failure handling. Explicit fixed modes may be used only in controlled ablation or a documented incident override and are not product defaults.
 
 ## Consequences
 
-A routine event may still use one worker when adaptive policy finds that sufficient. Ambiguous or high-risk triage may use deeper orchestration without changing the Wardnet API.
+Contextual-orchestrator deployments obtain an explicit adaptive policy without breaking direct providers. A routine event may still use one worker when adaptive policy finds that sufficient; ambiguous or high-risk triage may use deeper orchestration without changing the Wardnet API.
 
 ## References
 
