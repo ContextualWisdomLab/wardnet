@@ -1,0 +1,81 @@
+name: Bootstrap adaptive contextual-orchestrator SOC default
+
+on:
+  push:
+    branches:
+      - agent/bootstrap-quality-cost-auto-default-v2
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-quality-cost-auto-default-wardnet
+  cancel-in-progress: false
+
+jobs:
+  red-green-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TARGET_BRANCH: agent/quality-cost-auto-default
+    steps:
+      - name: Checkout bootstrap revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Preserve bounded bootstrap script
+        run: cp scripts/bootstrap_quality_cost_auto_default.py /tmp/bootstrap_quality_cost_auto_default.py
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Create clean test-first product branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git switch --force-create "$TARGET_BRANCH" origin/main
+          python /tmp/bootstrap_quality_cost_auto_default.py test
+          git add src/lib.rs
+          git commit -m "test(ai): require adaptive SOC orchestration"
+
+      - name: Prove the regression contract is red
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if cargo test --locked --workspace soc_llm_chat_body_and_extract; then
+            echo "Adaptive-default regression unexpectedly passed before implementation." >&2
+            exit 1
+          fi
+
+      - name: Implement adaptive quality-cost default
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python /tmp/bootstrap_quality_cost_auto_default.py implement
+          cargo fmt
+          git add src/lib.rs CHANGELOG.md docs/adr/0001-adaptive-contextual-orchestrator-default.md
+          git commit -m "fix(ai): use adaptive orchestration for SOC analysis"
+
+      - name: Verify complete Rust contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cargo fmt --check
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          git diff --check origin/main...HEAD
+
+      - name: Publish clean product branch
+        run: git push origin "HEAD:refs/heads/$TARGET_BRANCH"
