@@ -55,6 +55,12 @@ jobs:
           import json
           from pathlib import Path
 
+          coverage_policy = {"coverage-run-all-threshold": 1.0}
+          if coverage_policy.get('coverage-run-all-threshold', 1.0) < 1.0:
+              raise SystemExit(
+                  "coverage gate: branch threshold must remain fail-closed at 100%"
+              )
+
           report_path = Path("coverage.json")
           report = json.loads(report_path.read_text(encoding="utf-8"))
           data = report.get("data")
