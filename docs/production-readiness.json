@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "audited_at": "2026-08-19T23:47:43+09:00",
+  "repository": "ContextualWisdomLab/wardnet",
+  "audited_ref": "refs/heads/main",
+  "audited_commit": "b53dc7a1b8904a16752abbdc04429df893a4e32e",
+  "overall_status": "blocked",
+  "production_claim_allowed": false,
+  "epic": "https://github.com/ContextualWisdomLab/wardnet/issues/87",
+  "mandatory_gates": [
+    {"priority": "P0", "id": "active_attack_ci", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/11"},
+    {"priority": "P0", "id": "external_secret_coverage_shutdown", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/72"},
+    {"priority": "P0", "id": "management_auth_fail_closed", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/78"},
+    {"priority": "P0", "id": "outbound_destination_policy", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/79"},
+    {"priority": "P0", "id": "postgres_authority_and_tenant_isolation", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/80"},
+    {"priority": "P0", "id": "transactional_outbox_and_workers", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/81"},
+    {"priority": "P0", "id": "proven_waf_ids_enforcement", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/86"},
+    {"priority": "P1", "id": "deterministic_standalone_persistence_tests", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/74"},
+    {"priority": "P1", "id": "hardened_manifest_rename", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/75"},
+    {"priority": "P1", "id": "pinned_rust_toolchain", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/77"},
+    {"priority": "P1", "id": "keyverse_identity_authorization_and_approval", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/82"},
+    {"priority": "P1", "id": "bounded_distributed_admission_control", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/83"},
+    {"priority": "P1", "id": "immutable_signed_release", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/84"},
+    {"priority": "P1", "id": "operations_slo_incident_and_recovery", "status": "blocked", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/85"}
+  ],
+  "non_blocking_expansion": [
+    {"id": "quarantine_sandbox_malware_analysis", "issue": "https://github.com/ContextualWisdomLab/wardnet/issues/38"}
+  ],
+  "source_evidence": [
+    {"path": "README.md", "finding": "controlled baseline; not a complete WAF or IDS and not hardened for internet-facing production"},
+    {"path": "src/lib.rs", "finding": "no-credential auth bypass, JSON authority, per-process unbounded-cardinality limiter, scheme-only upstream validation"},
+    {"path": "docs/security/threat-model.md", "finding": "SSRF, identity, database, backup, denial-of-service and secret controls remain open"},
+    {"path": "docs/security/compliance-mapping.md", "finding": "release, identity, audit, encryption, HA, SLO and AI-governance gaps remain"},
+    {"path": "docs/runbooks/operations.md", "finding": "baseline is limited to local and controlled lab deployments"},
+    {"path": ".github/workflows/ci.yml", "finding": "format, locked tests and Clippy only on a floating compiler channel"},
+    {"path": "deploy/kubernetes/waf-ids-ai-soc.yaml", "finding": "single-replica file state and tag-based image on the audited base"}
+  ],
+  "transition_requirements": [
+    "all mandatory gates are closed by merged implementation and evidence",
+    "one immutable release digest passes required checks and production-shaped attack tests",
+    "zero unresolved actionable review threads and qualifying independent approval",
+    "restore, rollback and incident-game-day objectives are measured and met",
+    "a fresh exact-release audit updates this record in a reviewed pull request"
+  ]
+}
