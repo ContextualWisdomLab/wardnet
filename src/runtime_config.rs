@@ -96,9 +96,9 @@ impl RuntimeConfigRegistry {
 
     pub(crate) fn u64_or(&self, key: &str, default: u64) -> Result<u64, String> {
         match self.values.get(key) {
-            Some(Value::Number(value)) => value.as_u64().ok_or_else(|| {
-                format!("runtime configuration {key} must be an unsigned integer")
-            }),
+            Some(Value::Number(value)) => value
+                .as_u64()
+                .ok_or_else(|| format!("runtime configuration {key} must be an unsigned integer")),
             Some(_) => Err(format!(
                 "runtime configuration {key} must be an unsigned integer"
             )),
@@ -154,10 +154,7 @@ mod tests {
             registry.string_or(LITELLM_PROXY_BIND_ADDRESS, "127.0.0.1:1"),
             Ok("127.0.0.1:1")
         );
-        assert_eq!(
-            registry.usize_or(LITELLM_PROXY_MAX_BODY_BYTES, 1),
-            Ok(4096)
-        );
+        assert_eq!(registry.usize_or(LITELLM_PROXY_MAX_BODY_BYTES, 1), Ok(4096));
         assert_eq!(
             registry.u64_or(LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS, 10),
             Ok(10)
