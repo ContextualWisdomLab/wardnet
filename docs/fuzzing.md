@@ -11,28 +11,36 @@ Targets were chosen by mapping the untrusted-input surfaces with CodeGraph
 (`codegraph explore "score_request anomaly_signal normalize decode ..."` and
 `"parse_admin_tokens load_or_seed_state validate_dnsbl deserialize ..."`), which
 surfaced the request scorer, the persisted-state deserializer, the admin-token
-config parser, and the DNSBL zone generator as the reachable, no-covering-test
-entry points for arbitrary input.
+config parser, and the DNSBL zone generator as reachable arbitrary-input entry
+points. The LiteLLM proxy adds a credential-class parser at an internet-facing
+Authorization boundary, so the same fuzz/property contract applies there.
 
-| Fuzz target                 | Surface (function)                          | Invariants |
-| --------------------------- | ------------------------------------------- | ---------- |
-| `fuzz_score_request`        | `waf_ids_core::score_request`               | no panic on arbitrary path/query/body/IP; `reason` never empty; scoring deterministic |
-| `fuzz_appdata_json`         | `serde_json::from_str::<AppData>` (state file) | no panic; parsed values round-trip through serde |
-| `fuzz_parse_admin_tokens`   | `waf_ids_ai_soc::parse_admin_tokens`        | no panic; no empty token key; no empty principal actor value |
-| `fuzz_dnsbl_zone`           | `waf_ids_core::export_dnsbl_zone` / `validate_dnsbl` | no panic; every TXT payload fully escaped (no zone break-out); every published A-record response code is an IPv4 loopback literal (127.0.0.0/8) |
+| Fuzz target | Surface (function) | Invariants |
+| --- | --- | --- |
+| `fuzz_score_request` | `waf_ids_core::score_request` | no panic on arbitrary path/query/body/IP; `reason` never empty; scoring deterministic |
+| `fuzz_appdata_json` | `serde_json::from_str::<AppData>` (state file) | no panic; parsed values round-trip through serde |
+| `fuzz_parse_admin_tokens` | `waf_ids_ai_soc::parse_admin_tokens` | no panic; no empty token key; no empty principal actor value |
+| `fuzz_dnsbl_zone` | `waf_ids_core::export_dnsbl_zone` / `validate_dnsbl` | no panic; TXT payload fully escaped; published A-record response code stays in IPv4 loopback space |
+| `fuzz_litellm_credential` | `validate_litellm_virtual_key` | no panic on opaque header bytes; duplicate values are ambiguous; accepted values stay within the complete-header bound and use the Bearer/`sk-` grammar |
 
 ## Layout
 
-```
-fuzz/                       # separate cargo workspace (isolated from the root
-  Cargo.toml                # workspace so `cargo test` at the root is unaffected)
+```text
+fuzz/                       # separate cargo workspace
+  Cargo.toml                # root cargo test remains unaffected
   fuzz_targets/*.rs         # one libFuzzer target per surface
-  corpus/<target>/*         # committed seed corpus (attack payloads, edge cases)
+  corpus/<target>/*         # committed seeds where useful
 ```
 
-The property-test mirror lives in `crates/waf-ids-core/tests/fuzz_invariants.rs`
-and `tests/fuzz_invariants.rs` (proptest); it enforces the same invariants on
-stable as part of `cargo test --workspace`.
+The property-test mirrors live in:
+
+- `crates/waf-ids-core/tests/fuzz_invariants.rs`
+- `tests/fuzz_invariants.rs`
+- `tests/litellm_credential_properties.rs`
+
+They enforce the same invariants on stable as part of `cargo test --workspace`.
+The LiteLLM mirror covers arbitrary opaque bytes, duplicate values, excessive
+separator whitespace, complete-header bounds, and invalid padding placement.
 
 ## Running locally
 
@@ -41,7 +49,7 @@ Coverage-guided fuzzing needs a nightly toolchain:
 ```sh
 rustup toolchain install nightly
 cargo install cargo-fuzz
-cargo +nightly fuzz run fuzz_score_request -- -max_total_time=60
+cargo +nightly fuzz run fuzz_litellm_credential -- -max_total_time=60
 ```
 
 The stable property-test mirror needs no extra setup:
@@ -54,14 +62,17 @@ cargo test --workspace
 
 `.github/workflows/fuzz.yml` runs each target for a bounded budget:
 
-- **Pull requests:** 60s per target (smoke fuzzing; keeps CI cost predictable).
-- **Nightly cron / manual dispatch:** 300s per target (deeper exploration).
+- **Pull requests:** 60s per target.
+- **Nightly cron / manual dispatch:** 300s per target.
 
-Crash-reproducing inputs are uploaded as build artifacts on failure. All fuzzing
-dependencies are permissive (cargo-fuzz, libfuzzer-sys, arbitrary, proptest are
-each MIT OR Apache-2.0).
+Crash-reproducing inputs are uploaded as build artifacts on failure. Fuzzing
+dependencies are permissive: cargo-fuzz, libfuzzer-sys, arbitrary, and proptest
+are MIT OR Apache-2.0 compatible; Axum is MIT licensed.
 
 ## Further reading
 
-- V.J.M. Manès et al., *The Art, Science, and Engineering of Fuzzing: A Survey*
+- V. J. M. Manès et al., *The Art, Science, and Engineering of Fuzzing: A Survey*
   — [`papers/fuzzing-art-science-engineering-survey-arxiv-1812.00140.pdf`](papers/fuzzing-art-science-engineering-survey-arxiv-1812.00140.pdf).
+- S. A. Crosby and D. S. Wallach, *Denial of Service via Algorithmic Complexity
+  Attacks* — linked and summarized in
+  [`docs/doctoring/litellm-virtual-key-ingress.md`](doctoring/litellm-virtual-key-ingress.md).
