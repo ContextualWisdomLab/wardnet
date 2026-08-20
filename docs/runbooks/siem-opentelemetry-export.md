@@ -48,7 +48,7 @@ Each output line is an OCSF Detection Finding (`class_uid=2004`) with the `secur
 Validate the output is JSONL before handing it to a security lake or SIEM forwarder:
 
 ```bash
-python - <<'PY'
+python3 - <<'PY'
 import json
 from pathlib import Path
 
