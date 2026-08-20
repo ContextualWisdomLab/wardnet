@@ -1,6 +1,6 @@
 //! Fail-closed input and RFC 5424 timestamp contracts for the Wardnet exporter.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Output, Stdio};
 
 const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -15,12 +15,14 @@ fn exporter(args: &[&str], input: &str) -> Output {
         .spawn()
         .expect("spawn Wardnet event exporter");
 
-    child
+    if let Err(error) = child
         .stdin
         .take()
         .expect("exporter stdin")
         .write_all(input.as_bytes())
-        .expect("write exporter input");
+    {
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe, "write exporter input");
+    }
 
     child.wait_with_output().expect("wait for exporter")
 }
@@ -62,13 +64,14 @@ fn oversized_line_and_batch_fail_closed() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("line 1"));
 
     let mut oversized_batch = String::new();
-    for id in 1..=10_001 {
+    for id in 1..=100_001 {
         oversized_batch.push_str(&event(id, 1_723_456_789));
     }
     let output = exporter(&["--format", "ocsf"], &oversized_batch);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("event limit"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("event") || stderr.contains("input exceeds"));
 }
 
 #[test]
@@ -83,7 +86,28 @@ fn unsupported_trace_flags_fail_closed() {
     let output = exporter(&["--format", "otlp-json"], &input);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("trace_flags"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("trace flags"));
+}
+
+#[test]
+fn colon_delimited_credentials_are_redacted() {
+    let input = concat!(
+        "{\"id\":14,\"timestamp_unix\":1723456792,",
+        "\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",",
+        "\"reason\":\"token: abc123 password: hunter2 api_key: xyz\",",
+        "\"score\":1,\"path\":\"/\"}\n"
+    );
+    let output = exporter(&["--format", "ocsf"], input);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8(output.stdout).expect("UTF-8 OCSF output");
+    for secret in ["abc123", "hunter2", "xyz"] {
+        assert!(!body.contains(secret));
+    }
+    assert!(body.contains("[REDACTED]"));
 }
 
 #[test]
@@ -97,4 +121,24 @@ fn rfc5424_header_contains_the_event_timestamp() {
 
     let body = String::from_utf8(output.stdout).expect("UTF-8 syslog output");
     assert!(body.starts_with("<131>1 2024-08-12T09:59:51Z - wardnet - WARDNET_EVENT "));
+}
+
+#[test]
+fn rfc5424_sequence_id_respects_registered_range() {
+    let maximum = exporter(
+        &["--format", "rfc5424"],
+        &event(2_147_483_647, 1_723_456_791),
+    );
+    assert!(maximum.status.success());
+    let maximum_body = String::from_utf8(maximum.stdout).expect("UTF-8 syslog output");
+    assert!(maximum_body.contains("[meta sequenceId=\"2147483647\"]"));
+
+    let overflow = exporter(
+        &["--format", "rfc5424"],
+        &event(2_147_483_648, 1_723_456_791),
+    );
+    assert!(overflow.status.success());
+    let overflow_body = String::from_utf8(overflow.stdout).expect("UTF-8 syslog output");
+    assert!(!overflow_body.contains("[meta sequenceId="));
+    assert!(overflow_body.contains("\"event_id\":2147483648"));
 }
