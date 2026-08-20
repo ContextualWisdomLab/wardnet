@@ -2,13 +2,13 @@
 
 ## Protected failure
 
-The Wardnet `litellm-virtual-key-proxy` binary rejects the following request before it reaches LiteLLM:
+The Wardnet `litellm-virtual-key-proxy` binary rejects a telephone-shaped synthetic credential before it reaches LiteLLM:
 
 ```text
-Authorization: Bearer 061012345318
+Authorization: Bearer 01000000000
 ```
 
-The proxy requires exactly one Bearer credential with a bounded LiteLLM virtual-key shape beginning `sk-`. It does **not** transform a phone number, account identifier, provider-native API key, or arbitrary string into a virtual key.
+The proxy requires exactly one Bearer credential with a bounded LiteLLM virtual-key shape beginning `sk-`. It does **not** transform a telephone number, account identifier, provider-native API key, or arbitrary string into a virtual key.
 
 ## Trust boundary
 
@@ -50,7 +50,7 @@ Example registry document:
 ```json
 {
   "configuration_version": "1",
-  "litellm_proxy_upstream_url": "https://llm-gateway-dev.hyosungitx.com",
+  "litellm_proxy_upstream_url": "https://gateway.example.invalid",
   "litellm_proxy_bind_address": "127.0.0.1:8090",
   "litellm_proxy_max_body_bytes": 16777216,
   "litellm_proxy_connect_timeout_seconds": 10
@@ -142,7 +142,7 @@ When `llm_auth_rejected` increases:
 
 1. Identify the caller from trusted edge identity or deployment audit context, not from the rejected token.
 2. Inspect the caller's credential-selection configuration.
-3. Confirm it references a LiteLLM virtual-key secret, not a phone number, user ID, billing account, or provider-native key.
+3. Confirm it references a LiteLLM virtual-key secret, not a telephone number, user ID, billing account, or provider-native key.
 4. Rotate or remap the secret at its owning credential registry.
 5. Test one request through Wardnet.
 6. Confirm the request reaches LiteLLM and that LiteLLM performs its own key authorization.
@@ -157,7 +157,7 @@ Never resolve the alert by bypassing the proxy, logging the complete header, or 
 | Missing Authorization | 401; no upstream request |
 | Two Authorization headers | 401; no upstream request |
 | `Basic ...` | 401; no upstream request |
-| `Bearer 0610...` | 401; no token reflection; secret-free structured event |
+| Telephone-shaped synthetic Bearer value | 401; no token reflection; secret-free structured event |
 | Header larger than the parser bound | Immediate 401 before delimiter scans |
 | More than eight separator spaces | 401 |
 | Non-ASCII value | 401 |
@@ -165,6 +165,6 @@ Never resolve the alert by bypassing the proxy, logging the complete header, or 
 | Bounded `Bearer sk-...` | Forwarded for authoritative LiteLLM validation |
 | Cookie or trace baggage supplied | Stripped |
 | Query string supplied | Preserved on the fixed upstream path |
-| SSE upstream response | Streamed with content type and rate-limit metadata |
+| Two-chunk SSE upstream response | Headers and first chunk relayed before final chunk release |
 | `TRACE` or `CONNECT` | 405; no upstream request |
 | Upstream redirect | 502; redirect target not returned or followed |
