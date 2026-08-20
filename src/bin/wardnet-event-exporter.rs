@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::env;
 use std::io::{self, Read, Write};
@@ -188,17 +188,15 @@ where
             }
             "--deployment-environment" => {
                 let value = required_value(&args, index, "--deployment-environment")?;
-                deployment_environment =
-                    validated_label("deployment environment", value, 128)?;
+                deployment_environment = validated_label("deployment environment", value, 128)?;
                 index += 2;
             }
             option => return Err(format!("unknown option: {option}")),
         }
     }
 
-    let format = format.ok_or_else(|| {
-        "missing required --format (ocsf, otlp-json, or rfc5424)".to_string()
-    })?;
+    let format = format
+        .ok_or_else(|| "missing required --format (ocsf, otlp-json, or rfc5424)".to_string())?;
 
     Ok(ParsedCommand::Export(Options {
         format,
@@ -209,11 +207,7 @@ where
     }))
 }
 
-fn required_value<'a>(
-    args: &'a [String],
-    index: usize,
-    option: &str,
-) -> Result<&'a str, String> {
+fn required_value<'a>(args: &'a [String], index: usize, option: &str) -> Result<&'a str, String> {
     args.get(index + 1)
         .map(String::as_str)
         .filter(|value| !value.starts_with("--"))
@@ -258,9 +252,7 @@ fn read_events<R: Read>(reader: R) -> Result<Vec<NormalizedEvent>, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read standard input: {error}"))?;
     if bytes.len() as u64 > MAX_INPUT_BYTES {
-        return Err(format!(
-            "input exceeds the {MAX_INPUT_BYTES}-byte limit"
-        ));
+        return Err(format!("input exceeds the {MAX_INPUT_BYTES}-byte limit"));
     }
     let input = String::from_utf8(bytes).map_err(|_| "input is not valid UTF-8".to_string())?;
 
@@ -302,18 +294,8 @@ fn normalize_event(source: SourceEvent, line_number: usize) -> Result<Normalized
         ));
     }
     checked_time(source.timestamp_unix, 1_000_000_000, line_number)?;
-    let action = required_sanitized(
-        "action",
-        &source.action,
-        MAX_ACTION_CHARS,
-        line_number,
-    )?;
-    let reason = required_sanitized(
-        "reason",
-        &source.reason,
-        MAX_REASON_CHARS,
-        line_number,
-    )?;
+    let action = required_sanitized("action", &source.action, MAX_ACTION_CHARS, line_number)?;
+    let reason = required_sanitized("reason", &source.reason, MAX_REASON_CHARS, line_number)?;
     let path = sanitize_path(&source.path, line_number)?;
     let route_id = source
         .route_id
@@ -739,20 +721,26 @@ fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
     for event in events {
         let severity = severity(event.score);
         let priority = 16_u16 * 8 + u16::from(severity.syslog_code);
-        let ip_parameter = event.client_ip.as_deref().map_or_else(String::new, |client_ip| {
-            format!(" ip=\"{}\"", escape_structured_data(client_ip))
-        });
+        let ip_parameter = event
+            .client_ip
+            .as_deref()
+            .map_or_else(String::new, |client_ip| {
+                format!(" ip=\"{}\"", escape_structured_data(client_ip))
+            });
         let origin_data = format!(
             "[origin{ip_parameter} software=\"Wardnet\" swVersion=\"{}\"]",
             escape_structured_data(env!("CARGO_PKG_VERSION"))
         );
         let meta_data = format!("[meta sequenceId=\"{}\"]", event.id);
-        let trace_data = event.trace_context.as_ref().map_or_else(String::new, |context| {
-            format!(
-                "[OpenTelemetry trace_id=\"{}\" span_id=\"{}\" trace_flags=\"{}\"]",
-                context.trace_id, context.span_id, context.trace_flags
-            )
-        });
+        let trace_data = event
+            .trace_context
+            .as_ref()
+            .map_or_else(String::new, |context| {
+                format!(
+                    "[OpenTelemetry trace_id=\"{}\" span_id=\"{}\" trace_flags=\"{}\"]",
+                    context.trace_id, context.span_id, context.trace_flags
+                )
+            });
         let message = serde_json::to_string(&json!({
             "action": event.action.as_str(),
             "client_ip": event.client_ip.as_deref(),
