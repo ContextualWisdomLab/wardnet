@@ -111,17 +111,11 @@ where
 {
     let command = parse_args(args)?;
     match command {
-        ParsedCommand::Help => {
-            writer
-                .write_all(usage().as_bytes())
-                .map_err(|error| format!("write help: {error}"))?;
-            return Ok(());
-        }
-        ParsedCommand::Version => {
-            writeln!(writer, "{}", env!("CARGO_PKG_VERSION"))
-                .map_err(|error| format!("write version: {error}"))?;
-            return Ok(());
-        }
+        ParsedCommand::Help => writer
+            .write_all(usage().as_bytes())
+            .map_err(|error| format!("write help: {error}"))?,
+        ParsedCommand::Version => writeln!(writer, "{}", env!("CARGO_PKG_VERSION"))
+            .map_err(|error| format!("write version: {error}"))?,
         ParsedCommand::Export(options) => {
             let events = read_events(reader)?;
             let selected: Vec<_> = events
@@ -215,7 +209,7 @@ where
     }))
 }
 
-fn required_value<'a>(args: &'a [String], index: usize, option: &str) -> Result<&'a str, String> {
+fn required_value(args: &[String], index: usize, option: &str) -> Result<&str, String> {
     args.get(index + 1)
         .map(String::as_str)
         .filter(|value| !value.starts_with("--"))
@@ -225,7 +219,9 @@ fn required_value<'a>(args: &'a [String], index: usize, option: &str) -> Result<
 fn validated_label(label: &str, value: &str, maximum: usize) -> Result<String, String> {
     let length = value.chars().count();
     if length == 0 || length > maximum {
-        return Err(format!("{label} must contain between 1 and {maximum} characters"));
+        return Err(format!(
+            "{label} must contain between 1 and {maximum} characters"
+        ));
     }
     if value.chars().any(char::is_control) {
         return Err(format!("{label} contains a control character"));
@@ -282,7 +278,10 @@ fn read_events<R: Read>(reader: R) -> Result<Vec<NormalizedEvent>, String> {
         let source: SourceEvent = serde_json::from_str(line)
             .map_err(|error| format!("line {line_number}: invalid event JSON: {error}"))?;
         if !event_ids.insert(source.id) {
-            return Err(format!("line {line_number}: duplicate event id {}", source.id));
+            return Err(format!(
+                "line {line_number}: duplicate event id {}",
+                source.id
+            ));
         }
         events.push(normalize_event(source, line_number)?);
     }
@@ -294,7 +293,9 @@ fn normalize_event(source: SourceEvent, line_number: usize) -> Result<Normalized
         return Err(format!("line {line_number}: event id must be positive"));
     }
     if source.timestamp_unix == 0 {
-        return Err(format!("line {line_number}: timestamp_unix must be positive"));
+        return Err(format!(
+            "line {line_number}: timestamp_unix must be positive"
+        ));
     }
     checked_time(source.timestamp_unix, 1_000_000_000, line_number)?;
     let action = required_sanitized(
@@ -445,9 +446,10 @@ fn redact_token(token: &str) -> String {
 
 fn secret_prefix_index(token: &str, prefix: &str) -> Option<usize> {
     token.match_indices(prefix).find_map(|(index, _)| {
-        let boundary = token[..index].chars().next_back().map_or(true, |character| {
-            !character.is_ascii_alphanumeric() && character != '_'
-        });
+        let boundary = match token[..index].chars().next_back() {
+            None => true,
+            Some(character) => !character.is_ascii_alphanumeric() && character != '_',
+        };
         boundary.then_some(index)
     })
 }
@@ -531,7 +533,7 @@ fn render(options: &Options, events: &[NormalizedEvent]) -> Result<String, Strin
     match options.format {
         ExportFormat::Ocsf => render_json_lines(events, render_ocsf),
         ExportFormat::OtlpJson => render_otlp(options, events),
-        ExportFormat::Rfc5424 => Ok(render_rfc5424(events)),
+        ExportFormat::Rfc5424 => render_rfc5424(events),
     }
 }
 
@@ -655,8 +657,8 @@ fn render_otlp(options: &Options, events: &[NormalizedEvent]) -> Result<String, 
                     otlp_string_attribute("service.name", &options.service_name),
                     otlp_string_attribute("service.namespace", "org.contextualwisdomlab"),
                     otlp_string_attribute("service.version", &options.service_version),
-                    otlp_string_attribute("telemetry.sdk.language", "rust"),
-                    otlp_string_attribute("telemetry.sdk.name", "wardnet-event-exporter")
+                    otlp_string_attribute("wardnet.exporter.name", "wardnet-event-exporter"),
+                    otlp_string_attribute("wardnet.exporter.version", env!("CARGO_PKG_VERSION"))
                 ]
             },
             "scopeLogs": [{
@@ -699,7 +701,6 @@ fn otlp_log_record(event: &NormalizedEvent) -> Result<Value, String> {
             "stringValue": format!("Wardnet {} security decision: {}", event.action, event.reason)
         },
         "eventName": OTEL_EVENT_NAME,
-        "observedTimeUnixNano": timestamp.to_string(),
         "severityNumber": severity.otel_number,
         "severityText": severity.otel_text,
         "timeUnixNano": timestamp.to_string()
@@ -729,39 +730,41 @@ fn otlp_int_attribute(key: &str, value: u64) -> Value {
     })
 }
 
-fn render_rfc5424(events: &[NormalizedEvent]) -> String {
+fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
     let mut output = String::new();
     for event in events {
         let severity = severity(event.score);
         let priority = 16_u16 * 8 + u16::from(severity.syslog_code);
-        let route_id = event.route_id.as_deref().unwrap_or("-");
-        let client_ip = event.client_ip.as_deref().unwrap_or("-");
-        let wardnet_data = format!(
-            "[wardnet event_id=\"{}\" timestamp_unix=\"{}\" action=\"{}\" score=\"{}\" route_id=\"{}\" client_ip=\"{}\" path=\"{}\"]",
-            event.id,
-            event.timestamp_unix,
-            escape_structured_data(&event.action),
-            event.score,
-            escape_structured_data(route_id),
-            escape_structured_data(client_ip),
-            escape_structured_data(&event.path),
+        let ip_parameter = event.client_ip.as_deref().map_or_else(String::new, |client_ip| {
+            format!(" ip=\"{}\"", escape_structured_data(client_ip))
+        });
+        let origin_data = format!(
+            "[origin{ip_parameter} software=\"Wardnet\" swVersion=\"{}\"]",
+            escape_structured_data(env!("CARGO_PKG_VERSION"))
         );
+        let meta_data = format!("[meta sequenceId=\"{}\"]", event.id);
         let trace_data = event.trace_context.as_ref().map_or_else(String::new, |context| {
             format!(
                 "[OpenTelemetry trace_id=\"{}\" span_id=\"{}\" trace_flags=\"{}\"]",
                 context.trace_id, context.span_id, context.trace_flags
             )
         });
-        let message = format!(
-            "Wardnet {} security decision: {}",
-            event.action, event.reason
-        );
-        let line = format!(
-            "<{priority}>1 - - wardnet - WARDNET_EVENT {wardnet_data}{trace_data} {message}\n"
-        );
-        output.push_str(&line);
+        let message = serde_json::to_string(&json!({
+            "action": event.action.as_str(),
+            "client_ip": event.client_ip.as_deref(),
+            "event_id": event.id,
+            "path": event.path.as_str(),
+            "reason": event.reason.as_str(),
+            "route_id": event.route_id.as_deref(),
+            "score": event.score,
+            "timestamp_unix": event.timestamp_unix
+        }))
+        .map_err(|error| format!("serialize RFC 5424 event {}: {error}", event.id))?;
+        output.push_str(&format!(
+            "<{priority}>1 - - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \u{feff}{message}\n"
+        ));
     }
-    output
+    Ok(output)
 }
 
 fn escape_structured_data(value: &str) -> String {
