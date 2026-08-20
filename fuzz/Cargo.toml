@@ -21,6 +21,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+axum = "0.8"
 serde_json = "1"
 waf-ids-core = { path = "../crates/waf-ids-core" }
 waf-ids-ai-soc = { path = ".." }
@@ -49,6 +50,13 @@ bench = false
 [[bin]]
 name = "fuzz_dnsbl_zone"
 path = "fuzz_targets/fuzz_dnsbl_zone.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_litellm_credential"
+path = "fuzz_targets/fuzz_litellm_credential.rs"
 test = false
 doc = false
 bench = false
