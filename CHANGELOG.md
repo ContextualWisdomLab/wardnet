@@ -11,15 +11,15 @@ All notable changes to Wardnet are documented in this file.
 - Stable non-secret authentication rejection codes and RFC 6750 challenges.
 - Fixed-origin HTTPS configuration, no-system-proxy/no-redirect transport, explicit method policy, and bounded request bodies.
 - Approved request/response header projection for LLM APIs.
-- Streaming upstream response relay for server-sent events and other long-running LLM responses.
+- Streaming upstream response relay for server-sent events and other long-running LLM responses, with a controlled multi-chunk regression proving the first chunk is forwarded before upstream completion.
 - Secret-free structured authentication and transport events.
-- Health endpoint exposing policy, configuration version, upstream origin, and body-limit state without performing a billable model call.
+- Health endpoint exposing credential policy, configuration version, fixed-upstream policy, and body-limit state without revealing the configured hostname or performing a billable model call.
 - Stable property tests and a coverage-guided libFuzzer target for the untrusted Authorization grammar.
 - Security, ADR, operational, standards, and research-traceability documentation for the LiteLLM credential-class boundary.
 
 ### Security
 
-- Reject phone-shaped, missing, duplicate, wrong-scheme, malformed, non-ASCII, excessive-whitespace, and oversized credentials before LiteLLM upstream I/O.
+- Reject telephone-shaped, missing, duplicate, wrong-scheme, malformed, non-ASCII, excessive-whitespace, and oversized credentials before LiteLLM upstream I/O.
 - Bound the complete Authorization value before UTF-8 conversion, delimiter lookup, or whitespace scanning.
 - Prevent rejected credentials and masked fragments from entering response bodies or structured proxy events.
 - Strip cookies, trace baggage, forwarding-chain headers, proxy credentials, host routing, transfer framing, caller-controlled LiteLLM extensions, and arbitrary caller metadata at the LLM proxy boundary.
