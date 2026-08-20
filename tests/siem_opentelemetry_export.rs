@@ -148,7 +148,8 @@ fn rfc5424_uses_structured_data_and_single_line_messages() {
     let body = String::from_utf8(output.stdout).expect("UTF-8 syslog output");
     assert_eq!(body.lines().count(), 1);
     assert!(body.starts_with("<131>1 - - wardnet - WARDNET_EVENT "));
-    assert!(body.contains("[wardnet@32473 event_id=\"9\""));
+    assert!(body.contains("[wardnet event_id=\"9\""));
+    assert!(!body.contains("wardnet@"));
     assert!(body.contains(&format!(
         "[OpenTelemetry trace_id=\"{TRACE_ID}\" span_id=\"{SPAN_ID}\" trace_flags=\"01\"]"
     )));
