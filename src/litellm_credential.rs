@@ -34,9 +34,7 @@ impl CredentialRejection {
 /// This is a credential-class guard, not authentication. LiteLLM remains
 /// authoritative for key existence, revocation, team, budget, model scope, and
 /// other entitlements.
-pub(crate) fn validate_litellm_virtual_key(
-    headers: &HeaderMap,
-) -> Result<(), CredentialRejection> {
+pub(crate) fn validate_litellm_virtual_key(headers: &HeaderMap) -> Result<(), CredentialRejection> {
     let mut values = headers.get_all(AUTHORIZATION).iter();
     let value = values.next().ok_or(CredentialRejection::Missing)?;
     if values.next().is_some() {
@@ -102,8 +100,7 @@ fn valid_virtual_key_shape(token: &str) -> bool {
 }
 
 const fn is_b64_token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
 }
 
 #[cfg(test)]
@@ -134,11 +131,7 @@ mod tests {
 
         let token = format!("sk-{}", "a".repeat(MAX_BEARER_TOKEN_BYTES - 3));
         assert_eq!(token.len(), MAX_BEARER_TOKEN_BYTES);
-        let header = format!(
-            "Bearer{}{}",
-            " ".repeat(MAX_SCHEME_SEPARATOR_BYTES),
-            token
-        );
+        let header = format!("Bearer{}{}", " ".repeat(MAX_SCHEME_SEPARATOR_BYTES), token);
         assert_eq!(header.len(), MAX_AUTHORIZATION_HEADER_BYTES);
         assert_eq!(validate_litellm_virtual_key(&headers(&[&header])), Ok(()));
     }
@@ -164,7 +157,7 @@ mod tests {
     #[test]
     fn rejects_shape_padding_separator_and_non_ascii_failures() {
         for value in [
-            "Bearer 061012345318",
+            "Bearer 01000000000",
             "Bearer sk-",
             "Bearer sk-a b",
             "Bearer sk-a=tail",
@@ -179,10 +172,7 @@ mod tests {
             );
         }
 
-        let token_too_long = format!(
-            "Bearer sk-{}",
-            "a".repeat(MAX_BEARER_TOKEN_BYTES - 2)
-        );
+        let token_too_long = format!("Bearer sk-{}", "a".repeat(MAX_BEARER_TOKEN_BYTES - 2));
         assert_eq!(
             validate_litellm_virtual_key(&headers(&[&token_too_long])),
             Err(CredentialRejection::InvalidShape)
@@ -207,10 +197,7 @@ mod tests {
             Err(CredentialRejection::InvalidShape)
         );
 
-        let excessive_spaces = format!(
-            "Bearer{}sk-a",
-            " ".repeat(MAX_AUTHORIZATION_HEADER_BYTES)
-        );
+        let excessive_spaces = format!("Bearer{}sk-a", " ".repeat(MAX_AUTHORIZATION_HEADER_BYTES));
         assert_eq!(
             validate_litellm_virtual_key(&headers(&[&excessive_spaces])),
             Err(CredentialRejection::InvalidShape)
