@@ -14,10 +14,11 @@ The project starts small on purpose:
 - threat feed import status for real-time update operations
 - support bundle API for buyer due diligence and support handoff
 - threat-feed freshness evidence and SOC event NDJSON export
+- OCSF 1.8.0, OTLP/HTTP JSON, and RFC 5424 event export for SIEM and OpenTelemetry handoff
 - optional JSON state persistence for standalone operation
 - embedded admin console
 
-It does not pretend to be a full WAF, IDS, SIEM, or SOAR yet. Production WAF and IDS coverage should come from adapters to proven engines such as OWASP CRS/Coraza and Suricata.
+It does not pretend to be a full WAF, IDS, SIEM, or SOAR yet. Production WAF and IDS coverage should come from adapters to proven engines such as OWASP CRS/Coraza and Suricata. SIEM search, correlation, case management, retention, and incident workflow remain the responsibility of the receiving security platform; Wardnet provides standards-based event interoperability.
 
 ## Completion Baseline
 
@@ -35,7 +36,7 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `POST /api/threat-feeds/import/phishing-database` pulls active domains/IPs from `Phishing-Database/Phishing.Database` and converts them into local block signals.
 - `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
 - `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
-- `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
+- `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests and standards-based transformation.
 - `GET /api/commercial/evidence-manifest` returns the buyer-verifiable runtime, document, and deployment evidence map.
 - `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
 
@@ -166,6 +167,60 @@ curl -X POST http://127.0.0.1:8080/api/threat-feeds/import/phishing-database \
   }'
 ```
 
+## SIEM and OpenTelemetry export
+
+Build the exporter:
+
+```bash
+cargo build --locked --bin wardnet-event-exporter
+```
+
+Fetch a bounded source batch:
+
+```bash
+curl --fail --silent --show-error \
+  http://127.0.0.1:8080/api/events.ndjson \
+  > wardnet-events.ndjson
+```
+
+Export OCSF 1.8.0 Detection Finding JSONL:
+
+```bash
+cargo run --quiet --locked --bin wardnet-event-exporter -- \
+  --format ocsf \
+  < wardnet-events.ndjson \
+  > wardnet-ocsf.ndjson
+```
+
+Create an OTLP/HTTP JSON logs request for an OpenTelemetry Collector:
+
+```bash
+cargo run --quiet --locked --bin wardnet-event-exporter -- \
+  --format otlp-json \
+  --service-name wardnet-edge \
+  --deployment-environment production \
+  < wardnet-events.ndjson \
+  > wardnet-logs.otlp.json
+
+curl --fail --silent --show-error \
+  -H 'Content-Type: application/json' \
+  --data-binary @wardnet-logs.otlp.json \
+  http://127.0.0.1:4318/v1/logs
+```
+
+Export RFC 5424 syslog:
+
+```bash
+cargo run --quiet --locked --bin wardnet-event-exporter -- \
+  --format rfc5424 \
+  < wardnet-events.ndjson \
+  > wardnet-syslog.log
+```
+
+The exporter validates the complete bounded input before writing output. It ignores unknown input properties, strips path query strings and fragments, normalizes control characters, redacts credential-shaped text, and fails without partial output on malformed events. `--after-id` provides stateless filtering only; durable acknowledgements and retries require the transactional outbox tracked in #81.
+
+See `docs/runbooks/siem-opentelemetry-export.md` and `docs/adr/0001-siem-opentelemetry-event-export.md` for the full protocol and operational boundary.
+
 Deployment assets:
 
 - `Dockerfile`
@@ -177,6 +232,7 @@ Deployment assets:
 - `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and buyer evidence manifests.
 - `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests.
 - `src/main.rs`: process configuration and server startup.
+- `src/bin/wardnet-event-exporter.rs`: standards-based, provider-neutral OCSF/OTLP/RFC 5424 event transformation.
 
 The core is a local workspace crate rather than a git submodule because it does not yet have a separate release cadence or external consumers.
 
@@ -187,7 +243,8 @@ The core is a local workspace crate rather than a git submodule because it does 
 3. Live MISP REST pull and live OpenCTI GraphQL pull jobs (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 collection poll already available).
 4. Authoritative DNSBL service mode using Hickory DNS.
 5. AI SOC analyst assist with human approval gates for blocking changes.
-6. Full SIEM adapters after the NDJSON export contract is proven in buyer labs.
+6. Transactional outbox delivery, receiving-system receipts, collector integration tests, and buyer-specific SIEM profiles after the portable export contracts are verified.
+7. In-process OpenTelemetry traces, metrics, redacted structured logs, SLOs, and alerting across ingress, enforcement, storage, workers, and integrations.
 
 ## Verification
 
