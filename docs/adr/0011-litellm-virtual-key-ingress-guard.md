@@ -6,7 +6,7 @@
 
 ## Context
 
-The development LLM gateway emitted high-severity `llm_exceptions` alerts because a phone-number-shaped credential reached LiteLLM where a virtual key beginning with `sk-` was required. Treating this as an ordinary upstream model exception creates avoidable alert noise, consumes upstream capacity, and lets the wrong credential class cross the edge boundary.
+The development LLM gateway emitted high-severity `llm_exceptions` alerts because a telephone-shaped credential reached LiteLLM where a virtual key beginning with `sk-` was required. Treating this as an ordinary upstream model exception creates avoidable alert noise, consumes upstream capacity, and lets the wrong credential class cross the edge boundary.
 
 Wardnet is the ContextualWisdomLab WAF/IDS/software-load-balancer/APIM and therefore owns this inbound proxy control. EgressWeave protects Python outbound calls and is not the correct owner. Contextual Orchestrator owns model routing; LiteLLM owns virtual-key authentication, revocation, team, budget, model scope, and provider selection.
 
@@ -30,7 +30,7 @@ Add a dedicated Rust binary inside Wardnet:
 litellm-virtual-key-proxy
 ```
 
-The binary has one fixed, registry-configured LiteLLM origin and applies the `litellm_virtual_key` credential policy to every proxied request. It is deployable as a sidecar, internal edge service, or separate container in front of `https://llm-gateway-dev.hyosungitx.com`.
+The binary has one fixed, registry-configured LiteLLM origin and applies the `litellm_virtual_key` credential policy to every proxied request. It is deployable as a sidecar, internal edge service, or separate container in front of a synthetic example origin such as `https://gateway.example.invalid`.
 
 The guard and transport:
 
@@ -57,7 +57,7 @@ LiteLLM remains authoritative. Passing this shape gate does not prove that a key
 
 ### Positive
 
-- Phone numbers, account identifiers, and other obvious wrong credential classes fail before LiteLLM.
+- Telephone numbers, account identifiers, and other obvious wrong credential classes fail before LiteLLM.
 - The edge response and structured rejection event do not disclose the rejected value or a masked fragment.
 - Existing Wardnet routes are unchanged.
 - The binary is independently deployable and can later be embedded behind the general Wardnet control plane.
