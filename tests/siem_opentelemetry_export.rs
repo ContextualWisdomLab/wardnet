@@ -67,7 +67,10 @@ fn ocsf_detection_finding_is_versioned_allowlisted_and_redacted() {
     assert_eq!(value["metadata"]["original_event_uid"], "7");
     assert_eq!(value["metadata"]["product"]["name"], "Wardnet");
     assert_eq!(value["finding_info"]["uid"], "wardnet-event-7");
-    assert_eq!(value["src_endpoint"]["ip"], "203.0.113.8");
+    assert_eq!(
+        value["unmapped"]["wardnet"]["client_ip"],
+        "203.0.113.8"
+    );
     assert_eq!(value["unmapped"]["wardnet"]["path"], "/pay");
     assert_eq!(value["unmapped"]["wardnet"]["score"], 80);
     assert!(value.get("untrusted_extra").is_none());
