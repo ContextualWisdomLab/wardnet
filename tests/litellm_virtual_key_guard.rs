@@ -7,7 +7,7 @@ use axum::{
     extract::State,
     http::{
         HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
-        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, WWW_AUTHENTICATE},
+        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, COOKIE, LOCATION, WWW_AUTHENTICATE},
     },
     response::Response,
     routing::any,
@@ -36,6 +36,16 @@ async fn capture_upstream(
     headers: HeaderMap,
 ) -> Response {
     state.hits.fetch_add(1, Ordering::SeqCst);
+    if uri.path() == "/redirect" {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::TEMPORARY_REDIRECT;
+        response.headers_mut().insert(
+            LOCATION,
+            HeaderValue::from_static("https://credential-sink.invalid/collect"),
+        );
+        return response;
+    }
+
     let authorization_matches = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -75,9 +85,9 @@ async fn body_text(response: Response) -> String {
     String::from_utf8(body.to_vec()).expect("UTF-8 response")
 }
 
-fn proxy_request(path: &str, authorization: Option<&str>) -> Request<Body> {
+fn proxy_request(method: Method, path: &str, authorization: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
-        .method(Method::POST)
+        .method(method)
         .uri(path)
         .header(CONTENT_TYPE, "application/json")
         .header("accept", "text/event-stream")
@@ -87,7 +97,7 @@ fn proxy_request(path: &str, authorization: Option<&str>) -> Request<Body> {
         builder = builder.header(AUTHORIZATION, authorization);
     }
     builder
-        .body(Body::from(r#"{"model":"auto","messages":[]}"#))
+        .body(Body::from(r#"{"model":"auto","messages":[]}"#.replace("\\\"", "\"")))
         .expect("proxy request")
 }
 
@@ -123,7 +133,7 @@ async fn assert_rejected(
 }
 
 #[tokio::test]
-async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
+async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics() {
     let valid_key = "sk-virtual-test_ABC123";
     let hits = Arc::new(AtomicUsize::new(0));
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -163,13 +173,14 @@ async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
     assert_eq!(health.status(), StatusCode::OK);
     let health_body = body_text(health).await;
     assert!(health_body.contains("litellm_virtual_key"));
+    assert!(health_body.contains("configuration_version"));
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 
     let phone_shaped = "061012345318";
     let phone_header = format!("Bearer {phone_shaped}");
     assert_rejected(
         &app,
-        proxy_request("/v1/chat/completions", Some(&phone_header)),
+        proxy_request(Method::POST, "/v1/chat/completions", Some(&phone_header)),
         "credential_shape_invalid",
         Some("0610"),
     )
@@ -178,7 +189,7 @@ async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
 
     assert_rejected(
         &app,
-        proxy_request("/v1/chat/completions", None),
+        proxy_request(Method::POST, "/v1/chat/completions", None),
         "authorization_header_missing",
         None,
     )
@@ -188,6 +199,7 @@ async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
     assert_rejected(
         &app,
         proxy_request(
+            Method::POST,
             "/v1/chat/completions",
             Some("Basic c2stbm90LWEtdmlydHVhbC1rZXk="),
         ),
@@ -197,7 +209,11 @@ async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
     .await;
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 
-    let mut duplicate = proxy_request("/v1/chat/completions", Some("Bearer sk-first"));
+    let mut duplicate = proxy_request(
+        Method::POST,
+        "/v1/chat/completions",
+        Some("Bearer sk-first"),
+    );
     duplicate.headers_mut().append(
         AUTHORIZATION,
         HeaderValue::from_static("Bearer sk-second"),
@@ -215,6 +231,7 @@ async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
     let accepted = app_request(
         &app,
         proxy_request(
+            Method::POST,
             "/v1/chat/completions?team=alpha",
             Some(&valid_header),
         ),
@@ -248,6 +265,25 @@ async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
     assert_eq!(observed["path"], "/v1/chat/completions");
     assert_eq!(observed["query"], "team=alpha");
     assert!(!accepted_body.contains(valid_key));
+
+    let unsupported = app_request(
+        &app,
+        proxy_request(Method::TRACE, "/v1/models", Some(&valid_header)),
+    )
+    .await;
+    assert_eq!(unsupported.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(unsupported.headers().contains_key(ALLOW));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let redirected = app_request(
+        &app,
+        proxy_request(Method::POST, "/redirect", Some(&valid_header)),
+    )
+    .await;
+    assert_eq!(redirected.status(), StatusCode::BAD_GATEWAY);
+    assert!(!redirected.headers().contains_key(LOCATION));
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert!(body_text(redirected).await.contains("upstream_redirect_rejected"));
 
     upstream_task.abort();
 }
