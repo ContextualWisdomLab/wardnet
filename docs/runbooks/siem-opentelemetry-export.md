@@ -94,7 +94,7 @@ cargo run --quiet --locked --bin wardnet-event-exporter -- \
   > wardnet-syslog.log
 ```
 
-The output is one message per line. The source Unix timestamp is stored in the `wardnet` structured-data element. When trace context is present, the stable OpenTelemetry `OpenTelemetry` structured-data element is appended.
+The output is one message per line. It uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, `meta.sequenceId` for the Wardnet event ID, and the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp, are carried in a UTF-8 BOM-prefixed JSON message. No example or unowned IANA Private Enterprise Number is claimed.
 
 RFC 5424 does not provide confidentiality. Send these records over a protected transport such as a mutually authenticated TLS syslog relay or a collector-side file/pipe that is protected by operating-system permissions.
 
