@@ -1,4 +1,4 @@
-name: Repair LiteLLM virtual-key formatting
+name: Repair LiteLLM virtual-key formatting and anonymization
 
 # One-shot branch repair. The verified commit deletes this workflow.
 on:
@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: repair-litellm-virtual-key-format
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   repair:
@@ -32,6 +32,38 @@ jobs:
           toolchain: stable
           components: rustfmt,clippy
 
+      - name: Remove organization-specific incident identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "https://llm-gateway-dev.hyosungitx.com": "https://gateway.example.invalid",
+              "061012345318": "01000000000",
+              "Bearer 0610...": "a telephone-shaped synthetic Bearer value",
+          }
+          allowed_suffixes = {".md", ".json", ".rs", ".toml", ".yml", ".yaml", ".service"}
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or ".git" in path.parts or path.suffix not in allowed_suffixes:
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              updated = text
+              for old, new in replacements.items():
+                  updated = updated.replace(old, new)
+              if updated != text:
+                  path.write_text(updated, encoding="utf-8")
+          PY
+
+          if git grep -n -i -E 'hyosung|0610' -- ':!Cargo.lock'; then
+            echo "Organization-specific incident identifier remains in tracked content." >&2
+            exit 1
+          fi
+
       - name: Apply canonical Rust formatting
         run: cargo fmt --all
 
@@ -41,25 +73,25 @@ jobs:
           cargo test --locked --workspace
           cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: Publish only verified formatting repair
+      - name: Publish only verified repair
         shell: bash
         run: |
           set -euo pipefail
           workflow=.github/workflows/repair-litellm-virtual-key-format.yml
-          rm -- "$workflow"
+          rm -f -- "$workflow"
 
           git config user.name "opencode-agent[bot]"
           git config user.email "219766164+opencode-agent[bot]@users.noreply.github.com"
 
           while IFS= read -r -d '' path; do
             git add -- "$path"
-          done < <(git diff --name-only -z -- '*.rs')
-          git add -- "$workflow"
+          done < <(git diff --name-only -z -- '*.rs' '*.md' '*.json' '*.toml' '*.yml' '*.yaml' '*.service')
+          git add -u -- "$workflow" || true
 
           if git diff --cached --quiet; then
-            echo "No verified formatting changes were produced." >&2
+            echo "No verified repair changes were produced." >&2
             exit 1
           fi
 
-          git commit -m "style: apply canonical Rust formatting"
+          git commit -m "style: format and anonymize LiteLLM ingress guard"
           git push origin HEAD:feat/litellm-virtual-key-ingress-guard
