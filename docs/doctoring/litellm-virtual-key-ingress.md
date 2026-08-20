@@ -14,6 +14,7 @@ A dedicated Rust reverse proxy rejects missing, duplicate, non-Bearer, and clear
 | Security controls should fail closed before crossing a trust boundary | Apply the credential-class guard before target construction and upstream transport | `src/litellm_guard_proxy.rs` | missing, duplicate, wrong-scheme, oversized, and telephone-shaped values never reach the loopback upstream |
 | A lexical prefilter must not replace authoritative key validation | Accept only the expected credential class, then delegate existence, revocation, budget, team, and scope to LiteLLM | ADR-0011 | valid-shaped input is forwarded rather than locally authenticated |
 | Runtime settings must be retrieved through a registry contract | Bootstrap a versioned JSON KV document into an immutable process-local registry; reject unknown keys and wrong types | `src/runtime_config.rs`, `ProxyConfig::from_registry` | registry and exact CLI contract tests |
+| An unauthenticated health endpoint should disclose operational state without exposing internal topology | Report the fixed-upstream policy, not the configured upstream hostname | `HealthBody`, `healthz` | loopback integration test asserts the policy marker is present and the bound upstream address is absent |
 | A fixed-upstream credential boundary must not use an ambient system proxy or follow an unvalidated redirect | Disable system proxies and redirects; reject upstream 3xx responses locally | `ProxyState::new`, `proxy_request` | redirect regression returns 502 without forwarding `Location` |
 | Untrusted method tunnelling must be constrained | Permit the OpenAI-compatible REST method set and reject `CONNECT`, `TRACE`, and extensions | `method_allowed`, `method_not_allowed` | TRACE regression returns 405 with no upstream hit |
 | Streaming LLM responses should not require whole-body buffering | Construct the downstream Axum body from the upstream byte stream | `src/litellm_guard_proxy.rs` | controlled two-chunk SSE test receives headers and the first chunk before the final chunk is released, then verifies normal completion |
@@ -49,4 +50,4 @@ Meli, M., McNiece, M. R., & Reaves, B. (2019). How bad can it Git? Characterizin
 
 National Institute of Standards and Technology. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities* (NIST Special Publication 800-218). https://doi.org/10.6028/NIST.SP.800-218
 
-OWASP Foundation. (2025). *OWASP application security verification standard 5.0.0*. https://owasp.org/www-project/application-security-verification-standard/
+OWASP Foundation. (2025). *OWASP application security verification standard 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/
