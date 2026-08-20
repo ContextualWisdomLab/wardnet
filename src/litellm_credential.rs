@@ -86,8 +86,14 @@ fn valid_virtual_key_shape(token: &str) -> bool {
     {
         return false;
     }
+
+    let payload = &token[LITELLM_KEY_PREFIX.len()..];
+    if !matches!(payload.bytes().next(), Some(byte) if is_b64_token_byte(byte)) {
+        return false;
+    }
+
     let mut padding_started = false;
-    for byte in token.bytes() {
+    for byte in payload.bytes() {
         if byte == b'=' {
             padding_started = true;
             continue;
@@ -159,6 +165,8 @@ mod tests {
         for value in [
             "Bearer 01000000000",
             "Bearer sk-",
+            "Bearer sk-=",
+            "Bearer sk-====",
             "Bearer sk-a b",
             "Bearer sk-a=tail",
             "Bearer sk-a?bad",
