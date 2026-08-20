@@ -27,21 +27,65 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt,clippy
-      - name: Apply review fixes
+      - name: Apply and verify review fixes
         shell: bash
         run: |
           set -euo pipefail
           cargo add time@0.3 --features formatting
+          cargo add base64@0.22
           python3 - <<'PY'
           from pathlib import Path
 
-          source_path = Path('src/bin/wardnet-event-exporter.rs')
-          source = source_path.read_text()
-          old = 'use serde_json::{Value, json};\n'
-          if old not in source:
-              old = 'use serde_json::{json, Value};\n'
+          path = Path('src/bin/wardnet-event-exporter.rs')
+          source = path.read_text()
+
+          serde_import = 'use serde_json::{Value, json};\n'
+          assert serde_import in source
+          source = source.replace(
+              serde_import,
+              serde_import
+              + 'use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};\n'
+              + 'use time::{OffsetDateTime, format_description::well_known::Rfc3339};\n',
+              1,
+          )
+
+          old = '''    let mut events = Vec::new();
+              let mut event_ids = HashSet::new();
+              for (line_index, line) in input.lines().enumerate() {
+          '''
+          new = '''    let mut events = Vec::new();
+              let mut event_ids = HashSet::new();
+              let mut previous_event_id = 0_u64;
+              for (line_index, line) in input.lines().enumerate() {
+          '''
           assert old in source
-          source = source.replace(old, old + 'use time::{OffsetDateTime, format_description::well_known::Rfc3339};\n', 1)
+          source = source.replace(old, new, 1)
+
+          old = '''        if !event_ids.insert(source.id) {
+                  return Err(format!(
+                      "line {line_number}: duplicate event id {}",
+                      source.id
+                  ));
+              }
+              events.push(normalize_event(source, line_number)?);
+          '''
+          new = '''        if source.id < previous_event_id {
+                  return Err(format!(
+                      "line {line_number}: event id {} is lower than previous event id {previous_event_id}",
+                      source.id
+                  ));
+              }
+              if !event_ids.insert(source.id) {
+                  return Err(format!(
+                      "line {line_number}: duplicate event id {}",
+                      source.id
+                  ));
+              }
+              previous_event_id = source.id;
+              events.push(normalize_event(source, line_number)?);
+          '''
+          assert old in source
+          source = source.replace(old, new, 1)
 
           old = '''fn is_authorization_marker(token: &str) -> bool {
               let marker = token.trim_end_matches(':');
@@ -113,8 +157,58 @@ jobs:
           assert old in source
           source = source.replace(old, new, 1)
 
-          old = '''        let meta_data = format!("[meta sequenceId=\\"{}\\"]", event.id);
+          old = '''            let flags = u8::from_str_radix(&normalized_flags, 16).map_err(|_| {
+                      format!("line {line_number}: trace context has invalid trace flags")
+                  })?;
+                  Ok(Some(TraceContext {
           '''
+          new = '''            let flags = u8::from_str_radix(&normalized_flags, 16).map_err(|_| {
+                      format!("line {line_number}: trace context has invalid trace flags")
+                  })?;
+                  if flags & !0x01 != 0 {
+                      return Err(format!(
+                          "line {line_number}: trace context has unsupported trace flags"
+                      ));
+                  }
+                  Ok(Some(TraceContext {
+          '''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          old = '''        object.insert("spanId".to_string(), json!(trace_context.span_id));
+                  object.insert("traceId".to_string(), json!(trace_context.trace_id));
+          '''
+          new = '''        object.insert(
+                      "spanId".to_string(),
+                      json!(otlp_bytes_from_hex(&trace_context.span_id)?),
+                  );
+                  object.insert(
+                      "traceId".to_string(),
+                      json!(otlp_bytes_from_hex(&trace_context.trace_id)?),
+                  );
+          '''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          marker = 'fn otlp_string_attribute(key: &str, value: &str) -> Value {\n'
+          helper = '''fn otlp_bytes_from_hex(value: &str) -> Result<String, String> {
+              let mut decoded = Vec::with_capacity(value.len() / 2);
+              for pair in value.as_bytes().chunks_exact(2) {
+                  let pair = std::str::from_utf8(pair)
+                      .map_err(|_| "validated trace identifier is not UTF-8".to_string())?;
+                  decoded.push(
+                      u8::from_str_radix(pair, 16)
+                          .map_err(|_| "validated trace identifier is not hexadecimal".to_string())?,
+                  );
+              }
+              Ok(BASE64_STANDARD.encode(decoded))
+          }
+
+          '''
+          assert marker in source
+          source = source.replace(marker, helper + marker, 1)
+
+          old = '        let meta_data = format!("[meta sequenceId=\\"{}\\"]", event.id);\n'
           new = '''        let timestamp = rfc5424_timestamp(event.timestamp_unix)?;
                   let meta_data = if event.id <= i32::MAX as u64 {
                       format!("[meta sequenceId=\\"{}\\"]", event.id)
@@ -124,14 +218,13 @@ jobs:
           '''
           assert old in source
           source = source.replace(old, new, 1)
-          old = '''            "<{priority}>1 - - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"
-          '''
-          new = '''            "<{priority}>1 {timestamp} - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"
-          '''
+
+          old = '            "<{priority}>1 - - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"\n'
+          new = '            "<{priority}>1 {timestamp} - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"\n'
           assert old in source
           source = source.replace(old, new, 1)
-          marker = '''fn escape_structured_data(value: &str) -> String {
-          '''
+
+          marker = 'fn escape_structured_data(value: &str) -> String {\n'
           helper = '''fn rfc5424_timestamp(timestamp_unix: u64) -> Result<String, String> {
               let timestamp = i64::try_from(timestamp_unix)
                   .map_err(|_| "RFC 5424 timestamp exceeds the supported range".to_string())?;
@@ -144,49 +237,25 @@ jobs:
           '''
           assert marker in source
           source = source.replace(marker, helper + marker, 1)
-          source_path.write_text(source)
-
-          tests_path = Path('tests/siem_export_input_contract.rs')
-          tests = tests_path.read_text()
-          addition = r'''
-
-          #[test]
-          fn colon_delimited_credentials_are_redacted() {
-              let input = "{\"id\":14,\"timestamp_unix\":1723456792,\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",\"reason\":\"token: abc123 password: hunter2 api_key: xyz\",\"score\":1,\"path\":\"/\"}\n";
-              let output = exporter(&["--format", "ocsf"], input);
-              assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-              let body = String::from_utf8(output.stdout).expect("UTF-8 OCSF output");
-              assert!(!body.contains("abc123"));
-              assert!(!body.contains("hunter2"));
-              assert!(!body.contains("xyz"));
-              assert!(body.contains("[REDACTED]"));
-          }
-
-          #[test]
-          fn rfc5424_omits_out_of_range_meta_sequence_id_but_preserves_event_id() {
-              let output = exporter(&["--format", "rfc5424"], &event(2_147_483_648, 1_723_456_791));
-              assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-              let body = String::from_utf8(output.stdout).expect("UTF-8 syslog output");
-              assert!(!body.contains("[meta sequenceId=\"2147483648\"]"));
-              assert!(body.contains("\"event_id\":2147483648"));
-          }
-          '''
-          assert 'colon_delimited_credentials_are_redacted' not in tests
-          tests_path.write_text(tests + addition)
+          path.write_text(source)
 
           adr_path = Path('docs/adr/0001-siem-opentelemetry-event-export.md')
           adr = adr_path.read_text()
           adr = adr.replace(
+              '- Trace and span identifiers encoded as hexadecimal strings.',
+              '- Trace and span identifiers use Protobuf JSON bytes encoding (base64); the RFC 5424 trace-context element keeps the W3C hexadecimal representation.',
+          )
+          adr = adr.replace(
               '- The RFC 5424 timestamp is the NILVALUE `-` because the current source event stores Unix seconds rather than an RFC 3339 timestamp; the exact source time remains in the JSON message.',
-              '- The RFC 5424 header timestamp is deterministically rendered from the source Unix seconds as RFC 3339. `meta.sequenceId` is emitted only when the Wardnet event ID is within RFC 5424\'s `1..=2147483647` range; larger IDs remain in the JSON message.'
+              '- The RFC 5424 header timestamp is deterministically rendered from source Unix seconds as RFC 3339. `meta.sequenceId` is emitted only for event IDs in `1..=2147483647`; larger Wardnet IDs remain in the JSON message.',
           )
           adr_path.write_text(adr)
 
           runbook_path = Path('docs/runbooks/siem-opentelemetry-export.md')
           runbook = runbook_path.read_text()
           runbook = runbook.replace(
-              'It uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, `meta.sequenceId` for the Wardnet event ID, and the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp, are carried in a UTF-8 BOM-prefixed JSON message.',
-              'It renders the source event time as an RFC 3339 header timestamp, uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, emits `meta.sequenceId` only for event IDs in RFC 5424\'s `1..=2147483647` range, and uses the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp and all event IDs, are carried in a UTF-8 BOM-prefixed JSON message.'
+              'The output is one message per line. It uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, `meta.sequenceId` for the Wardnet event ID, and the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp, are carried in a UTF-8 BOM-prefixed JSON message. No example or unowned IANA Private Enterprise Number is claimed.',
+              'The output is one message per line. It renders the source event time as an RFC 3339 header timestamp, uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, emits `meta.sequenceId` only for event IDs in RFC 5424\'s `1..=2147483647` range, and uses the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp and all Wardnet event IDs, are carried in a UTF-8 BOM-prefixed JSON message. No example or unowned IANA Private Enterprise Number is claimed.',
           )
           runbook_path.write_text(runbook)
           PY
@@ -198,5 +267,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'fix: harden SIEM export review contracts'
+          git commit -m 'fix: harden SIEM export protocol contracts'
           git push origin HEAD:feat/siem-opentelemetry-export
