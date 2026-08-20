@@ -6,8 +6,6 @@ use std::process::{Command, Output, Stdio};
 
 const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 const SPAN_ID: &str = "00f067aa0ba902b7";
-const OTLP_TRACE_ID: &str = "S/kvNXezTaajzpKdDg5HNg==";
-const OTLP_SPAN_ID: &str = "APBnqgupArc=";
 const SECRET_CANARY: &str = "sk-live-wardnet-canary";
 
 fn exporter(args: &[&str], input: &str) -> Output {
@@ -114,8 +112,8 @@ fn otlp_json_filters_checkpoint_and_preserves_trace_context() {
 
     let record = &records[0];
     assert_eq!(record["timeUnixNano"], "1723456790000000000");
-    assert_eq!(record["traceId"], OTLP_TRACE_ID);
-    assert_eq!(record["spanId"], OTLP_SPAN_ID);
+    assert_eq!(record["traceId"], TRACE_ID);
+    assert_eq!(record["spanId"], SPAN_ID);
     assert_eq!(record["flags"], 1);
     assert_eq!(
         record["eventName"],
