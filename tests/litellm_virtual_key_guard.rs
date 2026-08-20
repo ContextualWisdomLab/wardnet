@@ -3,7 +3,7 @@ mod litellm_guard_proxy;
 
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     extract::State,
     http::{
         HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
@@ -12,22 +12,25 @@ use axum::{
     response::Response,
     routing::any,
 };
+use futures_util::{StreamExt, stream};
 use litellm_guard_proxy::{ProxyConfig, ProxyState, build_router};
 use serde_json::{Value, json};
 use std::{
+    convert::Infallible,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Notify};
 use tower::ServiceExt;
 
 #[derive(Clone)]
 struct UpstreamState {
     expected_key: String,
     hits: Arc<AtomicUsize>,
+    final_chunk_release: Arc<Notify>,
 }
 
 async fn capture_upstream(
@@ -61,7 +64,17 @@ async fn capture_upstream(
         "path": uri.path(),
         "query": uri.query()
     });
-    let mut response = Response::new(Body::from(format!("data: {payload}\n\n")));
+
+    let first_chunk = stream::once(async {
+        Ok::<Bytes, Infallible>(Bytes::from_static(b"data: "))
+    });
+    let final_chunk_release = state.final_chunk_release.clone();
+    let final_payload = format!("{payload}\n\n");
+    let final_chunk = stream::once(async move {
+        final_chunk_release.notified().await;
+        Ok::<Bytes, Infallible>(Bytes::from(final_payload))
+    });
+    let mut response = Response::new(Body::from_stream(first_chunk.chain(final_chunk)));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -138,6 +151,7 @@ async fn assert_rejected(
 async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics() {
     let valid_key = "sk-virtual-test_ABC123";
     let hits = Arc::new(AtomicUsize::new(0));
+    let final_chunk_release = Arc::new(Notify::new());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind upstream");
@@ -147,6 +161,7 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
         .with_state(UpstreamState {
             expected_key: valid_key.to_string(),
             hits: hits.clone(),
+            final_chunk_release: final_chunk_release.clone(),
         });
     let upstream_task = tokio::spawn(async move {
         axum::serve(listener, upstream)
@@ -178,16 +193,24 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
     assert!(health_body.contains("configuration_version"));
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 
-    let phone_shaped = "061012345318";
-    let phone_header = format!("Bearer {phone_shaped}");
+    let telephone_shaped = "01000000000";
+    let telephone_header = format!("Bearer {telephone_shaped}");
     assert_rejected(
         &app,
-        proxy_request(Method::POST, "/v1/chat/completions", Some(&phone_header)),
+        proxy_request(
+            Method::POST,
+            "/v1/chat/completions",
+            Some(&telephone_header),
+        ),
         "credential_shape_invalid",
-        Some("0610"),
+        Some(telephone_shaped),
     )
     .await;
-    assert_eq!(hits.load(Ordering::SeqCst), 0, "rejected key reached upstream");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "rejected key reached upstream"
+    );
 
     assert_rejected(
         &app,
@@ -216,17 +239,10 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
         "/v1/chat/completions",
         Some("Bearer sk-first"),
     );
-    duplicate.headers_mut().append(
-        AUTHORIZATION,
-        HeaderValue::from_static("Bearer sk-second"),
-    );
-    assert_rejected(
-        &app,
-        duplicate,
-        "authorization_header_ambiguous",
-        None,
-    )
-    .await;
+    duplicate
+        .headers_mut()
+        .append(AUTHORIZATION, HeaderValue::from_static("Bearer sk-second"));
+    assert_rejected(&app, duplicate, "authorization_header_ambiguous", None).await;
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 
     let valid_header = format!("Bearer {valid_key}");
@@ -255,7 +271,33 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
             .and_then(|value| value.to_str().ok()),
         Some("99")
     );
-    let accepted_body = body_text(accepted).await;
+
+    let mut accepted_stream = accepted.into_body().into_data_stream();
+    let first_chunk = tokio::time::timeout(Duration::from_secs(1), accepted_stream.next())
+        .await
+        .expect("proxy withheld the first upstream stream chunk")
+        .expect("first upstream stream item")
+        .expect("first upstream stream chunk");
+    assert_eq!(first_chunk.as_ref(), b"data: ");
+
+    final_chunk_release.notify_one();
+    let final_chunk = tokio::time::timeout(Duration::from_secs(1), accepted_stream.next())
+        .await
+        .expect("proxy did not relay the released final stream chunk")
+        .expect("final upstream stream item")
+        .expect("final upstream stream chunk");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), accepted_stream.next())
+            .await
+            .expect("proxy stream did not terminate")
+            .is_none()
+    );
+
+    let accepted_body = format!(
+        "{}{}",
+        String::from_utf8(first_chunk.to_vec()).expect("UTF-8 first chunk"),
+        String::from_utf8(final_chunk.to_vec()).expect("UTF-8 final chunk")
+    );
     let event_json = accepted_body
         .strip_prefix("data: ")
         .and_then(|value| value.strip_suffix("\n\n"))
@@ -285,7 +327,11 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
     assert_eq!(redirected.status(), StatusCode::BAD_GATEWAY);
     assert!(!redirected.headers().contains_key(LOCATION));
     assert_eq!(hits.load(Ordering::SeqCst), 2);
-    assert!(body_text(redirected).await.contains("upstream_redirect_rejected"));
+    assert!(
+        body_text(redirected)
+            .await
+            .contains("upstream_redirect_rejected")
+    );
 
     upstream_task.abort();
 }
