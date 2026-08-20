@@ -97,7 +97,9 @@ fn proxy_request(method: Method, path: &str, authorization: Option<&str>) -> Req
         builder = builder.header(AUTHORIZATION, authorization);
     }
     builder
-        .body(Body::from(r#"{"model":"auto","messages":[]}"#))
+        .body(Body::from(
+            json!({"model": "auto", "messages": []}).to_string(),
+        ))
         .expect("proxy request")
 }
 
