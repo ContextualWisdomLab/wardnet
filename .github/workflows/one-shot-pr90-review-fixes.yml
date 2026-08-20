@@ -31,6 +31,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # This commit contains only the extracted production parser module.
+          # It was created against this PR lineage but did not advance the PR ref,
+          # so apply it explicitly before wiring the binary/tests to it.
+          git cherry-pick d4f2cf69049b76d8d7ba3ec523e7518b2daa4587
           cargo add time@0.3 --features formatting
           python3 - <<'PY'
           from pathlib import Path
