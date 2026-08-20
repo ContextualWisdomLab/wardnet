@@ -1,8 +1,8 @@
 //! Dedicated high-throughput reverse proxy for a LiteLLM virtual-key boundary.
 //!
 //! The proxy performs one bounded credential-shape scan before any upstream
-//! I/O, forwards only approved end-to-end headers, and streams upstream bodies
-//! without accumulating complete LLM responses in memory.
+//! I/O, forwards only approved end-to-end headers, and streams upstream response
+//! bodies without accumulating complete LLM responses in memory.
 
 #[path = "credential_guard.rs"]
 mod credential_guard;
@@ -75,10 +75,8 @@ impl ProxyConfig {
             .string_or(LITELLM_PROXY_BIND_ADDRESS, DEFAULT_BIND_ADDRESS)?
             .parse::<SocketAddr>()
             .map_err(|error| format!("invalid {LITELLM_PROXY_BIND_ADDRESS}: {error}"))?;
-        let max_body_bytes = registry.usize_or(
-            LITELLM_PROXY_MAX_BODY_BYTES,
-            DEFAULT_MAX_BODY_BYTES,
-        )?;
+        let max_body_bytes =
+            registry.usize_or(LITELLM_PROXY_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES)?;
         let connect_timeout_seconds = registry.u64_or(
             LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
             DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -157,7 +155,7 @@ struct HealthBody<'a> {
     status: &'a str,
     credential_policy: &'a str,
     configuration_version: &'a str,
-    upstream_origin: String,
+    upstream_policy: &'a str,
     max_body_bytes: usize,
 }
 
@@ -176,7 +174,7 @@ async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody<'static>> {
         status: "ok",
         credential_policy: "litellm_virtual_key",
         configuration_version: SUPPORTED_CONFIGURATION_VERSION,
-        upstream_origin: upstream_origin(&state.upstream_url),
+        upstream_policy: "fixed_https_origin",
         max_body_bytes: state.max_body_bytes,
     })
 }
@@ -344,10 +342,6 @@ fn is_loopback_host(host: Option<&str>) -> bool {
             .parse::<IpAddr>()
             .map(|address| address.is_loopback())
             .unwrap_or(false)
-}
-
-fn upstream_origin(url: &Url) -> String {
-    url.origin().ascii_serialization()
 }
 
 fn error_class(error: &reqwest::Error) -> &'static str {
