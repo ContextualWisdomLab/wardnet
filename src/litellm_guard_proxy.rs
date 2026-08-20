@@ -6,16 +6,27 @@
 
 #[path = "credential_guard.rs"]
 mod credential_guard;
+#[path = "runtime_config.rs"]
+mod runtime_config;
+
+pub use runtime_config::{RuntimeConfigRegistry, configuration_path_from_args};
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, Method, StatusCode, Uri, header::CACHE_CONTROL},
+    http::{
+        HeaderMap, HeaderValue, Method, StatusCode, Uri,
+        header::{ALLOW, CACHE_CONTROL},
+    },
     response::{IntoResponse, Response},
     routing::get,
 };
 use reqwest::{Client, Url, redirect::Policy};
+use runtime_config::{
+    CONFIGURATION_VERSION, LITELLM_PROXY_BIND_ADDRESS, LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
+    LITELLM_PROXY_MAX_BODY_BYTES, LITELLM_PROXY_UPSTREAM_URL,
+};
 use serde::Serialize;
 use std::{
     error::Error,
@@ -26,13 +37,22 @@ use std::{
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8090";
 const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 10;
+const SUPPORTED_CONFIGURATION_VERSION: &str = "1";
+const ALLOWED_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS";
+const ALLOWED_CONFIG_KEYS: [&str; 5] = [
+    CONFIGURATION_VERSION,
+    LITELLM_PROXY_UPSTREAM_URL,
+    LITELLM_PROXY_BIND_ADDRESS,
+    LITELLM_PROXY_MAX_BODY_BYTES,
+    LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
+];
 
 /// Runtime configuration for the dedicated LiteLLM ingress proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Local listen address for the sidecar or edge deployment.
     pub bind_address: SocketAddr,
-    /// Fixed LiteLLM upstream base URL. Request paths and queries are appended.
+    /// Fixed LiteLLM upstream origin. Request paths and queries are appended.
     pub upstream_url: Url,
     /// Maximum accepted request-body size before the handler runs.
     pub max_body_bytes: usize,
@@ -41,35 +61,26 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
-    /// Parse and validate a proxy configuration from process environment.
-    ///
-    /// Required:
-    /// - `LITELLM_UPSTREAM_URL`
-    ///
-    /// Optional:
-    /// - `LITELLM_PROXY_BIND_ADDR` (default `127.0.0.1:8090`)
-    /// - `LITELLM_MAX_BODY_BYTES` (default 16 MiB)
-    /// - `LITELLM_CONNECT_TIMEOUT_SECONDS` (default 10)
-    pub fn from_env() -> Result<Self, Box<dyn Error>> {
-        let upstream = std::env::var("LITELLM_UPSTREAM_URL").map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "LITELLM_UPSTREAM_URL is required",
-            )
-        })?;
-        let bind_address = std::env::var("LITELLM_PROXY_BIND_ADDR")
-            .unwrap_or_else(|_| DEFAULT_BIND_ADDRESS.to_string())
-            .parse::<SocketAddr>()?;
-        let max_body_bytes = parse_positive_usize(
-            "LITELLM_MAX_BODY_BYTES",
-            std::env::var("LITELLM_MAX_BODY_BYTES").ok().as_deref(),
+    /// Resolve the immutable proxy configuration from a process-local registry.
+    pub fn from_registry(registry: &RuntimeConfigRegistry) -> Result<Self, String> {
+        registry.ensure_only(&ALLOWED_CONFIG_KEYS)?;
+        let version = registry.required_string(CONFIGURATION_VERSION)?;
+        if version != SUPPORTED_CONFIGURATION_VERSION {
+            return Err(format!(
+                "unsupported configuration_version {version}; expected {SUPPORTED_CONFIGURATION_VERSION}"
+            ));
+        }
+        let upstream = registry.required_string(LITELLM_PROXY_UPSTREAM_URL)?;
+        let bind_address = registry
+            .string_or(LITELLM_PROXY_BIND_ADDRESS, DEFAULT_BIND_ADDRESS)?
+            .parse::<SocketAddr>()
+            .map_err(|error| format!("invalid {LITELLM_PROXY_BIND_ADDRESS}: {error}"))?;
+        let max_body_bytes = registry.usize_or(
+            LITELLM_PROXY_MAX_BODY_BYTES,
             DEFAULT_MAX_BODY_BYTES,
         )?;
-        let connect_timeout_seconds = parse_positive_u64(
-            "LITELLM_CONNECT_TIMEOUT_SECONDS",
-            std::env::var("LITELLM_CONNECT_TIMEOUT_SECONDS")
-                .ok()
-                .as_deref(),
+        let connect_timeout_seconds = registry.u64_or(
+            LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
             DEFAULT_CONNECT_TIMEOUT_SECONDS,
         )?;
         Self::new(
@@ -78,7 +89,6 @@ impl ProxyConfig {
             max_body_bytes,
             Duration::from_secs(connect_timeout_seconds),
         )
-        .map_err(Into::into)
     }
 
     /// Construct and validate an explicit configuration.
@@ -113,9 +123,10 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
-    /// Build a no-redirect, connection-pooled HTTP client from validated config.
+    /// Build a no-redirect, no-system-proxy, connection-pooled HTTP client.
     pub fn new(config: &ProxyConfig) -> Result<Self, String> {
         let client = Client::builder()
+            .no_proxy()
             .redirect(Policy::none())
             .connect_timeout(config.connect_timeout)
             .pool_idle_timeout(Duration::from_secs(90))
@@ -132,8 +143,7 @@ impl ProxyState {
 
     fn target(&self, uri: &Uri) -> Result<Url, String> {
         let base = self.upstream_url.as_str().trim_end_matches('/');
-        let path = uri.path();
-        let mut target = format!("{base}{path}");
+        let mut target = format!("{base}{}", uri.path());
         if let Some(query) = uri.query().filter(|query| !query.is_empty()) {
             target.push('?');
             target.push_str(query);
@@ -146,6 +156,7 @@ impl ProxyState {
 struct HealthBody<'a> {
     status: &'a str,
     credential_policy: &'a str,
+    configuration_version: &'a str,
     upstream_origin: String,
     max_body_bytes: usize,
 }
@@ -164,6 +175,7 @@ async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody<'static>> {
     Json(HealthBody {
         status: "ok",
         credential_policy: "litellm_virtual_key",
+        configuration_version: SUPPORTED_CONFIGURATION_VERSION,
         upstream_origin: upstream_origin(&state.upstream_url),
         max_body_bytes: state.max_body_bytes,
     })
@@ -180,30 +192,24 @@ async fn proxy_request(
         emit_auth_rejection(rejection.code(), uri.path());
         return credential_guard::rejection_response(rejection);
     }
+    if !method_allowed(&method) {
+        return method_not_allowed();
+    }
 
     let target = match state.target(&uri) {
         Ok(target) => target,
-        Err(message) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "event_type": "proxy_target_error",
-                    "path": uri.path(),
-                    "reason": "invalid_upstream_target"
-                })
+        Err(_) => {
+            emit_proxy_event("proxy_target_error", "invalid_upstream_target", uri.path());
+            return proxy_error(
+                StatusCode::BAD_GATEWAY,
+                "invalid_upstream_target",
+                "LiteLLM upstream target could not be constructed",
             );
-            return proxy_error(StatusCode::BAD_GATEWAY, "invalid_upstream_target", message);
         }
     };
     let upstream_method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
         Ok(method) => method,
-        Err(_) => {
-            return proxy_error(
-                StatusCode::BAD_REQUEST,
-                "unsupported_http_method",
-                "Unsupported HTTP method",
-            );
-        }
+        Err(_) => return method_not_allowed(),
     };
     let request = credential_guard::forward_request_headers(
         &headers,
@@ -229,6 +235,19 @@ async fn proxy_request(
         }
     };
 
+    if upstream.status().is_redirection() {
+        emit_proxy_event(
+            "upstream_policy_rejection",
+            "upstream_redirect_rejected",
+            uri.path(),
+        );
+        return proxy_error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_redirect_rejected",
+            "LiteLLM upstream redirect rejected",
+        );
+    }
+
     let status = StatusCode::from_u16(upstream.status().as_u16())
         .expect("reqwest upstream status codes are valid HTTP status codes");
     let upstream_headers = upstream.headers().clone();
@@ -238,11 +257,37 @@ async fn proxy_request(
     response
 }
 
+fn method_allowed(method: &Method) -> bool {
+    method == Method::GET
+        || method == Method::POST
+        || method == Method::PUT
+        || method == Method::PATCH
+        || method == Method::DELETE
+        || method == Method::HEAD
+        || method == Method::OPTIONS
+}
+
+fn method_not_allowed() -> Response {
+    let mut response = proxy_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "unsupported_http_method",
+        "Unsupported HTTP method",
+    );
+    response
+        .headers_mut()
+        .insert(ALLOW, HeaderValue::from_static(ALLOWED_METHODS));
+    response
+}
+
 fn emit_auth_rejection(reason: &str, path: &str) {
+    emit_proxy_event("llm_auth_rejected", reason, path);
+}
+
+fn emit_proxy_event(event_type: &str, reason: &str, path: &str) {
     eprintln!(
         "{}",
         serde_json::json!({
-            "event_type": "llm_auth_rejected",
+            "event_type": event_type,
             "reason": reason,
             "path": path
         })
@@ -261,10 +306,9 @@ fn proxy_error(status: StatusCode, code: &str, message: impl Into<String>) -> Re
         })),
     )
         .into_response();
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }
 
@@ -275,6 +319,9 @@ fn validate_upstream_url(raw: &str) -> Result<Url, String> {
     }
     if url.query().is_some() || url.fragment().is_some() {
         return Err("upstream URL must not contain a query or fragment".to_string());
+    }
+    if url.path() != "/" {
+        return Err("upstream URL must be an origin without a path prefix".to_string());
     }
     match url.scheme() {
         "https" => {}
@@ -300,11 +347,7 @@ fn is_loopback_host(host: Option<&str>) -> bool {
 }
 
 fn upstream_origin(url: &Url) -> String {
-    let host = url.host_str().unwrap_or("invalid");
-    match url.port() {
-        Some(port) => format!("{}://{host}:{port}", url.scheme()),
-        None => format!("{}://{host}", url.scheme()),
-    }
+    url.origin().ascii_serialization()
 }
 
 fn error_class(error: &reqwest::Error) -> &'static str {
@@ -319,32 +362,6 @@ fn error_class(error: &reqwest::Error) -> &'static str {
     } else {
         "other"
     }
-}
-
-fn parse_positive_usize(name: &str, raw: Option<&str>, default: usize) -> Result<usize, String> {
-    let value = match raw {
-        Some(raw) => raw
-            .parse::<usize>()
-            .map_err(|error| format!("{name} must be a positive integer: {error}"))?,
-        None => default,
-    };
-    if value == 0 {
-        return Err(format!("{name} must be greater than 0"));
-    }
-    Ok(value)
-}
-
-fn parse_positive_u64(name: &str, raw: Option<&str>, default: u64) -> Result<u64, String> {
-    let value = match raw {
-        Some(raw) => raw
-            .parse::<u64>()
-            .map_err(|error| format!("{name} must be a positive integer: {error}"))?,
-        None => default,
-    };
-    if value == 0 {
-        return Err(format!("{name} must be greater than 0"));
-    }
-    Ok(value)
 }
 
 /// Bind and serve the dedicated proxy until `shutdown` resolves.
@@ -367,11 +384,52 @@ pub async fn serve(
 mod tests {
     use super::*;
 
+    fn registry(content: &str) -> RuntimeConfigRegistry {
+        RuntimeConfigRegistry::from_json_str(content).unwrap()
+    }
+
+    #[test]
+    fn resolves_registry_configuration_and_defaults() {
+        let config = ProxyConfig::from_registry(&registry(
+            r#"{
+                "configuration_version": "1",
+                "litellm_proxy_upstream_url": "https://llm.example"
+            }"#,
+        ))
+        .unwrap();
+        assert_eq!(config.bind_address, "127.0.0.1:8090".parse().unwrap());
+        assert_eq!(config.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(
+            config.connect_timeout,
+            Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECONDS)
+        );
+
+        assert!(
+            ProxyConfig::from_registry(&registry(
+                r#"{
+                    "configuration_version": "2",
+                    "litellm_proxy_upstream_url": "https://llm.example"
+                }"#
+            ))
+            .is_err()
+        );
+        assert!(
+            ProxyConfig::from_registry(&registry(
+                r#"{
+                    "configuration_version": "1",
+                    "litellm_proxy_upstream_url": "https://llm.example",
+                    "typo_limit": 1
+                }"#
+            ))
+            .is_err()
+        );
+    }
+
     #[test]
     fn validates_upstream_security_boundary() {
         assert!(validate_upstream_url("https://llm.example").is_ok());
         assert!(validate_upstream_url("http://127.0.0.1:4000").is_ok());
-        assert!(validate_upstream_url("http://localhost:4000/base").is_ok());
+        assert!(validate_upstream_url("http://localhost:4000/base").is_err());
         assert!(validate_upstream_url("http://llm.example").is_err());
         assert!(validate_upstream_url("https://user:secret@llm.example").is_err());
         assert!(validate_upstream_url("https://llm.example?key=value").is_err());
@@ -379,10 +437,10 @@ mod tests {
     }
 
     #[test]
-    fn joins_base_path_request_path_and_query() {
+    fn appends_request_path_and_query_to_fixed_origin() {
         let config = ProxyConfig::new(
             "127.0.0.1:0".parse().unwrap(),
-            "https://llm.example/base",
+            "https://llm.example",
             1024,
             Duration::from_secs(1),
         )
@@ -391,16 +449,41 @@ mod tests {
         let target = state
             .target(&"/v1/models?team=a".parse::<Uri>().unwrap())
             .unwrap();
-        assert_eq!(target.as_str(), "https://llm.example/base/v1/models?team=a");
+        assert_eq!(target.as_str(), "https://llm.example/v1/models?team=a");
     }
 
     #[test]
-    fn parses_positive_bounds() {
-        assert_eq!(parse_positive_usize("SIZE", None, 7).unwrap(), 7);
-        assert_eq!(parse_positive_usize("SIZE", Some("8"), 7).unwrap(), 8);
-        assert!(parse_positive_usize("SIZE", Some("0"), 7).is_err());
-        assert!(parse_positive_usize("SIZE", Some("bad"), 7).is_err());
-        assert_eq!(parse_positive_u64("TIME", None, 9).unwrap(), 9);
-        assert!(parse_positive_u64("TIME", Some("0"), 9).is_err());
+    fn validates_positive_bounds_and_methods() {
+        assert!(
+            ProxyConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                "https://llm.example",
+                0,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(
+            ProxyConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                "https://llm.example",
+                1,
+                Duration::ZERO
+            )
+            .is_err()
+        );
+        for method in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ] {
+            assert!(method_allowed(&method));
+        }
+        assert!(!method_allowed(&Method::CONNECT));
+        assert!(!method_allowed(&Method::TRACE));
     }
 }
