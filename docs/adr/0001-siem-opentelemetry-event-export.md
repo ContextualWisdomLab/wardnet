@@ -33,9 +33,10 @@ Add a separate Rust binary, `wardnet-event-exporter`, that consumes the existing
 
 3. **RFC 5424 syslog**
    - Facility `local0`.
-   - Wardnet event fields are carried in structured data.
+   - Registered `origin` and `meta` structured-data elements carry source software, optional client IP, and event sequence ID.
    - OpenTelemetry trace context is carried in the stable `OpenTelemetry` structured-data element.
-   - The RFC 5424 timestamp is the NILVALUE `-` because the current source event stores Unix seconds rather than an RFC 3339 timestamp; the exact source time remains in structured data.
+   - Wardnet-specific event fields are emitted as a UTF-8 BOM-prefixed JSON message, not as an unregistered SD-ID.
+   - The RFC 5424 timestamp is the NILVALUE `-` because the current source event stores Unix seconds rather than an RFC 3339 timestamp; the exact source time remains in the JSON message.
 
 The exporter is a deterministic protocol boundary rather than a network daemon. Standard input and output make it composable with `curl`, OpenTelemetry Collector, Fluent Bit, Vector, syslog relays, and vendor agents without giving the exporter provider credentials or arbitrary egress authority.
 
@@ -81,6 +82,6 @@ Rejected because CEF is vendor-oriented and loses structured semantics needed by
 
 Rejected because OTLP has a defined Protobuf JSON envelope, timestamp encoding, resource/scope structure, severity model, and trace-context fields.
 
-### Inventing a private enterprise number for RFC 5424
+### Inventing or borrowing a private enterprise number for RFC 5424
 
-Rejected. Until ContextualWisdomLab has an assigned IANA Private Enterprise Number, Wardnet uses the unqualified `wardnet` structured-data ID and does not claim an unowned PEN.
+Rejected. RFC 5424 reserves unqualified SD-IDs for IANA registration and requires locally extensible SD-IDs to use the owner's assigned IANA Private Enterprise Number. Wardnet instead uses registered `origin` and `meta` elements, the OpenTelemetry-defined trace element, and a JSON message until ContextualWisdomLab owns a PEN.
