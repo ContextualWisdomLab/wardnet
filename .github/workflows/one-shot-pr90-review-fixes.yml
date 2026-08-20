@@ -27,7 +27,7 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt,clippy
-      - name: Apply and verify review fixes
+      - name: Refactor parser and harden RFC contract
         shell: bash
         run: |
           set -euo pipefail
@@ -35,160 +35,75 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
+          lib_path = Path('src/lib.rs')
+          lib = lib_path.read_text()
+          if 'pub mod siem_event_input;\n' not in lib:
+              marker = 'mod coraza_audit;\n'
+              assert marker in lib
+              lib = lib.replace(marker, 'pub mod siem_event_input;\n' + marker, 1)
+              lib_path.write_text(lib)
+
           path = Path('src/bin/wardnet-event-exporter.rs')
           source = path.read_text()
+          source = source.replace('use serde::Deserialize;\n', '')
+          source = source.replace('use std::collections::HashSet;\n', '')
+          source = source.replace('use std::net::IpAddr;\n', '')
 
           serde_import = 'use serde_json::{Value, json};\n'
           assert serde_import in source
+          imports = (
+              serde_import
+              + 'use time::{OffsetDateTime, format_description::well_known::Rfc3339};\n'
+              + 'use waf_ids_ai_soc::siem_event_input::{\n'
+              + '    NormalizedEvent, checked_time, contains_secret_marker, read_events,\n'
+              + '};\n'
+          )
+          source = source.replace(serde_import, imports, 1)
+
+          constants = '''const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+          const MAX_LINE_BYTES: usize = 1024 * 1024;
+          const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+          const MAX_EVENTS: usize = 100_000;
+          const MAX_ACTION_CHARS: usize = 64;
+          const MAX_REASON_CHARS: usize = 2_048;
+          const MAX_PATH_CHARS: usize = 2_048;
+          const MAX_ROUTE_CHARS: usize = 256;
+          '''
+          assert constants in source
+          source = source.replace(constants, 'const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;\n', 1)
+
+          start = source.index('#[derive(Debug, Deserialize)]\nstruct SourceEvent')
+          end = source.index('#[derive(Debug, Clone, Copy, PartialEq, Eq)]\nstruct NormalizedSeverity', start)
+          source = source[:start] + source[end:]
+
+          start = source.index('fn read_events<R: Read>')
+          end = source.index('fn render(options: &Options, events: &[NormalizedEvent])', start)
+          source = source[:start] + source[end:]
+
+          old = '        let meta_data = format!("[meta sequenceId=\\"{}\\"]", event.id);\n'
+          assert old in source
           source = source.replace(
-              serde_import,
-              serde_import + 'use time::{OffsetDateTime, format_description::well_known::Rfc3339};\n',
+              old,
+              '''        let timestamp = rfc5424_timestamp(event.timestamp_unix)?;
+              let meta_data = if event.id <= i32::MAX as u64 {
+                  format!("[meta sequenceId=\\"{}\\"]", event.id)
+              } else {
+                  String::new()
+              };
+          ''',
               1,
           )
 
-          old = '''    let mut events = Vec::new();
-              let mut event_ids = HashSet::new();
-              for (line_index, line) in input.lines().enumerate() {
-          '''
-          new = '''    let mut events = Vec::new();
-              let mut event_ids = HashSet::new();
-              let mut previous_event_id = 0_u64;
-              for (line_index, line) in input.lines().enumerate() {
-          '''
-          assert old in source
-          source = source.replace(old, new, 1)
-
-          old = '''        if !event_ids.insert(source.id) {
-                  return Err(format!(
-                      "line {line_number}: duplicate event id {}",
-                      source.id
-                  ));
-              }
-              events.push(normalize_event(source, line_number)?);
-          '''
-          new = '''        if source.id < previous_event_id {
-                  return Err(format!(
-                      "line {line_number}: event id {} is lower than previous event id {previous_event_id}",
-                      source.id
-                  ));
-              }
-              if !event_ids.insert(source.id) {
-                  return Err(format!(
-                      "line {line_number}: duplicate event id {}",
-                      source.id
-                  ));
-              }
-              previous_event_id = source.id;
-              events.push(normalize_event(source, line_number)?);
-          '''
-          assert old in source
-          source = source.replace(old, new, 1)
-
-          old = '''fn is_authorization_marker(token: &str) -> bool {
-              let marker = token.trim_end_matches(':');
-              marker.eq_ignore_ascii_case("bearer") || marker.eq_ignore_ascii_case("authorization")
-          }
-
-          fn redact_token(token: &str) -> String {
-              const ASSIGNMENT_KEYS: [&str; 7] = [
-                  "access_token=",
-                  "api_key=",
-                  "apikey=",
-                  "authorization=",
-                  "password=",
-                  "secret=",
-                  "token=",
-              ];
-              let lower = token.to_ascii_lowercase();
-              for key in ASSIGNMENT_KEYS {
-                  if let Some(index) = lower.find(key) {
-                      return format!(
-                          "{}{}[REDACTED]",
-                          &token[..index],
-                          &token[index..index + key.len()]
-                      );
-                  }
-              }
-          '''
-          new = '''fn is_authorization_marker(token: &str) -> bool {
-              let marker = token.trim_end_matches([':', '=']);
-              [
-                  "authorization",
-                  "bearer",
-                  "basic",
-                  "token",
-                  "password",
-                  "secret",
-                  "api_key",
-                  "apikey",
-                  "access_token",
-              ]
-              .iter()
-              .any(|candidate| marker.eq_ignore_ascii_case(candidate))
-          }
-
-          fn redact_token(token: &str) -> String {
-              const ASSIGNMENT_NAMES: [&str; 7] = [
-                  "access_token",
-                  "api_key",
-                  "apikey",
-                  "authorization",
-                  "password",
-                  "secret",
-                  "token",
-              ];
-              let lower = token.to_ascii_lowercase();
-              for name in ASSIGNMENT_NAMES {
-                  for separator in ['=', ':'] {
-                      let key = format!("{name}{separator}");
-                      if let Some(index) = lower.find(&key) {
-                          return format!(
-                              "{}{}[REDACTED]",
-                              &token[..index],
-                              &token[index..index + key.len()]
-                          );
-                      }
-                  }
-              }
-          '''
-          assert old in source
-          source = source.replace(old, new, 1)
-
-          old = '''            let flags = u8::from_str_radix(&normalized_flags, 16).map_err(|_| {
-                      format!("line {line_number}: trace context has invalid trace flags")
-                  })?;
-                  Ok(Some(TraceContext {
-          '''
-          new = '''            let flags = u8::from_str_radix(&normalized_flags, 16).map_err(|_| {
-                      format!("line {line_number}: trace context has invalid trace flags")
-                  })?;
-                  if flags & !0x01 != 0 {
-                      return Err(format!(
-                          "line {line_number}: trace context has unsupported trace flags"
-                      ));
-                  }
-                  Ok(Some(TraceContext {
-          '''
-          assert old in source
-          source = source.replace(old, new, 1)
-
-          old = '        let meta_data = format!("[meta sequenceId=\\"{}\\"]", event.id);\n'
-          new = '''        let timestamp = rfc5424_timestamp(event.timestamp_unix)?;
-                  let meta_data = if event.id <= i32::MAX as u64 {
-                      format!("[meta sequenceId=\\"{}\\"]", event.id)
-                  } else {
-                      String::new()
-                  };
-          '''
-          assert old in source
-          source = source.replace(old, new, 1)
-
           old = '            "<{priority}>1 - - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"\n'
-          new = '            "<{priority}>1 {timestamp} - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"\n'
           assert old in source
-          source = source.replace(old, new, 1)
+          source = source.replace(
+              old,
+              '            "<{priority}>1 {timestamp} - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"\n',
+              1,
+          )
 
           marker = 'fn escape_structured_data(value: &str) -> String {\n'
+          assert marker in source
           helper = '''fn rfc5424_timestamp(timestamp_unix: u64) -> Result<String, String> {
               let timestamp = i64::try_from(timestamp_unix)
                   .map_err(|_| "RFC 5424 timestamp exceeds the supported range".to_string())?;
@@ -199,7 +114,6 @@ jobs:
           }
 
           '''
-          assert marker in source
           source = source.replace(marker, helper + marker, 1)
           path.write_text(source)
 
@@ -222,10 +136,10 @@ jobs:
           cargo fmt
           cargo test --locked --workspace
           cargo clippy --locked --workspace --all-targets -- -D warnings
-          git rm .github/workflows/one-shot-pr90-review-fixes.yml
           git diff --check
+          git rm .github/workflows/one-shot-pr90-review-fixes.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'fix: harden SIEM export protocol contracts'
+          git commit -m 'fix: harden SIEM exporter input and RFC contracts'
           git push origin HEAD:feat/siem-opentelemetry-export
