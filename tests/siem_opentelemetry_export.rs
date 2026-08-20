@@ -6,6 +6,8 @@ use std::process::{Command, Output, Stdio};
 
 const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 const SPAN_ID: &str = "00f067aa0ba902b7";
+const OTLP_TRACE_ID: &str = "S/kvNXezTaajzpKdDg5HNg==";
+const OTLP_SPAN_ID: &str = "APBnqgupArc=";
 const SECRET_CANARY: &str = "sk-live-wardnet-canary";
 
 fn exporter(args: &[&str], input: &str) -> Output {
@@ -78,7 +80,11 @@ fn ocsf_detection_finding_is_versioned_allowlisted_and_redacted() {
 
 #[test]
 fn otlp_json_filters_checkpoint_and_preserves_trace_context() {
-    let input = format!("{}{}", event(7, 1_723_456_789, 10), event(8, 1_723_456_790, 55));
+    let input = format!(
+        "{}{}",
+        event(7, 1_723_456_789, 10),
+        event(8, 1_723_456_790, 55)
+    );
     let output = exporter(
         &[
             "--format",
@@ -109,8 +115,8 @@ fn otlp_json_filters_checkpoint_and_preserves_trace_context() {
 
     let record = &records[0];
     assert_eq!(record["timeUnixNano"], "1723456790000000000");
-    assert_eq!(record["traceId"], TRACE_ID);
-    assert_eq!(record["spanId"], SPAN_ID);
+    assert_eq!(record["traceId"], OTLP_TRACE_ID);
+    assert_eq!(record["spanId"], OTLP_SPAN_ID);
     assert_eq!(record["flags"], 1);
     assert_eq!(
         record["eventName"],
@@ -119,8 +125,7 @@ fn otlp_json_filters_checkpoint_and_preserves_trace_context() {
 
     let attributes = record["attributes"].as_array().expect("OTLP attributes");
     assert!(attributes.iter().any(|attribute| {
-        attribute["key"] == "wardnet.event.id"
-            && attribute["value"]["intValue"] == "8"
+        attribute["key"] == "wardnet.event.id" && attribute["value"]["intValue"] == "8"
     }));
 
     let resource_attributes = resource_log["resource"]["attributes"]
@@ -137,7 +142,7 @@ fn otlp_json_filters_checkpoint_and_preserves_trace_context() {
 }
 
 #[test]
-fn rfc5424_uses_registered_structured_data_and_single_line_json_message() {
+fn rfc5424_uses_standard_structured_data_and_single_line_json_message() {
     let output = exporter(&["--format", "rfc5424"], &event(9, 1_723_456_791, 55));
     assert!(
         output.status.success(),
@@ -151,7 +156,7 @@ fn rfc5424_uses_registered_structured_data_and_single_line_json_message() {
     assert!(body.contains("[origin ip=\"203.0.113.8\" software=\"Wardnet\""));
     assert!(body.contains("[meta sequenceId=\"9\"]"));
     assert!(body.contains(&format!(
-        "[OpenTelemetry trace_id=\"{TRACE_ID}\" span_id=\"{SPAN_ID}\" trace_flags=\"01\"]"
+        "[opentelemetry trace_id=\"{TRACE_ID}\" span_id=\"{SPAN_ID}\" trace_flags=\"01\"]"
     )));
     assert!(body.contains('\u{feff}'));
     assert!(body.contains("\"event_id\":9"));
