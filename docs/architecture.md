@@ -18,6 +18,13 @@ flowchart LR
   gateway --> events["Security Events"]
   events --> kpis["SOC KPIs"]
   events --> eventExport["Events NDJSON"]
+  eventExport --> protocolExporter["wardnet-event-exporter"]
+  protocolExporter --> ocsf["OCSF 1.8.0 JSONL"]
+  protocolExporter --> otlp["OTLP/HTTP JSON Logs"]
+  protocolExporter --> syslog["RFC 5424 Syslog"]
+  ocsf --> siem["SIEM / Security Lake"]
+  otlp --> collector["OpenTelemetry Collector"]
+  syslog --> relay["Protected Syslog Relay"]
   state --> zone["DNSBL Zone Export"]
   api --> commercial["Commercial Readiness"]
   api --> feeds["Threat Feed Import"]
@@ -29,6 +36,7 @@ flowchart LR
 
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
 - `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests.
+- `src/bin/wardnet-event-exporter.rs`: bounded, fail-closed transformation of Wardnet event NDJSON into OCSF 1.8.0 Detection Finding JSONL, OTLP/HTTP JSON logs, or RFC 5424 syslog. It owns no network credentials and performs no delivery retries.
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
@@ -38,14 +46,47 @@ flowchart LR
 - `/api/threat-feeds/import`: authorized threat indicator and DNSBL import surface.
 - `/api/threat-feeds/freshness`: feed TTL expiry and stale/fresh evidence for buyer and SOC review.
 - `/api/support-bundle`: health, KPI, license, readiness, and evidence-count bundle for buyer or support review.
-- `/api/events.ndjson`: security events as newline-delimited JSON for lightweight SOC/SIEM ingestion tests.
+- `/api/events.ndjson`: security events as newline-delimited JSON and the canonical source for the protocol exporter.
 - `scripts/smoke.sh`: external smoke test for health, admin, auth, route writes, license writes, feed imports, block enforcement, KPIs, readiness, DNSBL export, support bundle, and restart persistence.
+
+## SIEM and OpenTelemetry boundary
+
+Wardnet is a security-event producer and enforcement control, not a replacement for a SIEM, security lake, log router, or OpenTelemetry Collector.
+
+```text
+Wardnet retained events
+        │
+        ▼
+/api/events.ndjson
+        │
+        ▼
+wardnet-event-exporter
+        ├── OCSF 1.8.0 Detection Finding JSONL
+        ├── OTLP/HTTP JSON ExportLogsServiceRequest
+        └── RFC 5424 syslog
+                │
+                ▼
+Collector / relay / SIEM owned delivery and retention
+```
+
+The current exporter is intentionally stateless:
+
+- `--after-id` filters records but is not a durable acknowledgement.
+- the complete bounded batch is validated and rendered before stdout is written;
+- malformed input cannot create a partial downstream export;
+- unknown input properties are ignored rather than forwarded;
+- query strings, fragments, control characters, and credential-shaped values are removed or redacted;
+- client IP evidence remains available and must be governed by the receiver's authorization and retention policy.
+
+Durable delivery, leases, retry, dead-letter handling, and downstream receipts belong to the transactional outbox in #81. In-process OpenTelemetry spans, metrics, SLOs, alerting, incident response, backup, and game-day evidence remain in #85.
 
 ## Near-Term Integrations
 
 - **WAF**: Coraza/OWASP CRS audit JSON/NDJSON ingest is available at `POST /api/waf/coraza/audit` (admin token). Interrupted transactions and CRS rule messages become `SecurityEvent` rows and feed gateway enforcement (DNSBL + `client_ip`/`path` threat indicators) so subsequent gateway decisions block matching clients. In-process Coraza embedding remains a follow-up — do not replace CRS with hand-rolled rules.
 - **IDS**: Suricata EVE JSON/NDJSON ingest is available at `POST /api/ids/suricata/eve` (admin token). Alert records become `SecurityEvent` rows for SOC export/KPI; full route correlation and live EVE tailing remain follow-ups.
 - **Threat Intelligence**: STIX 2.x indicator/bundle ingest is available at `POST /api/threat-intel/stix` (admin token), MISP Event/attribute JSON ingest at `POST /api/threat-intel/misp` (admin token), TAXII 2.1 collection poll at `POST /api/threat-intel/taxii/poll` (admin token; Basic/Bearer optional), and OpenCTI observable/indicator export ingest at `POST /api/threat-intel/opencti` (admin token). All update `ThreatIndicator` / `DnsblEntry` plus feed freshness. Live MISP REST pull and live OpenCTI GraphQL pull remain follow-ups.
+- **OpenTelemetry Runtime Instrumentation**: instrument ingress, enforcement decisions, upstream calls, identity checks, PostgreSQL/outbox work, and integrations after the production authority and worker boundaries are established. Logs, traces, and metrics must share correlation context without exporting secrets or uncontrolled high-cardinality values.
+- **Durable SIEM Delivery**: dispatch versioned OCSF/OTLP/syslog records from the #81 outbox, persist downstream receipts, and expose backlog/age/retry/dead-letter metrics. Transport-level delivery must not be described as exactly-once business processing.
 - **DNSBL Serving**: Hickory DNS should serve authoritative DNSBL responses directly after zone export semantics stabilize.
 - **AI SOC**: AI triage should summarize events, map likely ATT&CK tactics, and recommend actions. Enforcement-changing recommendations require human approval.
 
@@ -57,11 +98,17 @@ flowchart LR
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
 - JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
+- Export protocols do not provide authorization or durable delivery by themselves. Collector credentials, TLS, routing, storage, access control, retention, deletion, and incident workflows remain receiving-system responsibilities.
+- RFC 5424 has no confidentiality property; production syslog transport must be protected.
+- OCSF and OTLP mappings are versioned protocol contracts. A schema upgrade requires explicit mapping review and regression fixtures.
 - Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.
 - The reusable core remains in-repo as a workspace crate. A git submodule is intentionally deferred until an independently versioned engine, SDK, or adapter needs a separate release lifecycle.
 
 ## Product Architecture Evidence
 
+- SIEM/OpenTelemetry ADR: `docs/adr/0001-siem-opentelemetry-event-export.md`
+- SIEM/OpenTelemetry runbook: `docs/runbooks/siem-opentelemetry-export.md`
+- Standards traceability: `docs/doctoring/SIEM_OPENTELEMETRY_REFERENCES.md`
 - FigJam: `docs/figma/enterprise-product-architecture.md`
 - Product workflows: `docs/product-design/enterprise-operator-workflows.md`
 - Enterprise scorecard: `docs/analytics/enterprise-value-scorecard.md`
