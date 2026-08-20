@@ -18,9 +18,9 @@ Caller
   ▼
 Wardnet litellm-virtual-key-proxy
   ├─ bounded request body
-  ├─ LiteLLM credential-class guard
+  ├─ bounded LiteLLM credential-class guard
   ├─ approved request-header projection
-  ├─ fixed HTTPS upstream / no redirects
+  ├─ fixed HTTPS origin / no system proxy / no redirects
   └─ streaming response relay
        │ accepted Bearer value
        ▼
@@ -33,26 +33,40 @@ LiteLLM
 
 The Wardnet guard establishes only a lexical class boundary. A value such as `sk-not-a-real-key` can pass the edge shape check and must still fail LiteLLM authentication.
 
-## Deployment configuration
+## Runtime configuration registry
 
-Run the dedicated binary with one fixed upstream:
+Runtime values are read from a versioned JSON KV document and copied into an immutable process-local registry during startup. The only bootstrap input is the `--config <path>` argument. The proxy does not read individual runtime values from raw environment variables.
+
+Copy the deployment example and restrict it to the `wardnet` service account:
 
 ```bash
-LITELLM_UPSTREAM_URL=https://llm-gateway-dev.hyosungitx.com \
-LITELLM_PROXY_BIND_ADDR=0.0.0.0:8090 \
-LITELLM_MAX_BODY_BYTES=16777216 \
-LITELLM_CONNECT_TIMEOUT_SECONDS=10 \
-cargo run --locked --bin litellm-virtual-key-proxy
+install -o wardnet -g wardnet -m 0640 \
+  deploy/systemd/litellm-virtual-key-proxy.json.example \
+  /etc/wardnet/litellm-virtual-key-proxy.json
 ```
 
-Environment contract:
+Example registry document:
 
-| Variable | Required | Meaning |
-|---|---:|---|
-| `LITELLM_UPSTREAM_URL` | yes | Fixed LiteLLM base URL; HTTPS required except loopback tests |
-| `LITELLM_PROXY_BIND_ADDR` | no | Listen address, default `127.0.0.1:8090` |
-| `LITELLM_MAX_BODY_BYTES` | no | Positive request-body bound, default 16 MiB |
-| `LITELLM_CONNECT_TIMEOUT_SECONDS` | no | Positive upstream connect timeout, default 10 seconds |
+```json
+{
+  "configuration_version": "1",
+  "litellm_proxy_upstream_url": "https://llm-gateway-dev.hyosungitx.com",
+  "litellm_proxy_bind_address": "127.0.0.1:8090",
+  "litellm_proxy_max_body_bytes": 16777216,
+  "litellm_proxy_connect_timeout_seconds": 10
+}
+```
+
+Run from source with:
+
+```bash
+cargo run --locked --bin litellm-virtual-key-proxy -- \
+  --config ./deploy/systemd/litellm-virtual-key-proxy.json.example
+```
+
+The registry rejects unknown keys, wrong JSON types, unsupported `configuration_version` values, zero limits, and missing required values. A durable external KV can later materialize the same versioned JSON contract without changing the proxy's runtime lookup path.
+
+## Upstream and request contract
 
 Clients call the Wardnet listener with the original OpenAI-compatible path:
 
@@ -61,7 +75,9 @@ POST https://wardnet-llm.example/v1/chat/completions
 Authorization: Bearer sk-...
 ```
 
-The proxy appends the incoming path and query to the fixed upstream base. An upstream URL containing credentials, a query, or a fragment is rejected. Redirect following is disabled so a configured endpoint cannot redirect the accepted key to a second host.
+The configured upstream is an **origin**, not an arbitrary base path. Wardnet appends the incoming path and query to that fixed origin. An upstream URL containing credentials, a non-root path, query, or fragment is rejected. HTTPS is mandatory except for loopback integration tests. System proxy discovery and redirect following are disabled, and an upstream 3xx response is converted to a cache-safe `502 upstream_redirect_rejected` response without exposing `Location`.
+
+Allowed methods are `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS`. `CONNECT`, `TRACE`, and extension methods fail with `405` before upstream I/O.
 
 ## Rejection contract
 
@@ -101,12 +117,12 @@ Wardnet forwards only request metadata required by OpenAI-compatible LLM APIs:
 - `Content-Type` and `Content-Encoding`
 - `User-Agent`
 - OpenAI organization/project headers
-- request and W3C trace correlation headers
-- `x-litellm-*` extension headers
+- `X-Request-Id`
+- W3C `traceparent` and `tracestate`
 
-It does not forward cookies, `Host`, forwarding-chain headers, proxy credentials, `Connection`, transfer framing, or arbitrary caller headers.
+It does not forward cookies, `Host`, forwarding-chain headers, proxy credentials, `Connection`, transfer framing, trace `baggage`, arbitrary caller headers, or caller-controlled `x-litellm-*` extensions.
 
-Approved upstream response metadata includes content type/encoding, retry information, authentication challenge, request correlation, OpenAI/LiteLLM metadata, and rate-limit headers. Response bodies are streamed rather than accumulated in memory, preserving server-sent event behavior and bounding proxy memory by active chunks rather than full completions.
+Approved upstream response metadata includes content type/encoding, retry information, authentication challenge, request correlation, OpenAI/LiteLLM response metadata, and rate-limit headers. Response bodies are streamed rather than accumulated in memory, preserving server-sent event behavior and bounding proxy memory by active chunks rather than full completions.
 
 ## Health contract
 
@@ -114,6 +130,7 @@ Approved upstream response metadata includes content type/encoding, retry inform
 
 - service status;
 - credential policy name;
+- configuration contract version;
 - upstream origin without credentials, query, or path details;
 - configured request-body bound.
 
@@ -141,9 +158,13 @@ Never resolve the alert by bypassing the proxy, logging the complete header, or 
 | Two Authorization headers | 401; no upstream request |
 | `Basic ...` | 401; no upstream request |
 | `Bearer 0610...` | 401; no token reflection; secret-free structured event |
+| Header larger than the parser bound | Immediate 401 before delimiter scans |
+| More than eight separator spaces | 401 |
+| Non-ASCII value | 401 |
 | Invalid token character or misplaced padding | 401 |
 | Bounded `Bearer sk-...` | Forwarded for authoritative LiteLLM validation |
-| Cookie supplied with valid key | Cookie stripped |
+| Cookie or trace baggage supplied | Stripped |
 | Query string supplied | Preserved on the fixed upstream path |
 | SSE upstream response | Streamed with content type and rate-limit metadata |
-| Upstream redirect | Returned to the caller; not followed with the credential |
+| `TRACE` or `CONNECT` | 405; no upstream request |
+| Upstream redirect | 502; redirect target not returned or followed |
