@@ -40,7 +40,8 @@ The property-test mirrors live in:
 
 They enforce the same invariants on stable as part of `cargo test --workspace`.
 The LiteLLM mirror covers arbitrary opaque bytes, duplicate values, excessive
-separator whitespace, complete-header bounds, and invalid padding placement.
+separator whitespace, complete-header bounds, padding-only payloads, and invalid
+padding placement.
 
 ## Running locally
 
@@ -73,6 +74,14 @@ are MIT OR Apache-2.0 compatible; Axum is MIT licensed.
 
 - V. J. M. Manès et al., *The Art, Science, and Engineering of Fuzzing: A Survey*
   — [`papers/fuzzing-art-science-engineering-survey-arxiv-1812.00140.pdf`](papers/fuzzing-art-science-engineering-survey-arxiv-1812.00140.pdf).
+  The survey explains how coverage feedback drives execution into parser branches
+  that example-based tests may never reach. Wardnet applies that method to opaque
+  Authorization bytes and the bounded Bearer/`sk-` grammar, while a stable
+  property suite preserves the same acceptance and rejection invariants in every
+  ordinary test run.
 - S. A. Crosby and D. S. Wallach, *Denial of Service via Algorithmic Complexity
   Attacks* — linked and summarized in
   [`docs/doctoring/litellm-virtual-key-ingress.md`](doctoring/litellm-virtual-key-ingress.md).
+  Their analysis motivates bounding the complete Authorization value before
+  delimiter or whitespace scans, so malformed credentials cannot turn parsing
+  work into an unbounded proxy-side cost.
