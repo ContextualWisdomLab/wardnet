@@ -9,7 +9,7 @@ use axum::{
         HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
         header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, WWW_AUTHENTICATE},
     },
-    response::{IntoResponse, Response},
+    response::Response,
     routing::any,
 };
 use litellm_guard_proxy::{ProxyConfig, ProxyState, build_router};
