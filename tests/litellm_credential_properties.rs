@@ -14,6 +14,26 @@ fn single_header(raw: &[u8]) -> Option<HeaderMap> {
     Some(headers)
 }
 
+#[test]
+fn rejection_reason_codes_are_stable_and_non_secret() {
+    assert_eq!(
+        CredentialRejection::Missing.code(),
+        "authorization_header_missing"
+    );
+    assert_eq!(
+        CredentialRejection::Ambiguous.code(),
+        "authorization_header_ambiguous"
+    );
+    assert_eq!(
+        CredentialRejection::InvalidScheme.code(),
+        "authorization_scheme_invalid"
+    );
+    assert_eq!(
+        CredentialRejection::InvalidShape.code(),
+        "credential_shape_invalid"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
