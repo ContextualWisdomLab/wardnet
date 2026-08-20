@@ -1,5 +1,8 @@
 use serde_json::{Map, Value};
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+};
 
 pub(crate) const CONFIGURATION_VERSION: &str = "configuration_version";
 pub(crate) const LITELLM_PROXY_UPSTREAM_URL: &str = "litellm_proxy_upstream_url";
@@ -78,23 +81,27 @@ impl RuntimeConfigRegistry {
     pub(crate) fn usize_or(&self, key: &str, default: usize) -> Result<usize, String> {
         match self.values.get(key) {
             Some(Value::Number(value)) => {
-                let value = value
-                    .as_u64()
-                    .ok_or_else(|| format!("runtime configuration {key} must be an unsigned integer"))?;
+                let value = value.as_u64().ok_or_else(|| {
+                    format!("runtime configuration {key} must be an unsigned integer")
+                })?;
                 usize::try_from(value)
                     .map_err(|_| format!("runtime configuration {key} exceeds platform limits"))
             }
-            Some(_) => Err(format!("runtime configuration {key} must be an unsigned integer")),
+            Some(_) => Err(format!(
+                "runtime configuration {key} must be an unsigned integer"
+            )),
             None => Ok(default),
         }
     }
 
     pub(crate) fn u64_or(&self, key: &str, default: u64) -> Result<u64, String> {
         match self.values.get(key) {
-            Some(Value::Number(value)) => value
-                .as_u64()
-                .ok_or_else(|| format!("runtime configuration {key} must be an unsigned integer")),
-            Some(_) => Err(format!("runtime configuration {key} must be an unsigned integer")),
+            Some(Value::Number(value)) => value.as_u64().ok_or_else(|| {
+                format!("runtime configuration {key} must be an unsigned integer")
+            }),
+            Some(_) => Err(format!(
+                "runtime configuration {key} must be an unsigned integer"
+            )),
             None => Ok(default),
         }
     }
@@ -108,7 +115,7 @@ where
     let flag = args
         .next()
         .ok_or_else(|| "usage: litellm-virtual-key-proxy --config <path>".to_string())?;
-    if flag != "--config" {
+    if flag.as_os_str() != OsStr::new("--config") {
         return Err("expected --config <path>".to_string());
     }
     let path = args
@@ -127,14 +134,13 @@ mod tests {
     use super::*;
 
     fn registry() -> RuntimeConfigRegistry {
-        RuntimeConfigRegistry::from_json_str(
-            r#"{
-                "configuration_version": "1",
-                "litellm_proxy_upstream_url": "https://llm.example",
-                "litellm_proxy_max_body_bytes": 4096
-            }"#,
-        )
-        .unwrap()
+        let content = serde_json::json!({
+            CONFIGURATION_VERSION: "1",
+            LITELLM_PROXY_UPSTREAM_URL: "https://llm.example",
+            LITELLM_PROXY_MAX_BODY_BYTES: 4096
+        })
+        .to_string();
+        RuntimeConfigRegistry::from_json_str(&content).unwrap()
     }
 
     #[test]
@@ -161,17 +167,17 @@ mod tests {
     #[test]
     fn rejects_root_type_unknown_key_and_wrong_value_types() {
         assert!(RuntimeConfigRegistry::from_json_str("[]").is_err());
-        let registry = RuntimeConfigRegistry::from_json_str(r#"{"unknown": true}"#).unwrap();
+        let unknown = serde_json::json!({"unknown": true}).to_string();
+        let registry = RuntimeConfigRegistry::from_json_str(&unknown).unwrap();
         assert!(registry.ensure_only(&[CONFIGURATION_VERSION]).is_err());
 
-        let wrong = RuntimeConfigRegistry::from_json_str(
-            r#"{
-                "text": 1,
-                "number": "1",
-                "negative": -1
-            }"#,
-        )
-        .unwrap();
+        let wrong = serde_json::json!({
+            "text": 1,
+            "number": "1",
+            "negative": -1
+        })
+        .to_string();
+        let wrong = RuntimeConfigRegistry::from_json_str(&wrong).unwrap();
         assert!(wrong.required_string("text").is_err());
         assert!(wrong.usize_or("number", 1).is_err());
         assert!(wrong.u64_or("negative", 1).is_err());
