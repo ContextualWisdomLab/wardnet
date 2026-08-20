@@ -2,7 +2,7 @@
 
 ## Engineering claim
 
-A route-level proxy guard rejects missing, duplicate, non-Bearer, and clearly non-LiteLLM credentials before upstream I/O while preserving LiteLLM as the authoritative authentication and authorization system.
+A dedicated Rust reverse proxy rejects missing, duplicate, non-Bearer, and clearly non-LiteLLM credentials before upstream I/O while preserving LiteLLM as the authoritative authentication and authorization system.
 
 ## Traceability
 
@@ -10,16 +10,18 @@ A route-level proxy guard rejects missing, duplicate, non-Bearer, and clearly no
 |---|---|---|---|
 | OAuth 2.0 bearer tokens are carried in the `Authorization` header using the `Bearer` scheme | Require exactly one Bearer header; emit an RFC 6750 challenge on failure | `src/credential_guard.rs` | guard unit tests and `tests/litellm_virtual_key_guard.rs` |
 | A proxy must remove or consume hop-by-hop connection metadata rather than blindly forwarding it | Use an explicit end-to-end request/response header allowlist | `forward_request_headers`, `copy_response_headers` | upstream-capture regression verifies cookie stripping and required metadata |
-| Authentication failures must not disclose credentials | Emit stable reason codes only; no submitted value in JSON, events, logs, or challenge | `CredentialRejection`, `rejection_response` | phone-shaped canary is absent from response and event export |
-| Security controls should fail closed at the earliest authoritative boundary | Apply route policy before WAF scoring and upstream network I/O | Wardnet gateway handler | upstream hit counter remains zero for rejected inputs |
+| Authentication failures must not disclose credentials | Emit stable reason codes only; no submitted value in JSON, structured events, or challenges | `CredentialRejection`, `rejection_response`, `emit_auth_rejection` | phone-shaped canary is absent from the response; upstream hit count stays zero |
+| Security controls should fail closed before crossing a trust boundary | Apply the credential-class guard before target construction and upstream transport | `src/litellm_guard_proxy.rs` | missing, duplicate, wrong-scheme, and phone-shaped credentials never reach the loopback upstream |
 | A lexical prefilter must not replace authoritative key validation | Accept only the expected credential class, then delegate existence/revocation/budget/scope to LiteLLM | ADR-0011 | valid-shaped test proves forwarding, not local authentication |
-| Streaming LLM responses should not require whole-body buffering | Construct the downstream Axum body from the upstream byte stream | Wardnet proxy transport | SSE content type and rate-limit metadata round trip |
+| Intermediaries must not blindly propagate connection-specific or sensitive metadata | Fixed request/response header projection; cookies, host, proxy credentials, forwarding chain, and transfer framing omitted | `src/credential_guard.rs` | valid request reaches upstream without the supplied cookie |
+| A fixed upstream credential boundary must not follow an unvalidated redirect | Disable redirects in the pooled `reqwest` client | `ProxyState::new` | configuration and transport contract tests |
+| Streaming LLM responses should not require whole-body buffering | Construct the downstream Axum body from the upstream byte stream | `src/litellm_guard_proxy.rs` | SSE content type, body, query, correlation, and rate-limit metadata round trip |
 
 ## Security interpretation
 
-The `sk-` prefix is a **credential-class discriminator**, not proof of identity. This design prevents a known wrong class, such as a phone-shaped value, from entering LiteLLM's authentication path. It intentionally does not make a local key database, guess whether a virtual key is active, or duplicate LiteLLM's budget and scope semantics.
+The `sk-` prefix is a **credential-class discriminator**, not proof of identity. This design prevents a known wrong class, such as a phone-shaped value, from entering LiteLLM's authentication path. It intentionally does not make a local key database, guess whether a virtual key is active, or duplicate LiteLLM's team, model, budget, and scope semantics.
 
-The guard also does not close Wardnet's complete outbound destination-policy obligation. Route upstream validation, DNS resolution, connection-time peer verification, redirect policy, and network egress controls remain a separate defense-in-depth layer.
+The upstream URL is operator-owned rather than caller-owned. The first release requires HTTPS except loopback tests, rejects URL credentials/query/fragment, and disables redirects. Resolved-address policy, DNS rebinding resistance, and connection-time peer verification remain additional defense-in-depth work for deployments whose configuration authority is not already trusted.
 
 ## APA 7 references
 
