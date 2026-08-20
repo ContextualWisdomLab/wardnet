@@ -1,5 +1,6 @@
 name: Repair LiteLLM virtual-key formatting
 
+# One-shot branch repair. The verified commit deletes this workflow.
 on:
   push:
     branches:
