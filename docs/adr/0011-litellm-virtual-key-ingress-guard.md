@@ -6,26 +6,35 @@
 
 ## Context
 
-The development LLM gateway emitted high-severity `llm_exceptions` alerts because a phone-number-shaped credential reached LiteLLM where a virtual key beginning with `sk-` was required. Treating the exception as an ordinary upstream failure creates avoidable alert noise, spends upstream capacity, and allows the wrong credential class to cross the edge boundary.
+The development LLM gateway emitted high-severity `llm_exceptions` alerts because a phone-number-shaped credential reached LiteLLM where a virtual key beginning with `sk-` was required. Treating this as an ordinary upstream model exception creates avoidable alert noise, consumes upstream capacity, and lets the wrong credential class cross the edge boundary.
 
-Wardnet is the ContextualWisdomLab WAF/IDS/software-load-balancer/APIM and already owns route-level request enforcement. EgressWeave protects Python outbound calls and therefore is not the correct owner for an inbound reverse-proxy credential gate. Contextual Orchestrator owns model routing; LiteLLM owns virtual-key authentication, revocation, team, budget, and scope.
+Wardnet is the ContextualWisdomLab WAF/IDS/software-load-balancer/APIM and therefore owns this inbound proxy control. EgressWeave protects Python outbound calls and is not the correct owner. Contextual Orchestrator owns model routing; LiteLLM owns virtual-key authentication, revocation, team, budget, model scope, and provider selection.
+
+The existing general Wardnet gateway remains useful for mixed routes, but its current request/response transport is not an ideal place for a narrowly scoped LLM credential boundary because unrelated routes must remain backward compatible. The organization also requires modules to operate both independently and as ecosystem components.
 
 ## Decision
 
-Add an optional `authorization_policy` to each Wardnet route:
+Add a dedicated Rust binary inside Wardnet:
 
-- `none` preserves existing behavior.
-- `litellm_virtual_key` requires exactly one RFC 6750 Bearer credential whose bounded lexical shape starts with `sk-`.
+```text
+litellm-virtual-key-proxy
+```
+
+The binary has one fixed, operator-configured LiteLLM upstream and applies the `litellm_virtual_key` credential policy to every proxied request. It is deployable as a sidecar, internal edge service, or separate container in front of `https://llm-gateway-dev.hyosungitx.com`.
 
 The guard:
 
-1. runs after cheap admission control and before WAF scoring or upstream I/O;
-2. never rewrites or prepends a prefix to a supplied credential;
-3. records only stable non-secret reason codes;
-4. returns `401`, an RFC 6750 `WWW-Authenticate` challenge, and `Cache-Control: no-store`;
-5. forwards the accepted `Authorization` header only to the configured upstream;
-6. strips cookies, forwarding-chain, proxy-authentication, host, and hop-by-hop headers;
-7. streams the upstream response and preserves only approved streaming, correlation, retry, and rate-limit headers.
+1. requires exactly one RFC 6750 Bearer credential;
+2. performs one bounded scan of at most 512 credential bytes;
+3. requires the lexical LiteLLM virtual-key class beginning `sk-`;
+4. runs before upstream network I/O;
+5. never rewrites or prepends a prefix to a supplied credential;
+6. emits only stable non-secret reason codes;
+7. returns `401`, an RFC 6750 `WWW-Authenticate` challenge, and `Cache-Control: no-store`;
+8. forwards the accepted `Authorization` header only to the fixed upstream;
+9. strips cookies, forwarding-chain, proxy-authentication, host, transfer-framing, and arbitrary headers;
+10. disables upstream redirects and requires HTTPS except loopback HTTP used by tests;
+11. streams upstream responses and preserves only approved streaming, correlation, retry, authentication, and rate-limit headers.
 
 LiteLLM remains authoritative. Passing this shape gate does not prove that a key exists or is entitled to use a model.
 
@@ -34,31 +43,37 @@ LiteLLM remains authoritative. Passing this shape gate does not prove that a key
 ### Positive
 
 - Phone numbers, account identifiers, and other obvious wrong credential classes fail before LiteLLM.
-- The edge response is deterministic and does not disclose the rejected value.
-- Existing non-LLM routes remain compatible through the default `none` policy.
-- The implementation is a bounded, allocation-minimal Rust hot path and avoids buffering LLM streaming responses.
-- Security events distinguish credential-boundary failures from model/provider exceptions.
+- The edge response and structured rejection event do not disclose the rejected value or a masked fragment.
+- Existing Wardnet routes are unchanged.
+- The binary is independently deployable and can later be embedded behind the general Wardnet control plane.
+- The bounded Rust hot path is allocation-minimal, and LLM server-sent events are relayed without whole-response buffering.
+- Fixed upstream configuration and no-redirect behavior avoid turning a caller-controlled value into an outbound destination.
 
 ### Negative
 
 - Prefix validation cannot detect a revoked, unknown, over-budget, or under-scoped `sk-` value.
-- A misconfigured administrator can still point a route at an inappropriate upstream; the complete destination-policy/SSRF control remains tracked separately.
-- Clients using a non-LiteLLM key convention must use another route policy rather than weakening this one.
+- The initial binary does not persist rejection events into Wardnet's main SOC state; it emits secret-free structured events for the deployment log pipeline.
+- Broader production egress controls such as resolved-address policy and connection-time peer verification remain defense-in-depth work outside this narrow alert fix.
+- Deployments now run an additional binary unless the module is incorporated into the primary data plane later.
 
 ## Rejected alternatives
 
 ### Automatically prepend `sk-`
 
-Rejected because it converts malformed input into a different secret, hides the true caller defect, and could create ambiguous identity.
+Rejected because it converts malformed input into a different secret, hides the caller defect, and creates ambiguous identity.
 
-### Implement the guard in every LLM client
+### Implement the guard only in each LLM client
 
-Rejected because clients are heterogeneous and the exposed gateway requires one fail-closed ingress control in addition to client-side validation.
+Rejected because callers are heterogeneous. Client-side validation remains useful, but the exposed gateway requires one fail-closed ingress boundary.
 
 ### Move the check to EgressWeave
 
-Rejected because EgressWeave is an outbound Python SSRF/DNS-rebinding library, not the inbound high-throughput APIM authority.
+Rejected because EgressWeave is an outbound Python SSRF/DNS-rebinding library, not an inbound high-throughput APIM authority.
 
-### Replace Wardnet with a new proxy
+### Modify every existing Wardnet route
 
-Rejected for this bounded change. Wardnet already has the correct product responsibility and a Rust data plane. A future Pingora transport can reuse the same policy contract without changing route semantics.
+Rejected for the first slice because it would change a generic proxy contract and mix unrelated route compatibility concerns into the alert fix.
+
+### Replace Wardnet with another proxy product
+
+Rejected. Wardnet already owns the correct responsibility and is Rust-first. A future Pingora transport can reuse the same credential contract without moving the product boundary.
