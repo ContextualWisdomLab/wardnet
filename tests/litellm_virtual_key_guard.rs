@@ -1,22 +1,28 @@
+#[path = "../src/litellm_guard_proxy.rs"]
+mod litellm_guard_proxy;
+
 use axum::{
     Router,
     body::{Body, to_bytes},
     extract::State,
     http::{
-        HeaderMap, HeaderValue, Method, Request, StatusCode,
+        HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
         header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, WWW_AUTHENTICATE},
     },
     response::{IntoResponse, Response},
     routing::any,
 };
+use litellm_guard_proxy::{ProxyConfig, ProxyState, build_router};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 use tokio::net::TcpListener;
 use tower::ServiceExt;
-use waf_ids_ai_soc::{AppState, SecurityEvent, build_app};
 
 #[derive(Clone)]
 struct UpstreamState {
@@ -26,19 +32,24 @@ struct UpstreamState {
 
 async fn capture_upstream(
     State(state): State<UpstreamState>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
     state.hits.fetch_add(1, Ordering::SeqCst);
-    let authorization = headers
+    let authorization_matches = headers
         .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        == Some(state.expected_key.as_str());
     let request_id = headers
         .get("x-request-id")
         .and_then(|value| value.to_str().ok());
     let payload = json!({
-        "authorization_matches": authorization == Some(format!("Bearer {}", state.expected_key).as_str()),
+        "authorization_matches": authorization_matches,
         "request_id": request_id,
         "cookie_forwarded": headers.contains_key(COOKIE),
+        "path": uri.path(),
+        "query": uri.query()
     });
     let mut response = Response::new(Body::from(format!("data: {payload}\n\n")));
     *response.status_mut() = StatusCode::OK;
@@ -64,26 +75,7 @@ async fn body_text(response: Response) -> String {
     String::from_utf8(body.to_vec()).expect("UTF-8 response")
 }
 
-fn route_request(id: &str, path_prefix: &str, upstream: &str, guarded: bool) -> Request<Body> {
-    let mut route = json!({
-        "id": id,
-        "path_prefix": path_prefix,
-        "upstream": upstream,
-        "mode": "monitor",
-        "enabled": true
-    });
-    if guarded {
-        route["authorization_policy"] = json!("litellm_virtual_key");
-    }
-    Request::builder()
-        .method(Method::POST)
-        .uri("/api/routes")
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(route.to_string()))
-        .expect("route request")
-}
-
-fn gateway_request(path: &str, authorization: Option<&str>) -> Request<Body> {
+fn proxy_request(path: &str, authorization: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
         .method(Method::POST)
         .uri(path)
@@ -96,11 +88,42 @@ fn gateway_request(path: &str, authorization: Option<&str>) -> Request<Body> {
     }
     builder
         .body(Body::from(r#"{"model":"auto","messages":[]}"#))
-        .expect("gateway request")
+        .expect("proxy request")
+}
+
+async fn assert_rejected(
+    app: &Router,
+    request: Request<Body>,
+    expected_code: &str,
+    forbidden_fragment: Option<&str>,
+) {
+    let response = app_request(app, request).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let challenge = response
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if expected_code != "authorization_header_missing" {
+        assert!(challenge.contains("invalid_token"));
+    }
+    let body = body_text(response).await;
+    assert!(body.contains(expected_code));
+    if let Some(fragment) = forbidden_fragment {
+        assert!(!body.contains(fragment));
+    }
 }
 
 #[tokio::test]
-async fn litellm_virtual_key_policy_rejects_wrong_credential_class_before_upstream() {
+async fn proxy_rejects_wrong_credential_classes_and_streams_valid_requests() {
     let valid_key = "sk-virtual-test_ABC123";
     let hits = Arc::new(AtomicUsize::new(0));
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -119,104 +142,81 @@ async fn litellm_virtual_key_policy_rejects_wrong_credential_class_before_upstre
             .expect("serve upstream");
     });
 
-    let app = build_app(AppState::seeded(None));
-    let base_url = format!("http://{upstream_address}");
-    let created = app_request(
-        &app,
-        route_request("llm", "/llm", &base_url, true),
+    let config = ProxyConfig::new(
+        "127.0.0.1:0".parse().expect("bind address"),
+        format!("http://{upstream_address}"),
+        1024 * 1024,
+        Duration::from_secs(3),
     )
-    .await;
-    assert_eq!(created.status(), StatusCode::CREATED);
+    .expect("proxy config");
+    let app = build_router(ProxyState::new(&config).expect("proxy state"));
 
-    let phone_shaped = "061012345318";
-    let rejected = app_request(
-        &app,
-        gateway_request(
-            "/gateway/llm/v1/chat/completions",
-            Some(format!("Bearer {phone_shaped}").as_str()),
-        ),
-    )
-    .await;
-    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(hits.load(Ordering::SeqCst), 0, "rejected key reached upstream");
-    let challenge = rejected
-        .headers()
-        .get(WWW_AUTHENTICATE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    assert!(challenge.contains("invalid_token"));
-    assert_eq!(
-        rejected
-            .headers()
-            .get("cache-control")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-store")
-    );
-    let rejected_body = body_text(rejected).await;
-    assert!(!rejected_body.contains(phone_shaped));
-    assert!(!rejected_body.contains("0610"));
-
-    let missing = app_request(
-        &app,
-        gateway_request("/gateway/llm/v1/chat/completions", None),
-    )
-    .await;
-    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-
-    let wrong_scheme = app_request(
-        &app,
-        gateway_request(
-            "/gateway/llm/v1/chat/completions",
-            Some("Basic c2stbm90LWEtdmlydHVhbC1rZXk="),
-        ),
-    )
-    .await;
-    assert_eq!(wrong_scheme.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-
-    let events_response = app_request(
+    let health = app_request(
         &app,
         Request::builder()
             .method(Method::GET)
-            .uri("/api/events?action=auth_rejected")
+            .uri("/healthz")
             .body(Body::empty())
-            .expect("events request"),
+            .expect("health request"),
     )
     .await;
-    let events: Vec<SecurityEvent> =
-        serde_json::from_str(&body_text(events_response).await).expect("events JSON");
-    assert_eq!(events.len(), 3);
-    assert!(
-        events
-            .iter()
-            .all(|event| event.action == "auth_rejected")
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| event.reason == "credential_shape_invalid")
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| event.reason == "authorization_header_missing")
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| event.reason == "authorization_scheme_invalid")
-    );
-    let serialized_events = serde_json::to_string(&events).expect("serialize events");
-    assert!(!serialized_events.contains(phone_shaped));
-    assert!(!serialized_events.contains("0610"));
+    assert_eq!(health.status(), StatusCode::OK);
+    let health_body = body_text(health).await;
+    assert!(health_body.contains("litellm_virtual_key"));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
 
+    let phone_shaped = "061012345318";
+    let phone_header = format!("Bearer {phone_shaped}");
+    assert_rejected(
+        &app,
+        proxy_request("/v1/chat/completions", Some(&phone_header)),
+        "credential_shape_invalid",
+        Some("0610"),
+    )
+    .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "rejected key reached upstream");
+
+    assert_rejected(
+        &app,
+        proxy_request("/v1/chat/completions", None),
+        "authorization_header_missing",
+        None,
+    )
+    .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    assert_rejected(
+        &app,
+        proxy_request(
+            "/v1/chat/completions",
+            Some("Basic c2stbm90LWEtdmlydHVhbC1rZXk="),
+        ),
+        "authorization_scheme_invalid",
+        None,
+    )
+    .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    let mut duplicate = proxy_request("/v1/chat/completions", Some("Bearer sk-first"));
+    duplicate.headers_mut().append(
+        AUTHORIZATION,
+        HeaderValue::from_static("Bearer sk-second"),
+    );
+    assert_rejected(
+        &app,
+        duplicate,
+        "authorization_header_ambiguous",
+        None,
+    )
+    .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    let valid_header = format!("Bearer {valid_key}");
     let accepted = app_request(
         &app,
-        gateway_request(
-            "/gateway/llm/v1/chat/completions",
-            Some(format!("Bearer {valid_key}").as_str()),
+        proxy_request(
+            "/v1/chat/completions?team=alpha",
+            Some(&valid_header),
         ),
     )
     .await;
@@ -245,21 +245,9 @@ async fn litellm_virtual_key_policy_rejects_wrong_credential_class_before_upstre
     assert_eq!(observed["authorization_matches"], true);
     assert_eq!(observed["request_id"], "request-123");
     assert_eq!(observed["cookie_forwarded"], false);
+    assert_eq!(observed["path"], "/v1/chat/completions");
+    assert_eq!(observed["query"], "team=alpha");
     assert!(!accepted_body.contains(valid_key));
-
-    let legacy_created = app_request(
-        &app,
-        route_request("legacy", "/legacy", &base_url, false),
-    )
-    .await;
-    assert_eq!(legacy_created.status(), StatusCode::CREATED);
-    let legacy = app_request(
-        &app,
-        gateway_request("/gateway/legacy/v1/models", None),
-    )
-    .await;
-    assert_eq!(legacy.status(), StatusCode::OK);
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
 
     upstream_task.abort();
 }
