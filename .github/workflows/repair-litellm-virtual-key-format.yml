@@ -1,4 +1,4 @@
-name: Repair LiteLLM virtual-key formatting and anonymization
+name: Repair LiteLLM virtual-key guard
 
 # One-shot branch repair. The verified commit deletes this workflow.
 on:
@@ -32,13 +32,23 @@ jobs:
           toolchain: stable
           components: rustfmt,clippy
 
-      - name: Remove organization-specific incident identifiers
+      - name: Apply source-true security repairs
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
 
+          def replace_exact(path: Path, old: str, new: str, expected: int = 1) -> None:
+              text = path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(
+                      f"{path}: expected {expected} occurrence(s) of {old!r}, found {count}"
+                  )
+              path.write_text(text.replace(old, new), encoding="utf-8")
+
+          # Anonymize any stale incident-derived values left in branch content.
           replacements = {
               "https://llm-gateway-dev.hyosungitx.com": "https://gateway.example.invalid",
               "061012345318": "01000000000",
@@ -57,10 +67,52 @@ jobs:
                   updated = updated.replace(old, new)
               if updated != text:
                   path.write_text(updated, encoding="utf-8")
+
+          proxy = Path("src/litellm_guard_proxy.rs")
+          replace_exact(proxy, "    upstream_origin: String,\n", "    upstream_policy: &'a str,\n")
+          replace_exact(
+              proxy,
+              "        upstream_origin: upstream_origin(&state.upstream_url),\n",
+              "        upstream_policy: \"fixed_https_origin\",\n",
+          )
+          replace_exact(
+              proxy,
+              "fn upstream_origin(url: &Url) -> String {\n    url.origin().ascii_serialization()\n}\n\n",
+              "",
+          )
+
+          integration = Path("tests/litellm_virtual_key_guard.rs")
+          replace_exact(
+              integration,
+              "    assert!(health_body.contains(\"configuration_version\"));\n",
+              "    assert!(health_body.contains(\"configuration_version\"));\n"
+              "    assert!(health_body.contains(\"fixed_https_origin\"));\n"
+              "    assert!(!health_body.contains(&upstream_address.to_string()));\n",
+          )
+
+          replace_exact(
+              Path("CHANGELOG.md"),
+              "- Health endpoint exposing policy, configuration version, upstream origin, and body-limit state without performing a billable model call.\n",
+              "- Health endpoint exposing credential policy, configuration version, fixed-upstream policy, and body-limit state without revealing the configured hostname or performing a billable model call.\n",
+          )
+          replace_exact(
+              Path("docs/security/litellm-virtual-key-ingress.md"),
+              "- upstream origin without credentials, query, or path details;\n",
+              "- fixed-upstream policy state without exposing the configured hostname;\n",
+          )
+          replace_exact(
+              Path("docs/doctoring/litellm-virtual-key-ingress.md"),
+              "https://owasp.org/www-project/application-security-verification-standard/",
+              "https://owasp.org/www-project-application-security-verification-standard/",
+          )
           PY
 
           if git grep -n -i -E 'hyosung|0610' -- ':!Cargo.lock'; then
             echo "Organization-specific incident identifier remains in tracked content." >&2
+            exit 1
+          fi
+          if git grep -n 'upstream_origin'; then
+            echo "Unauthenticated health payload still exposes an upstream-origin field." >&2
             exit 1
           fi
 
@@ -93,5 +145,5 @@ jobs:
             exit 1
           fi
 
-          git commit -m "style: format and anonymize LiteLLM ingress guard"
+          git commit -m "fix(security): verify streaming and redact upstream topology"
           git push origin HEAD:feat/litellm-virtual-key-ingress-guard
