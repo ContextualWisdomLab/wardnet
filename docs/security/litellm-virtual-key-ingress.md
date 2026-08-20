@@ -131,7 +131,7 @@ Approved upstream response metadata includes content type/encoding, retry inform
 - service status;
 - credential policy name;
 - configuration contract version;
-- upstream origin without credentials, query, or path details;
+- fixed-upstream policy state without exposing the configured hostname;
 - configured request-body bound.
 
 It does not test a billable model call or reveal a virtual key.
@@ -153,7 +153,7 @@ Never resolve the alert by bypassing the proxy, logging the complete header, or 
 
 | Case | Expected result |
 |---|---|
-| Health request | 200 without Authorization; no upstream request |
+| Health request | 200 without Authorization; no upstream request or configured hostname disclosure |
 | Missing Authorization | 401; no upstream request |
 | Two Authorization headers | 401; no upstream request |
 | `Basic ...` | 401; no upstream request |
