@@ -65,9 +65,8 @@ async fn capture_upstream(
         "query": uri.query()
     });
 
-    let first_chunk = stream::once(async {
-        Ok::<Bytes, Infallible>(Bytes::from_static(b"data: "))
-    });
+    let first_chunk =
+        stream::once(async { Ok::<Bytes, Infallible>(Bytes::from_static(b"data: ")) });
     let final_chunk_release = state.final_chunk_release.clone();
     let final_payload = format!("{payload}\n\n");
     let final_chunk = stream::once(async move {
@@ -191,6 +190,8 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
     let health_body = body_text(health).await;
     assert!(health_body.contains("litellm_virtual_key"));
     assert!(health_body.contains("configuration_version"));
+    assert!(health_body.contains("fixed_https_origin"));
+    assert!(!health_body.contains(&upstream_address.to_string()));
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 
     let telephone_shaped = "01000000000";
