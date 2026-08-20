@@ -1,0 +1,99 @@
+//! Stable property-test mirror for the production SIEM NDJSON parser.
+
+use proptest::prelude::*;
+use std::io::Cursor;
+use waf_ids_ai_soc::siem_event_input::read_events;
+
+fn event(id: u64, timestamp_unix: u64, action: &str, reason: &str, path: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "timestamp_unix": timestamp_unix,
+        "client_ip": "203.0.113.9",
+        "route_id": "checkout",
+        "action": action,
+        "reason": reason,
+        "score": 55,
+        "path": path
+    })
+    .to_string()
+        + "\n"
+}
+
+proptest! {
+    #[test]
+    fn arbitrary_bounded_bytes_never_panic(input in proptest::collection::vec(any::<u8>(), 0..65_536)) {
+        let _ = read_events(Cursor::new(input));
+    }
+
+    #[test]
+    fn valid_events_preserve_identity_and_strip_query(
+        id in 1_u64..1_000_000,
+        timestamp_unix in 1_u64..4_000_000_000,
+        score in 0_u16..=100,
+        suffix in "[a-zA-Z0-9_-]{0,32}"
+    ) {
+        let input = serde_json::json!({
+            "id": id,
+            "timestamp_unix": timestamp_unix,
+            "client_ip": "203.0.113.9",
+            "route_id": "route_one",
+            "action": "monitor",
+            "reason": "rule match",
+            "score": score,
+            "path": format!("/resource/{suffix}?token=do-not-export#fragment")
+        }).to_string() + "\n";
+        let events = read_events(Cursor::new(input)).expect("valid event");
+        prop_assert_eq!(events.len(), 1);
+        prop_assert_eq!(events[0].id, id);
+        prop_assert_eq!(events[0].timestamp_unix, timestamp_unix);
+        prop_assert!(!events[0].path.contains('?'));
+        prop_assert!(!events[0].path.contains('#'));
+        prop_assert!(!events[0].path.contains("do-not-export"));
+    }
+}
+
+#[test]
+fn invalid_json_duplicate_and_decreasing_ids_fail_closed() {
+    assert!(read_events(Cursor::new(b"{not-json}\n")).is_err());
+
+    let duplicate = format!(
+        "{}{}",
+        event(7, 1_723_456_789, "monitor", "rule", "/a"),
+        event(7, 1_723_456_790, "monitor", "rule", "/b")
+    );
+    assert!(read_events(Cursor::new(duplicate)).is_err());
+
+    let decreasing = format!(
+        "{}{}",
+        event(8, 1_723_456_789, "monitor", "rule", "/a"),
+        event(7, 1_723_456_790, "monitor", "rule", "/b")
+    );
+    assert!(read_events(Cursor::new(decreasing)).is_err());
+}
+
+#[test]
+fn line_and_input_limits_fail_closed() {
+    let oversized_line = "x".repeat(1_048_577);
+    assert!(read_events(Cursor::new(oversized_line)).is_err());
+
+    let oversized_input = vec![b'x'; 16 * 1024 * 1024 + 1];
+    assert!(read_events(Cursor::new(oversized_input)).is_err());
+}
+
+#[test]
+fn normalization_redacts_colon_and_equals_credentials() {
+    let input = event(
+        9,
+        1_723_456_789,
+        "monitor",
+        "token: abc password=hunter2 api_key: xyz authorization=opaque",
+        "/pay?secret=value",
+    );
+    let events = read_events(Cursor::new(input)).expect("valid sanitized event");
+    let reason = &events[0].reason;
+    for secret in ["abc", "hunter2", "xyz", "opaque"] {
+        assert!(!reason.contains(secret));
+    }
+    assert!(reason.contains("[REDACTED]"));
+    assert_eq!(events[0].path, "/pay");
+}
