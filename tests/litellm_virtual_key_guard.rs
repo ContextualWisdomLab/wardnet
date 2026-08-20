@@ -13,10 +13,14 @@ use axum::{
     routing::any,
 };
 use futures_util::{StreamExt, stream};
-use litellm_guard_proxy::{ProxyConfig, ProxyState, build_router};
+use litellm_guard_proxy::{
+    ProxyConfig, ProxyState, RuntimeConfigRegistry, build_router, configuration_path_from_args,
+    serve,
+};
 use serde_json::{Value, json};
 use std::{
     convert::Infallible,
+    ffi::OsString,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -144,6 +148,27 @@ async fn assert_rejected(
     if let Some(fragment) = forbidden_fragment {
         assert!(!body.contains(fragment));
     }
+}
+
+#[tokio::test]
+async fn bootstrap_contract_loads_registry_and_serves_until_shutdown() {
+    let config_path = configuration_path_from_args(
+        [
+            "--config",
+            "deploy/systemd/litellm-virtual-key-proxy.json.example",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    )
+    .expect("parse configuration path");
+    let registry =
+        RuntimeConfigRegistry::from_json_file(config_path).expect("load runtime configuration");
+    let mut config = ProxyConfig::from_registry(&registry).expect("resolve proxy configuration");
+    config.bind_address = "127.0.0.1:0".parse().expect("ephemeral bind address");
+
+    serve(config, std::future::ready(()))
+        .await
+        .expect("serve and stop cleanly");
 }
 
 #[tokio::test]
