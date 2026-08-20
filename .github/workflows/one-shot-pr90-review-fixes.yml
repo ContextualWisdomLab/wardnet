@@ -1,0 +1,202 @@
+name: One-shot PR 90 review fixes
+
+on:
+  push:
+    branches:
+      - feat/siem-opentelemetry-export
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-pr90-review-fixes
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: feat/siem-opentelemetry-export
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.97.1
+          components: rustfmt,clippy
+      - name: Apply review fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo add time@0.3 --features formatting
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source_path = Path('src/bin/wardnet-event-exporter.rs')
+          source = source_path.read_text()
+          old = 'use serde_json::{Value, json};\n'
+          if old not in source:
+              old = 'use serde_json::{json, Value};\n'
+          assert old in source
+          source = source.replace(old, old + 'use time::{OffsetDateTime, format_description::well_known::Rfc3339};\n', 1)
+
+          old = '''fn is_authorization_marker(token: &str) -> bool {
+              let marker = token.trim_end_matches(':');
+              marker.eq_ignore_ascii_case("bearer") || marker.eq_ignore_ascii_case("authorization")
+          }
+
+          fn redact_token(token: &str) -> String {
+              const ASSIGNMENT_KEYS: [&str; 7] = [
+                  "access_token=",
+                  "api_key=",
+                  "apikey=",
+                  "authorization=",
+                  "password=",
+                  "secret=",
+                  "token=",
+              ];
+              let lower = token.to_ascii_lowercase();
+              for key in ASSIGNMENT_KEYS {
+                  if let Some(index) = lower.find(key) {
+                      return format!(
+                          "{}{}[REDACTED]",
+                          &token[..index],
+                          &token[index..index + key.len()]
+                      );
+                  }
+              }
+          '''
+          new = '''fn is_authorization_marker(token: &str) -> bool {
+              let marker = token.trim_end_matches([':', '=']);
+              [
+                  "authorization",
+                  "bearer",
+                  "basic",
+                  "token",
+                  "password",
+                  "secret",
+                  "api_key",
+                  "apikey",
+                  "access_token",
+              ]
+              .iter()
+              .any(|candidate| marker.eq_ignore_ascii_case(candidate))
+          }
+
+          fn redact_token(token: &str) -> String {
+              const ASSIGNMENT_NAMES: [&str; 7] = [
+                  "access_token",
+                  "api_key",
+                  "apikey",
+                  "authorization",
+                  "password",
+                  "secret",
+                  "token",
+              ];
+              let lower = token.to_ascii_lowercase();
+              for name in ASSIGNMENT_NAMES {
+                  for separator in ['=', ':'] {
+                      let key = format!("{name}{separator}");
+                      if let Some(index) = lower.find(&key) {
+                          return format!(
+                              "{}{}[REDACTED]",
+                              &token[..index],
+                              &token[index..index + key.len()]
+                          );
+                      }
+                  }
+              }
+          '''
+          assert old in source
+          source = source.replace(old, new, 1)
+
+          old = '''        let meta_data = format!("[meta sequenceId=\\"{}\\"]", event.id);
+          '''
+          new = '''        let timestamp = rfc5424_timestamp(event.timestamp_unix)?;
+                  let meta_data = if event.id <= i32::MAX as u64 {
+                      format!("[meta sequenceId=\\"{}\\"]", event.id)
+                  } else {
+                      String::new()
+                  };
+          '''
+          assert old in source
+          source = source.replace(old, new, 1)
+          old = '''            "<{priority}>1 - - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"
+          '''
+          new = '''            "<{priority}>1 {timestamp} - wardnet - WARDNET_EVENT {origin_data}{meta_data}{trace_data} \\u{feff}{message}\\n"
+          '''
+          assert old in source
+          source = source.replace(old, new, 1)
+          marker = '''fn escape_structured_data(value: &str) -> String {
+          '''
+          helper = '''fn rfc5424_timestamp(timestamp_unix: u64) -> Result<String, String> {
+              let timestamp = i64::try_from(timestamp_unix)
+                  .map_err(|_| "RFC 5424 timestamp exceeds the supported range".to_string())?;
+              OffsetDateTime::from_unix_timestamp(timestamp)
+                  .map_err(|error| format!("invalid RFC 5424 timestamp: {error}"))?
+                  .format(&Rfc3339)
+                  .map_err(|error| format!("format RFC 5424 timestamp: {error}"))
+          }
+
+          '''
+          assert marker in source
+          source = source.replace(marker, helper + marker, 1)
+          source_path.write_text(source)
+
+          tests_path = Path('tests/siem_export_input_contract.rs')
+          tests = tests_path.read_text()
+          addition = r'''
+
+          #[test]
+          fn colon_delimited_credentials_are_redacted() {
+              let input = "{\"id\":14,\"timestamp_unix\":1723456792,\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",\"reason\":\"token: abc123 password: hunter2 api_key: xyz\",\"score\":1,\"path\":\"/\"}\n";
+              let output = exporter(&["--format", "ocsf"], input);
+              assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+              let body = String::from_utf8(output.stdout).expect("UTF-8 OCSF output");
+              assert!(!body.contains("abc123"));
+              assert!(!body.contains("hunter2"));
+              assert!(!body.contains("xyz"));
+              assert!(body.contains("[REDACTED]"));
+          }
+
+          #[test]
+          fn rfc5424_omits_out_of_range_meta_sequence_id_but_preserves_event_id() {
+              let output = exporter(&["--format", "rfc5424"], &event(2_147_483_648, 1_723_456_791));
+              assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+              let body = String::from_utf8(output.stdout).expect("UTF-8 syslog output");
+              assert!(!body.contains("[meta sequenceId=\"2147483648\"]"));
+              assert!(body.contains("\"event_id\":2147483648"));
+          }
+          '''
+          assert 'colon_delimited_credentials_are_redacted' not in tests
+          tests_path.write_text(tests + addition)
+
+          adr_path = Path('docs/adr/0001-siem-opentelemetry-event-export.md')
+          adr = adr_path.read_text()
+          adr = adr.replace(
+              '- The RFC 5424 timestamp is the NILVALUE `-` because the current source event stores Unix seconds rather than an RFC 3339 timestamp; the exact source time remains in the JSON message.',
+              '- The RFC 5424 header timestamp is deterministically rendered from the source Unix seconds as RFC 3339. `meta.sequenceId` is emitted only when the Wardnet event ID is within RFC 5424\'s `1..=2147483647` range; larger IDs remain in the JSON message.'
+          )
+          adr_path.write_text(adr)
+
+          runbook_path = Path('docs/runbooks/siem-opentelemetry-export.md')
+          runbook = runbook_path.read_text()
+          runbook = runbook.replace(
+              'It uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, `meta.sequenceId` for the Wardnet event ID, and the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp, are carried in a UTF-8 BOM-prefixed JSON message.',
+              'It renders the source event time as an RFC 3339 header timestamp, uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, emits `meta.sequenceId` only for event IDs in RFC 5424\'s `1..=2147483647` range, and uses the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp and all event IDs, are carried in a UTF-8 BOM-prefixed JSON message.'
+          )
+          runbook_path.write_text(runbook)
+          PY
+          cargo fmt
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          git rm .github/workflows/one-shot-pr90-review-fixes.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden SIEM export review contracts'
+          git push origin HEAD:feat/siem-opentelemetry-export
