@@ -1,7 +1,7 @@
 //! End-to-end contracts for the Wardnet SIEM and OpenTelemetry exporter.
 
 use serde_json::Value;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Output, Stdio};
 
 const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -19,12 +19,14 @@ fn exporter(args: &[&str], input: &str) -> Output {
         .spawn()
         .expect("spawn Wardnet event exporter");
 
-    child
+    if let Err(error) = child
         .stdin
         .take()
         .expect("exporter stdin")
         .write_all(input.as_bytes())
-        .expect("write exporter input");
+    {
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe, "write exporter input");
+    }
 
     child.wait_with_output().expect("wait for exporter")
 }
@@ -154,7 +156,7 @@ fn rfc5424_uses_standard_structured_data_and_single_line_json_message() {
     assert!(body.contains("[origin ip=\"203.0.113.8\" software=\"Wardnet\""));
     assert!(body.contains("[meta sequenceId=\"9\"]"));
     assert!(body.contains(&format!(
-        "[opentelemetry trace_id=\"{TRACE_ID}\" span_id=\"{SPAN_ID}\" trace_flags=\"01\"]"
+        "[OpenTelemetry trace_id=\"{TRACE_ID}\" span_id=\"{SPAN_ID}\" trace_flags=\"01\"]"
     )));
     assert!(body.contains('\u{feff}'));
     assert!(body.contains("\"event_id\":9"));
@@ -189,7 +191,31 @@ fn incomplete_or_invalid_trace_context_is_rejected() {
 }
 
 #[test]
-fn unknown_format_and_unknown_option_are_rejected() {
+fn duplicate_and_zero_identifiers_fail_closed() {
+    for input in [
+        format!("{}{}", event(21, 1_723_456_789, 10), event(21, 1_723_456_790, 10)),
+        event(0, 1_723_456_789, 10),
+        event(22, 0, 10),
+    ] {
+        let output = exporter(&["--format", "ocsf"], &input);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn empty_otlp_batch_has_exact_empty_envelope() {
+    let output = exporter(&["--format", "otlp-json"], "");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{\"resourceLogs\":[]}\n");
+}
+
+#[test]
+fn missing_format_and_unknown_options_are_rejected() {
+    let missing_format = exporter(&[], "");
+    assert!(!missing_format.status.success());
+    assert!(String::from_utf8_lossy(&missing_format.stderr).contains("missing required --format"));
+
     let bad_format = exporter(&["--format", "cef"], "");
     assert!(!bad_format.status.success());
     assert!(String::from_utf8_lossy(&bad_format.stderr).contains("unsupported format"));
@@ -197,4 +223,34 @@ fn unknown_format_and_unknown_option_are_rejected() {
     let bad_option = exporter(&["--unknown"], "");
     assert!(!bad_option.status.success());
     assert!(String::from_utf8_lossy(&bad_option.stderr).contains("unknown option"));
+}
+
+#[test]
+fn service_version_is_exported_and_secret_shaped_labels_are_rejected() {
+    let output = exporter(
+        &[
+            "--format",
+            "otlp-json",
+            "--service-version",
+            "2026.8.20",
+        ],
+        &event(23, 1_723_456_789, 10),
+    );
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("valid OTLP JSON");
+    let attributes = value["resourceLogs"][0]["resource"]["attributes"]
+        .as_array()
+        .expect("resource attributes");
+    assert!(attributes.iter().any(|attribute| {
+        attribute["key"] == "service.version"
+            && attribute["value"]["stringValue"] == "2026.8.20"
+    }));
+
+    let rejected = exporter(
+        &["--format", "otlp-json", "--service-name", "token: secret-value"],
+        "",
+    );
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("credential-shaped"));
 }
