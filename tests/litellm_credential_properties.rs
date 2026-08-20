@@ -55,6 +55,16 @@ proptest! {
     }
 
     #[test]
+    fn padding_only_payloads_are_rejected(padding in 1usize..128) {
+        let raw = format!("Bearer sk-{}", "=".repeat(padding));
+        let headers = single_header(raw.as_bytes()).unwrap();
+        prop_assert_eq!(
+            validate_litellm_virtual_key(&headers),
+            Err(CredentialRejection::InvalidShape)
+        );
+    }
+
+    #[test]
     fn padding_followed_by_data_is_rejected(
         left in "[A-Za-z0-9._~+/-]{1,48}",
         right in "[A-Za-z0-9._~+/-]{1,48}"
