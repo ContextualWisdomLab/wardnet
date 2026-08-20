@@ -148,7 +148,9 @@ fn rfc5424_uses_standard_structured_data_and_single_line_json_message() {
 
     let body = String::from_utf8(output.stdout).expect("UTF-8 syslog output");
     assert_eq!(body.lines().count(), 1);
-    assert!(body.starts_with("<131>1 - - wardnet - WARDNET_EVENT "));
+    assert!(body.starts_with(
+        "<131>1 2024-08-12T09:59:51Z - wardnet - WARDNET_EVENT "
+    ));
     assert!(body.contains("[origin ip=\"203.0.113.8\" software=\"Wardnet\""));
     assert!(body.contains("[meta sequenceId=\"9\"]"));
     assert!(body.contains(&format!(
