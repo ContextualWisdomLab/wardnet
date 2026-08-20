@@ -13,8 +13,7 @@ use axum::{
 };
 
 const MISSING_CHALLENGE: &str = "Bearer realm=\"litellm\"";
-const INVALID_CHALLENGE: &str =
-    "Bearer realm=\"litellm\", error=\"invalid_token\", error_description=\"A LiteLLM virtual key is required\"";
+const INVALID_CHALLENGE: &str = "Bearer realm=\"litellm\", error=\"invalid_token\", error_description=\"A LiteLLM virtual key is required\"";
 
 fn challenge(rejection: CredentialRejection) -> &'static str {
     match rejection {
