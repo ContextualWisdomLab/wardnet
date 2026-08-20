@@ -1,0 +1,64 @@
+name: Repair LiteLLM virtual-key formatting
+
+on:
+  push:
+    branches:
+      - feat/litellm-virtual-key-ingress-guard
+    paths:
+      - .github/workflows/repair-litellm-virtual-key-format.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-litellm-virtual-key-format
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: feat/litellm-virtual-key-ingress-guard
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+
+      - name: Apply canonical Rust formatting
+        run: cargo fmt --all
+
+      - name: Verify formatted workspace
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Publish only verified formatting repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/repair-litellm-virtual-key-format.yml
+          rm -- "$workflow"
+
+          git config user.name "opencode-agent[bot]"
+          git config user.email "219766164+opencode-agent[bot]@users.noreply.github.com"
+
+          while IFS= read -r -d '' path; do
+            git add -- "$path"
+          done < <(git diff --name-only -z -- '*.rs')
+          git add -- "$workflow"
+
+          if git diff --cached --quiet; then
+            echo "No verified formatting changes were produced." >&2
+            exit 1
+          fi
+
+          git commit -m "style: apply canonical Rust formatting"
+          git push origin HEAD:feat/litellm-virtual-key-ingress-guard
