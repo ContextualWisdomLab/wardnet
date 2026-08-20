@@ -26,7 +26,6 @@ const MAX_ACTION_CHARS: usize = 64;
 const MAX_REASON_CHARS: usize = 2_048;
 const MAX_PATH_CHARS: usize = 2_048;
 const MAX_ROUTE_CHARS: usize = 256;
-const ENTERPRISE_NUMBER: u32 = 32_473;
 const OTEL_EVENT_NAME: &str = "org.contextualwisdomlab.wardnet.security.decision";
 const OTEL_SCOPE_NAME: &str = "org.contextualwisdomlab.wardnet.security";
 
@@ -404,14 +403,14 @@ fn sanitize_text(value: &str, maximum: usize) -> String {
             redact_token(token)
         };
         output.push_str(&redacted);
-        redact_next = token
-            .trim_end_matches(':')
-            .eq_ignore_ascii_case("bearer")
-            || token
-                .trim_end_matches(':')
-                .eq_ignore_ascii_case("authorization");
+        redact_next = is_authorization_marker(token);
     }
     truncate_chars(&output, maximum)
+}
+
+fn is_authorization_marker(token: &str) -> bool {
+    let marker = token.trim_end_matches(':');
+    marker.eq_ignore_ascii_case("bearer") || marker.eq_ignore_ascii_case("authorization")
 }
 
 fn redact_token(token: &str) -> String {
@@ -427,38 +426,41 @@ fn redact_token(token: &str) -> String {
     let lower = token.to_ascii_lowercase();
     for key in ASSIGNMENT_KEYS {
         if let Some(index) = lower.find(key) {
-            return format!("{}{}[REDACTED]", &token[..index], &token[index..index + key.len()]);
+            return format!(
+                "{}{}[REDACTED]",
+                &token[..index],
+                &token[index..index + key.len()]
+            );
         }
     }
 
     const SECRET_PREFIXES: [&str; 6] = ["sk-", "ghp_", "github_pat_", "xoxb-", "xoxp-", "AIza"];
     for prefix in SECRET_PREFIXES {
-        if let Some(index) = token.find(prefix) {
+        if let Some(index) = secret_prefix_index(token, prefix) {
             return format!("{}[REDACTED]", &token[..index]);
         }
     }
     token.to_string()
 }
 
+fn secret_prefix_index(token: &str, prefix: &str) -> Option<usize> {
+    token.match_indices(prefix).find_map(|(index, _)| {
+        let boundary = token[..index].chars().next_back().map_or(true, |character| {
+            !character.is_ascii_alphanumeric() && character != '_'
+        });
+        boundary.then_some(index)
+    })
+}
+
 fn contains_secret_marker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    [
-        "access_token=",
-        "api_key=",
-        "apikey=",
-        "authorization=",
-        "bearer ",
-        "github_pat_",
-        "password=",
-        "secret=",
-        "sk-",
-        "token=",
-        "xoxb-",
-        "xoxp-",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-        || value.contains("AIza")
+    let mut redact_next = false;
+    for token in value.split_whitespace() {
+        if redact_next || redact_token(token) != token {
+            return true;
+        }
+        redact_next = is_authorization_marker(token);
+    }
+    false
 }
 
 fn truncate_chars(value: &str, maximum: usize) -> String {
@@ -529,7 +531,7 @@ fn render(options: &Options, events: &[NormalizedEvent]) -> Result<String, Strin
     match options.format {
         ExportFormat::Ocsf => render_json_lines(events, render_ocsf),
         ExportFormat::OtlpJson => render_otlp(options, events),
-        ExportFormat::Rfc5424 => render_rfc5424(events),
+        ExportFormat::Rfc5424 => Ok(render_rfc5424(events)),
     }
 }
 
@@ -570,8 +572,8 @@ fn render_ocsf(event: &NormalizedEvent) -> Result<Value, String> {
         "class_uid": 2004,
         "finding_info": {
             "created_time": time,
-            "desc": event.reason,
-            "product": product,
+            "desc": event.reason.as_str(),
+            "product": product.clone(),
             "title": format!("Wardnet {} security decision", event.action),
             "types": ["WAF/IDS Security Decision"],
             "uid": format!("wardnet-event-{}", event.id)
@@ -599,16 +601,16 @@ fn render_ocsf(event: &NormalizedEvent) -> Result<Value, String> {
         "type_uid": 200401,
         "unmapped": {
             "wardnet": {
-                "action": event.action,
-                "client_ip": event.client_ip,
-                "path": event.path,
-                "reason": event.reason,
-                "route_id": event.route_id,
+                "action": event.action.as_str(),
+                "client_ip": event.client_ip.as_deref(),
+                "path": event.path.as_str(),
+                "reason": event.reason.as_str(),
+                "route_id": event.route_id.as_deref(),
                 "score": event.score,
                 "timestamp_unix": event.timestamp_unix,
-                "trace_flags": event.trace_context.as_ref().map(|context| context.trace_flags.clone()),
-                "trace_id": event.trace_context.as_ref().map(|context| context.trace_id.clone()),
-                "span_id": event.trace_context.as_ref().map(|context| context.span_id.clone())
+                "trace_flags": event.trace_context.as_ref().map(|context| context.trace_flags.as_str()),
+                "trace_id": event.trace_context.as_ref().map(|context| context.trace_id.as_str()),
+                "span_id": event.trace_context.as_ref().map(|context| context.span_id.as_str())
             }
         }
     }))
@@ -727,7 +729,7 @@ fn otlp_int_attribute(key: &str, value: u64) -> Value {
     })
 }
 
-fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
+fn render_rfc5424(events: &[NormalizedEvent]) -> String {
     let mut output = String::new();
     for event in events {
         let severity = severity(event.score);
@@ -735,7 +737,7 @@ fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
         let route_id = event.route_id.as_deref().unwrap_or("-");
         let client_ip = event.client_ip.as_deref().unwrap_or("-");
         let wardnet_data = format!(
-            "[wardnet@{ENTERPRISE_NUMBER} event_id=\"{}\" timestamp_unix=\"{}\" action=\"{}\" score=\"{}\" route_id=\"{}\" client_ip=\"{}\" path=\"{}\"]",
+            "[wardnet event_id=\"{}\" timestamp_unix=\"{}\" action=\"{}\" score=\"{}\" route_id=\"{}\" client_ip=\"{}\" path=\"{}\"]",
             event.id,
             event.timestamp_unix,
             escape_structured_data(&event.action),
@@ -759,7 +761,7 @@ fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
         );
         output.push_str(&line);
     }
-    Ok(output)
+    output
 }
 
 fn escape_structured_data(value: &str) -> String {
