@@ -209,7 +209,11 @@ where
     }))
 }
 
-fn required_value(args: &[String], index: usize, option: &str) -> Result<&str, String> {
+fn required_value<'a>(
+    args: &'a [String],
+    index: usize,
+    option: &str,
+) -> Result<&'a str, String> {
     args.get(index + 1)
         .map(String::as_str)
         .filter(|value| !value.starts_with("--"))
