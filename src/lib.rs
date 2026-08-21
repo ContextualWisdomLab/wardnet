@@ -39,6 +39,7 @@ mod coraza_audit;
 mod credentials;
 mod misp_import;
 mod opencti_import;
+pub mod siem_event_input;
 mod stix_import;
 mod suricata_eve;
 mod taxii;

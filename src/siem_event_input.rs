@@ -209,7 +209,13 @@ fn sanitize_path(value: &str, line_number: usize) -> Result<String, String> {
 fn sanitize_text(value: &str, maximum: usize) -> String {
     let normalized: String = value
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect();
 
     let mut output = String::new();

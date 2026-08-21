@@ -94,7 +94,7 @@ cargo run --quiet --locked --bin wardnet-event-exporter -- \
   > wardnet-syslog.log
 ```
 
-The output is one message per line. It uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, `meta.sequenceId` for the Wardnet event ID, and the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp, are carried in a UTF-8 BOM-prefixed JSON message. No example or unowned IANA Private Enterprise Number is claimed.
+The output is one message per line. It renders the source event time as an RFC 3339 header timestamp, uses the RFC-registered `origin` element for Wardnet software and optional client-IP metadata, emits `meta.sequenceId` only for event IDs in RFC 5424's `1..=2147483647` range, and uses the stable OpenTelemetry `OpenTelemetry` element when trace context exists. Remaining Wardnet fields, including the exact source Unix timestamp and all Wardnet event IDs, are carried in a UTF-8 BOM-prefixed JSON message. No example or unowned IANA Private Enterprise Number is claimed.
 
 RFC 5424 does not provide confidentiality. Send these records over a protected transport such as a mutually authenticated TLS syslog relay or a collector-side file/pipe that is protected by operating-system permissions.
 

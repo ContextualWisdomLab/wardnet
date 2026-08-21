@@ -28,12 +28,17 @@ fn exporter(args: &[&str], input: &str) -> Output {
 }
 
 fn event(id: u64, timestamp_unix: u64) -> String {
-    format!(concat!(
-        "{{\"id\":{id},\"timestamp_unix\":{timestamp_unix},",
-        "\"client_ip\":\"203.0.113.8\",\"route_id\":\"checkout\",",
-        "\"action\":\"block\",\"reason\":\"rule match\",",
-        "\"score\":55,\"path\":\"/pay\"}}\n"
-    ))
+    let line = serde_json::json!({
+        "id": id,
+        "timestamp_unix": timestamp_unix,
+        "client_ip": "203.0.113.8",
+        "route_id": "checkout",
+        "action": "block",
+        "reason": "rule match",
+        "score": 55,
+        "path": "/pay"
+    });
+    format!("{line}\n")
 }
 
 #[test]
@@ -53,11 +58,17 @@ fn zero_and_non_increasing_event_ids_fail_closed() {
 #[test]
 fn oversized_line_and_batch_fail_closed() {
     let oversized_reason = "x".repeat(1_048_577);
-    let oversized_line = format!(concat!(
-        "{{\"id\":1,\"timestamp_unix\":1723456789,",
-        "\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",",
-        "\"reason\":\"{oversized_reason}\",\"score\":1,\"path\":\"/\"}}\n"
-    ));
+    let line = serde_json::json!({
+        "id": 1,
+        "timestamp_unix": 1723456789,
+        "client_ip": null,
+        "route_id": null,
+        "action": "monitor",
+        "reason": oversized_reason,
+        "score": 1,
+        "path": "/"
+    });
+    let oversized_line = format!("{line}\n");
     let output = exporter(&["--format", "ocsf"], &oversized_line);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -76,13 +87,20 @@ fn oversized_line_and_batch_fail_closed() {
 
 #[test]
 fn unsupported_trace_flags_fail_closed() {
-    let input = format!(concat!(
-        "{{\"id\":12,\"timestamp_unix\":1723456794,",
-        "\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",",
-        "\"reason\":\"rule match\",\"score\":1,\"path\":\"/\",",
-        "\"trace_id\":\"{TRACE_ID}\",\"span_id\":\"{SPAN_ID}\",",
-        "\"trace_flags\":\"02\"}}\n"
-    ));
+    let input_value = serde_json::json!({
+        "id": 12,
+        "timestamp_unix": 1723456794,
+        "client_ip": null,
+        "route_id": null,
+        "action": "monitor",
+        "reason": "rule match",
+        "score": 1,
+        "path": "/",
+        "trace_id": TRACE_ID,
+        "span_id": SPAN_ID,
+        "trace_flags": "02"
+    });
+    let input = format!("{input_value}\n");
     let output = exporter(&["--format", "otlp-json"], &input);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());

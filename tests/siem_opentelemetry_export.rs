@@ -30,22 +30,21 @@ fn exporter(args: &[&str], input: &str) -> Output {
 }
 
 fn event(id: u64, timestamp_unix: u64, score: u16) -> String {
-    format!(
-        concat!(
-            "{{\"id\":{id},\"timestamp_unix\":{timestamp_unix},",
-            "\"client_ip\":\"203.0.113.8\",\"route_id\":\"checkout\",",
-            "\"action\":\"block\",",
-            "\"reason\":\"sqli\\ncredential {secret}\",",
-            "\"score\":{score},",
-            "\"path\":\"/pay?token={secret}#fragment\",",
-            "\"trace_id\":\"{trace_id}\",\"span_id\":\"{span_id}\",",
-            "\"trace_flags\":\"01\",",
-            "\"untrusted_extra\":\"{secret}\"}}\n"
-        ),
-        secret = SECRET_CANARY,
-        trace_id = TRACE_ID,
-        span_id = SPAN_ID,
-    )
+    let line = serde_json::json!({
+        "id": id,
+        "timestamp_unix": timestamp_unix,
+        "client_ip": "203.0.113.8",
+        "route_id": "checkout",
+        "action": "block",
+        "reason": format!("sqli\ncredential {secret}", secret = SECRET_CANARY),
+        "score": score,
+        "path": format!("/pay?token={secret}#fragment", secret = SECRET_CANARY),
+        "trace_id": TRACE_ID,
+        "span_id": SPAN_ID,
+        "trace_flags": "01",
+        "untrusted_extra": SECRET_CANARY
+    });
+    format!("{line}\n")
 }
 
 #[test]
@@ -148,9 +147,7 @@ fn rfc5424_uses_standard_structured_data_and_single_line_json_message() {
 
     let body = String::from_utf8(output.stdout).expect("UTF-8 syslog output");
     assert_eq!(body.lines().count(), 1);
-    assert!(body.starts_with(
-        "<131>1 2024-08-12T09:59:51Z - wardnet - WARDNET_EVENT "
-    ));
+    assert!(body.starts_with("<131>1 2024-08-12T09:59:51Z - wardnet - WARDNET_EVENT "));
     assert!(body.contains("[origin ip=\"203.0.113.8\" software=\"Wardnet\""));
     assert!(body.contains("[meta sequenceId=\"9\"]"));
     assert!(body.contains(&format!(
@@ -191,7 +188,11 @@ fn incomplete_or_invalid_trace_context_is_rejected() {
 #[test]
 fn duplicate_and_zero_identifiers_fail_closed() {
     for input in [
-        format!("{}{}", event(21, 1_723_456_789, 10), event(21, 1_723_456_790, 10)),
+        format!(
+            "{}{}",
+            event(21, 1_723_456_789, 10),
+            event(21, 1_723_456_790, 10)
+        ),
         event(0, 1_723_456_789, 10),
         event(22, 0, 10),
     ] {
@@ -226,12 +227,7 @@ fn missing_format_and_unknown_options_are_rejected() {
 #[test]
 fn service_version_is_exported_and_secret_shaped_labels_are_rejected() {
     let output = exporter(
-        &[
-            "--format",
-            "otlp-json",
-            "--service-version",
-            "2026.8.20",
-        ],
+        &["--format", "otlp-json", "--service-version", "2026.8.20"],
         &event(23, 1_723_456_789, 10),
     );
     assert!(output.status.success());
@@ -240,12 +236,16 @@ fn service_version_is_exported_and_secret_shaped_labels_are_rejected() {
         .as_array()
         .expect("resource attributes");
     assert!(attributes.iter().any(|attribute| {
-        attribute["key"] == "service.version"
-            && attribute["value"]["stringValue"] == "2026.8.20"
+        attribute["key"] == "service.version" && attribute["value"]["stringValue"] == "2026.8.20"
     }));
 
     let rejected = exporter(
-        &["--format", "otlp-json", "--service-name", "token: secret-value"],
+        &[
+            "--format",
+            "otlp-json",
+            "--service-name",
+            "token: secret-value",
+        ],
         "",
     );
     assert!(!rejected.status.success());

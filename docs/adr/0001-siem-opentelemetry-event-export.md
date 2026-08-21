@@ -36,7 +36,7 @@ Add a separate Rust binary, `wardnet-event-exporter`, that consumes the existing
    - Registered `origin` and `meta` structured-data elements carry source software, optional client IP, and event sequence ID.
    - OpenTelemetry trace context is carried in the stable `OpenTelemetry` structured-data element.
    - Wardnet-specific event fields are emitted as a UTF-8 BOM-prefixed JSON message, not as an unregistered SD-ID.
-   - The RFC 5424 timestamp is the NILVALUE `-` because the current source event stores Unix seconds rather than an RFC 3339 timestamp; the exact source time remains in the JSON message.
+   - The RFC 5424 header timestamp is deterministically rendered from source Unix seconds as RFC 3339. `meta.sequenceId` is emitted only for event IDs in `1..=2147483647`; larger Wardnet IDs remain in the JSON message.
 
 The exporter is a deterministic protocol boundary rather than a network daemon. Standard input and output make it composable with `curl`, OpenTelemetry Collector, Fluent Bit, Vector, syslog relays, and vendor agents without giving the exporter provider credentials or arbitrary egress authority.
 
