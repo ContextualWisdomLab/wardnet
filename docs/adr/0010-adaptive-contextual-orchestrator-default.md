@@ -18,6 +18,20 @@ and Fugu adapts the resulting scaffold to the query. These results support an
 adaptive default, but they do not authorize the orchestrator to own Wardnet's
 security evidence, permissions, audit trail, or operator decision.
 
+## Literature-to-decision mapping
+
+| Source | Mechanism | Reported ablation/metric | Decision item it grounds |
+| --- | --- | --- | --- |
+| Xu et al. (2025), *TRINITY* | A lightweight (~0.6B parameter) coordinator assigns Thinker/Worker/Verifier roles turn-by-turn without modifying constituent model weights. | 86.2% pass@1 on LiveCodeBench at publication; the ablation attributes the gain to the coordinator's hidden-state contextualization versus RL/imitation-learning coordinators under the same budget. | Decision item 2 (role-separated worker and verifier execution) -- justifies delegating *when* to add an independent checking role to the orchestrator rather than hard-coding it in Wardnet. |
+| Nielsen et al. (2025), *Conductor* | A 7B RL-trained coordinator adapts topology to task difficulty: single-query for factual tasks, planner-executor-verifier pipelines for hard tasks, with "Recursive Test-Time Scaling" (the coordinator can select itself as a worker for self-correction). | Record-setting 83.9% LiveCodeBench and 87.5% GPQA-Diamond; measured cost-efficiency gains over Mixture-of-Agents baselines. | Decision item 3 (conducted/recursive workflow for complex investigations) -- the query-adaptive depth and recursive self-correction are exactly the "decomposition, additional evidence, or iterative verification" case this item reserves for the orchestrator, not Wardnet. |
+| Tang et al. (2026), *Sakana Fugu* | Fugu/Fugu-Ultra devise dynamic agentic scaffolds (large-scale fine-tuning + evolutionary search + RL) that vary with the query, orchestrating a team of diverse SOTA models. | State-of-the-art on SWE-Bench Pro, Terminal-Bench, LiveCodeBench, GPQA-Diamond, and Humanity's Last Exam; training explicitly optimizes the performance/latency trade-off via evolutionary search. | Decision item 1 (a quality-sufficient single route for bounded, low-ambiguity enrichment) and the "quality and safety take precedence over latency" rule -- query-adaptive scaffolding is the mechanism that keeps bounded events on a cheap route without Wardnet pre-selecting depth. |
+| Omidvar & Akhlaghi (2026) | Models LLM sampling as a discrete stochastic channel, unifying retry/majority-vote/self-consistency into six operators, plus a cost-aware semantic-nearest-neighbor router with a single Lagrangian parameter traversing the quality-cost Pareto frontier. | ~56% lower normalized cost at matched quality, and ~7% quality improvement at matched cost (26% over single-shot), on MMLU/GSM8K/HumanEval. | The cost/quality tie-breaking rule ("known cost may break ties only after capability and safety constraints") -- grounds treating cost as a Pareto-frontier parameter subordinate to quality/safety, not an independent optimization target. |
+
+The scheduled evaluations required by the Decision section (comparing single-route,
+worker-verifier, and deeper orchestration modes on grounded SOC outcomes) are the
+Wardnet-side analogue of each paper's own ablation methodology, applied to this
+system's incident corpus instead of LiveCodeBench/GPQA/MMLU.
+
 ## Decision
 
 The SOC request explicitly includes `orchestration_mode: "auto"`. The central

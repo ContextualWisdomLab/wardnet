@@ -658,7 +658,7 @@ fn soc_llm_chat_body(model: &str, event: &SecurityEvent) -> serde_json::Value {
         event.action, event.reason, event.score, event.path, client_ip, event.timestamp_unix
     );
     serde_json::json!({
-        "model":model,
+        "model": model,
         "orchestration_mode": "auto",
         "messages": [
             {
