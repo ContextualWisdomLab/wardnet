@@ -72,6 +72,44 @@ fn ocsf_detection_finding_is_versioned_allowlisted_and_redacted() {
     assert_eq!(value["unmapped"]["wardnet"]["path"], "/pay");
     assert_eq!(value["unmapped"]["wardnet"]["score"], 80);
     assert!(value.get("untrusted_extra").is_none());
+    // OCSF 1.8.0's `action_id` enum only defines 0 (Unknown), 1 (Allowed),
+    // 2 (Denied), and 99 (Other) -- "block" must map to the defined Denied
+    // value, never an unmapped id a strict schema validator would reject.
+    assert_eq!(value["action_id"], 2);
+}
+
+#[test]
+fn ocsf_action_id_for_monitor_actions_is_a_defined_ocsf_enum_value() {
+    let input = format!(
+        "{}\n",
+        serde_json::json!({
+            "id": 9,
+            "timestamp_unix": 1_723_456_789,
+            "client_ip": "203.0.113.8",
+            "route_id": "checkout",
+            "action": "monitor",
+            "reason": "rule match",
+            "score": 10,
+            "path": "/pay"
+        })
+    );
+    let output = exporter(&["--format", "ocsf"], &input);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8(output.stdout).expect("UTF-8 OCSF output");
+    let value: Value = serde_json::from_str(body.trim()).expect("valid OCSF JSON line");
+
+    // OCSF 1.8.0's `action_id` dictionary enum has no "Observed" value (only
+    // 0/1/2/99 are defined); "monitor" must map to 99 (Other), with the
+    // human-readable caption carried in the free-text `action` field, per
+    // OCSF's documented convention for values the enum doesn't cover.
+    // Strict schema validators reject an unmapped id like the previously
+    // used 3.
+    assert_eq!(value["action_id"], 99);
+    assert_eq!(value["action"], "Observed");
 }
 
 #[test]

@@ -235,59 +235,73 @@ fn sanitize_text(value: &str, maximum: usize) -> String {
     truncate_chars(&output, maximum)
 }
 
+/// Marker names that indicate the following token (or an `=`/`:` assignment
+/// within the same token) carries a credential value. Compared after
+/// lower-casing and folding `-` to `_` so header-style names (`X-Api-Key`,
+/// `access-token`) match the same canonical set as `api_key`/`access_token`.
+const MARKER_NAMES: [&str; 9] = [
+    "authorization",
+    "bearer",
+    "basic",
+    "token",
+    "password",
+    "secret",
+    "api_key",
+    "apikey",
+    "access_token",
+];
+
+fn canonicalize_marker(token: &str) -> String {
+    token.to_ascii_lowercase().replace('-', "_")
+}
+
 fn is_authorization_marker(token: &str) -> bool {
-    let marker = token.trim_end_matches([':', '=']);
-    [
-        "authorization",
-        "bearer",
-        "basic",
-        "token",
-        "password",
-        "secret",
-        "api_key",
-        "apikey",
-        "access_token",
-    ]
-    .iter()
-    .any(|candidate| marker.eq_ignore_ascii_case(candidate))
+    let marker = canonicalize_marker(token.trim_end_matches([':', '=']));
+    MARKER_NAMES
+        .iter()
+        .any(|candidate| marker == *candidate || marker == format!("x_{candidate}"))
 }
 
 fn redact_token(token: &str) -> String {
-    const ASSIGNMENT_NAMES: [&str; 7] = [
-        "access_token",
-        "api_key",
-        "apikey",
-        "authorization",
-        "password",
-        "secret",
-        "token",
-    ];
-    let lower = token.to_ascii_lowercase();
-    for name in ASSIGNMENT_NAMES {
-        for separator in ['=', ':'] {
-            let key = format!("{name}{separator}");
-            if let Some(index) = lower.find(&key) {
-                return format!(
-                    "{}{}[REDACTED]",
-                    &token[..index],
-                    &token[index..index + key.len()]
-                );
+    // `access_token`/`api_key`/... trigger on assignment (`key=value` or
+    // `key:value` inside one token); `bearer`/`basic` are marker-only,
+    // so they are excluded here (they redact the *next* token instead,
+    // via `is_authorization_marker`).
+    let normalized = canonicalize_marker(token);
+    for name in MARKER_NAMES
+        .iter()
+        .filter(|name| !matches!(**name, "bearer" | "basic"))
+    {
+        for variant in [name.to_string(), format!("x_{name}")] {
+            for separator in ['=', ':'] {
+                let key = format!("{variant}{separator}");
+                if let Some(index) = boundary_match_index(&normalized, &key) {
+                    return format!(
+                        "{}{}[REDACTED]",
+                        &token[..index],
+                        &token[index..index + key.len()]
+                    );
+                }
             }
         }
     }
 
     const SECRET_PREFIXES: [&str; 6] = ["sk-", "ghp_", "github_pat_", "xoxb-", "xoxp-", "AIza"];
     for prefix in SECRET_PREFIXES {
-        if let Some(index) = secret_prefix_index(token, prefix) {
+        if let Some(index) = boundary_match_index(token, prefix) {
             return format!("{}[REDACTED]", &token[..index]);
         }
     }
     token.to_string()
 }
 
-fn secret_prefix_index(token: &str, prefix: &str) -> Option<usize> {
-    token.match_indices(prefix).find_map(|(index, _)| {
-        let boundary = match token[..index].chars().next_back() {
+/// Find `needle` in `haystack` at a word boundary: not immediately preceded
+/// by an alphanumeric character or `_`. Prevents `token:` from matching
+/// inside `access-token:` (normalized `access_token:`) as though it were a
+/// bare `token:` assignment.
+fn boundary_match_index(haystack: &str, needle: &str) -> Option<usize> {
+    haystack.match_indices(needle).find_map(|(index, _)| {
+        let boundary = match haystack[..index].chars().next_back() {
             None => true,
             Some(character) => !character.is_ascii_alphanumeric() && character != '_',
         };

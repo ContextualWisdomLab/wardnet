@@ -289,6 +289,12 @@ fn render_ocsf(event: &NormalizedEvent) -> Result<Value, String> {
     }))
 }
 
+/// Map a Wardnet action to an OCSF 1.8.0 `action_id`. The dictionary's
+/// `action_id` enum defines only 0 (Unknown), 1 (Allowed), 2 (Denied), and
+/// 99 (Other) -- there is no "Observed" value, so `monitor`/`observe`/`alert`
+/// use 99 with the human-readable caption carried in the free-text `action`
+/// field, per OCSF's documented convention for values the enum doesn't
+/// cover. A strict schema validator rejects any other integer here.
 fn ocsf_action(action: &str) -> (u8, &str) {
     if ["block", "blocked", "deny", "denied", "drop", "dropped"]
         .iter()
@@ -304,7 +310,7 @@ fn ocsf_action(action: &str) -> (u8, &str) {
         .iter()
         .any(|candidate| action.eq_ignore_ascii_case(candidate))
     {
-        (3, "Observed")
+        (99, "Observed")
     } else {
         (99, action)
     }

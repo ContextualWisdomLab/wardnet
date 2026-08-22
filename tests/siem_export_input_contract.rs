@@ -129,6 +129,27 @@ fn colon_delimited_credentials_are_redacted() {
 }
 
 #[test]
+fn hyphenated_credential_markers_are_redacted() {
+    let input = concat!(
+        "{\"id\":15,\"timestamp_unix\":1723456793,",
+        "\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",",
+        "\"reason\":\"x-api-key: abc123 access-token: hunter2\",",
+        "\"score\":1,\"path\":\"/\"}\n"
+    );
+    let output = exporter(&["--format", "ocsf"], input);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8(output.stdout).expect("UTF-8 OCSF output");
+    for secret in ["abc123", "hunter2"] {
+        assert!(!body.contains(secret), "leaked {secret} in {body}");
+    }
+    assert!(body.contains("[REDACTED]"));
+}
+
+#[test]
 fn rfc5424_header_contains_the_event_timestamp() {
     let output = exporter(&["--format", "rfc5424"], &event(13, 1_723_456_791));
     assert!(
