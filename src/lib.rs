@@ -6424,9 +6424,10 @@ mod tests {
     #[tokio::test]
     async fn load_surfaces_injected_write_temp_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
+        let state_dir = temp_state_path("write-temp-fault");
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(temp_state_path("write-temp-fault").join("state.json")),
+            state_path: Some(state_dir.join("state.json")),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
@@ -6437,14 +6438,16 @@ mod tests {
                 .unwrap()
                 .contains("failed to write temporary state file")
         );
+        let _ = fs::remove_dir_all(state_dir).await;
     }
 
     #[tokio::test]
     async fn load_surfaces_injected_rename_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::Rename);
+        let state_dir = temp_state_path("rename-fault");
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(temp_state_path("rename-fault").join("state.json")),
+            state_path: Some(state_dir.join("state.json")),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
@@ -6455,6 +6458,7 @@ mod tests {
                 .unwrap()
                 .contains("failed to replace state file")
         );
+        let _ = fs::remove_dir_all(state_dir).await;
     }
 
     #[tokio::test]
