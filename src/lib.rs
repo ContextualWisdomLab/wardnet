@@ -297,6 +297,34 @@ async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
     }
 }
 
+/// Test-only deterministic fault injection for [`persist_state`]'s two
+/// failure points. POSIX file permissions are not a reliable failure
+/// injector for this: a root or DAC-ignoring test runner writes through
+/// `0o500` directories, turning the intended error-path regression into a
+/// flake (or a silent non-test) depending on the CI user. Injecting the
+/// exact failure instead makes the regression deterministic on every
+/// environment. See `CLAUDE.md`'s Tests section.
+#[cfg(test)]
+pub(crate) mod persist_fault {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum Fault {
+        WriteTemp,
+        Rename,
+    }
+
+    thread_local! {
+        /// Thread-local, not global: the default `#[tokio::test]` flavor is
+        /// `current_thread`, so one test's entire async call tree (including
+        /// every nested `persist_state` call) runs on the one OS thread the
+        /// test harness assigned to that test function. A thread-local flag
+        /// therefore can't leak into, or be clobbered by, a concurrently
+        /// running test on another thread -- no cross-test lock needed.
+        pub(crate) static ACTIVE: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+}
+
 async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
@@ -312,12 +340,27 @@ async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
     let json =
         serde_json::to_vec_pretty(data).expect("AppData contains only JSON-serializable fields");
     let temp_path = temporary_state_path(path);
+    #[cfg(test)]
+    if persist_fault::ACTIVE.with(std::cell::Cell::get) == Some(persist_fault::Fault::WriteTemp) {
+        return Err(format!(
+            "failed to write temporary state file {}: injected fault",
+            temp_path.display()
+        ));
+    }
     fs::write(&temp_path, json).await.map_err(|error| {
         format!(
             "failed to write temporary state file {}: {error}",
             temp_path.display()
         )
     })?;
+    #[cfg(test)]
+    if persist_fault::ACTIVE.with(std::cell::Cell::get) == Some(persist_fault::Fault::Rename) {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(format!(
+            "failed to replace state file {}: injected fault",
+            path.display()
+        ));
+    }
     if let Err(error) = fs::rename(&temp_path, path).await {
         let _ = fs::remove_file(&temp_path).await;
         return Err(format!(
@@ -6352,25 +6395,38 @@ mod tests {
         let _ = fs::remove_dir_all(write_dir).await;
     }
 
-    #[cfg(unix)]
+    /// Injects `fault` into every `persist_state` call made from this test's
+    /// thread for as long as the returned guard lives, and resets it back
+    /// to "no fault" when the guard drops (including on an assertion panic
+    /// mid-test). Thread-local (see `persist_fault::ACTIVE`'s doc comment),
+    /// so this never needs to coordinate with any other test.
+    ///
+    /// Deterministic replacement for permission-based fault injection
+    /// (`chmod 0o500`): a root or DAC-ignoring test runner writes straight
+    /// through a read-only directory, so the previous approach was
+    /// environment-dependent -- it exercised the intended
+    /// `persist_state` error path only on some CI users/filesystems and
+    /// silently didn't on others. See issue #74 and `CLAUDE.md`'s Tests
+    /// section.
+    struct FaultGuard;
+
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            persist_fault::ACTIVE.with(|cell| cell.set(None));
+        }
+    }
+
+    fn inject_persist_fault(fault: persist_fault::Fault) -> FaultGuard {
+        persist_fault::ACTIVE.with(|cell| cell.set(Some(fault)));
+        FaultGuard
+    }
+
     #[tokio::test]
-    async fn load_surfaces_state_rewrite_failures() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let read_only_parent = temp_state_path("read-only-parent");
-        fs::create_dir_all(&read_only_parent).await.unwrap();
-        let read_only_file = read_only_parent.join("state.json");
-        fs::write(
-            &read_only_file,
-            serde_json::to_vec_pretty(&AppData::seeded()).unwrap(),
-        )
-        .await
-        .unwrap();
-        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o500))
-            .unwrap();
+    async fn load_surfaces_injected_write_temp_failure() {
+        let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(read_only_file.clone()),
+            state_path: Some(temp_state_path("write-temp-fault").join("state.json")),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
@@ -6381,16 +6437,14 @@ mod tests {
                 .unwrap()
                 .contains("failed to write temporary state file")
         );
-        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o700))
-            .unwrap();
-        let _ = fs::remove_dir_all(read_only_parent).await;
+    }
 
-        let read_only_dir = temp_state_path("read-only-dir");
-        fs::create_dir_all(&read_only_dir).await.unwrap();
-        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    #[tokio::test]
+    async fn load_surfaces_injected_rename_failure() {
+        let _fault = inject_persist_fault(persist_fault::Fault::Rename);
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(read_only_dir.join("state.json")),
+            state_path: Some(temp_state_path("rename-fault").join("state.json")),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
@@ -6399,10 +6453,8 @@ mod tests {
             result
                 .err()
                 .unwrap()
-                .contains("failed to write temporary state file")
+                .contains("failed to replace state file")
         );
-        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = fs::remove_dir_all(read_only_dir).await;
     }
 
     #[tokio::test]

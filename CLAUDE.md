@@ -56,6 +56,7 @@ The core stays an in-repo workspace crate on purpose (no git submodule) until it
 ## Tests
 
 - In-crate HTTP tests: `#[cfg(test)]` module in `src/lib.rs` (uses `tower::ServiceExt` to drive the Axum app). Tests that mutate env vars serialize on `ENV_GUARD`.
+- `persist_state`'s write-temp and atomic-rename failure paths are covered by deterministic fault injection (`persist_fault` module, `#[cfg(test)]`-only, `src/lib.rs`), not POSIX file permissions: a root or DAC-ignoring test runner writes straight through a `chmod 0o500` directory, so permission-based injection only exercised the error path on some CI users/filesystems and silently skipped it on others. The injected fault is a `thread_local!`, not a global lock, relying on the default `#[tokio::test]` `current_thread` flavor running each test's whole async call tree on one dedicated OS thread.
 - E2E binary test: `tests/binary.rs`.
 - Property-test mirrors of the fuzz invariants (run on stable in normal CI): `tests/fuzz_invariants.rs` and `crates/waf-ids-core/tests/fuzz_invariants.rs` (proptest).
 - External smoke: `scripts/smoke.sh`.
