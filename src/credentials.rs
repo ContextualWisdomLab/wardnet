@@ -78,7 +78,7 @@ impl CredentialRegistry {
         let mut from_file = false;
         let mut from_env = false;
 
-        if let Some(path) = credentials_path {
+        if let Some(path) = credentials_path.and_then(nonempty_credentials_path) {
             match std::fs::read_to_string(path) {
                 Ok(content) => {
                     let file_map: HashMap<String, serde_json::Value> =
@@ -133,13 +133,27 @@ impl CredentialRegistry {
     }
 }
 
+/// Return a credentials path only when it contains a non-whitespace path value.
+///
+/// `WAF_IDS_CREDENTIALS_PATH` is an optional bootstrap transport. Treating an
+/// empty environment value as a real path makes startup behavior depend on how
+/// the host platform classifies `read_to_string("")`; normalizing it here keeps
+/// the credential registry portable and fail-closed without inventing a file.
+fn nonempty_credentials_path(path: &Path) -> Option<&Path> {
+    if path.as_os_str().to_string_lossy().trim().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
 /// Constant-time equality for presented admin secrets.
 ///
 /// Length is mixed into the accumulator so a mismatched length does not take a
 /// faster path that would reveal the expected secret size.
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let max = left.len().max(right.len());
-    let mut diff = (left.len() ^ right.len()) as u8;
+    let mut diff = u8::from(left.len() != right.len());
     for i in 0..max {
         let l = left.get(i).copied().unwrap_or(0);
         let r = right.get(i).copied().unwrap_or(0);
