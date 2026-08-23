@@ -285,3 +285,131 @@ fn release_checksums_script_emits_sha256_lines() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn release_sbom_script_fails_closed_without_syft() {
+    let dir = std::env::temp_dir().join(format!("wardnet-sbom-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let artifact = dir.join("artifact.bin");
+    std::fs::write(&artifact, b"wardnet-sbom-fixture").expect("write fixture");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/release-sbom.sh");
+    let empty_path = dir.join("empty-path");
+    std::fs::create_dir_all(&empty_path).expect("empty PATH dir");
+    let output = Command::new("/bin/bash")
+        .arg(&script)
+        .arg("--output")
+        .arg(dir.join("sbom.spdx.json"))
+        .arg(&artifact)
+        .env("PATH", &empty_path)
+        .output()
+        .expect("run release-sbom.sh without syft");
+    assert!(
+        !output.status.success(),
+        "SBOM script must fail closed without syft"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("syft is required"),
+        "operator-visible fail-closed: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn release_sbom_script_rejects_non_spdx_and_accepts_spdx_json() {
+    let dir = std::env::temp_dir().join(format!("wardnet-sbom-stub-{}", std::process::id()));
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("stub PATH");
+    let artifact = dir.join("artifact.bin");
+    std::fs::write(&artifact, b"wardnet-sbom-fixture").expect("write fixture");
+    let syft = bin.join("syft");
+    std::fs::write(
+        &syft,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+out=""
+for arg in "$@"; do
+  case "$arg" in
+    spdx-json=*) out="${arg#spdx-json=}" ;;
+  esac
+done
+if [[ -z "$out" ]]; then
+  echo "stub syft expected -o spdx-json=FILE" >&2
+  exit 1
+fi
+mode="${STUB_SYFT_MODE:-spdx}"
+if [[ "$mode" == "garbage" ]]; then
+  printf '{"not":"spdx"}\n' > "$out"
+else
+  printf '{"spdxVersion":"SPDX-2.3","packages":[{"name":"waf-ids-ai-soc"}]}\n' > "$out"
+fi
+"#,
+    )
+    .expect("write stub syft");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&syft)
+            .expect("stub metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&syft, permissions).expect("chmod stub");
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/release-sbom.sh");
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    path = format!("{}:{path}", bin.display());
+    let garbage = Command::new("bash")
+        .arg(&script)
+        .arg("--output")
+        .arg(dir.join("bad.spdx.json"))
+        .arg(&artifact)
+        .env("PATH", &path)
+        .env("STUB_SYFT_MODE", "garbage")
+        .output()
+        .expect("run release-sbom.sh garbage");
+    assert!(
+        !garbage.status.success(),
+        "non-SPDX JSON must fail closed: {}",
+        String::from_utf8_lossy(&garbage.stderr)
+    );
+    let good_out = dir.join("sbom.spdx.json");
+    let good = Command::new("bash")
+        .arg(&script)
+        .arg("--output")
+        .arg(&good_out)
+        .arg(&artifact)
+        .env("PATH", &path)
+        .env("STUB_SYFT_MODE", "spdx")
+        .output()
+        .expect("run release-sbom.sh spdx");
+    assert!(
+        good.status.success(),
+        "SPDX JSON must be accepted: {}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let body = std::fs::read_to_string(&good_out).expect("read SPDX");
+    assert!(body.contains("SPDX-2.3"), "SPDX version: {body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn release_workflow_is_keyless_and_signs_by_digest() {
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
+    )
+    .expect("read release.yml");
+    assert!(workflow.contains("id-token: write"));
+    assert!(workflow.contains("attestations: write"));
+    assert!(workflow.contains("cosign sign --yes"));
+    assert!(workflow.contains("cosign sign-blob --yes"));
+    assert!(workflow.contains("scripts/release-sbom.sh"));
+    assert!(workflow.contains("attest-build-provenance"));
+    assert!(
+        !workflow.contains(":latest"),
+        "must not push a moving latest tag"
+    );
+    assert!(
+        workflow.contains("--verify-tag"),
+        "GitHub Release must verify the tag"
+    );
+}
