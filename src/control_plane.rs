@@ -293,6 +293,33 @@ fn ssl_mode(raw: &str) -> Result<SslMode, String> {
     Ok(SslMode::Disable)
 }
 
+/// tokio-postgres 0.7 only parses `disable` / `prefer` / `require`. Map the
+/// libpq verification modes we already treat as `Require` so rustls can
+/// still verify certificates.
+fn rewrite_sslmode_for_tokio(raw: &str) -> String {
+    let Some((head, query)) = raw.split_once('?') else {
+        return raw.to_string();
+    };
+    let rewritten = query
+        .split('&')
+        .map(|part| {
+            let Some((key, value)) = part.split_once('=') else {
+                return part.to_string();
+            };
+            if key.eq_ignore_ascii_case("sslmode")
+                && (value.eq_ignore_ascii_case("verify-ca")
+                    || value.eq_ignore_ascii_case("verify-full"))
+            {
+                format!("{key}=require")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{head}?{rewritten}")
+}
+
 fn rustls_connector() -> Result<MakeRustlsConnect, String> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -316,9 +343,11 @@ impl PostgresPlane {
 
     pub async fn connect_tenant(url: &str, tenant_id: &str) -> Result<Self, String> {
         let url = parse_database_url(url)?;
-        let (client, connection) = match ssl_mode(&url)? {
+        let mode = ssl_mode(&url)?;
+        let connect_url = rewrite_sslmode_for_tokio(&url);
+        let (client, connection) = match mode {
             SslMode::Disable => {
-                let (client, connection) = tokio_postgres::connect(&url, NoTls)
+                let (client, connection) = tokio_postgres::connect(&connect_url, NoTls)
                     .await
                     .map_err(|error| format!("control plane connect failed: {error}"))?;
                 (
@@ -330,7 +359,7 @@ impl PostgresPlane {
             }
             SslMode::Require => {
                 let tls = rustls_connector()?;
-                let (client, connection) = tokio_postgres::connect(&url, tls)
+                let (client, connection) = tokio_postgres::connect(&connect_url, tls)
                     .await
                     .map_err(|error| format!("control plane TLS connect failed: {error}"))?;
                 (
@@ -1521,6 +1550,31 @@ mod tests {
             ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=require").unwrap(),
             SslMode::Require
         );
+        assert_eq!(
+            ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full").unwrap(),
+            SslMode::Require
+        );
+        assert_eq!(
+            rewrite_sslmode_for_tokio(
+                "postgres://wardnet:sslmode=verify-full@127.0.0.1/wardnet?sslmode=verify-full"
+            ),
+            "postgres://wardnet:sslmode=verify-full@127.0.0.1/wardnet?sslmode=require"
+        );
+        assert_eq!(
+            rewrite_sslmode_for_tokio(
+                "postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-ca&connect_timeout=5"
+            ),
+            "postgres://wardnet@127.0.0.1/wardnet?sslmode=require&connect_timeout=5"
+        );
+        use std::str::FromStr;
+        tokio_postgres::Config::from_str(
+            "postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full",
+        )
+        .expect_err("tokio-postgres 0.7 rejects verify-full");
+        tokio_postgres::Config::from_str(&rewrite_sslmode_for_tokio(
+            "postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full",
+        ))
+        .expect("rewritten verify-full must parse as require");
     }
 
     #[tokio::test]
@@ -1532,15 +1586,21 @@ mod tests {
             return;
         }
         let separator = if url.contains('?') { '&' } else { '?' };
-        let tls_url = format!("{url}{separator}sslmode=require");
-        let error = match PostgresPlane::connect(&tls_url).await {
-            Ok(_) => panic!("plaintext CI postgres must not satisfy rustls"),
-            Err(error) => error,
-        };
-        assert!(
-            error.contains("TLS") || error.contains("ssl") || error.contains("certificate"),
-            "operator must see a TLS failure, not a silent plaintext fallback: {error}"
-        );
+        for mode in ["require", "verify-ca", "verify-full"] {
+            let tls_url = format!("{url}{separator}sslmode={mode}");
+            let error = match PostgresPlane::connect(&tls_url).await {
+                Ok(_) => panic!("plaintext CI postgres must not satisfy rustls ({mode})"),
+                Err(error) => error,
+            };
+            assert!(
+                !error.to_ascii_lowercase().contains("invalid value"),
+                "{mode} must not fail as a tokio-postgres config parse: {error}"
+            );
+            assert!(
+                error.contains("TLS") || error.contains("ssl") || error.contains("certificate"),
+                "operator must see a TLS failure for {mode}, not a silent plaintext fallback: {error}"
+            );
+        }
     }
 
     #[test]
