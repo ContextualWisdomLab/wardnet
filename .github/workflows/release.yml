@@ -24,7 +24,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/waf-ids-ai-soc dist/waf-ids-ai-soc-linux-x86_64
-          scripts/release-checksums.sh dist/waf-ids-ai-soc-linux-x86_64 > dist/SHA256SUMS
+          (cd dist && ../scripts/release-checksums.sh waf-ids-ai-soc-linux-x86_64 > SHA256SUMS)
           cat dist/SHA256SUMS
       - name: GitHub Release
         env:

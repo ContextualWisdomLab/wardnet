@@ -16,8 +16,9 @@ A git tag `vX.Y.Z` starts `.github/workflows/release.yml`, which:
 Operators verify a binary with:
 
 ```bash
-scripts/release-checksums.sh waf-ids-ai-soc-linux-x86_64
-# compare to SHA256SUMS on the GitHub Release
+# SHA256SUMS records basenames only, so this works next to the download
+sha256sum -c SHA256SUMS
+# or: shasum -a 256 -c SHA256SUMS
 ```
 
 ## Promotion

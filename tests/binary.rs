@@ -231,8 +231,9 @@ fn spawn_ready_gateway() -> Child {
 #[test]
 fn release_checksums_script_emits_sha256_lines() {
     let dir = std::env::temp_dir().join(format!("wardnet-checksums-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let artifact = dir.join("artifact.bin");
+    let nested = dir.join("dist");
+    std::fs::create_dir_all(&nested).expect("temp dir");
+    let artifact = nested.join("waf-ids-ai-soc-linux-x86_64");
     std::fs::write(&artifact, b"wardnet-release-fixture").expect("write fixture");
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/release-checksums.sh");
@@ -253,6 +254,34 @@ fn release_checksums_script_emits_sha256_lines() {
     assert!(
         digest.chars().all(|ch| ch.is_ascii_hexdigit()),
         "digest must be hex: {digest}"
+    );
+    assert!(
+        line.contains("waf-ids-ai-soc-linux-x86_64"),
+        "checksum line must name the artifact: {line}"
+    );
+    assert!(
+        !line.contains("dist/"),
+        "SHA256SUMS must use basenames so sha256sum -c works next to the download: {line}"
+    );
+    let sums = nested.join("SHA256SUMS");
+    std::fs::write(&sums, stdout.as_bytes()).expect("write SHA256SUMS");
+    let verified = if Command::new("sha256sum").arg("--version").output().is_ok() {
+        Command::new("sha256sum")
+            .current_dir(&nested)
+            .args(["-c", "SHA256SUMS"])
+            .output()
+            .expect("sha256sum -c")
+    } else {
+        Command::new("shasum")
+            .current_dir(&nested)
+            .args(["-a", "256", "-c", "SHA256SUMS"])
+            .output()
+            .expect("shasum -c")
+    };
+    assert!(
+        verified.status.success(),
+        "checksum file must verify: {}",
+        String::from_utf8_lossy(&verified.stderr)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
