@@ -49,6 +49,7 @@ append, snapshot save, and worker ack. `outbox_receipt` rows stay; they are
 the exactly-once ack. Dead letters are never pruned.
 
 Loopback file/memory adapters keep in-process stdout SIEM and report
-`outbox=disabled`. Remaining: HASH partitioning and additional consumers
-(TAXII poll, Clearfolio, contextual-orchestrator) on the same
-message/receipt contract. Backup/restore drill is on the PostgreSQL plane.
+`outbox=disabled`. `security_event` HASH partitioning is on the PostgreSQL
+plane. Remaining consumers: TAXII poll, Clearfolio, contextual-orchestrator
+on the same message/receipt contract. Backup/restore drill is on the
+PostgreSQL plane.

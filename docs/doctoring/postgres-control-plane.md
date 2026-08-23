@@ -26,6 +26,15 @@ Transaction isolation*. https://www.postgresql.org/docs/current/transaction-iso.
   commits in one transaction so a policy mutation cannot land without its audit
   records.
 
+PostgreSQL Global Development Group. (2026). *PostgreSQL documentation: Table
+partitioning*. https://www.postgresql.org/docs/current/ddl-partitioning.html
+
+- **Design impact:** `security_event` is `PARTITION BY HASH (tenant_id)` with
+  eight children so tenant-scoped SOC queries prune and high-volume appends do
+  not share one btree. The partition key is part of the primary key. Logical
+  backups stay a tenant snapshot; HASH is an on-disk layout, not a restore
+  schema bump that voids prior artifacts.
+
 National Institute of Standards and Technology. (2022). *Secure Software
 Development Framework (SSDF) version 1.1* (NIST SP 800-218).
 https://doi.org/10.6028/NIST.SP.800-218
@@ -50,10 +59,10 @@ NOBYPASSRLS, not table owner) so FORCE RLS binds. Provision that role and
 
 `GET /api/backup` (admin read) exports a hashed logical snapshot stamped with
 the current `MIGRATION_VERSION`. `POST /api/backup` restores after schema-version
-and payload-hash checks. Role-only migrations (v3 `wardnet_runtime`) do not
-change table shape, so `verify()` accepts schema versions
-`MIN_RESTORABLE_SCHEMA_VERSION` (2) through the current version rather than
-rejecting pre-upgrade snapshots. `POST /api/backup/drill` restores into an
+and payload-hash checks. Role-only migrations (v3 `wardnet_runtime`) and HASH
+layout (v4) do not change the logical snapshot shape, so `verify()` accepts
+schema versions `MIN_RESTORABLE_SCHEMA_VERSION` (2) through the current version
+rather than rejecting pre-upgrade snapshots. `POST /api/backup/drill` restores into an
 isolated tenant, compares invariants, and drops the drill rows. Declared RPO:
 last successful export (`on-demand-logical-snapshot`). Declared RTO: 60 seconds.
 `/healthz.backup` is `ready` on PostgreSQL.
@@ -68,5 +77,9 @@ https://doi.org/10.6028/NIST.SP.800-34r1
   `pg_dump`) so RLS tenant context is preserved and secrets (admin tokens,
   database URL) are never copied.
 
-Remaining: HASH partitioning for `security_event`,
-optimistic concurrency.
+`security_event` is HASH-partitioned by `tenant_id` (8 children) so tenant
+queries prune and high-volume appends do not share one btree. Existing
+unpartitioned tables convert under `pg_advisory_lock`; rows keep unmasked
+client IPs and paths. `/healthz.event_partitions` reports the child count.
+
+Remaining: optimistic concurrency.

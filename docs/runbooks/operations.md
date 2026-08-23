@@ -68,6 +68,7 @@ Expected fields:
 - `credentials_source`: `file`, `env`, or `none`
 - `admin_auth_configured`: whether any admin write token is configured
 - `backup`: `ready` on PostgreSQL (logical export/restore available) or `disabled` on file/memory
+- `event_partitions`: HASH child count for `security_event` (8 on PostgreSQL, 0 on file/memory)
 
 ## Control-plane backup and restore drill
 

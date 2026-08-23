@@ -362,6 +362,7 @@ impl AppState {
             } else {
                 "disabled".to_string()
             },
+            event_partitions: 0,
         }
     }
 
@@ -379,6 +380,9 @@ impl AppState {
                 health.outbox_oldest_age_seconds = stats.oldest_age_seconds;
             }
             Err(_) => health.outbox = "error".to_string(),
+        }
+        if let Ok(count) = plane.event_partition_count().await {
+            health.event_partitions = count;
         }
         health
     }
@@ -516,6 +520,8 @@ pub struct HealthStatus {
     pub outbox_oldest_age_seconds: Option<i64>,
     /// `ready` when PostgreSQL logical backup/restore is the authority; `disabled` on file/memory.
     pub backup: String,
+    /// HASH child count for `security_event` (0 on file/memory).
+    pub event_partitions: i64,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -3323,8 +3329,8 @@ function table(capt,cols,rows){
 }
 function toast(msg,ok){const d=document.createElement('div');d.className='toast '+(ok?'ok':'bad');d.textContent=msg;$('toast').appendChild(d);setTimeout(()=>d.remove(),4500);}
 async function guard(id,fn){try{await fn();}catch(e){$(id).innerHTML='<p class="err">Error: '+esc(e.message)+'</p>';}}
-async function loadKpis(){const k=await getJSON('/api/kpis');
-  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)]];
+async function loadKpis(){const k=await getJSON('/api/kpis');const h=await getJSON('/healthz');
+  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)],['Event partitions',h.event_partitions??0]];
   $('kpis').innerHTML=t.map(([l,v])=>'<div class="tile"><div class="label">'+esc(l)+'</div><div class="metric">'+esc(v)+'</div></div>').join('');}
 async function loadRoutes(){const d=await getJSON('/api/routes');
   $('routesBody').innerHTML=table('Configured routes',['Path prefix','Upstream','Mode','State'],d.map(r=>[esc(r.path_prefix),esc(r.upstream),modeBadge(r.mode),stateBadge(r.enabled)]));}
@@ -4470,6 +4476,10 @@ mod tests {
         assert!(
             html.contains("id=\"backupDrillBtn\""),
             "restore drill button missing"
+        );
+        assert!(
+            html.contains("Event partitions"),
+            "HASH event-partition KPI tile missing"
         );
         assert!(
             html.contains(":focus-visible"),
@@ -7598,6 +7608,7 @@ mod tests {
                 outbox_dead_letter: 0,
                 outbox_oldest_age_seconds: None,
                 backup: "disabled".to_string(),
+                event_partitions: 0,
             }
         );
 
