@@ -68,13 +68,11 @@ still say `waf-ids-ai-soc`. Kubernetes manifest remains
 this pass: docs and health copy already mention Wardnet in newer surfaces;
 wholesale crate rename is deferred (not a merge blocker).
 
-### Proven-engine enforcement (issue #86) — **partial this pass**
+### Proven-engine enforcement (issue #86)
 
-Coraza/Suricata ingest still maps proven-engine hits into DNSBL + threat
-indicators. This pass also writes an `engine_payload` hint from the audit URI
-query so the **same CRS payload is blocked for any client IP** on `/gateway`
-(not only the original source). In-process OWASP CRS/Coraza on every
-transaction, Suricata tail/shipper, and detection-quality corpora remain open.
+Coraza audit JSON and Suricata EVE ingest exist as **admin-token import
+adapters**. They are not an in-process enforcement engine on `/gateway`.
+Scoring still uses in-repo indicators + DNSBL. Do not invent CRS replacements.
 
 ### Identity (issue #82, Keyverse)
 
@@ -102,16 +100,10 @@ Shipped:
 
 Doctoring: `docs/doctoring/fail-closed-management-auth.md` (APA 7th).
 
-### Destination policy (issue #79) — **closed this pass**
+### Destination policy (issue #79)
 
-Shipped in `src/destination.rs` and wired through route upsert, gateway proxy,
-threat-intel fetch, Clearfolio, and SOC LLM. Default deny of loopback, RFC 1918,
-link-local, ULA, CGNAT, documentation, and cloud-metadata classes unless
-`DESTINATION_ALLOWLIST` (or loopback development) permits them.
-`DESTINATION_DENYLIST` wins. HTTP clients: no redirects, `no_proxy()`.
-
-Remaining: custom connector that pins the TCP peer to the evaluated IP (full
-TOCTOU close); Kubernetes NetworkPolicy examples as defense in depth.
+Upstream scheme validation exists; no fail-closed destination allowlist for all
+outbound (feed fetch, proxy, LLM, Clearfolio). Next-loop candidate after #78.
 
 ### SIEM / OpenTelemetry (issue #85 / PR #90)
 

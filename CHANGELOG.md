@@ -11,8 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fail closed before readiness when `BIND_ADDR` is not loopback-only and no write-capable admin principal is configured (`ADMIN_TOKEN`, `ADMIN_TOKENS`, or `WAF_IDS_CREDENTIALS_PATH`). Loopback development may still start without a token and reports `auth_mode=development` on `/healthz`.
 - A blank `WAF_IDS_STATE_PATH` is treated as in-memory state instead of becoming ready and then failing to replace an empty path.
-- Fail-closed destination policy on every outbound `http`/`https` call (gateway upstream, threat-intel fetch, Clearfolio, SOC LLM). Loopback/private/link-local/metadata destinations are denied unless `DESTINATION_ALLOWLIST` (or loopback development) permits them; `DESTINATION_DENYLIST` wins. Clients ignore ambient HTTP proxy variables and do not follow redirects.
-- Coraza/Suricata ingest writes an `engine_payload` hint from the audit URI query so the same proven-engine payload is enforced on `/gateway` for any client IP.
 - Management writes now distinguish `401` (unauthenticated) from `403` (authenticated, not permitted to write) without naming the expected role.
 - Presented admin secrets are compared in constant time. Duplicate, blank, and unknown `ADMIN_TOKENS` roles fail startup.
 

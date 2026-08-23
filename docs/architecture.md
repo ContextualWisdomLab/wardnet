@@ -76,5 +76,4 @@ flowchart LR
 
 - Default bind address is loopback. Loopback-only development may start without an admin token and reports `auth_mode=development` on `/healthz`.
 - Any non-loopback `BIND_ADDR` fails closed before readiness unless a write-capable principal is present in the credential registry (`ADMIN_TOKEN`, `ADMIN_TOKENS`, or `WAF_IDS_CREDENTIALS_PATH`).
-- Outbound `http`/`https` (gateway upstream, threat-intel, Clearfolio, SOC LLM) is mediated by one destination policy (`src/destination.rs`). Private/loopback/metadata classes are denied unless `DESTINATION_ALLOWLIST` permits them; `DESTINATION_DENYLIST` wins. Clients ignore ambient HTTP proxies and do not follow redirects.
 - Management writes return `401` when unauthenticated and `403` when authenticated but not permitted to write. Response bodies do not name the expected role.
