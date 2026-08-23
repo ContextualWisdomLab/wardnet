@@ -358,6 +358,21 @@ mod tests {
     }
 
     #[test]
+    fn constant_time_eq_rejects_lengths_differing_by_256_with_zero_suffix() {
+        let short = vec![0_u8; 1];
+        let long = vec![0_u8; 257];
+        assert!(!constant_time_eq(&short, &long));
+    }
+
+    #[test]
+    fn nonempty_credentials_path_filters_blank_values() {
+        assert!(nonempty_credentials_path(Path::new("")).is_none());
+        assert!(nonempty_credentials_path(Path::new("   ")).is_none());
+        let path = Path::new("credentials.json");
+        assert_eq!(nonempty_credentials_path(path), Some(path));
+    }
+
+    #[test]
     fn listen_is_loopback_only_classifies_bind_addresses() {
         assert!(listen_is_loopback_only("127.0.0.1:0"));
         assert!(listen_is_loopback_only("127.0.0.1:8080"));
