@@ -25,7 +25,15 @@ use waf_ids_core::{
 /// Default tenant used until Keyverse supplies claims (#82).
 pub const DEFAULT_TENANT_ID: &str = "local-lab";
 
-const MIGRATION_VERSION: i32 = 2;
+const MIGRATION_VERSION: i32 = 3;
+/// Oldest logical-backup schema that restores on this binary.
+///
+/// v3 only provisions `wardnet_runtime`; it does not change table shape. A
+/// snapshot exported at schema 2 is restorable here so a role-only upgrade
+/// cannot void the declared RPO.
+const MIN_RESTORABLE_SCHEMA_VERSION: i32 = 2;
+/// Non-owner, non-superuser role used after migrations so FORCE RLS binds.
+pub const RUNTIME_ROLE: &str = "wardnet_runtime";
 /// Declared RPO: last successful `GET /api/backup` (on-demand logical snapshot).
 pub const BACKUP_RPO: &str = "on-demand-logical-snapshot";
 /// Declared RTO budget for an isolated restore drill.
@@ -233,6 +241,24 @@ DROP POLICY IF EXISTS tenant_isolation ON outbox_receipt;
 CREATE POLICY tenant_isolation ON outbox_receipt
   USING (tenant_id = current_setting('wardnet.tenant_id', true))
   WITH CHECK (tenant_id = current_setting('wardnet.tenant_id', true));
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardnet_runtime') THEN
+    CREATE ROLE wardnet_runtime
+      NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOLOGIN
+      NOBYPASSRLS NOREPLICATION;
+  END IF;
+END
+$$;
+GRANT wardnet_runtime TO CURRENT_USER;
+GRANT USAGE ON SCHEMA public TO wardnet_runtime;
+REVOKE CREATE ON SCHEMA public FROM wardnet_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  tenant_account, tenant_profile, route_config, threat_indicator,
+  dnsbl_entry, security_event, audit_record, threat_feed,
+  outbox_message, outbox_receipt TO wardnet_runtime;
+GRANT SELECT ON schema_migration TO wardnet_runtime;
 "#;
 
 /// Fail closed when a non-loopback bind has no control-plane URL.
@@ -333,6 +359,60 @@ fn rustls_connector() -> Result<MakeRustlsConnect, String> {
     Ok(MakeRustlsConnect::with_webpki_roots())
 }
 
+async fn assume_runtime_role(client: &Client) -> Result<(), String> {
+    let current: String = client
+        .query_one("SELECT current_user", &[])
+        .await
+        .map_err(|error| format!("control plane current_user failed: {error}"))?
+        .get(0);
+    if current != RUNTIME_ROLE {
+        client
+            .batch_execute(
+                "DO $$
+                 BEGIN
+                   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardnet_runtime') THEN
+                     CREATE ROLE wardnet_runtime
+                       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOLOGIN
+                       NOBYPASSRLS NOREPLICATION;
+                   END IF;
+                 END
+                 $$;
+                 GRANT wardnet_runtime TO CURRENT_USER;
+                 GRANT USAGE ON SCHEMA public TO wardnet_runtime;
+                 REVOKE CREATE ON SCHEMA public FROM wardnet_runtime;
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON
+                   tenant_account, tenant_profile, route_config, threat_indicator,
+                   dnsbl_entry, security_event, audit_record, threat_feed,
+                   outbox_message, outbox_receipt TO wardnet_runtime;
+                 GRANT SELECT ON schema_migration TO wardnet_runtime;
+                 SET ROLE wardnet_runtime;",
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "control plane runtime role {RUNTIME_ROLE} failed (provision NOSUPERUSER NOBYPASSRLS and GRANT it to the login role): {error}"
+                )
+            })?;
+    }
+    let row = client
+        .query_one("SELECT current_user, current_setting('is_superuser')", &[])
+        .await
+        .map_err(|error| format!("control plane runtime identity failed: {error}"))?;
+    let user: String = row.get(0);
+    let superuser: String = row.get(1);
+    if user != RUNTIME_ROLE {
+        return Err(format!(
+            "control plane must run as {RUNTIME_ROLE}, current_user is {user}"
+        ));
+    }
+    if superuser == "on" {
+        return Err(format!(
+            "control plane role {RUNTIME_ROLE} must not be a superuser"
+        ));
+    }
+    Ok(())
+}
+
 /// Serializes schema application across connections (DROP/CREATE POLICY is not concurrent-safe).
 static MIGRATION_GATE: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
@@ -385,6 +465,7 @@ impl PostgresPlane {
             event_limit: LIST_LIMIT,
         };
         plane.migrate().await?;
+        plane.assume_runtime_role().await?;
         Ok(plane)
     }
 
@@ -422,6 +503,54 @@ impl PostgresPlane {
             .await
             .map_err(|error| format!("control plane migration version failed: {error}"))?;
         Ok(())
+    }
+
+    async fn assume_runtime_role(&self) -> Result<(), String> {
+        let client = self.client.lock().await;
+        assume_runtime_role(&client).await
+    }
+
+    #[cfg(test)]
+    async fn runtime_identity(&self) -> Result<(String, bool), String> {
+        let client = self.client.lock().await;
+        let row = client
+            .query_one(
+                "SELECT current_user, current_setting('is_superuser') = 'on'",
+                &[],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((row.get(0), row.get(1)))
+    }
+
+    #[cfg(test)]
+    async fn unscoped_route_count(&self) -> Result<i64, String> {
+        let mut client = self.client.lock().await;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| error.to_string())?;
+        let count: i64 = tx
+            .query_one("SELECT COUNT(*)::bigint FROM route_config", &[])
+            .await
+            .map_err(|error| error.to_string())?
+            .get(0);
+        tx.rollback().await.map_err(|error| error.to_string())?;
+        Ok(count)
+    }
+
+    #[cfg(test)]
+    async fn runtime_ddl_is_denied(&self) -> Result<bool, String> {
+        let client = self.client.lock().await;
+        let drop_denied = client
+            .batch_execute("DROP TABLE route_config")
+            .await
+            .is_err();
+        let disable_denied = client
+            .batch_execute("ALTER TABLE route_config DISABLE ROW LEVEL SECURITY")
+            .await
+            .is_err();
+        Ok(drop_denied && disable_denied)
     }
 
     /// Load the tenant snapshot, or `None` when the tenant has no rows yet.
@@ -582,9 +711,11 @@ impl ControlPlaneBackup {
 
     /// Fail closed when the schema is unsupported or the artifact was tampered with.
     pub fn verify(&self) -> Result<(), String> {
-        if self.schema_version != MIGRATION_VERSION {
+        if self.schema_version < MIN_RESTORABLE_SCHEMA_VERSION
+            || self.schema_version > MIGRATION_VERSION
+        {
             return Err(format!(
-                "backup schema_version {} is unsupported; expected {MIGRATION_VERSION}",
+                "backup schema_version {} is unsupported; accepted {MIN_RESTORABLE_SCHEMA_VERSION}..={MIGRATION_VERSION}",
                 self.schema_version
             ));
         }
@@ -2036,6 +2167,8 @@ mod tests {
         }
         assert!(MIGRATION_SQL.contains("FORCE ROW LEVEL SECURITY"));
         assert!(MIGRATION_SQL.contains("wardnet.tenant_id"));
+        assert!(MIGRATION_SQL.contains("wardnet_runtime"));
+        assert!(MIGRATION_SQL.contains("NOBYPASSRLS"));
         assert!(MIGRATION_SQL.contains("PRIMARY KEY (tenant_id, route_id)"));
         assert!(MIGRATION_SQL.contains("REFERENCES tenant_account"));
         assert!(MIGRATION_SQL.contains("UNIQUE (tenant_id, idempotency_key)"));
@@ -2462,6 +2595,23 @@ mod tests {
         .expect("seal");
         assert!(backup.verify().is_ok());
 
+        let mut prior = backup.clone();
+        prior.schema_version = MIN_RESTORABLE_SCHEMA_VERSION;
+        let prior = prior.seal().expect("re-seal compatible prior schema");
+        assert!(
+            prior.verify().is_ok(),
+            "role-only schema 3 must restore schema-{MIN_RESTORABLE_SCHEMA_VERSION} logical backups"
+        );
+
+        let mut too_old = backup.clone();
+        too_old.schema_version = MIN_RESTORABLE_SCHEMA_VERSION - 1;
+        assert!(
+            too_old
+                .verify()
+                .expect_err("older than restorable window")
+                .contains("unsupported")
+        );
+
         let mut bad_schema = backup.clone();
         bad_schema.schema_version = MIGRATION_VERSION + 1;
         assert!(
@@ -2558,5 +2708,49 @@ mod tests {
                 .is_some(),
             "drill must not drop the production tenant"
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_runtime_role_is_not_superuser_and_rls_default_denies() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant_a = unique_tenant("runtime-a");
+        let tenant_b = unique_tenant("runtime-b");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant_a)
+            .await
+            .expect("plane a");
+        let (role, superuser) = plane_a.runtime_identity().await.expect("runtime identity");
+        assert_eq!(role, RUNTIME_ROLE);
+        assert!(!superuser, "runtime role must not be a superuser");
+        assert!(
+            plane_a.runtime_ddl_is_denied().await.expect("ddl probe"),
+            "runtime role must not DROP TABLE or DISABLE ROW LEVEL SECURITY"
+        );
+        plane_a
+            .save(&AppData::seeded())
+            .await
+            .expect("save tenant a");
+        assert_eq!(
+            plane_a
+                .unscoped_route_count()
+                .await
+                .expect("unscoped count"),
+            0,
+            "missing wardnet.tenant_id must yield no rows under FORCE RLS"
+        );
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant_b)
+            .await
+            .expect("plane b");
+        assert!(
+            plane_b.load().await.expect("load tenant b").is_none(),
+            "tenant b must not observe tenant a rows"
+        );
+        let loaded_a = plane_a
+            .load()
+            .await
+            .expect("load tenant a")
+            .expect("tenant a rows");
+        assert!(!loaded_a.routes.is_empty());
     }
 }
