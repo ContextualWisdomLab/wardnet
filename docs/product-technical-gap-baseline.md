@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T17:06Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-23T19:00Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -25,8 +25,13 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| [#99](https://github.com/ContextualWisdomLab/wardnet/pull/99) | feat(store): transactional outbox and leased workers | `feat/issue-81-outbox-workers` stacked on #98 | local fmt/test/clippy + two `/healthz` smokes + postgres `/healthz.outbox=ready` this hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 first. Do not `--admin`. Do not re-implement the postgres gate. |
-| [#98](https://github.com/ContextualWisdomLab/wardnet/pull/98) | feat(store): require PostgreSQL as the production control plane | `ea621985e276` (`feat/issue-80-postgres-control-plane`) stacked on #97 | rust + fuzz green at last snapshot; Devin 7 threads (full-snapshot rewrite, ORDER BY, TLS, RLS owner, reconnect) | Author this pass; Devin COMMENTED | Org 2-approval + self-author. ORDER BY + incremental event persist addressed on #99. Remaining rustls / non-owner role / backup are #80 remainder. Do not `--admin`. |
+| [#104](https://github.com/ContextualWisdomLab/wardnet/pull/104) | feat(store): HASH-partition security_event by tenant | `feat/issue-80-event-hash-partition` stacked on #103 | local fmt/test/clippy + two `scripts/smoke.sh` + live postgres `/healthz.event_partitions=8` | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 then #103 first. Do not `--admin`. Do not re-implement runtime role. |
+| [#103](https://github.com/ContextualWisdomLab/wardnet/pull/103) | feat(store): non-owner PostgreSQL runtime role after migrate | `feat/issue-80-runtime-role` stacked on #100 | still-valid Devin restore-window finding fixed this pass (`MIN_RESTORABLE_SCHEMA_VERSION=2`); local fmt/test/clippy + smokes | Author this pass; Devin COMMENTED (v3 backup voiding addressed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 first. Do not `--admin`. Do not re-implement rustls, outbox, retention, backup, or HASH. |
+| [#102](https://github.com/ContextualWisdomLab/wardnet/pull/102) | feat(store): logical backup and isolated restore drill | squash-merged into #100 (`321e792`) | prior hour | Author prior hour | Folded into rustls stack. Do not re-implement. |
+| [#101](https://github.com/ContextualWisdomLab/wardnet/pull/101) | feat(store): bound outbox listing and prune processed rows | `feat/issue-81-outbox-retention` (`0c2167a`) stacked on #100 | still-valid Devin prune-cap finding fixed this pass (`EVENT_LIMIT` on save/ack) | Author; Devin COMMENTED (prune thread addressed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 first. Do not `--admin`. |
+| [#100](https://github.com/ContextualWisdomLab/wardnet/pull/100) | feat(store): rustls for production PostgreSQL `sslmode=require` | `feat/issue-80-postgres-rustls` stacked on #99 | local fmt/test/clippy + two `/healthz` smokes; live `sslmode=require` fails closed against plaintext postgres | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 first. Do not `--admin`. Do not re-implement the postgres gate or outbox. |
+| [#99](https://github.com/ContextualWisdomLab/wardnet/pull/99) | feat(store): transactional outbox and leased workers | `feat/issue-81-outbox-workers` stacked on #98 | local fmt/test/clippy + two `/healthz` smokes + postgres `/healthz.outbox=ready` prior hour | Author; Devin COMMENTED (unbounded list closed on #101) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 first. Do not `--admin`. |
+| [#98](https://github.com/ContextualWisdomLab/wardnet/pull/98) | feat(store): require PostgreSQL as the production control plane | `ea621985e276` (`feat/issue-80-postgres-control-plane`) stacked on #97 | rust + fuzz green at last snapshot; Devin 7 threads (full-snapshot rewrite, ORDER BY, TLS, RLS owner, reconnect) | Author this pass; Devin COMMENTED | Org 2-approval + self-author. ORDER BY + incremental event persist on #99; rustls on #100; backup/restore this pass. Remaining non-owner role. Do not `--admin`. |
 | [#97](https://github.com/ContextualWisdomLab/wardnet/pull/97) | feat(waf): evaluate live gateway transactions with in-process libcoraza | `feat/issue-86-in-process-libcoraza` stacked on #96 | local fmt/test/clippy + two `/healthz` smokes prior hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 first. Do not `--admin`. Do not re-implement sidecar or pin. |
 | [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `7cacaf135179` (`feat/issue-79-destination-policy`) stacked on #95 | rust + fuzz green at last snapshot; remaining Devin threads are info/KV-deviation | Author this pass; Devin/Codex COMMENTED | Org 2-approval + self-author. Merge #95 first. Do not re-implement the TCP-peer pin. |
 | [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | feat(waf): consult Coraza sidecar on live gateway transactions | `ba9ee3a0b142` (`feat/issue-86-in-path-coraza`) | rust + Security Scan green at last snapshot | Author this pass; Devin/Codex COMMENTED | Org 2-approval + self-author. Do not re-implement sidecar slice. |
@@ -54,8 +59,8 @@ by ruleset `18156473` (not by failing Checks). Do not `--admin` merge.
 | [#84](https://github.com/ContextualWisdomLab/wardnet/issues/84) | [P1] Build an immutable signed release, promotion, and rollback pipeline | high |
 | [#83](https://github.com/ContextualWisdomLab/wardnet/issues/83) | [P1] Add bounded distributed admission control, trusted client attribution, and overload behavior | high |
 | [#82](https://github.com/ContextualWisdomLab/wardnet/issues/82) | [P1] Integrate Keyverse identity, tenant authorization, consent, and human approval evidence | high (blocked) |
-| [#81](https://github.com/ContextualWisdomLab/wardnet/issues/81) | [P0] Add a transactional outbox and idempotent leased workers for external effects | **critical — first slice this pass** |
-| [#80](https://github.com/ContextualWisdomLab/wardnet/issues/80) | [P0] Add an authoritative PostgreSQL control plane with tenant isolation and recoverable migrations | **critical — gate on #98; rustls/backup remainder** |
+| [#81](https://github.com/ContextualWisdomLab/wardnet/issues/81) | [P0] Add a transactional outbox and idempotent leased workers for external effects | **critical — first slice on #99; bounded list/retention on #101** |
+| [#80](https://github.com/ContextualWisdomLab/wardnet/issues/80) | [P0] Add an authoritative PostgreSQL control plane with tenant isolation and recoverable migrations | **critical — gate on #98; rustls/backup on #100; non-owner role on #103; HASH partitions this pass** |
 | [#79](https://github.com/ContextualWisdomLab/wardnet/issues/79) | [P0] Enforce a fail-closed destination policy for all outbound traffic | **critical — closed in runtime on #96** |
 | [#78](https://github.com/ContextualWisdomLab/wardnet/issues/78) | [P0] Fail closed when management credentials are absent | **critical — closed in runtime on #94** |
 | [#75](https://github.com/ContextualWisdomLab/wardnet/issues/75) | Rename Kubernetes manifest to wardnet.yaml after external-secret hardening lands | medium |
@@ -91,17 +96,30 @@ Management auth is shared secrets (`X-Admin-Token`) plus optional multi-token
 RBAC. Keyverse (OIDC/SCIM/FIDO2) is not wired. Fail-closed (#78) is the
 prerequisite shipped on PR #94.
 
-### Durable control plane (issue #80) — **production gate on #98**
+### Durable control plane (issue #80) — **production gate on #98; rustls on #100; backup on #102; runtime role on #103; HASH this pass**
 
 PostgreSQL is required for non-loopback binds (`CONTROL_PLANE_DATABASE_URL`).
 `src/control_plane.rs` migrates 3NF two-word tables with default-deny RLS
 (`FORCE ROW LEVEL SECURITY`, `wardnet.tenant_id`). Snapshot persist is one
 transaction. JSON file / memory remain loopback/community only.
-`/healthz.persistence` is `postgres` | `file` | `memory`. Remaining: rustls,
-non-owner role, backup/restore drill, event HASH partitioning, optimistic
-concurrency.
+`/healthz.persistence` is `postgres` | `file` | `memory`. `sslmode=require`
+/ `verify-ca` / `verify-full` use rustls with Mozilla roots (certificates
+always verified; stricter than libpq `require`). `allow` / `prefer` are
+rejected. `GET /api/backup` exports a hashed logical snapshot; `POST /api/backup`
+restores after schema and payload-hash checks; `POST /api/backup/drill` restores
+into an isolated tenant, compares unmasked invariants, and drops the drill
+tenant. Declared RPO: last successful export. Declared RTO: 60s.
+`/healthz.backup` is `ready` on PostgreSQL, `disabled` on file/memory.
+Runtime is `wardnet_runtime` (NOSUPERUSER, NOBYPASSRLS) after migrate.
+Logical restore accepts schema 2 through the current migration version
+(`MIN_RESTORABLE_SCHEMA_VERSION`); role-only and HASH-layout migrations do not
+void pre-upgrade snapshots. `security_event` is `PARTITION BY HASH (tenant_id)`
+with 8 children. Unpartitioned tables convert in place under `pg_advisory_lock`.
+`/healthz.event_partitions` is 8 on PostgreSQL, 0 on file/memory. Client IPs
+and paths stay unmasked across convert. Remaining: optimistic concurrency.
+Physical/PITR backups stay a DBA concern.
 
-### Transactional outbox (issue #81) — **first slice this pass**
+### Transactional outbox (issue #81) — **first slice on #99; retention on #101**
 
 On the PostgreSQL authority, security events append (`security_event` +
 `outbox_message`) in one transaction instead of rewriting every table.
@@ -112,8 +130,10 @@ Stdout SIEM export is **at-least-once**; the receipt is the exactly-once ack.
 Operator-visible: `/healthz.outbox` (`ready`|`disabled`), pending/leased/
 dead-letter counts, `GET /api/outbox` (admin read), `POST /api/outbox/{id}/replay`
 (admin write + audit). Client IPs and paths in payloads are not masked.
-File/memory adapters stay `outbox=disabled` with in-process stdout. Remaining
-consumers: TAXII poll, Clearfolio, contextual-orchestrator on the same contract.
+File/memory adapters stay `outbox=disabled` with in-process stdout. `GET /api/outbox`
+is bounded to `EVENT_LIMIT`; processed rows prune to that cap on append, snapshot
+save, and worker ack; dead letters stay. Remaining consumers: TAXII poll,
+Clearfolio, contextual-orchestrator on the same contract.
 
 ### Fail-closed credentials (issue #78) — **closed on PR #94**
 
@@ -142,7 +162,9 @@ replays `security_event.recorded` as stdout SIEM with receipts.
 | Figma Code Connect | Not used |
 | Ten UI-UX areas | Inventoried in `docs/ui-ux/storybook-scene-inventory.md` |
 | Node Storybook | **Not hosted in `/admin`** (embedded-console architecture). File:// inventory is the scene/edge-case contract this pass. |
-| Outbox card | Embedded `/admin` Outbox section this pass |
+| Outbox card | Embedded `/admin` Outbox section |
+| Backup card | Embedded `/admin` Control-plane backup section |
+| Event partitions KPI | Embedded `/admin` KPI tile from `/healthz.event_partitions` this pass |
 
 ### CSAP / SOC 2 vs PII unmasking
 
@@ -154,9 +176,9 @@ future encryption-at-rest.
 ### Coverage / docstring bar
 
 Org 100% line/branch/docstring applies to **changed** surfaces this loop
-(outbox schema, claim/ack/dead-letter/replay, incremental event persist,
-health/API, admin card). Remaining holes on untouched handlers stay listed
-for later loops.
+(HASH convert SQL, restorable schema window, `/healthz.event_partitions`,
+admin KPI tile, probe upgrade preserving unmasked IPs/paths). Remaining
+holes on untouched handlers stay listed for later loops.
 
 ### Ecosystem connectors (leverage order)
 
@@ -170,24 +192,19 @@ for later loops.
 
 ## This loop’s shipped gap
 
-Issue **#81** first slice (transactional outbox + leased workers) on the #80
-PostgreSQL authority. Also the still-valid #98 ORDER BY on load queries and
-incremental security-event persist (gateway path no longer rewrites the whole
-snapshot). Operator-visible: `/healthz.outbox=ready` on postgres,
-`GET /api/outbox`, admin Outbox card. Driving tests:
-`postgres_appends_event_and_outbox_atomically`,
-`postgres_outbox_worker_is_idempotent_and_dead_letters`,
-`postgres_expired_lease_is_reclaimed_and_skip_locked_is_exclusive`,
-`outbox_api_is_admin_authenticated_and_disabled_without_postgres`.
-Do not re-implement #78, the #86 sidecar/libcoraza slices, the #79 pin, or
-the #80 production postgres gate.
+Issue **#80** remaining: HASH-partition `security_event` by `tenant_id` (8
+children) stacked on #103. Still-valid #103 Devin finding: `verify()` now
+accepts schema 2..=current so a role-only/HASH-layout upgrade cannot void
+the last pre-upgrade logical backup. Do not re-implement #78, sidecar, pin,
+libcoraza, the postgres gate, outbox, rustls, retention, backup/restore, or
+the runtime role.
 
 ## Next hourly loop (do, do not report)
 
 1. Second independent APPROVE on #91/#92. Do not `--admin`.
-2. Keep #94/#95/#96/#97/#98 and this #81 PR merge-ready. Merge order #95 then
-   #96 then #97 then #98 then this. Do not re-implement shipped slices.
-3. Next runtime gap if policy still blocks: rustls / backup drill remainder of
-   #80, or additional #81 consumers (TAXII / Clearfolio / orchestrator) on this
-   outbox.
+2. Keep #94/#95/#96/#97/#98/#99/#100/#103 and #104 merge-ready.
+   Merge order #94 independently; #95 then #96 then #97 then #98 then #99
+   then #100 then #103 then #104.
+3. Next runtime gap if policy still blocks: extra #81 consumers (TAXII /
+   Clearfolio / orchestrator) or optimistic concurrency.
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.

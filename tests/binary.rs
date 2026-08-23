@@ -143,6 +143,36 @@ fn binary_fail_closes_non_loopback_listen_without_postgres() {
 }
 
 #[test]
+fn binary_fail_closes_when_control_plane_sslmode_is_ambiguous() {
+    let output = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
+        .env("BIND_ADDR", "127.0.0.1:0")
+        .env(
+            "CONTROL_PLANE_DATABASE_URL",
+            "postgres://wardnet@127.0.0.1/wardnet?sslmode=prefer",
+        )
+        .env_remove("WAF_IDS_STATE_PATH")
+        .env_remove("CORAZA_LIB_PATH")
+        .output()
+        .expect("spawn gateway binary for sslmode check");
+    assert!(
+        !output.status.success(),
+        "sslmode=prefer must fail startup: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("sslmode"),
+        "startup error should name the rejected sslmode:\n{combined}"
+    );
+    assert!(
+        !combined.contains("waf-ids-ai-soc listening on"),
+        "readiness must not be reported for an ambiguous sslmode:\n{combined}"
+    );
+}
+
+#[test]
 fn binary_fail_closes_when_control_plane_url_is_not_postgres() {
     let output = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
         .env("BIND_ADDR", "127.0.0.1:0")

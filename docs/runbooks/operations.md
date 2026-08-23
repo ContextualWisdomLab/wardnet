@@ -67,6 +67,33 @@ Expected fields:
 - `event_limit`: retained security event count
 - `credentials_source`: `file`, `env`, or `none`
 - `admin_auth_configured`: whether any admin write token is configured
+- `backup`: `ready` on PostgreSQL (logical export/restore available) or `disabled` on file/memory
+- `event_partitions`: HASH child count for `security_event` (8 on PostgreSQL, 0 on file/memory)
+
+## Control-plane backup and restore drill
+
+PostgreSQL mode (`/healthz.persistence=postgres`) is the only authority that
+can export or restore. File/memory adapters report `/healthz.backup=disabled`.
+
+Declared RPO: last successful `GET /api/backup`. Declared RTO: 60 seconds for
+the isolated drill.
+
+```bash
+# Export a hashed tenant snapshot (admin read token). Client IPs and paths stay unmasked.
+curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" http://127.0.0.1:8080/api/backup > backup.json
+
+# Isolated restore drill (does not replace the live tenant).
+curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" -X POST http://127.0.0.1:8080/api/backup/drill
+
+# Restore the live tenant from an artifact (admin write). Schema and payload-hash
+# mismatches fail closed. The action is audited.
+curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d @backup.json -X POST http://127.0.0.1:8080/api/backup
+```
+
+The artifact does not contain admin tokens or `CONTROL_PLANE_DATABASE_URL`.
+Physical/PITR backups remain a DBA concern; this is the application-level
+recovery path with tenant RLS preserved.
 
 ## Smoke Test
 
@@ -100,7 +127,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 
 - TLS termination and identity-aware admin access
 - upstream allowlists and egress controls
-- durable database storage with backups
+- durable database storage with backups (PostgreSQL logical export at `GET /api/backup`; isolated restore drill at `POST /api/backup/drill`; declared RPO is last successful export, declared RTO is 60s)
 - SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
 - Detection-quality corpora and Suricata EVE tail/shipper remain open. In-process libcoraza (`CORAZA_LIB_PATH` + `CORAZA_RULES_PATH` or `CORAZA_DIRECTIVES`) evaluates each live `/gateway` transaction; otherwise HTTP sidecar consult at `CORAZA_WAF_URL`. Audit ingest at `POST /api/waf/coraza/audit` still fuses block hits into DNSBL/`client_ip` indicators. Set `PROVEN_ENGINE_FAIL_CLOSED=true` in production so an engine outage does not silently allow traffic.

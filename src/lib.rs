@@ -137,7 +137,9 @@ impl AppState {
 
     /// Load from PostgreSQL, seeding the tenant snapshot when empty.
     pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
-        let plane = control_plane::PostgresPlane::connect(database_url).await?;
+        let plane = control_plane::PostgresPlane::connect(database_url)
+            .await?
+            .with_event_limit(config.event_limit);
         let mut data = match plane.load().await? {
             Some(loaded) => loaded,
             None => AppData::seeded(),
@@ -355,6 +357,12 @@ impl AppState {
             outbox_leased: 0,
             outbox_dead_letter: 0,
             outbox_oldest_age_seconds: None,
+            backup: if self.control_plane.is_some() {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            event_partitions: 0,
         }
     }
 
@@ -372,6 +380,9 @@ impl AppState {
                 health.outbox_oldest_age_seconds = stats.oldest_age_seconds;
             }
             Err(_) => health.outbox = "error".to_string(),
+        }
+        if let Ok(count) = plane.event_partition_count().await {
+            health.event_partitions = count;
         }
         health
     }
@@ -507,6 +518,10 @@ pub struct HealthStatus {
     pub outbox_leased: i64,
     pub outbox_dead_letter: i64,
     pub outbox_oldest_age_seconds: Option<i64>,
+    /// `ready` when PostgreSQL logical backup/restore is the authority; `disabled` on file/memory.
+    pub backup: String,
+    /// HASH child count for `security_event` (0 on file/memory).
+    pub event_partitions: i64,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -581,6 +596,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/outbox", get(list_outbox))
         .route("/api/outbox/{message_id}/replay", post(replay_outbox))
+        .route("/api/backup", get(get_backup).post(restore_backup))
+        .route("/api/backup/drill", post(backup_drill))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
         .route("/api/signatures", get(list_signatures))
@@ -1131,6 +1148,7 @@ async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> R
 #[derive(Serialize)]
 struct OutboxListView {
     status: String,
+    limit: usize,
     messages: Vec<outbox::OutboxMessage>,
 }
 
@@ -1138,16 +1156,19 @@ async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Respo
     if !admin_authenticated(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
+    let limit = state.event_limit.max(1);
     let Some(plane) = &state.control_plane else {
         return Json(OutboxListView {
             status: "disabled".to_string(),
+            limit,
             messages: Vec::new(),
         })
         .into_response();
     };
-    match plane.list_outbox().await {
+    match plane.list_outbox_limited(limit as i64).await {
         Ok(messages) => Json(OutboxListView {
             status: "ready".to_string(),
+            limit,
             messages,
         })
         .into_response(),
@@ -1194,6 +1215,135 @@ async fn replay_outbox(
         }))
         .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+#[derive(Serialize)]
+struct BackupView {
+    status: String,
+    rpo: String,
+    rto_budget_ms: u64,
+    artifact: Option<control_plane::ControlPlaneBackup>,
+}
+
+async fn get_backup(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return Json(BackupView {
+            status: "disabled".to_string(),
+            rpo: control_plane::BACKUP_RPO.to_string(),
+            rto_budget_ms: control_plane::BACKUP_RTO_BUDGET_MS,
+            artifact: None,
+        })
+        .into_response();
+    };
+    match plane.logical_backup().await {
+        Ok(artifact) => Json(BackupView {
+            status: "ready".to_string(),
+            rpo: control_plane::BACKUP_RPO.to_string(),
+            rto_budget_ms: control_plane::BACKUP_RTO_BUDGET_MS,
+            artifact: Some(artifact),
+        })
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn restore_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(backup): Json<control_plane::ControlPlaneBackup>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backup restore requires the PostgreSQL control plane",
+        );
+    };
+    if let Err(message) = backup.verify() {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    if let Err(message) = plane.restore_logical_backup(&backup).await {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    match plane.load().await {
+        Ok(Some(loaded)) => {
+            *state.inner.write().await = loaded;
+        }
+        Ok(None) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "restore committed but tenant snapshot is empty",
+            );
+        }
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+    let actor = audit_actor(&state, &headers);
+    match state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "restore_backup",
+                "control_plane_backup",
+                backup.payload_hash.clone(),
+            );
+        })
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({
+            "status": "restored",
+            "schema_version": backup.schema_version,
+            "payload_hash": backup.payload_hash,
+        }))
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn backup_drill(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backup drill requires the PostgreSQL control plane",
+        );
+    };
+    let report = match plane.restore_drill().await {
+        Ok(report) => report,
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
+    let actor = audit_actor(&state, &headers);
+    let outcome = if report.passed {
+        "backup_drill"
+    } else {
+        "backup_drill_failed"
+    };
+    if let Err(message) = state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                outcome,
+                "control_plane_backup",
+                report.source_hash.clone(),
+            );
+        })
+        .await
+    {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
+    }
+    if report.passed {
+        (StatusCode::OK, Json(report)).into_response()
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(report)).into_response()
     }
 }
 
@@ -3137,6 +3287,14 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Outbox</h2><p class="muted">PostgreSQL leased workers for external effects. File/memory adapters report disabled. Client IPs and paths are not masked.</p><div id="outboxBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Control-plane backup</h2>
+      <p class="muted">On-demand PostgreSQL logical snapshot. Restore drill uses an isolated tenant and does not mask client IPs, paths, or actors. File/memory adapters report disabled. Declared RPO is last successful export; declared RTO is 60s.</p>
+      <div id="backupBody" class="muted">Loading…</div>
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="backupDrillBtn" class="btn-secondary">Run restore drill</button>
+      </div>
+      <pre class="raw" id="backupDrill" style="margin-top:8px;white-space:pre-wrap"></pre>
+    </section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
     <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
@@ -3171,8 +3329,8 @@ function table(capt,cols,rows){
 }
 function toast(msg,ok){const d=document.createElement('div');d.className='toast '+(ok?'ok':'bad');d.textContent=msg;$('toast').appendChild(d);setTimeout(()=>d.remove(),4500);}
 async function guard(id,fn){try{await fn();}catch(e){$(id).innerHTML='<p class="err">Error: '+esc(e.message)+'</p>';}}
-async function loadKpis(){const k=await getJSON('/api/kpis');
-  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)]];
+async function loadKpis(){const k=await getJSON('/api/kpis');const h=await getJSON('/healthz');
+  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)],['Event partitions',h.event_partitions??0]];
   $('kpis').innerHTML=t.map(([l,v])=>'<div class="tile"><div class="label">'+esc(l)+'</div><div class="metric">'+esc(v)+'</div></div>').join('');}
 async function loadRoutes(){const d=await getJSON('/api/routes');
   $('routesBody').innerHTML=table('Configured routes',['Path prefix','Upstream','Mode','State'],d.map(r=>[esc(r.path_prefix),esc(r.upstream),modeBadge(r.mode),stateBadge(r.enabled)]));}
@@ -3210,11 +3368,22 @@ async function loadOutbox(){
   const rows=(o.messages||[]).slice(0,25).map(x=>[esc(x.event_type),esc(x.message_status),esc(x.attempt_count),esc(x.aggregate_id),esc(x.terminal_reason??'—')]);
   $('outboxBody').innerHTML=head+table('Outbox messages',['Type','Status','Attempts','Aggregate','Terminal reason'],rows);
 }
+async function loadBackup(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/backup',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const b=await r.json();
+  const head='<div class="row" style="margin-bottom:10px">'+badge(b.status||'disabled',b.status==='ready'?'b-pass':'b-neutral')+'<span class="muted">RPO '+esc(b.rpo||'—')+' · RTO '+esc(b.rto_budget_ms)+'ms</span></div>';
+  const art=b.artifact||{};
+  const rows=[[esc(art.schema_version??'—'),esc(art.tenant_id??'—'),esc(art.payload_hash?String(art.payload_hash).slice(0,16)+'…':'—'),esc((art.snapshot&&art.snapshot.events||[]).length),esc((art.outbox||[]).length)]];
+  $('backupBody').innerHTML=head+table('Logical backup artifact',['Schema','Tenant','Hash','Events','Outbox'],rows);
+}
 async function loadRaw(id,url,json){try{const t=json?JSON.stringify(await getJSON(url),null,2):await getText(url);$(id).textContent=t&&t.trim()?t:'(empty)';}catch(e){$(id).textContent='Error: '+e.message;}}
 async function refresh(){await Promise.allSettled([
   guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),
   guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),
-  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),guard('outboxBody',loadOutbox),
+  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),guard('outboxBody',loadOutbox),guard('backupBody',loadBackup),
   loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
 function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;
   f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}
@@ -3234,6 +3403,16 @@ function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==
 syncHc();
 $('hcToggle').addEventListener('click',()=>{const on=root.dataset.theme==='hc';if(on){delete root.dataset.theme;}else{root.dataset.theme='hc';}localStorage.setItem('waf-theme',on?'':'hc');syncHc();});
 $('refreshBtn').addEventListener('click',refresh);
+$('backupDrillBtn').addEventListener('click',async()=>{
+  const out=$('backupDrill');out.textContent='Running isolated restore drill…';
+  try{
+    const r=await fetch('/api/backup/drill',{method:'POST',headers:cfHeaders()});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.error||r.statusText);
+    out.textContent=JSON.stringify(j,null,2);
+    toast(j.passed?'Restore drill passed':'Restore drill failed',!!j.passed);
+    guard('backupBody',loadBackup);guard('auditBody',loadAudit);
+  }catch(e){out.innerHTML='<span class="err">Drill error: '+esc(e.message)+'</span>';toast('Restore drill failed: '+e.message,false);}});
 function cfHeaders(){const t=($('adminToken').value||'').trim();return t?{'x-admin-token':t}:{};}
 async function pollClearfolio(id){
   for(let i=0;i<40;i++){
@@ -4290,6 +4469,18 @@ mod tests {
             "high-contrast toggle missing"
         );
         assert!(html.contains("Skip to content"), "skip link missing");
+        assert!(
+            html.contains("id=\"backupBody\""),
+            "backup card container missing"
+        );
+        assert!(
+            html.contains("id=\"backupDrillBtn\""),
+            "restore drill button missing"
+        );
+        assert!(
+            html.contains("Event partitions"),
+            "HASH event-partition KPI tile missing"
+        );
         assert!(
             html.contains(":focus-visible"),
             "focus-visible styling missing"
@@ -7416,6 +7607,8 @@ mod tests {
                 outbox_leased: 0,
                 outbox_dead_letter: 0,
                 outbox_oldest_age_seconds: None,
+                backup: "disabled".to_string(),
+                event_partitions: 0,
             }
         );
 
@@ -7448,6 +7641,10 @@ mod tests {
         )
         .await;
         assert_eq!(body["status"], "disabled");
+        assert_eq!(
+            body["limit"].as_u64(),
+            Some(AppConfig::DEFAULT_EVENT_LIMIT as u64)
+        );
         assert_eq!(body["messages"], serde_json::json!([]));
 
         let health: HealthStatus =
@@ -7461,6 +7658,26 @@ mod tests {
         )
         .await;
         assert_eq!(replayed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let denied_backup = app_request(&app, empty_request(Method::GET, "/api/backup")).await;
+        assert_eq!(denied_backup.status(), StatusCode::UNAUTHORIZED);
+        let backup: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/backup", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(backup["status"], "disabled");
+        assert_eq!(backup["artifact"], serde_json::Value::Null);
+        assert_eq!(health.backup, "disabled");
+        let drill = app_request(
+            &app,
+            authed_empty_request(Method::POST, "/api/backup/drill", "secret"),
+        )
+        .await;
+        assert_eq!(drill.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
