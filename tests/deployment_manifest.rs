@@ -2,6 +2,7 @@
 
 const MANIFEST: &str = include_str!("../deploy/kubernetes/waf-ids-ai-soc.yaml");
 
+/// Secret coordinates the gateway Deployment must consume for `ADMIN_TOKEN`.
 #[derive(Debug, PartialEq, Eq)]
 struct ExternalAdminSecretRef<'a> {
     namespace: &'a str,
@@ -9,10 +10,12 @@ struct ExternalAdminSecretRef<'a> {
     secret_key: &'a str,
 }
 
+/// Count leading ASCII spaces so YAML indent is compared structurally.
 fn leading_spaces(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
+/// Read `child_key` from the mapping that starts at `parent_key`/`parent_indent`.
 fn mapping_value<'a>(
     lines: &[&'a str],
     parent_key: &str,
@@ -34,6 +37,7 @@ fn mapping_value<'a>(
         })
 }
 
+/// Lines that belong to the YAML block nested under `parent_key`.
 fn nested_block<'a>(lines: &[&'a str], parent_key: &str, parent_indent: usize) -> Vec<&'a str> {
     let Some(parent_index) = lines
         .iter()
@@ -49,6 +53,7 @@ fn nested_block<'a>(lines: &[&'a str], parent_key: &str, parent_indent: usize) -
         .collect()
 }
 
+/// Slice of a YAML list item whose `- name:` equals `item_name`.
 fn named_list_item_block<'a>(
     lines: &[&'a str],
     item_name: &str,
@@ -72,6 +77,9 @@ fn named_list_item_block<'a>(
         .collect()
 }
 
+/// Locate `ADMIN_TOKEN` on the `waf-ids-ai-soc` gateway container only.
+///
+/// `secretKeyRef.optional: true` is treated as absent (fail closed).
 fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_>> {
     manifest.split("\n---\n").find_map(|document| {
         let lines = document.lines().collect::<Vec<_>>();
