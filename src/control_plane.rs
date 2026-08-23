@@ -11,6 +11,7 @@ use crate::outbox::{
     STATUS_LEASED, STATUS_PENDING, STATUS_PROCESSED,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Instant;
@@ -752,6 +753,7 @@ impl PostgresPlane {
         append_security_event(&mut client, &self.tenant_id, event, event_limit).await
     }
 
+    #[cfg(test)]
     pub async fn drain_once<F>(
         &self,
         owner: &str,
@@ -771,6 +773,160 @@ impl PostgresPlane {
             dispatch,
         )
         .await
+    }
+
+    /// Claim due messages, dispatch without holding the client lock, then ack.
+    /// HTTP consumers must not pin the PostgreSQL connection during outbound I/O.
+    pub async fn drain_due_async<F, Fut>(
+        &self,
+        owner: &str,
+        now_unix: i64,
+        dispatch: F,
+    ) -> Result<usize, String>
+    where
+        F: Fn(OutboxMessage) -> Fut,
+        Fut: Future<Output = Result<String, DispatchError>>,
+    {
+        let claimed = {
+            let mut client = self.client.lock().await;
+            claim_batch(&mut client, &self.tenant_id, owner, now_unix).await?
+        };
+        let mut processed = 0;
+        for message in claimed {
+            let duplicate = {
+                let mut client = self.client.lock().await;
+                receipt_exists(&mut client, &self.tenant_id, &message.idempotency_key).await?
+            };
+            if duplicate {
+                let mut client = self.client.lock().await;
+                ack_processed(
+                    &mut client,
+                    &self.tenant_id,
+                    &message,
+                    "duplicate-receipt",
+                    now_unix,
+                    self.event_limit,
+                )
+                .await?;
+                processed += 1;
+                continue;
+            }
+            match dispatch(message.clone()).await {
+                Ok(evidence) => {
+                    let mut client = self.client.lock().await;
+                    ack_processed(
+                        &mut client,
+                        &self.tenant_id,
+                        &message,
+                        &evidence,
+                        now_unix,
+                        self.event_limit,
+                    )
+                    .await?;
+                    processed += 1;
+                }
+                Err(error) => {
+                    let mut client = self.client.lock().await;
+                    fail_claimed(&mut client, &self.tenant_id, &message, now_unix, &error).await?;
+                }
+            }
+        }
+        Ok(processed)
+    }
+
+    /// Persist an operator-triggered external effect (TAXII / Clearfolio / SOC).
+    /// Secrets must not appear in `payload_json`.
+    pub async fn enqueue_effect(
+        &self,
+        event_type: &'static str,
+        aggregate_id: &str,
+        payload_json: String,
+    ) -> Result<String, String> {
+        let created_unix = unix_now_i64();
+        let hash = outbox::payload_hash(&payload_json);
+        let unique = format!("{created_unix}:{hash}");
+        let (message_id, idempotency_key) =
+            outbox::effect_ids(event_type, &self.tenant_id, &unique);
+        let mut client = self.client.lock().await;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| format!("control plane effect transaction failed: {error}"))?;
+        tx.execute(
+            "SELECT set_config('wardnet.tenant_id', $1, true)",
+            &[&self.tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+        insert_outbox(
+            &tx,
+            &self.tenant_id,
+            &OutboxInsert {
+                message_id: message_id.clone(),
+                aggregate_id: aggregate_id.to_string(),
+                aggregate_version: created_unix,
+                event_type,
+                created_unix,
+                payload_json,
+                payload_hash: hash,
+                idempotency_key,
+            },
+        )
+        .await?;
+        prune_processed_outbox(&tx, &self.tenant_id, self.event_limit).await?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("control plane effect commit failed: {error}"))?;
+        Ok(message_id)
+    }
+
+    /// Load one outbox row plus receipt evidence when processed.
+    pub async fn get_outbox_item(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<(OutboxMessage, Option<String>)>, String> {
+        let mut client = self.client.lock().await;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| format!("control plane get-outbox transaction failed: {error}"))?;
+        tx.execute(
+            "SELECT set_config('wardnet.tenant_id', $1, true)",
+            &[&self.tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+        let row = tx
+            .query_opt(
+                "SELECT message_id, aggregate_id, aggregate_version, event_type, schema_version,
+                        created_unix, payload_json, payload_hash, idempotency_key, message_status,
+                        lease_owner, lease_expires_unix, attempt_count, first_attempt_unix,
+                        last_attempt_unix, next_available_unix, terminal_reason
+                 FROM outbox_message WHERE tenant_id = $1 AND message_id = $2",
+                &[&self.tenant_id, &message_id],
+            )
+            .await
+            .map_err(|error| format!("control plane get outbox_message failed: {error}"))?;
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .map_err(|error| format!("control plane get-outbox commit failed: {error}"))?;
+            return Ok(None);
+        };
+        let message = row_to_outbox(&row, &self.tenant_id);
+        let evidence = tx
+            .query_opt(
+                "SELECT receipt_evidence FROM outbox_receipt
+                 WHERE tenant_id = $1 AND message_id = $2",
+                &[&self.tenant_id, &message_id],
+            )
+            .await
+            .map_err(|error| format!("control plane get outbox_receipt failed: {error}"))?
+            .map(|row| row.get::<_, String>(0));
+        tx.commit()
+            .await
+            .map_err(|error| format!("control plane get-outbox commit failed: {error}"))?;
+        Ok(Some((message, evidence)))
     }
 
     pub async fn outbox_health(&self, now_unix: i64) -> Result<OutboxHealth, String> {
@@ -1599,6 +1755,7 @@ async fn insert_outbox(
     Ok(())
 }
 
+#[cfg(test)]
 async fn drain_once<F>(
     client: &mut Client,
     tenant_id: &str,
@@ -3146,5 +3303,54 @@ mod tests {
         let winner = plane_a.load().await.expect("reload").expect("tenant");
         assert_eq!(winner.routes[0].path_prefix, "/occ-a");
         assert!(winner.snapshot_version > loaded_a.snapshot_version);
+    }
+
+    #[tokio::test]
+    async fn postgres_enqueues_external_effect_and_async_drain_records_receipt() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("outbox-effect");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("test database");
+        plane.save(&AppData::seeded()).await.expect("seed");
+        let now = unix_now_i64().saturating_add(60);
+        let _ = plane
+            .drain_once("setup", now, |_| Ok("setup".into()))
+            .await
+            .expect("ack snapshot");
+        let payload = serde_json::json!({
+            "objects_url": "https://taxii.example/api1/collections/c/objects/",
+            "feed_id": "taxii-lab",
+            "path": "/gateway/login",
+            "client_ip": "198.51.100.20"
+        })
+        .to_string();
+        let message_id = plane
+            .enqueue_effect(crate::outbox::EVENT_TAXII_POLLED, "taxii-lab", payload)
+            .await
+            .expect("enqueue taxii poll");
+        let processed = plane
+            .drain_due_async(
+                "effect-worker",
+                now.saturating_add(30),
+                |message| async move {
+                    assert_eq!(message.event_type, crate::outbox::EVENT_TAXII_POLLED);
+                    assert!(message.payload_json.contains("198.51.100.20"));
+                    assert!(message.payload_json.contains("/gateway/login"));
+                    Ok("taxii-ack:unmasked".into())
+                },
+            )
+            .await
+            .expect("async drain");
+        assert_eq!(processed, 1);
+        let (message, evidence) = plane
+            .get_outbox_item(&message_id)
+            .await
+            .expect("get item")
+            .expect("enqueued");
+        assert_eq!(message.message_status, STATUS_PROCESSED);
+        assert_eq!(evidence.as_deref(), Some("taxii-ack:unmasked"));
     }
 }

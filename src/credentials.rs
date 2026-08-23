@@ -12,6 +12,8 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
 pub const CRED_CONTROL_PLANE_URL: &str = "control_plane_url";
+pub const CRED_SOC_LLM_TOKEN: &str = "soc_llm_token";
+pub const CRED_TAXII_BEARER: &str = "taxii_bearer";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -90,7 +92,13 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_CONTROL_PLANE_URL,
+                        CRED_SOC_LLM_TOKEN,
+                        CRED_TAXII_BEARER,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
@@ -139,6 +147,21 @@ impl CredentialRegistry {
 
         Ok(Self { values, source })
     }
+
+    /// Fill a missing secret from bootstrap transport. No-op when the key is
+    /// already present or the value is empty. Never logs the value.
+    pub fn load_optional_secret(&mut self, name: &str, env_value: Option<String>) {
+        if self.values.contains_key(name) {
+            return;
+        }
+        let Some(value) = env_value.filter(|value| !value.is_empty()) else {
+            return;
+        };
+        self.values.insert(name.to_string(), value);
+        if self.source == CredentialSource::None {
+            self.source = CredentialSource::Env;
+        }
+    }
 }
 
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
@@ -185,6 +208,22 @@ mod tests {
             CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
+    }
+
+    #[test]
+    fn load_optional_secret_fills_missing_keys_only() {
+        let mut registry =
+            CredentialRegistry::bootstrap_secrets(None, Some("secret".to_string()), None, None)
+                .unwrap();
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("llm-token".into()));
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("ignored".into()));
+        registry.load_optional_secret(CRED_TAXII_BEARER, Some(String::new()));
+        assert_eq!(
+            registry.get_credential(CRED_SOC_LLM_TOKEN),
+            Some("llm-token")
+        );
+        assert!(registry.get_credential(CRED_TAXII_BEARER).is_none());
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("secret"));
     }
 
     #[test]

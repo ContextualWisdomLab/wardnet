@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- PostgreSQL outbox consumers for TAXII poll, Clearfolio document submit, and contextual-orchestrator SOC analysis (issue #81 remainder). Operator-triggered HTTP leaves through `taxii.collection_polled`, `clearfolio.document_submitted`, and `soc.analysis_requested` with leased-worker retries and unique receipts. Request path returns HTTP 202 and `GET /api/outbox/{message_id}` exposes receipt evidence. Secrets never enter outbox payloads (TAXII bearer lives in the credential registry). File/memory adapters keep the previous synchronous path. Client IPs, paths, indicator values, and actor names stay unmasked. LLM analysis remains advisory and never auto-enforces.
+
+
 - PostgreSQL `security_event` is HASH-partitioned by `tenant_id` (8 children). Unpartitioned tables convert in place and keep unmasked client IPs and paths. `/healthz.event_partitions` reports the child count (0 on file/memory). Logical restore still accepts schema 2 through the current migration version; HASH does not change the snapshot shape.
 - PostgreSQL snapshot persist is optimistic-concurrency: `tenant_account.snapshot_version` must match the loaded token or the write returns a snapshot conflict (HTTP 409). Restores overwrite. File/memory adapters stay single-writer.
 - PostgreSQL control-plane runtime is `wardnet_runtime` (NOSUPERUSER, NOBYPASSRLS, not the table owner). Migrations run as the login role, then `SET ROLE` so FORCE RLS binds even when the URL user is a superuser. Missing `wardnet.tenant_id` yields no rows. DDL (`DROP TABLE`, `DISABLE ROW LEVEL SECURITY`) is denied. Logical restore accepts schema 2 through the current migration version so a role-only upgrade cannot void the last pre-upgrade backup.
