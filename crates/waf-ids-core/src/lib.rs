@@ -1265,7 +1265,7 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "GET",
             "/api/waf/engine-status",
             "application/json",
-            "in-path Coraza sidecar vs ingest-hint enforcement status (no sidecar URL)",
+            "in-path Coraza libcoraza/sidecar vs ingest-hint enforcement status (no library path or sidecar URL)",
             false,
         ),
         buyer_evidence_endpoint(

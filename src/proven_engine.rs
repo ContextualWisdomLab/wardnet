@@ -1,36 +1,48 @@
-//! In-path Coraza sidecar adapter (issue #86).
+//! In-path Coraza adapter (issue #86).
 //!
-//! Wardnet does not reimplement OWASP CRS. When a sidecar URL is configured,
-//! each gateway transaction is POSTed there and the response is parsed with
-//! the existing Coraza audit adapter. Unreachable engines are either
-//! fail-closed or explicitly degraded — never a silent ruleset skip.
+//! Wardnet does not reimplement OWASP CRS. Live `/gateway` transactions are
+//! evaluated by a proven engine in this order:
+//!
+//! 1. In-process libcoraza (`CORAZA_LIB_PATH`) when loaded.
+//! 2. Otherwise an HTTP sidecar (`CORAZA_WAF_URL`) parsed with the existing
+//!    Coraza audit adapter.
+//!
+//! Unreachable engines are either fail-closed or explicitly degraded — never
+//! a silent ruleset skip.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::coraza_audit::{CorazaIngestedHit, parse_coraza_audit_body};
+use crate::coraza_inprocess::InProcessCoraza;
 
 /// Sidecar HTTP timeout. Bounded so a hung WAF cannot stall the gateway.
 pub const SIDECAR_TIMEOUT: Duration = Duration::from_millis(1_500);
 
-/// Operator-configured Coraza sidecar consult.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Operator-configured Coraza sidecar and/or in-process libcoraza consult.
+#[derive(Debug, Clone)]
 pub struct ProvenEngineConfig {
     /// Full HTTP URL of the Coraza evaluate endpoint. `None` keeps ingest-hint
-    /// enforcement only.
+    /// enforcement only when in-process libcoraza is also unset.
     pub sidecar_url: Option<String>,
-    /// When true, a configured sidecar that is unreachable or denied by
+    /// When true, a configured engine that is unreachable or denied by
     /// destination policy fails the transaction (503) instead of falling back
     /// to builtin scoring.
     pub fail_closed: bool,
+    /// Loaded libcoraza instance. When set, live transactions evaluate here
+    /// and the sidecar is not consulted.
+    pub in_process: Option<Arc<InProcessCoraza>>,
 }
 
 impl ProvenEngineConfig {
-    /// No sidecar; gateway scoring uses ingest hints and builtin signatures.
+    /// No sidecar and no in-process engine; gateway scoring uses ingest hints
+    /// and builtin signatures.
     pub fn disabled() -> Self {
         Self {
             sidecar_url: None,
             fail_closed: false,
+            in_process: None,
         }
     }
 
@@ -45,19 +57,36 @@ impl ProvenEngineConfig {
         Self {
             sidecar_url,
             fail_closed,
+            in_process: None,
+        }
+    }
+
+    /// In-process libcoraza. Sidecar URL is left unset.
+    pub fn in_process(engine: Arc<InProcessCoraza>, fail_closed: bool) -> Self {
+        Self {
+            sidecar_url: None,
+            fail_closed,
+            in_process: Some(engine),
         }
     }
 
     /// True when a non-empty sidecar URL is configured.
-    pub fn in_path(&self) -> bool {
+    pub fn sidecar_configured(&self) -> bool {
         self.sidecar_url
             .as_deref()
             .is_some_and(|url| !url.trim().is_empty())
     }
 
-    /// Operator-visible mode label (`coraza_sidecar` or `ingest_hints_only`).
+    /// True when in-process libcoraza or a sidecar is configured.
+    pub fn in_path(&self) -> bool {
+        self.in_process.is_some() || self.sidecar_configured()
+    }
+
+    /// Operator-visible mode label.
     pub fn mode(&self) -> &'static str {
-        if self.in_path() {
+        if self.in_process.is_some() {
+            "coraza_in_process"
+        } else if self.sidecar_configured() {
             "coraza_sidecar"
         } else {
             "ingest_hints_only"
@@ -206,12 +235,23 @@ mod tests {
     fn sidecar_config_is_in_path() {
         let config = ProvenEngineConfig::sidecar("http://127.0.0.1:9000/waf", true);
         assert!(config.in_path());
+        assert!(config.sidecar_configured());
         assert_eq!(config.mode(), "coraza_sidecar");
         assert!(config.fail_closed);
         assert_eq!(
             config.sidecar_url.as_deref(),
             Some("http://127.0.0.1:9000/waf")
         );
+    }
+
+    #[test]
+    fn in_process_config_wins_mode_label() {
+        let engine = crate::coraza_inprocess::load_stub_engine();
+        let config = ProvenEngineConfig::in_process(engine, true);
+        assert!(config.in_path());
+        assert!(!config.sidecar_configured());
+        assert_eq!(config.mode(), "coraza_in_process");
+        assert!(config.fail_closed);
     }
 
     #[test]

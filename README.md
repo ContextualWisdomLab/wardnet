@@ -70,6 +70,9 @@ Useful environment variables:
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
+- `CORAZA_LIB_PATH` / `CORAZA_RULES_PATH` / `CORAZA_DIRECTIVES`: optional in-process libcoraza. A missing library or empty ruleset fails startup. `/healthz.proven_engine` reports `coraza_in_process`.
+- `CORAZA_WAF_URL`: optional Coraza sidecar URL used when libcoraza is not loaded
+- `PROVEN_ENGINE_FAIL_CLOSED`: when true, a configured engine outage returns 503 instead of degrading to builtin scoring
 
 Example with persistent local state:
 

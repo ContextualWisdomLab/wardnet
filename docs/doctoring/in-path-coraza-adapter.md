@@ -42,7 +42,9 @@ https://doi.org/10.6028/NIST.SP.800-218
 
 ## Operator next action
 
-Point `CORAZA_WAF_URL` at a Coraza (or CRS-compatible) evaluate endpoint that
-returns Coraza audit JSON. Set `PROVEN_ENGINE_FAIL_CLOSED=true` in production.
-Confirm `GET /api/waf/engine-status` reports `mode=coraza_sidecar` and
-`in_path=true` before exposing `/gateway`.
+Prefer in-process libcoraza: set `CORAZA_LIB_PATH` to the shared library and
+`CORAZA_RULES_PATH` (or `CORAZA_DIRECTIVES`) to a pinned OWASP CRS bundle. Point
+`CORAZA_WAF_URL` at a Coraza evaluate endpoint only when the process cannot
+load the library. Set `PROVEN_ENGINE_FAIL_CLOSED=true` in production. Confirm
+`GET /api/waf/engine-status` reports `in_path=true` (`coraza_in_process` or
+`coraza_sidecar`) before exposing `/gateway`.
