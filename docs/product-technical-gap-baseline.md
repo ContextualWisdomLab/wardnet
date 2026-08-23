@@ -25,6 +25,7 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
+| [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | fix(auth): fail closed without write-capable admin on public bind | `fix/issue-78-fail-closed-credentials` | local fmt/test/clippy + two smokes green; GitHub Checks pending at open | Author this pass. | Org 2-approval ruleset + self-author (same as other self-authored PRs). Runtime gap #78 is in this PR. |
 | [#93](https://github.com/ContextualWisdomLab/wardnet/pull/93) | test(persistence): replace permission-based fault injection with a deterministic seam | `fix/issue-74-deterministic-persistence-fault` | rust + Security Scan green; **strix FAILURE** (job `97189711094`). Run log HTTP 404 from this token against wardnet and org `.github`. | Author `seonghobae`; Devin comments (info). | (1) strix FAILURE — log not readable (404); (2) org 2-approval ruleset + self-author. |
 | [#92](https://github.com/ContextualWisdomLab/wardnet/pull/92) | build(deps): bump github/codeql-action/upload-sarif from 4.37.6 to 4.37.7 | dependabot | All green (27). | Maintainer APPROVED (1 of 2). | Org ruleset: 2 approving reviews. Last pusher is dependabot so this approval counts; **second independent APPROVE missing**. |
 | [#91](https://github.com/ContextualWisdomLab/wardnet/pull/91) | build(deps): bump futures-util from 0.3.33 to 0.3.34 | dependabot | All green (27). | Maintainer APPROVED (1 of 2). | Same as #92: second independent APPROVE missing. |
