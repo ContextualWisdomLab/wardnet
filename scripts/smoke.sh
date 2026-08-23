@@ -73,18 +73,21 @@ PY
 start_server
 
 health="$(curl -fsS "$BASE_URL/healthz")"
+echo "healthz body: $health"
 assert_json_field "$health" 'data["status"] == "ok"'
 assert_json_field "$health" 'data["persistence"] == "file"'
 assert_json_field "$health" 'data["dnsbl_origin"] == "dnsbl.test"'
 assert_json_field "$health" 'data["event_limit"] == 5'
 assert_json_field "$health" 'data["proven_engine"] == "ingest_hints_only"'
 assert_json_field "$health" 'data["proven_engine_fail_closed"] is False'
+assert_json_field "$health" 'data["destination_mode"] == "development"'
 
 engine_status="$(curl -fsS "$BASE_URL/api/waf/engine-status")"
 assert_json_field "$engine_status" 'data["mode"] == "ingest_hints_only"'
 assert_json_field "$engine_status" 'data["in_path"] is False'
 
 admin_html="$(curl -fsS "$BASE_URL/admin")"
+echo "admin body bytes: ${#admin_html}"
 case "$admin_html" in
   *"ContextualWisdomLab WAF/IDS/AI SOC Gateway"*) ;;
   *)
@@ -92,6 +95,10 @@ case "$admin_html" in
     exit 1
     ;;
 esac
+readiness="$(curl -fsS "$BASE_URL/api/commercial/readiness")"
+echo "readiness body: $readiness"
+assert_json_field "$readiness" 'data["target_sale_value_krw"] == 2000000000'
+assert_json_field "$readiness" '"readiness_level" in data'
 
 unauthorized_code="$(
   curl -sS -o /dev/null -w '%{http_code}' \
@@ -168,6 +175,7 @@ assert_json_field "$kpis" 'data["stale_threat_feed_count"] == 0'
 assert_json_field "$kpis" 'data["audit_log_count"] >= 3'
 
 readiness="$(curl -fsS "$BASE_URL/api/commercial/readiness")"
+echo "readiness sale-ready body: $readiness"
 assert_json_field "$readiness" 'data["target_sale_value_krw"] == 2000000000'
 assert_json_field "$readiness" 'data["ready_for_enterprise_sale"] is True'
 assert_json_field "$readiness" 'data["readiness_level"] == "sale_ready"'

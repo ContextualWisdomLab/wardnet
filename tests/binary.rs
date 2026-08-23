@@ -40,6 +40,46 @@ fn binary_serves_until_force_stopped_on_windows() {
     );
 }
 
+#[test]
+fn binary_does_not_report_readiness_before_state_validation() {
+    let state_path = std::env::temp_dir().join(format!(
+        "wardnet-corrupt-state-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+    std::fs::write(&state_path, "not-json").expect("write corrupt state fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
+        .env("BIND_ADDR", "127.0.0.1:0")
+        .env("WAF_IDS_STATE_PATH", &state_path)
+        .env_remove("ADMIN_TOKEN")
+        .env_remove("ADMIN_TOKENS")
+        .env_remove("WAF_IDS_CREDENTIALS_PATH")
+        .output()
+        .expect("spawn gateway binary for startup validation check");
+    let _ = std::fs::remove_file(&state_path);
+
+    assert!(
+        !output.status.success(),
+        "corrupt state must fail startup: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("is not valid JSON"),
+        "startup error should explain the invalid state file:\n{combined}"
+    );
+    assert!(
+        !combined.contains("waf-ids-ai-soc listening on"),
+        "readiness must not be reported until persisted state validates:\n{combined}"
+    );
+}
+
 fn spawn_ready_gateway() -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
         .env("BIND_ADDR", "127.0.0.1:0")

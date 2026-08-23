@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T13:30Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-23T15:05Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -25,20 +25,20 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `feat/issue-79-destination-policy` stacked on #95 | local fmt/test/clippy green | Author this pass. | Org 2-approval + self-author. Restores issue #79 unscoped from #94. Merge #95 first. |
-| [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | feat(waf): consult Coraza sidecar on live gateway transactions | `54604c2` (`feat/issue-86-in-path-coraza`) | local fmt/test/clippy + two smokes green; GitHub Checks pending at open. Copilot review requested. | Author this pass. | Org 2-approval + self-author. Runtime gap #86 sidecar slice is this PR. |
-| [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | fix(auth): fail closed without write-capable admin on public bind | `868a7e5` (`fix/issue-78-fail-closed-credentials`) | Restored to issue-#78-only scope (destination/#86 unscoped). Copilot review requested this hour. | Author `seonghobae`; Devin COMMENTED. | Org ruleset `18156473` 2-approval + self-author. Do not `--admin` merge. |
+| [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `feat/issue-79-destination-policy` stacked on #95 | local fmt/test/clippy green this hour (still-valid review fixes). Copilot review requested. | Author this pass; Devin/Codex COMMENTED on prior head. | Org 2-approval + self-author. Merge #95 first. `gh pr merge` rejected by ruleset 18156473. |
+| [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | feat(waf): consult Coraza sidecar on live gateway transactions | `ba9ee3a` (`feat/issue-86-in-path-coraza`) | rust + Security Scan green; strix in_progress at snapshot; opencode-review queued. Copilot review requested. | Author this pass; Devin/Codex COMMENTED. | Org 2-approval + self-author. Do not re-implement sidecar slice. |
+| [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | fix(auth): fail closed without write-capable admin on public bind | `f31d960` (`fix/issue-78-fail-closed-credentials`) | Concurrent commit moved state validation before readiness (closes prior rust failure `binary_does_not_report_readiness_before_state_validation` on `b9daeb5`). Checks re-running. Copilot review requested. | Author `seonghobae`; Devin COMMENTED. | Org 2-approval + self-author. Do not `--admin` merge. Do not re-implement #78. |
 | [#93](https://github.com/ContextualWisdomLab/wardnet/pull/93) | test(persistence): replace permission-based fault injection with a deterministic seam | `f77eb697` | rust + Security Scan green; **strix FAILURE** (job `97189711094`). Artifact `strix-reports` id `9493001688`. Root cause is org LiteLLM provider `openai-direct/gpt-5.6-luna` (0 vulns then fail-closed). Not a wardnet code finding. | Author `seonghobae`; Devin COMMENTED. | strix org-provider FAILURE + 2-approval + self-author. Do not rotate review-agent keys. |
-| [#92](https://github.com/ContextualWisdomLab/wardnet/pull/92) | build(deps): bump github/codeql-action/upload-sarif from 4.37.6 to 4.37.7 | dependabot `17277d78` | All green (27). | Maintainer APPROVED (1 of 2). Copilot review requested this hour. | **Second independent APPROVE missing** (ruleset 2-approval). `gh pr merge` rejected by policy, not Checks. |
-| [#91](https://github.com/ContextualWisdomLab/wardnet/pull/91) | build(deps): bump futures-util from 0.3.33 to 0.3.34 | dependabot `c4662cae` | All green (27). | Maintainer APPROVED (1 of 2). Copilot review requested this hour. | Same as #92: second independent APPROVE missing. |
+| [#92](https://github.com/ContextualWisdomLab/wardnet/pull/92) | build(deps): bump github/codeql-action/upload-sarif from 4.37.6 to 4.37.7 | dependabot `17277d78` | All green. `--auto` squash already enabled. | Maintainer APPROVED (1 of 2). | **Second independent APPROVE missing**. `gh pr merge` rejected: "the base branch policy prohibits the merge." |
+| [#91](https://github.com/ContextualWisdomLab/wardnet/pull/91) | build(deps): bump futures-util from 0.3.33 to 0.3.34 | dependabot `c4662cae` | All green. `--auto` squash already enabled. | Maintainer APPROVED (1 of 2). | Same as #92: second independent APPROVE missing. |
 | [#90](https://github.com/ContextualWisdomLab/wardnet/pull/90) | feat(observability): export Wardnet events to SIEM and OpenTelemetry | `40f11b93` | All green (35). | Author `seonghobae`; CodeRabbit/Devin/GHAS COMMENTED. **0 unresolved threads** on exact head. | Org 2-approval + self-author. |
 | [#88](https://github.com/ContextualWisdomLab/wardnet/pull/88) | feat(security): reject non-LiteLLM credentials before upstream | `41b21cfe` | All green (35). | Author `seonghobae`; CodeRabbit COMMENTED. **0 unresolved threads** on exact head. | Org 2-approval + self-author. |
 | [#77](https://github.com/ContextualWisdomLab/wardnet/pull/77) | build(rust): pin and track Rust 1.97.1 | `a13c0865` | rust green; **strix FAILURE** (job `97001450437`). Same org-provider fail-closed as #93. | Author `seonghobae`; Devin COMMENTED. | strix org-provider FAILURE + 2-approval + self-author. |
 | [#76](https://github.com/ContextualWisdomLab/wardnet/pull/76) | feat(ai): delegate SOC analysis to adaptive orchestration | `1cc49277` | All green (35). | Author `seonghobae`; CodeRabbit COMMENTED; opencode DISMISSED. **0 unresolved threads**. | Org 2-approval + self-author. |
-| [#72](https://github.com/ContextualWisdomLab/wardnet/pull/72) | fix(deploy): require externally provisioned admin secret | `6881f479` | rust/coverage-evidence/opencode-review **success**; **strix FAILURE** (job `97198957113`, org provider). **0 unresolved threads**. | Latest opencode-agent **CHANGES_REQUESTED** was on `5fd9e2ba`, not this head. coverage-evidence is green on `6881f47` but opencode did not post APPROVE (review job only prints that approval is a separate dispatch). Copilot review requested this hour. | `CHANGES_REQUESTED` still sticky from prior SHA + 2-approval + self-author + strix org-provider FAILURE. |
+| [#72](https://github.com/ContextualWisdomLab/wardnet/pull/72) | fix(deploy): require externally provisioned admin secret | `6881f479` | rust/coverage-evidence/opencode-review **success**; **strix FAILURE** (job `97198957113`, org provider). **0 unresolved threads**. | Latest opencode-agent **CHANGES_REQUESTED** was on `5fd9e2ba`, not this head. coverage-evidence is green on `6881f47` but opencode did not post APPROVE. Copilot review requested. | Sticky `CHANGES_REQUESTED` + 2-approval + self-author + strix org-provider FAILURE. |
 
-Dependabot #91 and #92 were approved by this actor; `gh pr merge` was rejected
-by the base-branch policy (not by failing Checks). Do not `--admin` merge.
+Dependabot #91 and #92 remain auto-merge enabled; `gh pr merge` was rejected
+by ruleset `18156473` (not by failing Checks). Do not `--admin` merge.
 
 ## Then-open issues
 
@@ -108,13 +108,26 @@ Shipped:
 
 Doctoring: `docs/doctoring/fail-closed-management-auth.md` (APA 7th).
 
-### Destination policy (issue #79) — **closed this pass**
+### Destination policy (issue #79) — **closed this pass (review-hardening)**
 
 Shipped in `src/destination.rs` and wired through route upsert, gateway proxy,
 threat-intel fetch, Clearfolio, and SOC LLM. Default deny of loopback, RFC 1918,
-link-local, ULA, CGNAT, documentation, and cloud-metadata classes unless
-`DESTINATION_ALLOWLIST` (or loopback development) permits them.
-`DESTINATION_DENYLIST` wins. HTTP clients: no redirects, `no_proxy()`.
+link-local, ULA, CGNAT, documentation, cloud-metadata, and deprecated IPv6
+site-local (`fec0::/10`) unless `DESTINATION_ALLOWLIST` (or loopback development)
+permits them. `DESTINATION_DENYLIST` wins. HTTP clients: no redirects, `no_proxy()`.
+
+This hour's still-valid review fixes (operator-visible):
+
+- CIDR allowlist matches apply **per resolved address** (a private CIDR cannot
+  exempt a sibling metadata/link-local answer).
+- CIDR allowlist entries authorize non-default ports after resolve.
+- Invalid CIDR prefixes (`/33`, `/129`) fail startup before bind.
+- Hostnames that merely contain `0x` (e.g. `0x0.st`) are not hex IP literals.
+- `AppState::load` / `new` default to production policy; `seeded()` opts into
+  development. `/healthz.destination_mode` reports the class.
+- Blocking OS DNS runs on `spawn_blocking` with a 2s timeout.
+- Persistence and destination-list validation complete **before** the readiness
+  line (binary test `binary_does_not_report_readiness_before_state_validation`).
 
 Remaining: custom connector that pins the TCP peer to the evaluated IP (full
 TOCTOU close); Kubernetes NetworkPolicy examples as defense in depth.
@@ -159,23 +172,27 @@ Remaining holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
-Issue **#86** slice: in-path Coraza sidecar adapter on live `/gateway`
-transactions (branch `feat/issue-86-in-path-coraza`, not stacked onto PR #94
-after that PR was restored to issue-#78-only scope). Operator-visible:
-`GET /api/waf/engine-status` reports whether CRS is in the request path; a
-sidecar interrupt blocks the **current** request (not only a later client
-matching ingest hints). #78 remains on PR #94; #79 destination policy was
-unscoped from #94 and was not re-implemented here.
+Issue **#79** remaining review-hardening on PR #96 (still unmerged; policy
+blocks). Operator-visible: `/healthz.destination_mode`; CIDR allowlist no longer
+exempts sibling denied-class DNS answers; CIDR entries authorize non-default
+ports; invalid prefixes fail closed at startup; IPv6 site-local is denied;
+readiness is not printed until state validates. Driving test:
+`create_route_fail_closes_private_upstream_unless_cidr_allowlisted` (real
+`POST /api/routes` through `assert_outbound`). #78 remains on PR #94 (`f31d960`
+already moved state validation before readiness — do not re-implement). #86
+sidecar remains on PR #95 — do not re-implement that slice.
 
 ## Next hourly loop (do, do not report)
 
-1. Second independent APPROVE on #91/#92 (Copilot requested; still 1/2).
-2. Re-dispatch opencode review on #72 head `6881f47` now that coverage-evidence
-   is green, without rotating review-agent secrets.
+1. Second independent APPROVE on #91/#92 (Copilot requested; still 1/2; `--auto`
+   already enabled).
+2. Keep #94/#95/#96 merge-ready. Do not `--admin` merge. Do not re-implement
+   #78 or the #86 sidecar slice.
 3. Strix FAILURE on #72/#77/#93 is org LiteLLM provider infra, not wardnet
    code; do not rotate keys. Watch ContextualWisdomLab/.github branch
    `codex/strix-fail-closed-provider-evidence`.
-4. Keep #94 merge-ready (Copilot requested). Stacked #78/#79/#86 live there.
-5. Next runtime gap if policy still blocks: #80 durable control plane, or
-   Suricata EVE tail/shipper (remainder of #86).
+4. Sticky opencode `CHANGES_REQUESTED` on #72 head `6881f47` — review job does
+   not post APPROVE.
+5. Next runtime gap if policy still blocks: TCP-peer pin remainder of #79, or
+   #80 durable control plane, or Suricata EVE tail/shipper (remainder of #86).
 6. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.

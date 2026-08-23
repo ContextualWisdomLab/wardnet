@@ -5,6 +5,11 @@
 //! classified. Deny-overrides win over allowlists. Loopback-class destinations
 //! are allowed only when [`DestinationPolicy::development`] is selected (the
 //! process itself is loopback-only).
+//!
+//! CIDR allowlist matches apply per resolved address (a private CIDR must not
+//! exempt a sibling metadata/link-local answer). Non-default ports are allowed
+//! when the host or a resolved CIDR is allowlisted. Remaining TOCTOU: the
+//! subsequent HTTP client may re-resolve; pin the TCP peer in a later pass.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use waf_ids_core::ip_in_network;
@@ -57,6 +62,15 @@ impl DestinationPolicy {
         }
     }
 
+    /// Operator-visible policy class (`production` or `development`).
+    pub fn mode(&self) -> &'static str {
+        if self.allow_loopback_class {
+            "development"
+        } else {
+            "production"
+        }
+    }
+
     /// Parse comma-separated allow/deny lists (`host`, `*.suffix`, `cidr`).
     pub fn with_lists(mut self, allow: &str, deny: &str) -> Result<Self, String> {
         self.allow = parse_list(allow)?;
@@ -71,45 +85,8 @@ impl DestinationPolicy {
         resolver: &dyn HostResolver,
     ) -> Result<DestinationDecision, String> {
         let parsed = parse_outbound_url(raw)?;
-        let host_allowlisted = self.allow.iter().any(|entry| match entry {
-            ListEntry::Hostname(_) | ListEntry::Suffix(_) => {
-                matching_host(entry, &parsed.host, &[])
-            }
-            ListEntry::Cidr { .. } => false,
-        });
-        let literal_loopback = parsed.host == "localhost"
-            || parsed
-                .host
-                .parse::<IpAddr>()
-                .map(|ip| canonicalize_ip(ip).is_loopback())
-                .unwrap_or(false);
-        if parsed.port != 80
-            && parsed.port != 443
-            && !host_allowlisted
-            && !(self.allow_loopback_class && literal_loopback)
-        {
-            return Err(format!(
-                "destination port {} is not a default http/https port",
-                parsed.port
-            ));
-        }
-        let mut ips = Vec::new();
-        if parsed.host == "localhost" {
-            ips.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        } else if let Ok(ip) = parsed.host.parse::<IpAddr>() {
-            ips.push(canonicalize_ip(ip));
-        } else {
-            ips = resolver
-                .resolve(&parsed.host)
-                .map_err(|error| format!("destination DNS failed for {}: {error}", parsed.host))?;
-            if ips.is_empty() {
-                return Err(format!(
-                    "destination {} resolved to no addresses",
-                    parsed.host
-                ));
-            }
-            ips = ips.into_iter().map(canonicalize_ip).collect();
-        }
+        let ips = resolve_host_ips(&parsed.host, resolver)?;
+        let host_allowlisted = host_allowlisted(&self.allow, &parsed.host);
 
         if let Some(entry) = self.matching_entry(&self.deny, &parsed.host, &ips) {
             return Err(format!(
@@ -119,13 +96,26 @@ impl DestinationPolicy {
             ));
         }
 
-        let allowlisted = self
-            .matching_entry(&self.allow, &parsed.host, &ips)
-            .is_some();
+        let cidr_allowlisted = ips.iter().any(|ip| cidr_allows(&self.allow, *ip));
+        let loopback_ok = self.allow_loopback_class
+            && (parsed.host == "localhost" || ips.iter().any(|ip| ip.is_loopback()));
+        if parsed.port != 80
+            && parsed.port != 443
+            && !host_allowlisted
+            && !cidr_allowlisted
+            && !loopback_ok
+        {
+            return Err(format!(
+                "destination port {} is not a default http/https port",
+                parsed.port
+            ));
+        }
 
         for ip in &ips {
             if ip_is_denied_class(*ip) {
-                if allowlisted || (self.allow_loopback_class && ip.is_loopback()) {
+                let this_cidr = cidr_allows(&self.allow, *ip);
+                if host_allowlisted || this_cidr || (self.allow_loopback_class && ip.is_loopback())
+                {
                     continue;
                 }
                 return Err(format!(
@@ -174,6 +164,41 @@ impl HostResolver for SystemHostResolver {
     }
 }
 
+fn resolve_host_ips(host: &str, resolver: &dyn HostResolver) -> Result<Vec<IpAddr>, String> {
+    let mut ips = Vec::new();
+    if host == "localhost" {
+        ips.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    } else if let Ok(ip) = host.parse::<IpAddr>() {
+        ips.push(canonicalize_ip(ip));
+    } else {
+        ips = resolver
+            .resolve(host)
+            .map_err(|error| format!("destination DNS failed for {host}: {error}"))?;
+        if ips.is_empty() {
+            return Err(format!("destination {host} resolved to no addresses"));
+        }
+        ips = ips.into_iter().map(canonicalize_ip).collect();
+    }
+    Ok(ips)
+}
+
+fn host_allowlisted(entries: &[ListEntry], host: &str) -> bool {
+    entries.iter().any(|entry| match entry {
+        ListEntry::Hostname(_) | ListEntry::Suffix(_) => matching_host(entry, host, &[]),
+        ListEntry::Cidr { .. } => false,
+    })
+}
+
+fn cidr_allows(entries: &[ListEntry], ip: IpAddr) -> bool {
+    entries.iter().any(|entry| match entry {
+        ListEntry::Cidr {
+            network,
+            prefix_len,
+        } => ip_in_network(*network, *prefix_len, ip),
+        _ => false,
+    })
+}
+
 fn parse_outbound_url(raw: &str) -> Result<ParsedOutbound, String> {
     let parsed = reqwest::Url::parse(raw).map_err(|_| "destination URL must be absolute")?;
     match parsed.scheme() {
@@ -212,17 +237,33 @@ fn host_is_ambiguous_literal(host: &str) -> bool {
         return true;
     }
     let lowered = host.to_ascii_lowercase();
-    if lowered.contains("0x") {
+    // Bare hex IPv4 (0x7f000001), not a hostname that merely contains "0x".
+    if lowered.starts_with("0x")
+        && !lowered.contains('.')
+        && lowered[2..].chars().all(|c| c.is_ascii_hexdigit())
+        && lowered.len() > 2
+    {
         return true;
     }
-    let octets: Vec<&str> = host.split('.').collect();
-    octets.len() == 4
-        && octets
-            .iter()
-            .all(|octet| !octet.is_empty() && octet.chars().all(|c| c.is_ascii_digit()))
-        && octets
-            .iter()
-            .any(|octet| octet.len() > 1 && octet.starts_with('0'))
+    let octets: Vec<&str> = lowered.split('.').collect();
+    if octets.len() != 4 || octets.iter().any(|octet| octet.is_empty()) {
+        return false;
+    }
+    let all_numericish = octets.iter().all(|octet| octet_is_numericish(octet));
+    let any_non_decimal = octets.iter().any(|octet| octet_is_hex_or_octal(octet));
+    all_numericish && any_non_decimal
+}
+
+fn octet_is_numericish(octet: &str) -> bool {
+    octet.chars().all(|c| c.is_ascii_digit())
+        || (octet.starts_with("0x") && octet[2..].chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn octet_is_hex_or_octal(octet: &str) -> bool {
+    (octet.starts_with("0x")
+        && octet.len() > 2
+        && octet[2..].chars().all(|c| c.is_ascii_hexdigit()))
+        || (octet.len() > 1 && octet.starts_with('0') && octet.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn canonicalize_ip(ip: IpAddr) -> IpAddr {
@@ -258,6 +299,11 @@ fn ip_is_denied_class(ip: IpAddr) -> bool {
                     32,
                     ip,
                 )
+                || ip_in_network(
+                    IpAddr::V6(Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0)),
+                    10,
+                    ip,
+                )
                 || v6
                     .to_ipv4_mapped()
                     .is_some_and(|v4| ip_is_denied_class(IpAddr::V4(v4)))
@@ -283,6 +329,15 @@ fn parse_list(raw: &str) -> Result<Vec<ListEntry>, String> {
             let prefix_len: u8 = prefix
                 .parse()
                 .map_err(|_| format!("invalid CIDR prefix {prefix}"))?;
+            let max_prefix = match network {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            if prefix_len > max_prefix {
+                return Err(format!(
+                    "CIDR prefix {prefix_len} exceeds {max_prefix} for {network}"
+                ));
+            }
             out.push(ListEntry::Cidr {
                 network,
                 prefix_len,
@@ -383,6 +438,7 @@ mod tests {
             ("mixed.example", "203.0.113.10"),
             ("cgnat.example", "100.64.0.1"),
             ("ula.example", "fd12:3456:789a::1"),
+            ("example.com", "8.8.8.8"),
         ]);
         deny(&policy, "http://127.0.0.1/", &dns, "denied address class");
         deny(&policy, "http://0.0.0.0/", &dns, "denied address class");
@@ -498,5 +554,78 @@ mod tests {
         policy
             .evaluate("https://origin.example./path", &dns)
             .unwrap();
+    }
+
+    #[test]
+    fn hex_substring_in_a_real_hostname_is_not_an_ip_literal() {
+        let policy = DestinationPolicy::production();
+        let dns = resolver(&[]);
+        deny(
+            &policy,
+            "https://0x0.st/",
+            &dns,
+            "destination DNS failed for 0x0.st",
+        );
+        deny(&policy, "http://0x7f000001/", &dns, "denied");
+    }
+
+    #[test]
+    fn cidr_allowlist_permits_non_default_port_on_matching_literal() {
+        let policy = DestinationPolicy::production()
+            .with_lists("10.0.0.0/8", "")
+            .unwrap();
+        let dns = resolver(&[]);
+        policy.evaluate("http://10.1.2.3:8080/", &dns).unwrap();
+        deny(
+            &policy,
+            "http://8.8.8.8:8080/",
+            &dns,
+            "not a default http/https port",
+        );
+    }
+
+    #[test]
+    fn cidr_allowlist_does_not_exempt_sibling_denied_class_answers() {
+        let policy = DestinationPolicy::production()
+            .with_lists("10.0.0.0/8", "")
+            .unwrap();
+        let mut map = HashMap::new();
+        map.insert(
+            "split.internal".to_string(),
+            vec![
+                "10.1.1.1".parse().unwrap(),
+                "169.254.169.254".parse().unwrap(),
+            ],
+        );
+        let dns = MapResolver(map);
+        deny(
+            &policy,
+            "https://split.internal/",
+            &dns,
+            "denied address class 169.254.169.254",
+        );
+    }
+
+    #[test]
+    fn invalid_cidr_prefix_is_rejected_at_parse() {
+        let v4 = DestinationPolicy::production().with_lists("10.0.0.0/33", "");
+        assert!(
+            v4.unwrap_err().contains("CIDR prefix 33 exceeds 32"),
+            "IPv4 prefix must be at most /32"
+        );
+        let v6 = DestinationPolicy::production().with_lists("2001:db8::/129", "");
+        assert!(
+            v6.unwrap_err().contains("CIDR prefix 129 exceeds 128"),
+            "IPv6 prefix must be at most /128"
+        );
+    }
+
+    #[test]
+    fn production_denies_deprecated_ipv6_site_local() {
+        let policy = DestinationPolicy::production();
+        let dns = resolver(&[]);
+        deny(&policy, "http://[fec0::1]/", &dns, "denied address class");
+        assert_eq!(policy.mode(), "production");
+        assert_eq!(DestinationPolicy::development().mode(), "development");
     }
 }

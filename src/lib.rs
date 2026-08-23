@@ -13,7 +13,7 @@ use std::{
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs,
@@ -108,6 +108,7 @@ pub struct ClearfolioConfig {
 impl AppState {
     pub fn seeded(admin_token: Option<String>) -> Self {
         Self::new(AppData::seeded(), AppConfig::memory(admin_token))
+            .with_destination_policy(DestinationPolicy::development())
     }
 
     pub async fn load(config: AppConfig) -> Result<Self, String> {
@@ -142,7 +143,7 @@ impl AppState {
             clearfolio: None,
             soc_llm: None,
             proven_engine: ProvenEngineConfig::disabled(),
-            destination: DestinationPolicy::development(),
+            destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
         }
     }
@@ -181,10 +182,22 @@ impl AppState {
     }
 
     /// Fail closed before any outbound http/https send.
-    fn assert_outbound(&self, url: &str) -> Result<(), String> {
-        self.destination
-            .evaluate(url, self.resolver.as_ref())
-            .map(|_| ())
+    ///
+    /// Blocking OS DNS runs on `spawn_blocking` with a bounded timeout so a
+    /// hung resolver cannot starve Tokio workers.
+    async fn assert_outbound(&self, url: &str) -> Result<(), String> {
+        let policy = self.destination.clone();
+        let resolver = Arc::clone(&self.resolver);
+        let url = url.to_string();
+        tokio::time::timeout(
+            DESTINATION_RESOLVE_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                policy.evaluate(&url, resolver.as_ref()).map(|_| ())
+            }),
+        )
+        .await
+        .map_err(|_| "destination DNS timed out".to_string())?
+        .map_err(|_| "destination evaluation cancelled".to_string())?
     }
 
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
@@ -285,6 +298,7 @@ impl AppState {
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
             proven_engine: self.proven_engine.mode().to_string(),
             proven_engine_fail_closed: self.proven_engine.fail_closed,
+            destination_mode: self.destination.mode().to_string(),
         }
     }
 }
@@ -410,6 +424,8 @@ pub struct HealthStatus {
     pub proven_engine: String,
     /// True when a configured sidecar outage fails the live transaction closed.
     pub proven_engine_fail_closed: bool,
+    /// `production` (fail-closed classes) or `development` (loopback class permitted).
+    pub destination_mode: String,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -423,6 +439,8 @@ const PHISHING_DATABASE_DEFAULT_IP_LIMIT: usize = 5_000;
 const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
 const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
 const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
+/// Bounded wait for blocking OS DNS inside destination-policy evaluation.
+const DESTINATION_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
@@ -630,7 +648,7 @@ async fn clearfolio_submit(
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
     let submit_url = clearfolio_submit_url(&config.base_url);
-    if let Err(message) = state.assert_outbound(&submit_url) {
+    if let Err(message) = state.assert_outbound(&submit_url).await {
         return error(StatusCode::BAD_REQUEST, message);
     }
     let mut request = state.http.post(submit_url).multipart(form);
@@ -663,7 +681,7 @@ async fn clearfolio_status(
         );
     };
     let status_url = clearfolio_status_url(&config.base_url, &job_id);
-    if let Err(message) = state.assert_outbound(&status_url) {
+    if let Err(message) = state.assert_outbound(&status_url).await {
         return error(StatusCode::BAD_REQUEST, message);
     }
     let mut request = state.http.get(status_url);
@@ -805,7 +823,7 @@ async fn soc_analyze(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
-    if let Err(message) = state.assert_outbound(&endpoint) {
+    if let Err(message) = state.assert_outbound(&endpoint).await {
         return error(StatusCode::BAD_REQUEST, message);
     }
     let response = state
@@ -896,7 +914,7 @@ async fn create_route(
         return error(StatusCode::BAD_REQUEST, message);
     }
     if (route.upstream.starts_with("http://") || route.upstream.starts_with("https://"))
-        && let Err(message) = state.assert_outbound(&route.upstream)
+        && let Err(message) = state.assert_outbound(&route.upstream).await
     {
         return error(StatusCode::BAD_REQUEST, message);
     }
@@ -1623,7 +1641,7 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    state.assert_outbound(url)?;
+    state.assert_outbound(url).await?;
     let mut request = state
         .feed_http
         .get(url)
@@ -2338,7 +2356,7 @@ async fn consult_proven_engine(
     else {
         return ProvenEngineOutcome::NotConfigured;
     };
-    if let Err(reason) = state.assert_outbound(&url) {
+    if let Err(reason) = state.assert_outbound(&url).await {
         return ProvenEngineOutcome::Unavailable { reason };
     }
     proven_engine::evaluate_sidecar(&state.http, &url, method, request_uri, body_text, client_ip)
@@ -2379,7 +2397,7 @@ async fn proxy_request(
     body: Bytes,
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
-    state.assert_outbound(&target)?;
+    state.assert_outbound(&target).await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = state
@@ -2642,7 +2660,7 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
 
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    state.assert_outbound(url)?;
+    state.assert_outbound(url).await?;
     let response = state
         .feed_http
         .get(url)
@@ -3233,12 +3251,6 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    let local_addr = listener.local_addr()?;
-    println!("waf-ids-ai-soc listening on http://{local_addr}");
-    // Flush so a supervising parent process (the e2e test) sees the readiness
-    // line immediately even though stdout is block-buffered when piped.
-    std::io::Write::flush(&mut std::io::stdout())?;
     let coraza_waf_url = std::env::var("CORAZA_WAF_URL")
         .ok()
         .map(|value| value.trim().to_string())
@@ -3255,6 +3267,7 @@ pub async fn run_from_env(
             fail_closed: proven_engine_fail_closed,
         },
     };
+    let destination_policy = startup_destination_policy(&bind_addr)?;
     let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
@@ -3262,8 +3275,14 @@ pub async fn run_from_env(
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_proven_engine(proven_engine)
-        .with_destination_policy(startup_destination_policy(&bind_addr)?)
+        .with_destination_policy(destination_policy)
         .with_max_body_size(max_body_bytes);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+    println!("waf-ids-ai-soc listening on http://{local_addr}");
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;
@@ -3309,6 +3328,8 @@ mod tests {
             "MAX_BODY_BYTES",
             "CORAZA_WAF_URL",
             "PROVEN_ENGINE_FAIL_CLOSED",
+            "DESTINATION_ALLOWLIST",
+            "DESTINATION_DENYLIST",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -3410,6 +3431,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_from_env_rejects_malformed_destination_allowlist() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("DESTINATION_ALLOWLIST", "10.0.0.0/33");
+        }
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
     async fn run_from_env_rejects_malformed_max_body_bytes() {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
@@ -3439,7 +3476,7 @@ mod tests {
             std::env::set_var("BIND_ADDR", "127.0.0.1:0");
             std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
         }
-        // Bind succeeds, but loading corrupt persisted state maps to an error.
+        // Corrupt persisted state is a hard error before the listener binds.
         assert!(
             run_from_env(Box::pin(std::future::ready(())))
                 .await
@@ -4264,6 +4301,7 @@ mod tests {
             json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
         assert_eq!(health.persistence, "file");
         assert_eq!(health.dnsbl_origin, "dnsbl.example");
+        assert_eq!(health.destination_mode, "production");
 
         let block_route = RouteConfig {
             id: "secure".to_string(),
@@ -5950,7 +5988,8 @@ mod tests {
                 dnsbl_origin: "dnsbl.local".to_string(),
                 event_limit: 20,
             },
-        );
+        )
+        .with_destination_policy(DestinationPolicy::development());
         let app = build_app(state);
 
         let no_route = app_request(&app, empty_request(Method::GET, "/gateway/none")).await;
@@ -7034,6 +7073,7 @@ mod tests {
                 admin_auth_configured: false,
                 proven_engine: "ingest_hints_only".to_string(),
                 proven_engine_fail_closed: false,
+                destination_mode: "production".to_string(),
             }
         );
 
@@ -7044,6 +7084,69 @@ mod tests {
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
+        assert_eq!(
+            AppState::seeded(None).health_status().destination_mode,
+            "development"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_route_fail_closes_private_upstream_unless_cidr_allowlisted() {
+        let denied_app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_destination_policy(DestinationPolicy::production()),
+        );
+        let denied = app_request(
+            &denied_app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "internal-svc",
+                    "path_prefix": "/internal",
+                    "upstream": "http://10.1.2.3:8080/",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        let denied_body = body_text(denied).await;
+        assert!(
+            denied_body.contains("not a default http/https port")
+                || denied_body.contains("denied address class"),
+            "production policy must reject a private non-default-port upstream: {denied_body}"
+        );
+
+        let allowlisted = DestinationPolicy::production()
+            .with_lists("10.0.0.0/8", "")
+            .expect("valid CIDR allowlist");
+        let allowed_app = build_app(
+            AppState::seeded(Some("secret".to_string())).with_destination_policy(allowlisted),
+        );
+        let created = app_request(
+            &allowed_app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "internal-svc",
+                    "path_prefix": "/internal",
+                    "upstream": "http://10.1.2.3:8080/",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let health: HealthStatus =
+            json_body(app_request(&allowed_app, empty_request(Method::GET, "/healthz")).await)
+                .await;
+        assert_eq!(health.destination_mode, "production");
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
@@ -7256,11 +7359,13 @@ mod tests {
     fn state_with_event_and_llm(base_url: &str) -> AppState {
         let mut data = AppData::seeded();
         data.events.push(soc_test_event());
-        AppState::new(data, AppConfig::memory(None)).with_soc_llm(Some(SocLlmConfig {
-            base_url: base_url.to_string(),
-            token: "test-token".to_string(),
-            model: "contextual-orchestrator".to_string(),
-        }))
+        AppState::new(data, AppConfig::memory(None))
+            .with_destination_policy(DestinationPolicy::development())
+            .with_soc_llm(Some(SocLlmConfig {
+                base_url: base_url.to_string(),
+                token: "test-token".to_string(),
+                model: "contextual-orchestrator".to_string(),
+            }))
     }
 
     async fn spawn_chat_mock(response: &'static str) -> std::net::SocketAddr {
