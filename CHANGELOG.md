@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Tagged releases (`vX.Y.Z`) build a locked binary, SHA-256 checksums, a GitHub Release, and an immutable GHCR image (`ghcr.io/contextualwisdomlab/waf-ids-ai-soc:vX.Y.Z`). Promotion and rollback are tag-for-tag (`docs/runbooks/release.md`). No moving `latest` tag.
 - PostgreSQL outbox consumers for TAXII poll, Clearfolio document submit, and contextual-orchestrator SOC analysis (issue #81 remainder). Operator-triggered HTTP leaves through `taxii.collection_polled`, `clearfolio.document_submitted`, and `soc.analysis_requested` with leased-worker retries and unique receipts. Request path returns HTTP 202 and `GET /api/outbox/{message_id}` exposes receipt evidence. Secrets never enter outbox payloads (TAXII bearer lives in the credential registry). File/memory adapters keep the previous synchronous path. Client IPs, paths, indicator values, and actor names stay unmasked. LLM analysis remains advisory and never auto-enforces.
 
 

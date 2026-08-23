@@ -227,3 +227,32 @@ fn spawn_ready_gateway() -> Child {
     );
     child
 }
+
+#[test]
+fn release_checksums_script_emits_sha256_lines() {
+    let dir = std::env::temp_dir().join(format!("wardnet-checksums-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let artifact = dir.join("artifact.bin");
+    std::fs::write(&artifact, b"wardnet-release-fixture").expect("write fixture");
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/release-checksums.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg(&artifact)
+        .output()
+        .expect("run release-checksums.sh");
+    assert!(
+        output.status.success(),
+        "checksums script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().expect("one checksum line");
+    let digest = line.split_whitespace().next().expect("hex digest");
+    assert_eq!(digest.len(), 64, "SHA-256 hex: {line}");
+    assert!(
+        digest.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "digest must be hex: {digest}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

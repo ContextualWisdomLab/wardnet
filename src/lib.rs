@@ -5910,6 +5910,18 @@ mod tests {
                 .iter()
                 .any(|path| path == "Dockerfile")
         );
+        assert!(
+            final_readiness
+                .deployment_assets
+                .iter()
+                .any(|path| path == ".github/workflows/release.yml")
+        );
+        assert!(
+            final_readiness
+                .buyer_evidence
+                .iter()
+                .any(|path| path == "docs/runbooks/release.md")
+        );
 
         let manifest: BuyerEvidenceManifest = json_body(
             app_request(
