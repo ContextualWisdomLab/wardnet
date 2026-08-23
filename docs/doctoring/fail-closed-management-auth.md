@@ -49,7 +49,9 @@ https://cwe.mitre.org/data/definitions/306.html
 | Fail closed on public bind | `require_write_auth_for_bind` + `run_from_env` |
 | Loopback development remains usable | `listen_is_loopback_only`; `/healthz.auth_mode=development` |
 | 401 vs 403 | `reject_management_write` |
-| Constant-time compare | `constant_time_eq` over RBAC map and shared token |
+| Constant-time compare | `constant_time_eq` mixes a length-inequality flag, not `(len ^ len) as u8` |
+| Blank credentials path | empty/whitespace `WAF_IDS_CREDENTIALS_PATH` is unset |
+| Smoke-test token | `scripts/smoke.sh` generates a per-process secret (CWE-798) |
 | Ambiguous token registry | `parse_admin_tokens_strict` (duplicate / blank / unknown role) |
 
 PII is **not** masked on security events: SOC operators cannot do their job if

@@ -5,7 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 STATE_FILE="$TMP_DIR/state.json"
 LOG_FILE="$TMP_DIR/server.log"
-ADMIN_TOKEN_VALUE="dev-secret"
+ADMIN_TOKEN_VALUE="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+)"
 PORT="$(python3 - <<'PY'
 import socket
 s = socket.socket()

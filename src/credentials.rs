@@ -149,8 +149,9 @@ fn nonempty_credentials_path(path: &Path) -> Option<&Path> {
 
 /// Constant-time equality for presented admin secrets.
 ///
-/// Length is mixed into the accumulator so a mismatched length does not take a
-/// faster path that would reveal the expected secret size.
+/// Length inequality is mixed in as a boolean flag, not a truncated integer
+/// XOR. Folding `(left.len() ^ right.len()) as u8` would treat lengths that
+/// differ by a multiple of 256 as equal when the extra bytes are `0x00`.
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let max = left.len().max(right.len());
     let mut diff = u8::from(left.len() != right.len());
