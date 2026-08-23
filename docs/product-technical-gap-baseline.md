@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T15:05Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-23T15:20Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -25,7 +25,7 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `feat/issue-79-destination-policy` stacked on #95 | local fmt/test/clippy green this hour (still-valid review fixes). Copilot review requested. | Author this pass; Devin/Codex COMMENTED on prior head. | Org 2-approval + self-author. Merge #95 first. `gh pr merge` rejected by ruleset 18156473. |
+| [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `feat/issue-79-destination-policy` stacked on #95 | TCP-peer pin this hour (local fmt/test/clippy after pin). Copilot review to re-request. | Author this pass; Devin/Codex COMMENTED on prior head (TOCTOU P1 addressed by pin). | Org 2-approval + self-author. Merge #95 first. `gh pr merge` rejected by ruleset 18156473. |
 | [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | feat(waf): consult Coraza sidecar on live gateway transactions | `ba9ee3a` (`feat/issue-86-in-path-coraza`) | rust + Security Scan green; strix in_progress at snapshot; opencode-review queued. Copilot review requested. | Author this pass; Devin/Codex COMMENTED. | Org 2-approval + self-author. Do not re-implement sidecar slice. |
 | [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | fix(auth): fail closed without write-capable admin on public bind | `f31d960` (`fix/issue-78-fail-closed-credentials`) | Concurrent commit moved state validation before readiness (closes prior rust failure `binary_does_not_report_readiness_before_state_validation` on `b9daeb5`). Checks re-running. Copilot review requested. | Author `seonghobae`; Devin COMMENTED. | Org 2-approval + self-author. Do not `--admin` merge. Do not re-implement #78. |
 | [#93](https://github.com/ContextualWisdomLab/wardnet/pull/93) | test(persistence): replace permission-based fault injection with a deterministic seam | `f77eb697` | rust + Security Scan green; **strix FAILURE** (job `97189711094`). Artifact `strix-reports` id `9493001688`. Root cause is org LiteLLM provider `openai-direct/gpt-5.6-luna` (0 vulns then fail-closed). Not a wardnet code finding. | Author `seonghobae`; Devin COMMENTED. | strix org-provider FAILURE + 2-approval + self-author. Do not rotate review-agent keys. |
@@ -128,9 +128,12 @@ This hour's still-valid review fixes (operator-visible):
 - Blocking OS DNS runs on `spawn_blocking` with a 2s timeout.
 - Persistence and destination-list validation complete **before** the readiness
   line (binary test `binary_does_not_report_readiness_before_state_validation`).
+- After evaluation, the outbound HTTP client connects **only** to those
+  addresses (Host/SNI preserved). Driving tests:
+  `proxy_request_connects_to_pinned_policy_addresses` and
+  `outbound_http_fails_closed_without_a_preauthorized_pin`.
 
-Remaining: custom connector that pins the TCP peer to the evaluated IP (full
-TOCTOU close); Kubernetes NetworkPolicy examples as defense in depth.
+Remaining: Kubernetes NetworkPolicy examples as defense in depth.
 
 ### SIEM / OpenTelemetry (issue #85 / PR #90)
 
@@ -172,15 +175,14 @@ Remaining holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
-Issue **#79** remaining review-hardening on PR #96 (still unmerged; policy
-blocks). Operator-visible: `/healthz.destination_mode`; CIDR allowlist no longer
-exempts sibling denied-class DNS answers; CIDR entries authorize non-default
-ports; invalid prefixes fail closed at startup; IPv6 site-local is denied;
-readiness is not printed until state validates. Driving test:
-`create_route_fail_closes_private_upstream_unless_cidr_allowlisted` (real
-`POST /api/routes` through `assert_outbound`). #78 remains on PR #94 (`f31d960`
-already moved state validation before readiness — do not re-implement). #86
-sidecar remains on PR #95 — do not re-implement that slice.
+Issue **#79** TCP-peer pin on PR #96 (still unmerged; policy blocks). After
+`assert_outbound` allows a host, reqwest DNS returns only those evaluated
+addresses so a rebinding answer cannot reach loopback/private/metadata.
+Operator-visible: `/healthz.destination_mode` plus pin tests
+`proxy_request_connects_to_pinned_policy_addresses` (real `proxy_request` to
+`pin-test.invalid` mapped to a local listener) and
+`outbound_http_fails_closed_without_a_preauthorized_pin`. #78 remains on PR
+#94. #86 sidecar remains on PR #95 — do not re-implement those slices.
 
 ## Next hourly loop (do, do not report)
 
@@ -193,6 +195,6 @@ sidecar remains on PR #95 — do not re-implement that slice.
    `codex/strix-fail-closed-provider-evidence`.
 4. Sticky opencode `CHANGES_REQUESTED` on #72 head `6881f47` — review job does
    not post APPROVE.
-5. Next runtime gap if policy still blocks: TCP-peer pin remainder of #79, or
-   #80 durable control plane, or Suricata EVE tail/shipper (remainder of #86).
+5. Next runtime gap if policy still blocks: in-process libcoraza remainder of
+   #86, or #80 durable control plane, or #81 outbox/workers.
 6. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.

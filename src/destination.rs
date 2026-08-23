@@ -8,11 +8,20 @@
 //!
 //! CIDR allowlist matches apply per resolved address (a private CIDR must not
 //! exempt a sibling metadata/link-local answer). Non-default ports are allowed
-//! when the host or a resolved CIDR is allowlisted. Remaining TOCTOU: the
-//! subsequent HTTP client may re-resolve; pin the TCP peer in a later pass.
+//! when the host or a resolved CIDR is allowlisted. The outbound HTTP client
+//! does not re-resolve: it connects only to addresses recorded by a successful
+//! evaluation (Host/SNI stay on the original name).
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    sync::{Arc, Mutex},
+};
 use waf_ids_core::ip_in_network;
+
+/// Cap on remembered (host → evaluated IPs) pins so a hostile name flood
+/// cannot grow the table without bound. Eviction is wholesale, not LRU.
+const MAX_DESTINATION_PINS: usize = 4096;
 
 /// Outcome of a destination-policy check. `reason` never includes credentials
 /// or query strings.
@@ -134,6 +143,77 @@ impl DestinationPolicy {
     }
 }
 
+/// Process-local map of hostname → addresses that already passed policy.
+///
+/// The outbound reqwest client uses [`PinnedDns`] so TCP connects to these
+/// addresses and never asks the OS resolver a second time (DNS rebinding /
+/// TOCTOU close).
+#[derive(Default)]
+pub(crate) struct DestinationPins {
+    inner: Mutex<HashMap<String, Vec<IpAddr>>>,
+}
+
+impl DestinationPins {
+    pub(crate) fn record(&self, host: &str, ips: &[IpAddr]) {
+        let host = normalize_dns_host(host);
+        let mut map = self.inner.lock().expect("destination pin lock");
+        if map.len() >= MAX_DESTINATION_PINS {
+            map.clear();
+        }
+        map.insert(host, ips.to_vec());
+    }
+
+    pub(crate) fn lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
+        let host = normalize_dns_host(host);
+        self.inner
+            .lock()
+            .expect("destination pin lock")
+            .get(&host)
+            .cloned()
+    }
+}
+
+/// reqwest DNS resolver that returns only pre-authorized addresses.
+pub(crate) struct PinnedDns {
+    pins: Arc<DestinationPins>,
+}
+
+impl PinnedDns {
+    pub(crate) fn new(pins: Arc<DestinationPins>) -> Self {
+        Self { pins }
+    }
+}
+
+#[derive(Debug)]
+struct UnpinnedHost(String);
+
+impl std::fmt::Display for UnpinnedHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "destination host {} is not pre-authorized", self.0)
+    }
+}
+
+impl std::error::Error for UnpinnedHost {}
+
+impl reqwest::dns::Resolve for PinnedDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let pins = Arc::clone(&self.pins);
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let Some(ips) = pins.lookup(&host) else {
+                return Err(Box::new(UnpinnedHost(normalize_dns_host(&host)))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            };
+            let addrs: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, 0)).collect();
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn normalize_dns_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
 struct ParsedOutbound {
     host: String,
     port: u16,
@@ -227,7 +307,7 @@ fn parse_outbound_url(raw: &str) -> Result<ParsedOutbound, String> {
     }
     let port = parsed.port_or_known_default().unwrap_or(0);
     Ok(ParsedOutbound {
-        host: host.trim_end_matches('.').to_ascii_lowercase(),
+        host: normalize_dns_host(host),
         port,
     })
 }
@@ -627,5 +707,30 @@ mod tests {
         deny(&policy, "http://[fec0::1]/", &dns, "denied address class");
         assert_eq!(policy.mode(), "production");
         assert_eq!(DestinationPolicy::development().mode(), "development");
+    }
+
+    #[test]
+    fn pin_board_records_evaluated_ips_and_normalizes_the_host() {
+        let pins = DestinationPins::default();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        pins.record("Pin-Test.invalid.", &[loopback]);
+        assert_eq!(pins.lookup("pin-test.invalid"), Some(vec![loopback]));
+        assert_eq!(pins.lookup("PIN-TEST.invalid."), Some(vec![loopback]));
+        assert!(pins.lookup("other.invalid").is_none());
+    }
+
+    #[test]
+    fn pin_board_evicts_when_the_cap_is_exceeded() {
+        let pins = DestinationPins::default();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        for i in 0..MAX_DESTINATION_PINS {
+            pins.record(&format!("host{i}.invalid"), &[loopback]);
+        }
+        pins.record("overflow.invalid", &[loopback]);
+        assert!(
+            pins.lookup("host0.invalid").is_none(),
+            "wholesale eviction must drop the oldest batch"
+        );
+        assert_eq!(pins.lookup("overflow.invalid"), Some(vec![loopback]));
     }
 }

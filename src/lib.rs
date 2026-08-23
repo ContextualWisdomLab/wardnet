@@ -80,6 +80,9 @@ pub struct AppState {
     /// Fail-closed destination policy for every outbound http/https call.
     destination: DestinationPolicy,
     resolver: Arc<dyn HostResolver + Send + Sync>,
+    /// Addresses that already passed policy; the HTTP clients resolve through
+    /// this pin board instead of a second OS DNS lookup.
+    pins: Arc<destination::DestinationPins>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -125,11 +128,12 @@ impl AppState {
     }
 
     fn new(data: AppData, config: AppConfig) -> Self {
+        let pins = Arc::new(destination::DestinationPins::default());
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: outbound_http_client(),
-            feed_http: outbound_http_client(),
+            http: outbound_http_client(Arc::clone(&pins)),
+            feed_http: outbound_http_client(Arc::clone(&pins)),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
@@ -145,6 +149,7 @@ impl AppState {
             proven_engine: ProvenEngineConfig::disabled(),
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
+            pins,
         }
     }
 
@@ -181,23 +186,32 @@ impl AppState {
         self
     }
 
+    /// Replace the destination DNS resolver. Tests inject a static map so a
+    /// hostname that is not in OS DNS can still be evaluated and pinned.
+    #[cfg(test)]
+    fn with_resolver(mut self, resolver: Arc<dyn HostResolver + Send + Sync>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
     /// Fail closed before any outbound http/https send.
     ///
     /// Blocking OS DNS runs on `spawn_blocking` with a bounded timeout so a
-    /// hung resolver cannot starve Tokio workers.
+    /// hung resolver cannot starve Tokio workers. Successful evaluations are
+    /// recorded on the pin board the HTTP clients use for connect-time DNS.
     async fn assert_outbound(&self, url: &str) -> Result<(), String> {
         let policy = self.destination.clone();
         let resolver = Arc::clone(&self.resolver);
         let url = url.to_string();
-        tokio::time::timeout(
+        let decision = tokio::time::timeout(
             DESTINATION_RESOLVE_TIMEOUT,
-            tokio::task::spawn_blocking(move || {
-                policy.evaluate(&url, resolver.as_ref()).map(|_| ())
-            }),
+            tokio::task::spawn_blocking(move || policy.evaluate(&url, resolver.as_ref())),
         )
         .await
         .map_err(|_| "destination DNS timed out".to_string())?
-        .map_err(|_| "destination evaluation cancelled".to_string())?
+        .map_err(|_| "destination evaluation cancelled".to_string())??;
+        self.pins.record(&decision.host, &decision.ips);
+        Ok(())
     }
 
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
@@ -3168,10 +3182,11 @@ pub fn parse_u64_env(
     }
 }
 
-fn outbound_http_client() -> reqwest::Client {
+fn outbound_http_client(pins: Arc<destination::DestinationPins>) -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
+        .dns_resolver(Arc::new(destination::PinnedDns::new(pins)))
         .build()
         .expect("failed to build fail-closed outbound HTTP client")
 }
@@ -7147,6 +7162,75 @@ mod tests {
             json_body(app_request(&allowed_app, empty_request(Method::GET, "/healthz")).await)
                 .await;
         assert_eq!(health.destination_mode, "production");
+    }
+
+    struct PinMapResolver(HashMap<String, Vec<IpAddr>>);
+
+    impl HostResolver for PinMapResolver {
+        fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+            self.0
+                .get(host)
+                .cloned()
+                .ok_or_else(|| format!("no fixture for {host}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_request_connects_to_pinned_policy_addresses() {
+        let upstream_app = Router::new().route("/", get(|| async { (StatusCode::OK, "pinned") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream_app).into_future());
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "pin-test.invalid".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        );
+        let state = AppState::seeded(None).with_resolver(Arc::new(PinMapResolver(answers)));
+
+        let response = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "pin".to_string(),
+                path_prefix: "/pin".to_string(),
+                upstream: format!("http://pin-test.invalid:{}", addr.port()),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/pin",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect("pinned hostname must connect to the evaluated loopback address");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64).await.unwrap();
+        assert_eq!(&bytes[..], b"pinned");
+    }
+
+    #[tokio::test]
+    async fn outbound_http_fails_closed_without_a_preauthorized_pin() {
+        let state = AppState::seeded(None);
+        let error = state
+            .http
+            .get("http://pin-test.invalid/")
+            .send()
+            .await
+            .expect_err("unpinned hostname must not hit OS DNS");
+        let mut message = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(err) = source {
+            message.push(' ');
+            message.push_str(&err.to_string());
+            source = err.source();
+        }
+        assert!(
+            message.contains("not pre-authorized"),
+            "fail-closed pin resolver must surface in the reqwest error: {message}"
+        );
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {

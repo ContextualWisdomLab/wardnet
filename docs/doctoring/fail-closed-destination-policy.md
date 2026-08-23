@@ -33,8 +33,9 @@ https://doi.org/10.1145/1315245.1315298
 - **Design impact:** CIDR allowlist exceptions apply per resolved address so a
   private-range answer cannot exempt a sibling metadata or link-local record.
   Blocking OS DNS is offloaded from Tokio workers with a two-second timeout.
-  Connecting to the evaluated IP (full TOCTOU close) remains follow-up work;
-  the ACM paper is not redistributed.
+  After evaluation succeeds, the HTTP client connects only to those addresses
+  (original Host/SNI preserved) so a rebinding answer cannot reach a denied
+  class. The ACM paper is not redistributed.
 
 National Institute of Standards and Technology. (2022). *Secure Software
 Development Framework (SSDF) version 1.1* (NIST SP 800-218).
@@ -54,4 +55,5 @@ listeners use the strict class list. `/healthz.destination_mode` reports
 `production` or `development`. CIDR prefixes outside `/32` (IPv4) or `/128`
 (IPv6) fail startup. Deprecated IPv6 site-local (`fec0::/10`) is a denied
 class. Hostnames that merely contain `0x` (for example `0x0.st`) are not
-treated as hex IP literals.
+treated as hex IP literals. Outbound HTTP does not re-query OS DNS: it
+connects to the evaluated addresses only.
