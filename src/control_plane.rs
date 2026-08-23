@@ -10,8 +10,10 @@ use crate::outbox::{
     LEASE_SECONDS, LIST_LIMIT, OutboxHealth, OutboxMessage, SCHEMA_VERSION, STATUS_DEAD_LETTER,
     STATUS_LEASED, STATUS_PENDING, STATUS_PROCESSED,
 };
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -24,6 +26,10 @@ use waf_ids_core::{
 pub const DEFAULT_TENANT_ID: &str = "local-lab";
 
 const MIGRATION_VERSION: i32 = 2;
+/// Declared RPO: last successful `GET /api/backup` (on-demand logical snapshot).
+pub const BACKUP_RPO: &str = "on-demand-logical-snapshot";
+/// Declared RTO budget for an isolated restore drill.
+pub const BACKUP_RTO_BUDGET_MS: u64 = 60_000;
 
 /// Recoverable forward migration. Two-word snake_case names, 3NF, RLS.
 pub const MIGRATION_SQL: &str = r#"
@@ -475,6 +481,153 @@ impl PostgresPlane {
         let mut client = self.client.lock().await;
         replay_dead_letter(&mut client, &self.tenant_id, message_id, now_unix).await
     }
+
+    /// Tenant-scoped logical backup. Client IPs, paths, and actor names stay unmasked.
+    pub async fn logical_backup(&self) -> Result<ControlPlaneBackup, String> {
+        let mut client = self.client.lock().await;
+        export_backup(&mut client, &self.tenant_id).await
+    }
+
+    /// Restore a verified artifact into this tenant. Fail closed on schema or hash mismatch.
+    pub async fn restore_logical_backup(&self, backup: &ControlPlaneBackup) -> Result<(), String> {
+        backup.verify()?;
+        let mut client = self.client.lock().await;
+        restore_backup(&mut client, &self.tenant_id, backup).await
+    }
+
+    /// Restore into an isolated tenant, compare invariants, then drop the drill tenant.
+    pub async fn restore_drill(&self) -> Result<BackupDrillReport, String> {
+        let started = Instant::now();
+        let backup = self.logical_backup().await?;
+        let isolated = format!("restore-drill-{}-{}", std::process::id(), unix_now_i64());
+        let mut client = self.client.lock().await;
+        restore_backup(&mut client, &isolated, &backup).await?;
+        let restored = export_backup(&mut client, &isolated).await?;
+        drop_tenant(&mut client, &isolated).await?;
+        let source_hash = backup.semantic_hash()?;
+        let restored_hash = restored.semantic_hash()?;
+        let passed = source_hash == restored_hash
+            && restored.snapshot.routes == backup.snapshot.routes
+            && restored.snapshot.events == backup.snapshot.events
+            && restored.snapshot.threats == backup.snapshot.threats
+            && restored.snapshot.dnsbl == backup.snapshot.dnsbl
+            && restored.outbox.len() == backup.outbox.len()
+            && restored.receipts.len() == backup.receipts.len();
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok(BackupDrillReport {
+            passed,
+            duration_ms,
+            rpo: BACKUP_RPO.to_string(),
+            rto_budget_ms: BACKUP_RTO_BUDGET_MS,
+            source_hash,
+            restored_hash,
+            route_count: backup.snapshot.routes.len(),
+            event_count: backup.snapshot.events.len(),
+            outbox_count: backup.outbox.len(),
+            receipt_count: backup.receipts.len(),
+            isolated_tenant_id: isolated,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboxReceiptRow {
+    pub tenant_id: String,
+    pub idempotency_key: String,
+    pub message_id: String,
+    pub processed_unix: i64,
+    pub receipt_evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneBackup {
+    pub schema_version: i32,
+    pub tenant_id: String,
+    pub created_unix: i64,
+    pub snapshot: AppData,
+    pub outbox: Vec<OutboxMessage>,
+    pub receipts: Vec<OutboxReceiptRow>,
+    pub payload_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupDrillReport {
+    pub passed: bool,
+    pub duration_ms: u64,
+    pub rpo: String,
+    pub rto_budget_ms: u64,
+    pub source_hash: String,
+    pub restored_hash: String,
+    pub route_count: usize,
+    pub event_count: usize,
+    pub outbox_count: usize,
+    pub receipt_count: usize,
+    pub isolated_tenant_id: String,
+}
+
+impl ControlPlaneBackup {
+    fn unsigned_json(&self) -> Result<String, String> {
+        let mut unsigned = self.clone();
+        unsigned.payload_hash.clear();
+        serde_json::to_string(&unsigned)
+            .map_err(|error| format!("backup serialize failed: {error}"))
+    }
+
+    fn seal(mut self) -> Result<Self, String> {
+        self.payload_hash.clear();
+        let json = self.unsigned_json()?;
+        self.payload_hash = outbox::payload_hash(&json);
+        Ok(self)
+    }
+
+    /// Fail closed when the schema is unsupported or the artifact was tampered with.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.schema_version != MIGRATION_VERSION {
+            return Err(format!(
+                "backup schema_version {} is unsupported; expected {MIGRATION_VERSION}",
+                self.schema_version
+            ));
+        }
+        if self.tenant_id.trim().is_empty() {
+            return Err("backup tenant_id must be non-empty".to_string());
+        }
+        let expected = outbox::payload_hash(&self.unsigned_json()?);
+        if expected != self.payload_hash {
+            return Err("backup payload_hash does not match contents".to_string());
+        }
+        Ok(())
+    }
+
+    fn semantic_hash(&self) -> Result<String, String> {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.commercial.tenant_id.clear();
+        let mut outbox: Vec<_> = self
+            .outbox
+            .iter()
+            .map(|message| {
+                (
+                    message.idempotency_key.clone(),
+                    message.payload_hash.clone(),
+                    message.message_status.clone(),
+                    message.payload_json.clone(),
+                )
+            })
+            .collect();
+        outbox.sort();
+        let mut receipts: Vec<_> = self
+            .receipts
+            .iter()
+            .map(|row| (row.idempotency_key.clone(), row.receipt_evidence.clone()))
+            .collect();
+        receipts.sort();
+        let body = serde_json::json!({
+            "snapshot": snapshot,
+            "outbox": outbox,
+            "receipts": receipts,
+        })
+        .to_string();
+        Ok(outbox::payload_hash(&body))
+    }
 }
 
 async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<AppData>, String> {
@@ -543,6 +696,21 @@ async fn save_snapshot(
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
 
+    write_snapshot_rows(&tx, tenant_id, data).await?;
+    enqueue_snapshot_outbox(&tx, tenant_id, data).await?;
+    prune_processed_outbox(&tx, tenant_id, keep).await?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("control plane commit failed: {error}"))?;
+    Ok(())
+}
+
+async fn write_snapshot_rows(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    data: &AppData,
+) -> Result<(), String> {
     tx.execute(
         "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence)
          VALUES ($1, $2, $3)
@@ -723,13 +891,6 @@ async fn save_snapshot(
         .await
         .map_err(|error| format!("control plane insert threat_feed failed: {error}"))?;
     }
-
-    enqueue_snapshot_outbox(&tx, tenant_id, data).await?;
-    prune_processed_outbox(&tx, tenant_id, keep).await?;
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("control plane commit failed: {error}"))?;
     Ok(())
 }
 
@@ -1514,6 +1675,187 @@ async fn replay_dead_letter(
     Ok(())
 }
 
+async fn export_backup(client: &mut Client, tenant_id: &str) -> Result<ControlPlaneBackup, String> {
+    let snapshot = load_snapshot(client, tenant_id)
+        .await?
+        .ok_or_else(|| format!("tenant {tenant_id} has no snapshot to back up"))?;
+    let outbox = list_outbox(client, tenant_id, i64::MAX).await?;
+    let receipts = list_receipts(client, tenant_id).await?;
+    ControlPlaneBackup {
+        schema_version: MIGRATION_VERSION,
+        tenant_id: tenant_id.to_string(),
+        created_unix: unix_now_i64(),
+        snapshot,
+        outbox,
+        receipts,
+        payload_hash: String::new(),
+    }
+    .seal()
+}
+
+async fn list_receipts(
+    client: &mut Client,
+    tenant_id: &str,
+) -> Result<Vec<OutboxReceiptRow>, String> {
+    let tx = client
+        .transaction()
+        .await
+        .map_err(|error| format!("control plane receipt list transaction failed: {error}"))?;
+    tx.execute(
+        "SELECT set_config('wardnet.tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+    let rows = tx
+        .query(
+            "SELECT idempotency_key, message_id, processed_unix, receipt_evidence
+             FROM outbox_receipt WHERE tenant_id = $1
+             ORDER BY processed_unix, idempotency_key",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane list outbox_receipt failed: {error}"))?;
+    let receipts = rows
+        .iter()
+        .map(|row| OutboxReceiptRow {
+            tenant_id: tenant_id.to_string(),
+            idempotency_key: row.get(0),
+            message_id: row.get(1),
+            processed_unix: row.get(2),
+            receipt_evidence: row.get(3),
+        })
+        .collect();
+    tx.commit()
+        .await
+        .map_err(|error| format!("control plane receipt list commit failed: {error}"))?;
+    Ok(receipts)
+}
+
+async fn restore_backup(
+    client: &mut Client,
+    tenant_id: &str,
+    backup: &ControlPlaneBackup,
+) -> Result<(), String> {
+    backup.verify()?;
+    let tx = client
+        .transaction()
+        .await
+        .map_err(|error| format!("control plane restore transaction failed: {error}"))?;
+    tx.execute(
+        "SELECT set_config('wardnet.tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+    write_snapshot_rows(&tx, tenant_id, &backup.snapshot).await?;
+    for table in ["outbox_receipt", "outbox_message"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE tenant_id = $1"),
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane delete {table} failed: {error}"))?;
+    }
+    for message in &backup.outbox {
+        insert_restored_outbox(&tx, tenant_id, message).await?;
+    }
+    for receipt in &backup.receipts {
+        tx.execute(
+            "INSERT INTO outbox_receipt (
+                tenant_id, idempotency_key, message_id, processed_unix, receipt_evidence
+             ) VALUES ($1,$2,$3,$4,$5)",
+            &[
+                &tenant_id,
+                &receipt.idempotency_key,
+                &receipt.message_id,
+                &receipt.processed_unix,
+                &receipt.receipt_evidence,
+            ],
+        )
+        .await
+        .map_err(|error| format!("control plane restore outbox_receipt failed: {error}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("control plane restore commit failed: {error}"))?;
+    Ok(())
+}
+
+async fn insert_restored_outbox(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    message: &OutboxMessage,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO outbox_message (
+            tenant_id, message_id, aggregate_id, aggregate_version, event_type,
+            schema_version, created_unix, payload_json, payload_hash, idempotency_key,
+            message_status, lease_owner, lease_expires_unix, attempt_count,
+            first_attempt_unix, last_attempt_unix, next_available_unix, terminal_reason
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+        &[
+            &tenant_id,
+            &message.message_id,
+            &message.aggregate_id,
+            &message.aggregate_version,
+            &message.event_type,
+            &message.schema_version,
+            &message.created_unix,
+            &message.payload_json,
+            &message.payload_hash,
+            &message.idempotency_key,
+            &message.message_status,
+            &message.lease_owner,
+            &message.lease_expires_unix,
+            &message.attempt_count,
+            &message.first_attempt_unix,
+            &message.last_attempt_unix,
+            &message.next_available_unix,
+            &message.terminal_reason,
+        ],
+    )
+    .await
+    .map_err(|error| format!("control plane restore outbox_message failed: {error}"))?;
+    Ok(())
+}
+
+async fn drop_tenant(client: &mut Client, tenant_id: &str) -> Result<(), String> {
+    let tx = client
+        .transaction()
+        .await
+        .map_err(|error| format!("control plane drop-tenant transaction failed: {error}"))?;
+    tx.execute(
+        "SELECT set_config('wardnet.tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+    for table in [
+        "outbox_receipt",
+        "outbox_message",
+        "threat_feed",
+        "audit_record",
+        "security_event",
+        "dnsbl_entry",
+        "threat_indicator",
+        "route_config",
+        "tenant_profile",
+        "tenant_account",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE tenant_id = $1"),
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane drop {table} failed: {error}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("control plane drop-tenant commit failed: {error}"))?;
+    Ok(())
+}
+
 fn unix_now_i64() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2102,6 +2444,119 @@ mod tests {
                 .count(),
             2,
             "save_snapshot must prune processed rows to EVENT_LIMIT"
+        );
+    }
+
+    #[test]
+    fn backup_verify_fails_closed_on_schema_and_hash() {
+        let backup = ControlPlaneBackup {
+            schema_version: MIGRATION_VERSION,
+            tenant_id: "local-lab".into(),
+            created_unix: 1,
+            snapshot: AppData::seeded(),
+            outbox: Vec::new(),
+            receipts: Vec::new(),
+            payload_hash: String::new(),
+        }
+        .seal()
+        .expect("seal");
+        assert!(backup.verify().is_ok());
+
+        let mut bad_schema = backup.clone();
+        bad_schema.schema_version = MIGRATION_VERSION + 1;
+        assert!(
+            bad_schema
+                .verify()
+                .expect_err("future schema")
+                .contains("unsupported")
+        );
+
+        let mut bad_hash = backup.clone();
+        bad_hash.payload_hash = "deadbeef".into();
+        assert!(
+            bad_hash
+                .verify()
+                .expect_err("tamper")
+                .contains("payload_hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_backup_restore_drill_preserves_unmasked_invariants() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("backup-drill");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("test database")
+            .with_event_limit(10);
+        let mut seeded = AppData::seeded();
+        seeded.events.push(sample_event(1, "/backup-restore"));
+        seeded.next_event_id = 2;
+        plane.save(&seeded).await.expect("seed with unmasked event");
+        let now = unix_now_i64().saturating_add(60);
+        plane
+            .append_security_event(&sample_event(2, "/backup-path"), 10)
+            .await
+            .expect("enqueue");
+        let _ = plane
+            .drain_once("backup-worker", now, |_| Ok("backup-ack".into()))
+            .await
+            .expect("process one");
+        let backup = plane.logical_backup().await.expect("export backup");
+        backup.verify().expect("self-hash");
+        assert!(
+            backup
+                .snapshot
+                .events
+                .iter()
+                .any(|event| event.path == "/backup-restore"
+                    && event.client_ip.map(|ip| ip.to_string()) == Some("198.51.100.20".into())),
+            "backup must keep client IPs and paths unmasked"
+        );
+        assert!(
+            backup
+                .outbox
+                .iter()
+                .any(|message| message.payload_json.contains("198.51.100.20")),
+            "outbox payloads must keep client IPs unmasked"
+        );
+
+        let isolated = unique_tenant("backup-restore-target");
+        let target = PostgresPlane::connect_tenant(&url, &isolated)
+            .await
+            .expect("isolated restore tenant");
+        target
+            .restore_logical_backup(&backup)
+            .await
+            .expect("restore into isolated tenant");
+        let restored = target.logical_backup().await.expect("re-export restored");
+        assert_eq!(restored.snapshot.routes, backup.snapshot.routes);
+        assert_eq!(restored.snapshot.events, backup.snapshot.events);
+        assert_eq!(restored.outbox.len(), backup.outbox.len());
+        assert_eq!(restored.receipts.len(), backup.receipts.len());
+        assert_eq!(
+            restored.semantic_hash().expect("restored hash"),
+            backup.semantic_hash().expect("source hash")
+        );
+
+        let report = plane.restore_drill().await.expect("isolated drill");
+        assert!(report.passed, "drill must match source and restored hashes");
+        assert!(
+            report.duration_ms <= BACKUP_RTO_BUDGET_MS,
+            "drill duration {}ms exceeds declared RTO {}ms",
+            report.duration_ms,
+            BACKUP_RTO_BUDGET_MS
+        );
+        assert_eq!(report.rpo, BACKUP_RPO);
+        assert!(
+            plane
+                .load()
+                .await
+                .expect("source tenant still loads")
+                .is_some(),
+            "drill must not drop the production tenant"
         );
     }
 }

@@ -50,6 +50,6 @@ the exactly-once ack. Dead letters are never pruned.
 
 Loopback file/memory adapters keep in-process stdout SIEM and report
 `outbox=disabled`. Remaining: a
-non-owner runtime role, backup/restore drill, HASH partitioning, and additional
+non-owner runtime role, HASH partitioning, and additional
 consumers (TAXII poll, Clearfolio, contextual-orchestrator) on the same
-message/receipt contract.
+message/receipt contract. Backup/restore drill is on the PostgreSQL plane.
