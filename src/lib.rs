@@ -37,6 +37,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod destination;
 mod misp_import;
 mod opencti_import;
 mod stix_import;
@@ -46,6 +47,7 @@ pub use credentials::{
     CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource,
     listen_is_loopback_only, require_write_auth_for_bind,
 };
+pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -63,6 +65,9 @@ pub struct AppState {
     /// to this). Combined with missing write credentials, `/healthz` reports
     /// `auth_mode=development`.
     listen_loopback: bool,
+    /// Fail-closed destination policy for every outbound http/https call.
+    destination: DestinationPolicy,
+    resolver: Arc<dyn HostResolver + Send + Sync>,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
@@ -125,15 +130,14 @@ impl AppState {
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: reqwest::Client::new(),
-            feed_http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("failed to build no-redirect feed client"),
+            http: outbound_http_client(),
+            feed_http: outbound_http_client(),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
             listen_loopback: true,
+            destination: DestinationPolicy::development(),
+            resolver: Arc::new(SystemHostResolver),
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
@@ -193,6 +197,19 @@ impl AppState {
     pub fn with_listen_loopback(mut self, listen_loopback: bool) -> Self {
         self.listen_loopback = listen_loopback;
         self
+    }
+
+    /// Replace the outbound destination policy. Builder-style.
+    pub fn with_destination_policy(mut self, policy: DestinationPolicy) -> Self {
+        self.destination = policy;
+        self
+    }
+
+    /// Fail closed before any outbound http/https send.
+    fn assert_outbound(&self, url: &str) -> Result<(), String> {
+        self.destination
+            .evaluate(url, self.resolver.as_ref())
+            .map(|_| ())
     }
 
     fn has_write_capable_admin(&self) -> bool {
@@ -625,10 +642,11 @@ async fn clearfolio_submit(
         .mime_str("text/plain")
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
-    let mut request = state
-        .http
-        .post(clearfolio_submit_url(&config.base_url))
-        .multipart(form);
+    let submit_url = clearfolio_submit_url(&config.base_url);
+    if let Err(message) = state.assert_outbound(&submit_url) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let mut request = state.http.post(submit_url).multipart(form);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -657,9 +675,11 @@ async fn clearfolio_status(
             "Clearfolio integration is not configured",
         );
     };
-    let mut request = state
-        .http
-        .get(clearfolio_status_url(&config.base_url, &job_id));
+    let status_url = clearfolio_status_url(&config.base_url, &job_id);
+    if let Err(message) = state.assert_outbound(&status_url) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let mut request = state.http.get(status_url);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -798,6 +818,9 @@ async fn soc_analyze(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
+    if let Err(message) = state.assert_outbound(&endpoint) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
     let response = state
         .http
         .post(endpoint)
@@ -883,6 +906,11 @@ async fn create_route(
         return denied;
     }
     if let Err(message) = validate_route(&route) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    if (route.upstream.starts_with("http://") || route.upstream.starts_with("https://"))
+        && let Err(message) = state.assert_outbound(&route.upstream)
+    {
         return error(StatusCode::BAD_REQUEST, message);
     }
 
@@ -1608,6 +1636,7 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    state.assert_outbound(url)?;
     let mut request = state
         .feed_http
         .get(url)
@@ -2271,6 +2300,7 @@ async fn proxy_request(
     body: Bytes,
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
+    state.assert_outbound(&target)?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = state
@@ -2601,6 +2631,7 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
 
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    state.assert_outbound(url)?;
     let response = state
         .feed_http
         .get(url)
@@ -3092,6 +3123,29 @@ pub fn parse_u64_env(
 /// over this function so every branch is reachable from tests (the parse/error
 /// paths in-process, the bind/serve path via an ephemeral listener and an
 /// immediate shutdown).
+fn outbound_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .expect("failed to build fail-closed outbound HTTP client")
+}
+
+fn startup_destination_policy(
+    bind_addr: &str,
+) -> Result<DestinationPolicy, Box<dyn std::error::Error>> {
+    let base = if listen_is_loopback_only(bind_addr) {
+        DestinationPolicy::development()
+    } else {
+        DestinationPolicy::production()
+    };
+    let allow = std::env::var("DESTINATION_ALLOWLIST").unwrap_or_default();
+    let deny = std::env::var("DESTINATION_DENYLIST").unwrap_or_default();
+    Ok(base
+        .with_lists(&allow, &deny)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?)
+}
+
 pub async fn run_from_env(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3165,6 +3219,7 @@ pub async fn run_from_env(
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_listen_loopback(listen_is_loopback_only(&bind_addr))
+        .with_destination_policy(startup_destination_policy(&bind_addr)?)
         .with_max_body_size(max_body_bytes);
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
@@ -5808,6 +5863,33 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("upstream must use http://"));
+    }
+
+    #[tokio::test]
+    async fn create_route_fail_closes_metadata_upstream() {
+        let app = build_app(AppState::seeded(None));
+        let denied = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                None,
+                &serde_json::json!({
+                    "id": "pivot",
+                    "path_prefix": "/pivot",
+                    "upstream": "http://169.254.169.254/",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        let body = body_text(denied).await;
+        assert!(
+            body.contains("denied address class"),
+            "operator must see the denied class: {body}"
+        );
     }
 
     fn temp_state_path(name: &str) -> PathBuf {

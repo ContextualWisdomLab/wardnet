@@ -70,6 +70,15 @@ Expected fields:
 - `admin_auth_configured`: whether any admin token is configured
 - `auth_mode`: `development` only on a loopback listener with no write-capable principal; otherwise `production`. A non-loopback process refuses to become ready without credentials (issue #78).
 
+## Destination policy (issue #79)
+
+Outbound `http`/`https` is fail-closed. If a route or feed is denied, the error
+names the host and the denied class or denylist entry (never credentials).
+
+Next action: add the origin to `DESTINATION_ALLOWLIST` (`host`, `*.suffix`, or
+`CIDR`) and restart; or keep it blocked with `DESTINATION_DENYLIST`. Kubernetes
+NetworkPolicy egress is defense in depth, not a substitute.
+
 ## Smoke Test
 
 ```bash

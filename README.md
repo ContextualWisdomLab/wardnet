@@ -66,6 +66,7 @@ Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
 - `ADMIN_TOKEN`: write token for management writes via `X-Admin-Token`. Optional only on loopback (`127.0.0.1` / `::1` / `localhost`). Required before readiness on any non-loopback `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public).
+- `DESTINATION_ALLOWLIST` / `DESTINATION_DENYLIST`: comma-separated hosts, `*.suffix`, or CIDRs for outbound `http`/`https`. Denylist wins. Loopback/private/metadata destinations are denied unless allowlisted (loopback development still permits loopback-class destinations).
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero

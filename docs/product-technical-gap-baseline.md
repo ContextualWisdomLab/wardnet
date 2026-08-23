@@ -100,10 +100,16 @@ Shipped:
 
 Doctoring: `docs/doctoring/fail-closed-management-auth.md` (APA 7th).
 
-### Destination policy (issue #79)
+### Destination policy (issue #79) — **closed this pass**
 
-Upstream scheme validation exists; no fail-closed destination allowlist for all
-outbound (feed fetch, proxy, LLM, Clearfolio). Next-loop candidate after #78.
+Shipped in `src/destination.rs` and wired through route upsert, gateway proxy,
+threat-intel fetch, Clearfolio, and SOC LLM. Default deny of loopback, RFC 1918,
+link-local, ULA, CGNAT, documentation, and cloud-metadata classes unless
+`DESTINATION_ALLOWLIST` (or loopback development) permits them.
+`DESTINATION_DENYLIST` wins. HTTP clients: no redirects, `no_proxy()`.
+
+Remaining: custom connector that pins the TCP peer to the evaluated IP (full
+TOCTOU close); Kubernetes NetworkPolicy examples as defense in depth.
 
 ### SIEM / OpenTelemetry (issue #85 / PR #90)
 
