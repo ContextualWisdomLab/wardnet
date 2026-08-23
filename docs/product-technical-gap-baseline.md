@@ -25,7 +25,8 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| [#105](https://github.com/ContextualWisdomLab/wardnet/pull/105) | feat(store): optimistic concurrency on postgres snapshots | `feat/issue-80-optimistic-concurrency` stacked on #99 | Devin still-valid startup-version 409 fixed this pass (`load_postgres` advances `snapshot_version` after save); local fmt/test/clippy + two `/healthz` smokes | Author; Devin COMMENTED (startup false-conflict addressed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 first. Do not `--admin`. Do not re-implement HASH/role/backup. |
+| [#106](https://github.com/ContextualWisdomLab/wardnet/pull/106) | feat(store): outbox consumers for TAXII, Clearfolio, and orchestrator | `feat/issue-81-outbox-consumers` stacked on #105 | local fmt/test/clippy + smoke.sh + two `/healthz` and `/admin`/`/api/commercial/readiness` (2B KRW) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 first. Do not `--admin`. Do not re-implement OCC or prior store slices. |
+| [#105](https://github.com/ContextualWisdomLab/wardnet/pull/105) | feat(store): optimistic concurrency on postgres snapshots | `feat/issue-80-optimistic-concurrency` stacked on #99 | Devin still-valid startup-version 409 fixed this pass (`load_postgres` advances `snapshot_version` after save); local fmt/test/clippy + two `/healthz` smokes | Author; Devin COMMENTED (startup false-conflict addressed, thread resolved) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 first. Do not `--admin`. Do not re-implement HASH/role/backup. |
 | [#104](https://github.com/ContextualWisdomLab/wardnet/pull/104) | feat(store): HASH-partition security_event by tenant | merged into rustls stack then #99 | prior hour | Author prior hour | Folded into #99. Do not re-implement. |
 | [#103](https://github.com/ContextualWisdomLab/wardnet/pull/103) | feat(store): non-owner PostgreSQL runtime role after migrate | `feat/issue-80-runtime-role` stacked on #100 | still-valid Devin restore-window finding fixed this pass (`MIN_RESTORABLE_SCHEMA_VERSION=2`); local fmt/test/clippy + smokes | Author this pass; Devin COMMENTED (v3 backup voiding addressed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 first. Do not `--admin`. Do not re-implement rustls, outbox, retention, backup, or HASH. |
 | [#102](https://github.com/ContextualWisdomLab/wardnet/pull/102) | feat(store): logical backup and isolated restore drill | squash-merged into #100 (`321e792`) | prior hour | Author prior hour | Folded into rustls stack. Do not re-implement. |
@@ -210,7 +211,7 @@ retention, backup/restore, runtime role, HASH, or OCC.
 
 1. Second independent APPROVE on #91/#92. Do not `--admin`.
 2. Keep #94 independently; #95 then #96 then #97 then #98 then #99 then #105
-   then this consumers PR merge-ready. Do not `--admin`.
+   then #106 merge-ready. Do not `--admin`.
 3. Next runtime gap if policy still blocks: signed release/promotion (#84) or
    Keyverse identity (#82) after the postgres stack.
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.
