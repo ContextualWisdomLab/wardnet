@@ -2397,7 +2397,8 @@ mod tests {
         if url.trim().is_empty() {
             return;
         }
-        let plane = PostgresPlane::connect(&url)
+        let tenant = unique_tenant("roundtrip");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
             .await
             .expect("test database must accept the control plane");
         let seeded = AppData::seeded();
@@ -2411,7 +2412,7 @@ mod tests {
         assert_eq!(loaded.threats, seeded.threats);
         assert_eq!(loaded.dnsbl, seeded.dnsbl);
         assert_eq!(loaded.next_event_id, seeded.next_event_id);
-        assert_eq!(loaded.commercial.tenant_id, DEFAULT_TENANT_ID);
+        assert_eq!(loaded.commercial.tenant_id, tenant);
         let messages = plane
             .list_outbox_limited(LIST_LIMIT)
             .await

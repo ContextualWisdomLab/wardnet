@@ -137,9 +137,33 @@ impl AppState {
 
     /// Load from PostgreSQL, seeding the tenant snapshot when empty.
     pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
-        let plane = control_plane::PostgresPlane::connect(database_url)
-            .await?
-            .with_event_limit(config.event_limit);
+        Self::load_postgres_from_plane(
+            config,
+            control_plane::PostgresPlane::connect(database_url).await?,
+        )
+        .await
+    }
+
+    /// Load a specific tenant snapshot. `save` bumps `snapshot_version`; the
+    /// in-memory token must match that next value or the first management write
+    /// false-conflicts (HTTP 409) forever.
+    pub async fn load_postgres_for_tenant(
+        config: AppConfig,
+        database_url: &str,
+        tenant_id: &str,
+    ) -> Result<Self, String> {
+        Self::load_postgres_from_plane(
+            config,
+            control_plane::PostgresPlane::connect_tenant(database_url, tenant_id).await?,
+        )
+        .await
+    }
+
+    async fn load_postgres_from_plane(
+        config: AppConfig,
+        plane: control_plane::PostgresPlane,
+    ) -> Result<Self, String> {
+        let plane = plane.with_event_limit(config.event_limit);
         let mut data = match plane.load().await? {
             Some(loaded) => loaded,
             None => AppData::seeded(),
@@ -147,6 +171,7 @@ impl AppState {
         let event_limit = config.event_limit.max(1);
         enforce_event_limit(&mut data, event_limit);
         plane.save(&data).await?;
+        data.snapshot_version = data.snapshot_version.saturating_add(1);
         Ok(Self::new(data, config).with_control_plane(Arc::new(plane)))
     }
 
@@ -325,7 +350,7 @@ impl AppState {
         if let Some(plane) = &self.control_plane {
             plane.save(data).await?;
             let mut inner = self.inner.write().await;
-            inner.snapshot_version = inner.snapshot_version.saturating_add(1);
+            inner.snapshot_version = data.snapshot_version.saturating_add(1);
             return Ok(());
         }
         let Some(path) = self.state_path.as_deref() else {
@@ -3907,6 +3932,43 @@ mod tests {
             "operator must see the production authority requirement: {message}"
         );
         clear_run_env();
+    }
+
+    fn control_plane_test_database_url() -> Option<String> {
+        std::env::var("CONTROL_PLANE_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    fn unique_test_tenant(label: &str) -> String {
+        format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        )
+    }
+
+    #[tokio::test]
+    async fn postgres_load_advances_snapshot_version_so_first_write_does_not_conflict() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("occ-load");
+        let state = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("startup save must succeed");
+        state
+            .mutate_and_persist(|data| {
+                data.routes[0].path_prefix = "/after-start".into();
+            })
+            .await
+            .expect("first management write after load_postgres must not false-conflict");
+        let inner = state.inner.read().await;
+        assert_eq!(inner.routes[0].path_prefix, "/after-start");
+        assert!(inner.snapshot_version >= 2);
     }
 
     #[tokio::test]
