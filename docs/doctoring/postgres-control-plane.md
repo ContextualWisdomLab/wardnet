@@ -41,6 +41,23 @@ https://doi.org/10.6028/NIST.SP.800-218
 Set `CONTROL_PLANE_DATABASE_URL` (or credentials-file key `control_plane_url`)
 before binding a non-loopback address. Use `sslmode=require` or
 `sslmode=verify-full` for rustls. `/healthz.persistence` reports `postgres`.
-Loopback still uses `WAF_IDS_STATE_PATH` or in-memory state. Remaining:
-non-owner runtime role, backup/restore drill, HASH partitioning for
-`security_event`, optimistic concurrency.
+Loopback still uses `WAF_IDS_STATE_PATH` or in-memory state.
+
+`GET /api/backup` (admin read) exports a hashed logical snapshot. `POST /api/backup`
+restores after schema-version and payload-hash checks. `POST /api/backup/drill`
+restores into an isolated tenant, compares invariants, and drops the drill
+rows. Declared RPO: last successful export (`on-demand-logical-snapshot`).
+Declared RTO: 60 seconds. `/healthz.backup` is `ready` on PostgreSQL.
+
+National Institute of Standards and Technology. (2010). *Contingency planning
+guide for federal information systems* (NIST SP 800-34 rev. 1).
+https://doi.org/10.6028/NIST.SP.800-34r1
+(`docs/papers/nist-sp-800-34r1-contingency-planning.pdf`, public domain)
+
+- **Design impact:** CP-2 / CP-4 — declared RPO/RTO and an automated restore
+  drill into an isolated environment. The artifact is application-level (not
+  `pg_dump`) so RLS tenant context is preserved and secrets (admin tokens,
+  database URL) are never copied.
+
+Remaining: non-owner runtime role, HASH partitioning for `security_event`,
+optimistic concurrency.

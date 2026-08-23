@@ -59,7 +59,7 @@ flowchart LR
 - `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone/loopback operation. Without it, the service uses seeded in-memory state. Production binds require PostgreSQL (`CONTROL_PLANE_DATABASE_URL`).
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
-- JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
+- JSON persistence is a baseline durability mechanism, not a substitute for a production database. PostgreSQL mode exports a hashed logical snapshot (`GET /api/backup`) and runs an isolated restore drill (`POST /api/backup/drill`).
 - Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.
 - The reusable core remains in-repo as a workspace crate. A git submodule is intentionally deferred until an independently versioned engine, SDK, or adapter needs a separate release lifecycle.
 
