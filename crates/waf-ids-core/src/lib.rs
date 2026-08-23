@@ -22,6 +22,9 @@ pub struct AppData {
     pub commercial: CommercialProfile,
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
+    /// Postgres optimistic-concurrency token. File/memory ignore it.
+    #[serde(default)]
+    pub snapshot_version: u64,
 }
 
 impl AppData {
@@ -56,6 +59,7 @@ impl AppData {
             next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
+            snapshot_version: 0,
         }
     }
 }

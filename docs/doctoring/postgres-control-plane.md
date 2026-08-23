@@ -82,4 +82,7 @@ queries prune and high-volume appends do not share one btree. Existing
 unpartitioned tables convert under `pg_advisory_lock`; rows keep unmasked
 client IPs and paths. `/healthz.event_partitions` reports the child count.
 
-Remaining: optimistic concurrency.
+Snapshot persist compares `tenant_account.snapshot_version` and fails closed
+on a stale token (HTTP 409). Operator restores overwrite the token.
+
+Remaining: additional outbox consumers (TAXII / Clearfolio / orchestrator).

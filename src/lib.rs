@@ -323,7 +323,10 @@ impl AppState {
 
     async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
         if let Some(plane) = &self.control_plane {
-            return plane.save(data).await;
+            plane.save(data).await?;
+            let mut inner = self.inner.write().await;
+            inner.snapshot_version = inner.snapshot_version.saturating_add(1);
+            return Ok(());
         }
         let Some(path) = self.state_path.as_deref() else {
             return Ok(());
@@ -1029,7 +1032,7 @@ async fn create_route(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1065,7 +1068,7 @@ async fn create_threat(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1101,7 +1104,7 @@ async fn create_dnsbl(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1172,7 +1175,7 @@ async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Respo
             messages,
         })
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1214,7 +1217,7 @@ async fn replay_outbox(
             "message_id": message_id
         }))
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1247,7 +1250,7 @@ async fn get_backup(State(state): State<AppState>, headers: HeaderMap) -> Respon
             artifact: Some(artifact),
         })
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1302,7 +1305,7 @@ async fn restore_backup(
             "payload_hash": backup.payload_hash,
         }))
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1442,7 +1445,7 @@ async fn update_commercial_license(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1485,7 +1488,7 @@ async fn import_threat_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1576,7 +1579,7 @@ async fn import_stix_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1667,7 +1670,7 @@ async fn import_misp_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1763,7 +1766,7 @@ async fn import_opencti_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1903,7 +1906,7 @@ async fn poll_taxii_collection(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2089,7 +2092,7 @@ async fn import_suricata_eve(
         .await
     {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2191,7 +2194,7 @@ async fn import_coraza_audit(
         .await
     {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2350,7 +2353,7 @@ async fn import_phishing_database_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -3095,6 +3098,14 @@ fn parse_phishing_ips(feed: &str, limit: usize) -> Vec<IpAddr> {
         }
     }
     values
+}
+
+fn persist_error(message: String) -> Response {
+    if message.contains("snapshot conflict") {
+        error(StatusCode::CONFLICT, message)
+    } else {
+        error(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -6509,6 +6520,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                snapshot_version: 0,
             },
             AppConfig {
                 admin_token: None,
@@ -7412,6 +7424,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                snapshot_version: 0,
             },
             AppConfig {
                 admin_token: None,

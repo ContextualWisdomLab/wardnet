@@ -25,7 +25,7 @@ use waf_ids_core::{
 /// Default tenant used until Keyverse supplies claims (#82).
 pub const DEFAULT_TENANT_ID: &str = "local-lab";
 
-const MIGRATION_VERSION: i32 = 4;
+const MIGRATION_VERSION: i32 = 5;
 /// Oldest logical-backup schema that restores on this binary.
 ///
 /// v3 only provisions `wardnet_runtime`. v4 HASH-partitions `security_event`
@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS schema_migration (
 CREATE TABLE IF NOT EXISTS tenant_account (
   tenant_id TEXT PRIMARY KEY,
   event_sequence BIGINT NOT NULL,
-  audit_sequence BIGINT NOT NULL
+  audit_sequence BIGINT NOT NULL,
+  snapshot_version BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tenant_profile (
@@ -263,6 +264,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   dnsbl_entry, security_event, audit_record, threat_feed,
   outbox_message, outbox_receipt TO wardnet_runtime;
 GRANT SELECT ON schema_migration TO wardnet_runtime;
+ALTER TABLE tenant_account ADD COLUMN IF NOT EXISTS snapshot_version BIGINT NOT NULL DEFAULT 0;
 "#;
 
 fn hash_partition_sql_for(parent: &str) -> Result<String, String> {
@@ -949,7 +951,7 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
     let account = tx
         .query_opt(
-            "SELECT event_sequence, audit_sequence FROM tenant_account WHERE tenant_id = $1",
+            "SELECT event_sequence, audit_sequence, snapshot_version FROM tenant_account WHERE tenant_id = $1",
             &[&tenant_id],
         )
         .await
@@ -982,6 +984,7 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
         next_audit_log_id: account.get::<_, i64>(1) as u64,
         commercial,
         threat_feeds,
+        snapshot_version: account.get::<_, i64>(2) as u64,
     }))
 }
 
@@ -1002,7 +1005,7 @@ async fn save_snapshot(
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
 
-    write_snapshot_rows(&tx, tenant_id, data).await?;
+    write_snapshot_rows(&tx, tenant_id, data, true).await?;
     enqueue_snapshot_outbox(&tx, tenant_id, data).await?;
     prune_processed_outbox(&tx, tenant_id, keep).await?;
 
@@ -1016,21 +1019,54 @@ async fn write_snapshot_rows(
     tx: &Transaction<'_>,
     tenant_id: &str,
     data: &AppData,
+    enforce_snapshot_version: bool,
 ) -> Result<(), String> {
-    tx.execute(
-        "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (tenant_id) DO UPDATE SET
-           event_sequence = EXCLUDED.event_sequence,
-           audit_sequence = EXCLUDED.audit_sequence",
-        &[
-            &tenant_id,
-            &(data.next_event_id as i64),
-            &(data.next_audit_log_id as i64),
-        ],
-    )
-    .await
-    .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?;
+    let expected = data.snapshot_version as i64;
+    let next_version = if enforce_snapshot_version {
+        expected.saturating_add(1)
+    } else {
+        expected
+    };
+    let written = if enforce_snapshot_version {
+        tx.execute(
+            "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id) DO UPDATE SET
+               event_sequence = EXCLUDED.event_sequence,
+               audit_sequence = EXCLUDED.audit_sequence,
+               snapshot_version = EXCLUDED.snapshot_version
+             WHERE tenant_account.snapshot_version = $5",
+            &[
+                &tenant_id,
+                &(data.next_event_id as i64),
+                &(data.next_audit_log_id as i64),
+                &next_version,
+                &expected,
+            ],
+        )
+        .await
+        .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?
+    } else {
+        tx.execute(
+            "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id) DO UPDATE SET
+               event_sequence = EXCLUDED.event_sequence,
+               audit_sequence = EXCLUDED.audit_sequence,
+               snapshot_version = EXCLUDED.snapshot_version",
+            &[
+                &tenant_id,
+                &(data.next_event_id as i64),
+                &(data.next_audit_log_id as i64),
+                &next_version,
+            ],
+        )
+        .await
+        .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?
+    };
+    if enforce_snapshot_version && written == 0 {
+        return Err("control plane snapshot conflict".to_string());
+    }
 
     for table in [
         "route_config",
@@ -2054,7 +2090,7 @@ async fn restore_backup(
     )
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
-    write_snapshot_rows(&tx, tenant_id, &backup.snapshot).await?;
+    write_snapshot_rows(&tx, tenant_id, &backup.snapshot, false).await?;
     for table in ["outbox_receipt", "outbox_message"] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE tenant_id = $1"),
@@ -2737,8 +2773,13 @@ mod tests {
             2,
             "ack must prune processed rows to the configured EVENT_LIMIT, not LIST_LIMIT"
         );
+        let current = plane
+            .load()
+            .await
+            .expect("load for prune save")
+            .expect("tenant exists");
         plane
-            .save(&AppData::seeded())
+            .save(&current)
             .await
             .expect("save must use the same retention cap");
         let after_save = plane
@@ -3071,5 +3112,38 @@ mod tests {
             .batch_execute("DROP TABLE IF EXISTS event_hash_probe CASCADE")
             .await
             .expect("drop probe");
+    }
+
+    #[tokio::test]
+    async fn postgres_stale_snapshot_save_conflicts() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("occ");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane a");
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane b");
+        plane_a.save(&AppData::seeded()).await.expect("first save");
+        let mut loaded_a = plane_a.load().await.expect("load a").expect("tenant a");
+        let loaded_b = plane_b.load().await.expect("load b").expect("tenant b");
+        assert_eq!(loaded_a.snapshot_version, loaded_b.snapshot_version);
+        loaded_a.routes[0].path_prefix = "/occ-a".into();
+        plane_a.save(&loaded_a).await.expect("winner save");
+        let mut stale = loaded_b;
+        stale.routes[0].path_prefix = "/occ-b".into();
+        let error = plane_b
+            .save(&stale)
+            .await
+            .expect_err("stale snapshot must conflict");
+        assert!(
+            error.contains("snapshot conflict"),
+            "operator must see a snapshot conflict: {error}"
+        );
+        let winner = plane_a.load().await.expect("reload").expect("tenant");
+        assert_eq!(winner.routes[0].path_prefix, "/occ-a");
+        assert!(winner.snapshot_version > loaded_a.snapshot_version);
     }
 }
