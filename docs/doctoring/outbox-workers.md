@@ -40,8 +40,13 @@ https://doi.org/10.6028/NIST.SP.800-218
 Production binds already require `CONTROL_PLANE_DATABASE_URL`. On that path:
 
 - `GET /healthz` reports `outbox=ready` plus pending/leased/dead-letter counts
-- `GET /api/outbox` (admin read) lists messages
+- `GET /api/outbox` (admin read) lists at most `EVENT_LIMIT` messages
+  (dead letters, then pending, then leased, then processed)
 - `POST /api/outbox/{message_id}/replay` (admin write) requeues dead letters
+
+Processed `outbox_message` rows are pruned to the operator `EVENT_LIMIT` on
+append, snapshot save, and worker ack. `outbox_receipt` rows stay; they are
+the exactly-once ack. Dead letters are never pruned.
 
 Loopback file/memory adapters keep in-process stdout SIEM and report
 `outbox=disabled`. Remaining: a

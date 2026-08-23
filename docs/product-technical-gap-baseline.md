@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T17:24Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-23T17:35Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -25,6 +25,7 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
+| [#101](https://github.com/ContextualWisdomLab/wardnet/pull/101) | feat(store): bound outbox listing and prune processed rows | `feat/issue-81-outbox-retention` stacked on #100 | local fmt/test/clippy + two `/healthz` smokes; live `postgres_outbox_list_is_bounded_and_prunes_processed` | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 first. Do not `--admin`. Do not re-implement rustls or the outbox first slice. |
 | [#100](https://github.com/ContextualWisdomLab/wardnet/pull/100) | feat(store): rustls for production PostgreSQL `sslmode=require` | `feat/issue-80-postgres-rustls` stacked on #99 | local fmt/test/clippy + two `/healthz` smokes; live `sslmode=require` fails closed against plaintext postgres | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 first. Do not `--admin`. Do not re-implement the postgres gate or outbox. |
 | [#99](https://github.com/ContextualWisdomLab/wardnet/pull/99) | feat(store): transactional outbox and leased workers | `feat/issue-81-outbox-workers` stacked on #98 | local fmt/test/clippy + two `/healthz` smokes + postgres `/healthz.outbox=ready` prior hour | Author; Devin COMMENTED (4 threads: unbounded list still-valid; 3 info) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 first. Do not `--admin`. Do not re-implement the postgres gate. Bounded `list_outbox` is #81 remainder, not this TLS slice. |
 | [#98](https://github.com/ContextualWisdomLab/wardnet/pull/98) | feat(store): require PostgreSQL as the production control plane | `ea621985e276` (`feat/issue-80-postgres-control-plane`) stacked on #97 | rust + fuzz green at last snapshot; Devin 7 threads (full-snapshot rewrite, ORDER BY, TLS, RLS owner, reconnect) | Author this pass; Devin COMMENTED | Org 2-approval + self-author. ORDER BY + incremental event persist addressed on #99. rustls this pass; remaining non-owner role / backup are #80 remainder. Do not `--admin`. |
@@ -115,8 +116,10 @@ Stdout SIEM export is **at-least-once**; the receipt is the exactly-once ack.
 Operator-visible: `/healthz.outbox` (`ready`|`disabled`), pending/leased/
 dead-letter counts, `GET /api/outbox` (admin read), `POST /api/outbox/{id}/replay`
 (admin write + audit). Client IPs and paths in payloads are not masked.
-File/memory adapters stay `outbox=disabled` with in-process stdout. Remaining
-consumers: TAXII poll, Clearfolio, contextual-orchestrator on the same contract.
+File/memory adapters stay `outbox=disabled` with in-process stdout. `GET /api/outbox`
+is bounded to `EVENT_LIMIT`; processed rows prune to that cap; dead letters stay.
+Remaining consumers: TAXII poll, Clearfolio, contextual-orchestrator on the same
+contract.
 
 ### Fail-closed credentials (issue #78) — **closed on PR #94**
 
@@ -173,19 +176,16 @@ for later loops.
 
 ## This loop’s shipped gap
 
-Issue **#80** rustls remainder. `sslmode=require` / `verify-full` uses rustls
-with Mozilla roots (certificates always verified). `allow` / `prefer` fail
-closed. Driving tests: `database_url_rejects_non_postgres_and_ambiguous_sslmode`,
-`require_tls_fails_closed_against_plaintext_postgres` (CI plaintext postgres
-must not silently fall back), `binary_fail_closes_when_control_plane_sslmode_is_ambiguous`.
-Do not re-implement #78, sidecar, pin, libcoraza, the postgres gate, or the
-#81 outbox slice.
+Issue **#81** still-valid #99 finding: bounded `GET /api/outbox` (`EVENT_LIMIT`)
+and prune of processed `outbox_message` rows (receipts and dead letters stay).
+Stacked on #100 rustls. Do not re-implement #78, sidecar, pin, libcoraza, the
+postgres gate, the #81 first outbox slice, or rustls.
 
 ## Next hourly loop (do, do not report)
 
 1. Second independent APPROVE on #91/#92. Do not `--admin`.
-2. Keep #94/#95/#96/#97/#98/#99 and this rustls PR merge-ready. Merge order
-   #95 then #96 then #97 then #98 then #99 then this.
+2. Keep #94/#95/#96/#97/#98/#99/#100 and this retention PR merge-ready. Merge
+   order #95 then #96 then #97 then #98 then #99 then #100 then this.
 3. Next runtime gap if policy still blocks: backup/restore remainder of #80,
    or additional #81 consumers (TAXII / Clearfolio / orchestrator).
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.

@@ -14,6 +14,8 @@ pub const SCHEMA_VERSION: i32 = 1;
 pub const MAX_ATTEMPTS: i32 = 8;
 pub const LEASE_SECONDS: i64 = 30;
 pub const CLAIM_BATCH: i64 = 16;
+/// Cap for `GET /api/outbox` and processed-row retention (mirrors `EVENT_LIMIT`).
+pub const LIST_LIMIT: i64 = 1_000;
 pub const STATUS_PENDING: &str = "pending";
 pub const STATUS_LEASED: &str = "leased";
 pub const STATUS_PROCESSED: &str = "processed";
