@@ -1131,6 +1131,7 @@ async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> R
 #[derive(Serialize)]
 struct OutboxListView {
     status: String,
+    limit: usize,
     messages: Vec<outbox::OutboxMessage>,
 }
 
@@ -1138,16 +1139,19 @@ async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Respo
     if !admin_authenticated(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
+    let limit = state.event_limit.max(1);
     let Some(plane) = &state.control_plane else {
         return Json(OutboxListView {
             status: "disabled".to_string(),
+            limit,
             messages: Vec::new(),
         })
         .into_response();
     };
-    match plane.list_outbox().await {
+    match plane.list_outbox_limited(limit as i64).await {
         Ok(messages) => Json(OutboxListView {
             status: "ready".to_string(),
+            limit,
             messages,
         })
         .into_response(),
@@ -7448,6 +7452,10 @@ mod tests {
         )
         .await;
         assert_eq!(body["status"], "disabled");
+        assert_eq!(
+            body["limit"].as_u64(),
+            Some(AppConfig::DEFAULT_EVENT_LIMIT as u64)
+        );
         assert_eq!(body["messages"], serde_json::json!([]));
 
         let health: HealthStatus =

@@ -70,7 +70,7 @@ Useful environment variables:
 - `WAF_IDS_STATE_PATH`: optional JSON state path for loopback/community. When omitted, the service runs with seeded in-memory state. Production (non-loopback) binds require `CONTROL_PLANE_DATABASE_URL` instead.
 - `CONTROL_PLANE_DATABASE_URL`: PostgreSQL URL for the production control plane (`postgres://…`). Secret; prefer `WAF_IDS_CREDENTIALS_PATH` key `control_plane_url`. `sslmode=require` / `verify-full` uses rustls with Mozilla roots (certificates always verified). `sslmode=disable` or omitted is plaintext. `allow`/`prefer` are rejected. `/healthz.persistence` reports `postgres` when connected.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
-- `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
+- `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero. Also caps `GET /api/outbox` and processed outbox-row retention.
 - `CORAZA_LIB_PATH` / `CORAZA_RULES_PATH` / `CORAZA_DIRECTIVES`: optional in-process libcoraza. A missing library or empty ruleset fails startup. `/healthz.proven_engine` reports `coraza_in_process`.
 - `CORAZA_WAF_URL`: optional Coraza sidecar URL used when libcoraza is not loaded
 - `PROVEN_ENGINE_FAIL_CLOSED`: when true, a configured engine outage returns 503 instead of degrading to builtin scoring
