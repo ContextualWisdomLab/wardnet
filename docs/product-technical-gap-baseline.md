@@ -25,7 +25,7 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| this PR | feat(waf): evaluate live gateway transactions with in-process libcoraza | `feat/issue-86-in-process-libcoraza` stacked on #96 | local fmt/test/clippy + two `/healthz` smokes this hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 first. Do not `--admin`. |
+| [#97](https://github.com/ContextualWisdomLab/wardnet/pull/97) | feat(waf): evaluate live gateway transactions with in-process libcoraza | `feat/issue-86-in-process-libcoraza` stacked on #96 | local fmt/test/clippy + two `/healthz` smokes this hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 first. Do not `--admin`. Do not re-implement sidecar or pin. |
 | [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `7cacaf135179` (`feat/issue-79-destination-policy`) stacked on #95 | rust + fuzz green at last snapshot; remaining Devin threads are info/KV-deviation | Author this pass; Devin/Codex COMMENTED. Remaining unresolved: DESTINATION_* env (documented operational-config deviation), hostname-allowlist mixed answers (intended), sidecar loopback needs allowlist in production, pin-cap eviction info | Org 2-approval + self-author. Merge #95 first. Do not re-implement the TCP-peer pin. |
 | [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | feat(waf): consult Coraza sidecar on live gateway transactions | `ba9ee3a0b142` (`feat/issue-86-in-path-coraza`) | rust + Security Scan green at last snapshot | Author this pass; Devin/Codex COMMENTED | Org 2-approval + self-author. Do not re-implement sidecar slice. |
 | [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | fix(auth): fail closed without write-capable admin on public bind | `f31d960a0b52` (`fix/issue-78-fail-closed-credentials`) | Checks re-ran after readiness-order fix | Author `seonghobae`; Devin COMMENTED | Org 2-approval + self-author. Do not `--admin` merge. Do not re-implement #78. |
@@ -150,7 +150,7 @@ loops.
 
 ## This loop’s shipped gap
 
-Issue **#86** in-process libcoraza remainder (this branch, stacked on #96).
+Issue **#86** in-process libcoraza remainder ([#97](https://github.com/ContextualWisdomLab/wardnet/pull/97), stacked on #96).
 Operator-visible: `CORAZA_LIB_PATH` + `CORAZA_RULES_PATH`/`CORAZA_DIRECTIVES`;
 `/healthz.proven_engine=coraza_in_process`; `GET /api/waf/engine-status`
 `in_process_configured` / `in_process_rules`; missing library fails before
@@ -166,8 +166,8 @@ default `/healthz` + `/admin` (`ingest_hints_only`); stub-loaded `/healthz` +
 1. Second independent APPROVE on #91/#92 (Copilot re-requested; still 1/2;
    `--auto` already enabled). Merge if exact-HEAD second independent APPROVE
    exists. Do not `--admin`.
-2. Keep #94/#95/#96 and this in-process PR merge-ready. Merge order #95 then
-   #96 then this PR. Do not re-implement #78, the #86 sidecar, or the #79 pin.
+2. Keep #94/#95/#96/#97 merge-ready. Merge order #95 then #96 then #97. Do
+   not re-implement #78, the #86 sidecar, or the #79 pin.
 3. Strix FAILURE on #72/#77/#93 is org LiteLLM provider infra, not wardnet
    code; do not rotate keys. Watch ContextualWisdomLab/.github branch
    `codex/strix-fail-closed-provider-evidence`.
