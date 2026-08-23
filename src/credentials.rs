@@ -133,6 +133,69 @@ impl CredentialRegistry {
     }
 }
 
+/// Constant-time equality for presented admin secrets.
+///
+/// Length is mixed into the accumulator so a mismatched length does not take a
+/// faster path that would reveal the expected secret size.
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max = left.len().max(right.len());
+    let mut diff = (left.len() ^ right.len()) as u8;
+    for i in 0..max {
+        let l = left.get(i).copied().unwrap_or(0);
+        let r = right.get(i).copied().unwrap_or(0);
+        diff |= l ^ r;
+    }
+    diff == 0
+}
+
+/// True when `bind_addr` can only be reached from the local host.
+///
+/// Unparseable addresses return `false` (fail closed: require credentials).
+pub fn listen_is_loopback_only(bind_addr: &str) -> bool {
+    let trimmed = bind_addr.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    let Some(host) = bind_host(trimmed) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn bind_host(bind_addr: &str) -> Option<&str> {
+    if let Some(rest) = bind_addr.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(&rest[..end]);
+    }
+    bind_addr.rsplit_once(':').map(|(host, _)| host)
+}
+
+/// Fail closed before readiness when a non-loopback listener has no write-capable
+/// admin principal. Loopback-only development remains available without a token.
+///
+/// This is the shipped gate behind [`crate::run_from_env`]; tests drive it
+/// directly so the bind/listen path is not required to prove the policy.
+pub fn require_write_auth_for_bind(
+    bind_addr: &str,
+    has_write_capable_admin: bool,
+) -> Result<(), String> {
+    if has_write_capable_admin || listen_is_loopback_only(bind_addr) {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to bind {bind_addr} without a write-capable admin credential: set ADMIN_TOKEN, ADMIN_TOKENS, or WAF_IDS_CREDENTIALS_PATH before listening on a non-loopback address"
+        ))
+    }
+}
+
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
@@ -283,5 +346,43 @@ mod tests {
         let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equal_secrets_and_rejects_others() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret!"));
+        assert!(!constant_time_eq(b"secret", b""));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn listen_is_loopback_only_classifies_bind_addresses() {
+        assert!(listen_is_loopback_only("127.0.0.1:0"));
+        assert!(listen_is_loopback_only("127.0.0.1:8080"));
+        assert!(listen_is_loopback_only("[::1]:8080"));
+        assert!(listen_is_loopback_only("localhost:8080"));
+        assert!(listen_is_loopback_only("LOCALHOST:9"));
+        assert!(!listen_is_loopback_only("0.0.0.0:0"));
+        assert!(!listen_is_loopback_only("0.0.0.0:8080"));
+        assert!(!listen_is_loopback_only("[::]:8080"));
+        assert!(!listen_is_loopback_only("192.0.2.10:8080"));
+        assert!(!listen_is_loopback_only(""));
+        assert!(!listen_is_loopback_only("not-an-address"));
+    }
+
+    #[test]
+    fn require_write_auth_for_bind_fail_closes_public_listeners() {
+        require_write_auth_for_bind("127.0.0.1:0", false).unwrap();
+        require_write_auth_for_bind("0.0.0.0:0", true).unwrap();
+        let err = require_write_auth_for_bind("0.0.0.0:0", false).unwrap_err();
+        assert!(
+            err.contains("refusing to bind 0.0.0.0:0"),
+            "operator error must name the refused address: {err}"
+        );
+        assert!(err.contains("ADMIN_TOKEN"), "{err}");
+        let err = require_write_auth_for_bind("[::]:8080", false).unwrap_err();
+        assert!(err.contains("refusing to bind [::]:8080"), "{err}");
     }
 }

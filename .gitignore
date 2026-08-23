@@ -1,3 +1,4 @@
 /target
 /waf-ids-state*.json
 /runtime-state*.json
+/.codegraph

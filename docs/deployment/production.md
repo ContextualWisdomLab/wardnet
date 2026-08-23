@@ -40,7 +40,7 @@ kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
 - Terminate TLS in front of the service.
 - Expose `/admin` and `/api/*` only through identity-aware access.
 - Configure upstream allowlists and egress policy.
-- Store `ADMIN_TOKEN` in a secret manager.
+- Store `ADMIN_TOKEN` in a secret manager. The process **will not become ready** on `BIND_ADDR=0.0.0.0:8080` (or any non-loopback address) if no write-capable credential is configured. That is intentional fail-closed behavior (issue #78). Recovery: inject the Secret, restart; do not disable the gate.
 - Mount persistent state or replace JSON persistence with a database.
 - Run `scripts/smoke.sh` before promoting a release.
 - Keep block mode route-scoped and reversible.

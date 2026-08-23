@@ -16,13 +16,14 @@
 - Operators use management APIs and the embedded admin console.
 - Upstream services are outside the process trust boundary.
 - The state file is trusted only after JSON deserialization succeeds.
+- A non-loopback listener is untrusted until a write-capable admin principal exists in the credential registry. Missing credentials are a startup failure, not “auth disabled”.
 - Threat feed import payloads are untrusted operator-supplied data.
 
 ## Primary Threats
 
 | Threat | Impact | Current Control | Required Hardening |
 | --- | --- | --- | --- |
-| Unauthorized management write | Route takeover or false blocking | `X-Admin-Token` write gate; multi-token RBAC with actor labels and readonly role; audit log for successful writes | SSO/OIDC, mTLS or identity proxy, SCIM |
+| Unauthorized management write | Route takeover or false blocking | `X-Admin-Token` write gate; multi-token RBAC with actor labels and readonly role; audit log for successful writes; **fail-closed startup** on non-loopback bind without a write-capable principal; `401` vs `403` without leaking expected role; constant-time secret compare | SSO/OIDC via Keyverse, mTLS or identity proxy, SCIM |
 | Malicious threat feed import | False positives or broad blocks | Validation, route-scoped enforcement | Source signing, feed confidence, staged promotion |
 | State file corruption | Startup failure or stale policy | JSON parse failure surfaces startup error | Database, backup, schema migration |
 | Upstream SSRF through routes | Internal network exposure | Upstream scheme validation | Upstream allowlists, egress policy |

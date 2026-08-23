@@ -53,6 +53,7 @@ flowchart LR
 
 - Default bind address is localhost.
 - Remote management requires `ADMIN_TOKEN` plus external TLS and identity controls.
+- Non-loopback listeners fail closed before readiness unless a write-capable admin principal is configured.
 - `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone operation. Without it, the service uses seeded in-memory state.
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
@@ -62,7 +63,17 @@ flowchart LR
 
 ## Product Architecture Evidence
 
+- Figma design-system file ID: `QTH5UuU0FJv2VyM2xb02Fp` (see `docs/design-system.md` and `docs/adr/0001-figma-and-design-system.md`)
+- FigJam architecture file ID: `JExziD87eUWKLERECUGhWQ` (`docs/figma/enterprise-product-architecture.md`)
 - FigJam: `docs/figma/enterprise-product-architecture.md`
 - Product workflows: `docs/product-design/enterprise-operator-workflows.md`
 - Enterprise scorecard: `docs/analytics/enterprise-value-scorecard.md`
 - Complexity audit: `docs/ponytail/2026-07-02-complexity-audit.md`
+- UI-UX scene / edge-case inventory (file://-openable): `docs/ui-ux/storybook-scene-inventory.md`
+- Product/technical gap baseline: `docs/product-technical-gap-baseline.md`
+
+## Security Boundaries (credentials)
+
+- Default bind address is loopback. Loopback-only development may start without an admin token and reports `auth_mode=development` on `/healthz`.
+- Any non-loopback `BIND_ADDR` fails closed before readiness unless a write-capable principal is present in the credential registry (`ADMIN_TOKEN`, `ADMIN_TOKENS`, or `WAF_IDS_CREDENTIALS_PATH`).
+- Management writes return `401` when unauthenticated and `403` when authenticated but not permitted to write. Response bodies do not name the expected role.

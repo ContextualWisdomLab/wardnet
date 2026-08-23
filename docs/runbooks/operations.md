@@ -50,8 +50,9 @@ WAF_IDS_STATE_PATH=./waf-ids-state.local.json \
 cargo run
 ```
 
-Health reports `credentials_source` (`file` / `env` / `none`) and
-`admin_auth_configured` (boolean) without exposing secret values.
+Health reports `credentials_source` (`file` / `env` / `none`),
+`admin_auth_configured` (boolean), and `auth_mode` (`development` /
+`production`) without exposing secret values.
 
 ## Health Check
 
@@ -66,7 +67,8 @@ Expected fields:
 - `dnsbl_origin`: configured DNSBL origin without a trailing dot
 - `event_limit`: retained security event count
 - `credentials_source`: `file`, `env`, or `none`
-- `admin_auth_configured`: whether any admin write token is configured
+- `admin_auth_configured`: whether any admin token is configured
+- `auth_mode`: `development` only on a loopback listener with no write-capable principal; otherwise `production`. A non-loopback process refuses to become ready without credentials (issue #78).
 
 ## Smoke Test
 
