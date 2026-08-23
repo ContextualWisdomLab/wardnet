@@ -6,7 +6,9 @@ is committed at `docs/papers/nist-sp-800-218-ssdf.pdf`.
 
 ## Immutable artifacts
 
-A git tag `vX.Y.Z` starts `.github/workflows/release.yml`, which:
+A git tag `vX.Y.Z` starts `.github/workflows/release.yml`. Lightweight
+tags are refused (`scripts/admit-release-tag.sh` requires an annotated
+tag object). The workflow then:
 
 1. Builds `waf-ids-ai-soc` with `cargo build --locked --release`
 2. Writes basename `SHA256SUMS` via `scripts/release-checksums.sh`
@@ -59,9 +61,14 @@ changed.
 ## Promotion
 
 1. Tag from the merge commit on `main`: `git tag -a vX.Y.Z -m "wardnet vX.Y.Z"`
+   (lightweight `git tag vX.Y.Z` is not admitted)
 2. `git push origin vX.Y.Z`
 3. Wait for the Release workflow
-4. Point Kubernetes at the digest (not `latest`, not the tag alone):
+4. Pin Kubernetes from `IMAGE-DIGEST.txt` (not `latest`, not the tag alone):
+
+```bash
+scripts/pin-k8s-digest.sh IMAGE-DIGEST.txt
+```
 
 ```yaml
 image: ghcr.io/contextualwisdomlab/waf-ids-ai-soc@sha256:<digest>
@@ -78,6 +85,5 @@ until a tagged image exists; bump that pin in the same release PR as the tag.
 3. Confirm `/healthz` and `/api/commercial/readiness` on the rolled-back replica
 4. Do not retag or overwrite an existing `v*` image
 
-Declared rollback unit: one immutable digest. Remaining on #84: ephemeral
-production-shaped deploy of the signed digest, admission that rejects
-unsigned tags, and the coverage/attack evidence bundle.
+Declared rollback unit: one immutable digest. Remaining on #84: coverage
+and attack-evidence bundle for the signed artifacts.

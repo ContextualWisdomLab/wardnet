@@ -412,4 +412,114 @@ fn release_workflow_is_keyless_and_signs_by_digest() {
         workflow.contains("--verify-tag"),
         "GitHub Release must verify the tag"
     );
+    assert!(
+        workflow.contains("scripts/admit-release-tag.sh"),
+        "release must admit annotated tags only"
+    );
+}
+
+#[test]
+fn admit_release_tag_rejects_lightweight_and_accepts_annotated() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/admit-release-tag.sh");
+    let dir = std::env::temp_dir().join(format!("wardnet-admit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp git dir");
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .env("GIT_AUTHOR_NAME", "wardnet")
+            .env("GIT_AUTHOR_EMAIL", "release@wardnet.test")
+            .env("GIT_COMMITTER_NAME", "wardnet")
+            .env("GIT_COMMITTER_EMAIL", "release@wardnet.test")
+            .status()
+            .expect("git")
+    };
+    assert!(git(&["init", "-q"]).success());
+    std::fs::write(dir.join("README"), b"wardnet").expect("readme");
+    assert!(git(&["add", "README"]).success());
+    assert!(git(&["commit", "-qm", "seed"]).success());
+    assert!(git(&["tag", "v0.0.1"]).success(), "lightweight tag");
+    let light = Command::new("bash")
+        .arg(&script)
+        .arg("v0.0.1")
+        .current_dir(&dir)
+        .output()
+        .expect("admit lightweight");
+    assert!(
+        !light.status.success(),
+        "lightweight tag must be refused: {}",
+        String::from_utf8_lossy(&light.stderr)
+    );
+    assert!(git(&["tag", "-a", "v0.0.2", "-m", "annotated"]).success());
+    let annotated = Command::new("bash")
+        .arg(&script)
+        .arg("v0.0.2")
+        .current_dir(&dir)
+        .output()
+        .expect("admit annotated");
+    assert!(
+        annotated.status.success(),
+        "annotated tag must be admitted: {}",
+        String::from_utf8_lossy(&annotated.stderr)
+    );
+    let bad_name = Command::new("bash")
+        .arg(&script)
+        .arg("release-candidate")
+        .current_dir(&dir)
+        .output()
+        .expect("admit bad name");
+    assert!(!bad_name.status.success(), "non vX.Y.Z must be refused");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pin_k8s_digest_refuses_tags_and_accepts_sha256() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/pin-k8s-digest.sh");
+    let dir = std::env::temp_dir().join(format!("wardnet-pin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let tag_only = dir.join("tag.txt");
+    std::fs::write(
+        &tag_only,
+        "ghcr.io/contextualwisdomlab/waf-ids-ai-soc:v0.1.0\n",
+    )
+    .expect("write tag");
+    let tag_out = Command::new("bash")
+        .arg(&script)
+        .arg(&tag_only)
+        .output()
+        .expect("pin tag");
+    assert!(
+        !tag_out.status.success(),
+        "tag alias must be refused: {}",
+        String::from_utf8_lossy(&tag_out.stderr)
+    );
+    let digest = dir.join("IMAGE-DIGEST.txt");
+    let hex = "a".repeat(64);
+    std::fs::write(
+        &digest,
+        format!("ghcr.io/contextualwisdomlab/waf-ids-ai-soc@sha256:{hex}\n"),
+    )
+    .expect("write digest");
+    let ok = Command::new("bash")
+        .arg(&script)
+        .arg(&digest)
+        .output()
+        .expect("pin digest");
+    assert!(
+        ok.status.success(),
+        "digest must be admitted: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&ok.stdout);
+    assert!(stdout.contains("@sha256:"));
+    assert!(stdout.contains("imagePullPolicy: IfNotPresent"));
+    let missing = Command::new("bash")
+        .arg(&script)
+        .arg(dir.join("missing.txt"))
+        .output()
+        .expect("pin missing");
+    assert!(!missing.status.success());
+    let _ = std::fs::remove_dir_all(&dir);
 }
