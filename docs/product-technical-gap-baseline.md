@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T16:20Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-23T17:06Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -25,13 +25,15 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| [#97](https://github.com/ContextualWisdomLab/wardnet/pull/97) | feat(waf): evaluate live gateway transactions with in-process libcoraza | `feat/issue-86-in-process-libcoraza` stacked on #96 | local fmt/test/clippy + two `/healthz` smokes this hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 first. Do not `--admin`. Do not re-implement sidecar or pin. |
-| [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `7cacaf135179` (`feat/issue-79-destination-policy`) stacked on #95 | rust + fuzz green at last snapshot; remaining Devin threads are info/KV-deviation | Author this pass; Devin/Codex COMMENTED. Remaining unresolved: DESTINATION_* env (documented operational-config deviation), hostname-allowlist mixed answers (intended), sidecar loopback needs allowlist in production, pin-cap eviction info | Org 2-approval + self-author. Merge #95 first. Do not re-implement the TCP-peer pin. |
+| [#99](https://github.com/ContextualWisdomLab/wardnet/pull/99) | feat(store): transactional outbox and leased workers | `feat/issue-81-outbox-workers` stacked on #98 | local fmt/test/clippy + two `/healthz` smokes + postgres `/healthz.outbox=ready` this hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 first. Do not `--admin`. Do not re-implement the postgres gate. |
+| [#98](https://github.com/ContextualWisdomLab/wardnet/pull/98) | feat(store): require PostgreSQL as the production control plane | `ea621985e276` (`feat/issue-80-postgres-control-plane`) stacked on #97 | rust + fuzz green at last snapshot; Devin 7 threads (full-snapshot rewrite, ORDER BY, TLS, RLS owner, reconnect) | Author this pass; Devin COMMENTED | Org 2-approval + self-author. ORDER BY + incremental event persist addressed on #99. Remaining rustls / non-owner role / backup are #80 remainder. Do not `--admin`. |
+| [#97](https://github.com/ContextualWisdomLab/wardnet/pull/97) | feat(waf): evaluate live gateway transactions with in-process libcoraza | `feat/issue-86-in-process-libcoraza` stacked on #96 | local fmt/test/clippy + two `/healthz` smokes prior hour | Author this pass | Org 2-approval + self-author. Merge #95 then #96 first. Do not `--admin`. Do not re-implement sidecar or pin. |
+| [#96](https://github.com/ContextualWisdomLab/wardnet/pull/96) | feat(security): fail-closed destination policy for outbound HTTP | `7cacaf135179` (`feat/issue-79-destination-policy`) stacked on #95 | rust + fuzz green at last snapshot; remaining Devin threads are info/KV-deviation | Author this pass; Devin/Codex COMMENTED | Org 2-approval + self-author. Merge #95 first. Do not re-implement the TCP-peer pin. |
 | [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | feat(waf): consult Coraza sidecar on live gateway transactions | `ba9ee3a0b142` (`feat/issue-86-in-path-coraza`) | rust + Security Scan green at last snapshot | Author this pass; Devin/Codex COMMENTED | Org 2-approval + self-author. Do not re-implement sidecar slice. |
 | [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | fix(auth): fail closed without write-capable admin on public bind | `f31d960a0b52` (`fix/issue-78-fail-closed-credentials`) | Checks re-ran after readiness-order fix | Author `seonghobae`; Devin COMMENTED | Org 2-approval + self-author. Do not `--admin` merge. Do not re-implement #78. |
 | [#93](https://github.com/ContextualWisdomLab/wardnet/pull/93) | test(persistence): replace permission-based fault injection with a deterministic seam | `f77eb69748ec` | rust + Security Scan green; **strix FAILURE** (org LiteLLM provider `openai-direct/gpt-5.6-luna`) | Author `seonghobae`; Devin COMMENTED | strix org-provider FAILURE + 2-approval + self-author. Do not rotate review-agent keys. |
-| [#92](https://github.com/ContextualWisdomLab/wardnet/pull/92) | build(deps): bump github/codeql-action/upload-sarif from 4.37.6 to 4.37.7 | dependabot `17277d78d5e1` | All green. `--auto` squash already enabled. Copilot review re-requested this hour. | Maintainer APPROVED (1 of 2). | **Second independent APPROVE missing**. `gh pr merge` rejected by ruleset 18156473. |
-| [#91](https://github.com/ContextualWisdomLab/wardnet/pull/91) | build(deps): bump futures-util from 0.3.33 to 0.3.34 | dependabot `c4662caebfa1` | All green. `--auto` squash already enabled. Copilot review re-requested this hour. | Maintainer APPROVED (1 of 2). | Same as #92: second independent APPROVE missing. |
+| [#92](https://github.com/ContextualWisdomLab/wardnet/pull/92) | build(deps): bump github/codeql-action/upload-sarif from 4.37.6 to 4.37.7 | dependabot `17277d78d5e1` | All green. `--auto` squash already enabled. | Maintainer APPROVED (1 of 2). | **Second independent APPROVE missing**. `gh pr merge` rejected by ruleset 18156473. |
+| [#91](https://github.com/ContextualWisdomLab/wardnet/pull/91) | build(deps): bump futures-util from 0.3.33 to 0.3.34 | dependabot `c4662caebfa1` | All green. `--auto` squash already enabled. | Maintainer APPROVED (1 of 2). | Same as #92: second independent APPROVE missing. |
 | [#90](https://github.com/ContextualWisdomLab/wardnet/pull/90) | feat(observability): export Wardnet events to SIEM and OpenTelemetry | `40f11b93a972` | All green (35). | Author `seonghobae`; CodeRabbit/Devin/GHAS COMMENTED. **0 unresolved threads** on exact head. | Org 2-approval + self-author. |
 | [#88](https://github.com/ContextualWisdomLab/wardnet/pull/88) | feat(security): reject non-LiteLLM credentials before upstream | `41b21cfe2168` | All green (35). | Author `seonghobae`; CodeRabbit COMMENTED. **0 unresolved threads** on exact head. | Org 2-approval + self-author. |
 | [#77](https://github.com/ContextualWisdomLab/wardnet/pull/77) | build(rust): pin and track Rust 1.97.1 | `a13c08656177` | rust green; **strix FAILURE**. Same org-provider fail-closed as #93. | Author `seonghobae`; Devin COMMENTED. | strix org-provider FAILURE + 2-approval + self-author. |
@@ -52,8 +54,8 @@ by ruleset `18156473` (not by failing Checks). Do not `--admin` merge.
 | [#84](https://github.com/ContextualWisdomLab/wardnet/issues/84) | [P1] Build an immutable signed release, promotion, and rollback pipeline | high |
 | [#83](https://github.com/ContextualWisdomLab/wardnet/issues/83) | [P1] Add bounded distributed admission control, trusted client attribution, and overload behavior | high |
 | [#82](https://github.com/ContextualWisdomLab/wardnet/issues/82) | [P1] Integrate Keyverse identity, tenant authorization, consent, and human approval evidence | high (blocked) |
-| [#81](https://github.com/ContextualWisdomLab/wardnet/issues/81) | [P0] Add a transactional outbox and idempotent leased workers for external effects | **critical** |
-| [#80](https://github.com/ContextualWisdomLab/wardnet/issues/80) | [P0] Add an authoritative PostgreSQL control plane with tenant isolation and recoverable migrations | **critical** |
+| [#81](https://github.com/ContextualWisdomLab/wardnet/issues/81) | [P0] Add a transactional outbox and idempotent leased workers for external effects | **critical — first slice this pass** |
+| [#80](https://github.com/ContextualWisdomLab/wardnet/issues/80) | [P0] Add an authoritative PostgreSQL control plane with tenant isolation and recoverable migrations | **critical — gate on #98; rustls/backup remainder** |
 | [#79](https://github.com/ContextualWisdomLab/wardnet/issues/79) | [P0] Enforce a fail-closed destination policy for all outbound traffic | **critical — closed in runtime on #96** |
 | [#78](https://github.com/ContextualWisdomLab/wardnet/issues/78) | [P0] Fail closed when management credentials are absent | **critical — closed in runtime on #94** |
 | [#75](https://github.com/ContextualWisdomLab/wardnet/issues/75) | Rename Kubernetes manifest to wardnet.yaml after external-secret hardening lands | medium |
@@ -71,20 +73,17 @@ still say `waf-ids-ai-soc`. Kubernetes manifest remains
 this pass: docs and health copy already mention Wardnet in newer surfaces;
 wholesale crate rename is deferred (not a merge blocker).
 
-### Proven-engine enforcement (issue #86) — **in-process libcoraza this pass**
+### Proven-engine enforcement (issue #86) — **in-process libcoraza shipped, unmerged**
 
 Coraza/Suricata ingest still maps proven-engine hits into DNSBL + threat
 indicators. PR #95 consults a Coraza sidecar on each live `/gateway`
-transaction when `CORAZA_WAF_URL` is set. This pass also `dlopen`s
-operator-supplied libcoraza (`CORAZA_LIB_PATH` + `CORAZA_RULES_PATH` and/or
-`CORAZA_DIRECTIVES`) and evaluates the same live transactions through the
-libcoraza C ABI (`src/coraza_inprocess.rs`). In-process wins over sidecar when
-both are set. Missing library, missing rules, or an empty ruleset fail
-startup before bind. `GET /api/waf/engine-status` and `/healthz.proven_engine`
-report `coraza_in_process` / `coraza_sidecar` / `ingest_hints_only`. CI stays
-hermetic with a fixture cdylib that exports the same symbols; production
-points at a real libcoraza + CRS bundle. Suricata tail/shipper and
-detection-quality corpora remain open.
+transaction when `CORAZA_WAF_URL` is set. PR #97 `dlopen`s operator-supplied
+libcoraza (`CORAZA_LIB_PATH` + `CORAZA_RULES_PATH` and/or `CORAZA_DIRECTIVES`)
+and evaluates the same live transactions through the libcoraza C ABI
+(`src/coraza_inprocess.rs`). In-process wins over sidecar when both are set.
+Missing library, missing rules, or an empty ruleset fail startup before bind.
+`GET /api/waf/engine-status` and `/healthz.proven_engine` report
+`coraza_in_process` / `coraza_sidecar` / `ingest_hints_only`. Do not re-implement.
 
 ### Identity (issue #82, Keyverse)
 
@@ -92,7 +91,7 @@ Management auth is shared secrets (`X-Admin-Token`) plus optional multi-token
 RBAC. Keyverse (OIDC/SCIM/FIDO2) is not wired. Fail-closed (#78) is the
 prerequisite shipped on PR #94.
 
-### Durable control plane (issue #80) — **production gate + RLS snapshot this pass**
+### Durable control plane (issue #80) — **production gate on #98**
 
 PostgreSQL is required for non-loopback binds (`CONTROL_PLANE_DATABASE_URL`).
 `src/control_plane.rs` migrates 3NF two-word tables with default-deny RLS
@@ -101,6 +100,20 @@ transaction. JSON file / memory remain loopback/community only.
 `/healthz.persistence` is `postgres` | `file` | `memory`. Remaining: rustls,
 non-owner role, backup/restore drill, event HASH partitioning, optimistic
 concurrency.
+
+### Transactional outbox (issue #81) — **first slice this pass**
+
+On the PostgreSQL authority, security events append (`security_event` +
+`outbox_message`) in one transaction instead of rewriting every table.
+Policy snapshots enqueue `policy.snapshot_replaced`. A leased worker claims
+with `FOR UPDATE SKIP LOCKED`, retries with bounded exponential backoff,
+dead-letters permanent/exhausted failures, and records unique receipts.
+Stdout SIEM export is **at-least-once**; the receipt is the exactly-once ack.
+Operator-visible: `/healthz.outbox` (`ready`|`disabled`), pending/leased/
+dead-letter counts, `GET /api/outbox` (admin read), `POST /api/outbox/{id}/replay`
+(admin write + audit). Client IPs and paths in payloads are not masked.
+File/memory adapters stay `outbox=disabled` with in-process stdout. Remaining
+consumers: TAXII poll, Clearfolio, contextual-orchestrator on the same contract.
 
 ### Fail-closed credentials (issue #78) — **closed on PR #94**
 
@@ -116,7 +129,8 @@ Production sidecar URLs on loopback/private still need `DESTINATION_ALLOWLIST`
 ### SIEM / OpenTelemetry (issue #85 / PR #90)
 
 `/api/events.ndjson` and stdout JSON lines exist on main. Full exporter binary
-and OTel sit on PR #90, blocked by the 2-approval ruleset.
+and OTel sit on PR #90, blocked by the 2-approval ruleset. The #81 worker now
+replays `security_event.recorded` as stdout SIEM with receipts.
 
 ### UI-UX / Storybook / Figma
 
@@ -128,6 +142,7 @@ and OTel sit on PR #90, blocked by the 2-approval ruleset.
 | Figma Code Connect | Not used |
 | Ten UI-UX areas | Inventoried in `docs/ui-ux/storybook-scene-inventory.md` |
 | Node Storybook | **Not hosted in `/admin`** (embedded-console architecture). File:// inventory is the scene/edge-case contract this pass. |
+| Outbox card | Embedded `/admin` Outbox section this pass |
 
 ### CSAP / SOC 2 vs PII unmasking
 
@@ -139,36 +154,40 @@ future encryption-at-rest.
 ### Coverage / docstring bar
 
 Org 100% line/branch/docstring applies to **changed** surfaces this loop
-(libcoraza loader, engine-status in-process fields, startup fail-closed,
-gateway consult). Remaining holes on untouched handlers stay listed for later
-loops.
+(outbox schema, claim/ack/dead-letter/replay, incremental event persist,
+health/API, admin card). Remaining holes on untouched handlers stay listed
+for later loops.
 
 ### Ecosystem connectors (leverage order)
 
 1. **keyverse** — identity for management plane (#82).
 2. **contextual-orchestrator** — SOC LLM already optional via
-   `SOC_LLM_BASE_URL`; keep adapter, do not fork routing.
+   `SOC_LLM_BASE_URL`; keep adapter, do not fork routing. Next: same outbox
+   contract.
 3. **naruon** / **clearfolio** — document viewer already optional.
 4. **TEPP / RankWeave / ThreadWeave / LineageWeave / disksage / fast-mlsirm** —
    not on the gateway data path; no connector this pass.
 
 ## This loop’s shipped gap
 
-Issue **#80** first slice (PostgreSQL production authority). Non-loopback binds
-fail closed without `CONTROL_PLANE_DATABASE_URL`. Operator-visible:
-`/healthz.persistence=postgres`; credentials key `control_plane_url`. Driving
-tests: `run_from_env_fail_closes_public_bind_without_postgres`,
-`binary_fail_closes_non_loopback_listen_without_postgres`,
-`binary_fail_closes_when_control_plane_url_is_not_postgres`,
-`postgres_roundtrip_seeded_snapshot_when_database_url_is_set` (CI postgres
-service). Do not re-implement #78, the #86 sidecar/libcoraza slices, or the
-#79 pin.
+Issue **#81** first slice (transactional outbox + leased workers) on the #80
+PostgreSQL authority. Also the still-valid #98 ORDER BY on load queries and
+incremental security-event persist (gateway path no longer rewrites the whole
+snapshot). Operator-visible: `/healthz.outbox=ready` on postgres,
+`GET /api/outbox`, admin Outbox card. Driving tests:
+`postgres_appends_event_and_outbox_atomically`,
+`postgres_outbox_worker_is_idempotent_and_dead_letters`,
+`postgres_expired_lease_is_reclaimed_and_skip_locked_is_exclusive`,
+`outbox_api_is_admin_authenticated_and_disabled_without_postgres`.
+Do not re-implement #78, the #86 sidecar/libcoraza slices, the #79 pin, or
+the #80 production postgres gate.
 
 ## Next hourly loop (do, do not report)
 
 1. Second independent APPROVE on #91/#92. Do not `--admin`.
-2. Keep #94/#95/#96/#97 and this #80 PR merge-ready. Merge order #95 then #96
-   then #97 then this. Do not re-implement shipped slices.
-3. Next runtime gap if policy still blocks: #81 outbox/workers on this
-   postgres authority, or rustls / backup drill remainder of #80.
+2. Keep #94/#95/#96/#97/#98 and this #81 PR merge-ready. Merge order #95 then
+   #96 then #97 then #98 then this. Do not re-implement shipped slices.
+3. Next runtime gap if policy still blocks: rustls / backup drill remainder of
+   #80, or additional #81 consumers (TAXII / Clearfolio / orchestrator) on this
+   outbox.
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.

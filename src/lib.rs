@@ -42,6 +42,7 @@ mod credentials;
 mod destination;
 mod misp_import;
 mod opencti_import;
+mod outbox;
 mod proven_engine;
 mod stix_import;
 mod suricata_eve;
@@ -345,7 +346,34 @@ impl AppState {
             proven_engine: self.proven_engine.mode().to_string(),
             proven_engine_fail_closed: self.proven_engine.fail_closed,
             destination_mode: self.destination.mode().to_string(),
+            outbox: if self.control_plane.is_some() {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            outbox_pending: 0,
+            outbox_leased: 0,
+            outbox_dead_letter: 0,
+            outbox_oldest_age_seconds: None,
         }
+    }
+
+    async fn health_status_live(&self) -> HealthStatus {
+        let mut health = self.health_status();
+        let Some(plane) = &self.control_plane else {
+            return health;
+        };
+        match plane.outbox_health(now_unix() as i64).await {
+            Ok(stats) => {
+                health.outbox = stats.status;
+                health.outbox_pending = stats.pending;
+                health.outbox_leased = stats.leased;
+                health.outbox_dead_letter = stats.dead_letter;
+                health.outbox_oldest_age_seconds = stats.oldest_age_seconds;
+            }
+            Err(_) => health.outbox = "error".to_string(),
+        }
+        health
     }
 }
 
@@ -473,6 +501,12 @@ pub struct HealthStatus {
     pub proven_engine_fail_closed: bool,
     /// `production` (fail-closed classes) or `development` (loopback class permitted).
     pub destination_mode: String,
+    /// `ready` when the PostgreSQL outbox is the authority; `disabled` on file/memory.
+    pub outbox: String,
+    pub outbox_pending: i64,
+    pub outbox_leased: i64,
+    pub outbox_dead_letter: i64,
+    pub outbox_oldest_age_seconds: Option<i64>,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -545,6 +579,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
         .route("/api/audit-logs", get(list_audit_logs))
+        .route("/api/outbox", get(list_outbox))
+        .route("/api/outbox/{message_id}/replay", post(replay_outbox))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
         .route("/api/signatures", get(list_signatures))
@@ -907,7 +943,7 @@ async fn soc_analyze(
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
-    Json(state.health_status())
+    Json(state.health_status_live().await)
 }
 
 /// Build/version metadata for deployment verification.
@@ -1090,6 +1126,75 @@ async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> R
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
     Json(state.inner.read().await.audit_logs.clone()).into_response()
+}
+
+#[derive(Serialize)]
+struct OutboxListView {
+    status: String,
+    messages: Vec<outbox::OutboxMessage>,
+}
+
+async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return Json(OutboxListView {
+            status: "disabled".to_string(),
+            messages: Vec::new(),
+        })
+        .into_response();
+    };
+    match plane.list_outbox().await {
+        Ok(messages) => Json(OutboxListView {
+            status: "ready".to_string(),
+            messages,
+        })
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn replay_outbox(
+    State(state): State<AppState>,
+    PathParam(message_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox replay requires the PostgreSQL control plane",
+        );
+    };
+    let actor = audit_actor(&state, &headers);
+    if let Err(message) = plane
+        .replay_dead_letter(&message_id, now_unix() as i64)
+        .await
+    {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    match state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "replay_outbox",
+                "outbox_message",
+                message_id.clone(),
+            );
+        })
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "pending",
+            "message_id": message_id
+        }))
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
 }
 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
@@ -2161,7 +2266,7 @@ async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
     let generated_at_unix = now_unix();
     Json(SupportBundle {
         generated_at_unix,
-        health: state.health_status(),
+        health: state.health_status_live().await,
         kpis: kpi_snapshot_at(&data, generated_at_unix),
         commercial: data.commercial.clone(),
         readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
@@ -2520,29 +2625,37 @@ async fn record_event(
     let action = action.to_string();
     let path = path.to_string();
     let event_limit = state.event_limit;
-    if let Err(error) = state
-        .mutate_and_persist(|data| {
-            let id = data.next_event_id;
-            data.next_event_id += 1;
-            let event = SecurityEvent {
-                id,
-                timestamp_unix: now_unix(),
-                client_ip,
-                route_id,
-                action,
-                reason,
-                score,
-                path,
-            };
-            // Structured stdout log line for SIEM / log-collector ingestion.
-            // ponytail: one println per recorded event — fine at gateway volumes;
-            // add async batching if event throughput ever becomes a bottleneck.
-            println!("{}", security_event_log_line(&event));
-            data.events.push(event);
-            enforce_event_limit(data, event_limit);
-        })
-        .await
-    {
+    let _guard = state.persist_lock.lock().await;
+    let (event, previous) = {
+        let mut data = state.inner.write().await;
+        let previous = data.clone();
+        let id = data.next_event_id;
+        data.next_event_id += 1;
+        let event = SecurityEvent {
+            id,
+            timestamp_unix: now_unix(),
+            client_ip,
+            route_id,
+            action,
+            reason,
+            score,
+            path,
+        };
+        data.events.push(event.clone());
+        enforce_event_limit(&mut data, event_limit);
+        (event, previous)
+    };
+    let persist = if let Some(plane) = &state.control_plane {
+        plane.append_security_event(&event, event_limit).await
+    } else {
+        // File/memory has no leased worker; emit the SIEM line on the request path.
+        println!("{}", security_event_log_line(&event));
+        let snapshot = state.inner.read().await.clone();
+        state.persist_snapshot(&snapshot).await
+    };
+    if let Err(error) = persist {
+        let mut data = state.inner.write().await;
+        *data = previous;
         eprintln!("failed to persist security event: {error}");
     }
 }
@@ -3023,6 +3136,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre>
     </section>
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Outbox</h2><p class="muted">PostgreSQL leased workers for external effects. File/memory adapters report disabled. Client IPs and paths are not masked.</p><div id="outboxBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
     <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
@@ -3086,11 +3200,21 @@ async function loadAudit(){
   const a=await r.json();
   $('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));
 }
+async function loadOutbox(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/outbox',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const o=await r.json();
+  const head='<div class="row" style="margin-bottom:10px">'+badge(o.status||'disabled',o.status==='ready'?'b-pass':'b-neutral')+'</div>';
+  const rows=(o.messages||[]).slice(0,25).map(x=>[esc(x.event_type),esc(x.message_status),esc(x.attempt_count),esc(x.aggregate_id),esc(x.terminal_reason??'—')]);
+  $('outboxBody').innerHTML=head+table('Outbox messages',['Type','Status','Attempts','Aggregate','Terminal reason'],rows);
+}
 async function loadRaw(id,url,json){try{const t=json?JSON.stringify(await getJSON(url),null,2):await getText(url);$(id).textContent=t&&t.trim()?t:'(empty)';}catch(e){$(id).textContent='Error: '+e.message;}}
 async function refresh(){await Promise.allSettled([
   guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),
   guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),
-  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),
+  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),guard('outboxBody',loadOutbox),
   loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
 function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;
   f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}
@@ -3382,11 +3506,38 @@ pub async fn run_from_env(
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
+    let stop_workers = Arc::new(tokio::sync::Notify::new());
+    if state.control_plane.is_some() {
+        let worker_state = state.clone();
+        let stop = Arc::clone(&stop_workers);
+        tokio::spawn(async move {
+            run_outbox_worker(worker_state, stop).await;
+        });
+    }
     let served = axum::serve(listener, build_app(state))
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            stop_workers.notify_waiters();
+        })
         .await;
     served?;
     Ok(())
+}
+
+async fn run_outbox_worker(state: AppState, stop: Arc<tokio::sync::Notify>) {
+    let owner = format!("wardnet:{}", std::process::id());
+    loop {
+        tokio::select! {
+            _ = stop.notified() => break,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Some(plane) = &state.control_plane {
+                    let _ = plane
+                        .drain_once(&owner, now_unix() as i64, outbox::dispatch_stdout)
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -7260,6 +7411,11 @@ mod tests {
                 proven_engine: "ingest_hints_only".to_string(),
                 proven_engine_fail_closed: false,
                 destination_mode: "production".to_string(),
+                outbox: "disabled".to_string(),
+                outbox_pending: 0,
+                outbox_leased: 0,
+                outbox_dead_letter: 0,
+                outbox_oldest_age_seconds: None,
             }
         );
 
@@ -7274,6 +7430,37 @@ mod tests {
             AppState::seeded(None).health_status().destination_mode,
             "development"
         );
+        assert_eq!(state.health_status().outbox, "disabled");
+    }
+
+    #[tokio::test]
+    async fn outbox_api_is_admin_authenticated_and_disabled_without_postgres() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let denied = app_request(&app, empty_request(Method::GET, "/api/outbox")).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/outbox", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["status"], "disabled");
+        assert_eq!(body["messages"], serde_json::json!([]));
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.outbox, "disabled");
+        assert_eq!(health.outbox_pending, 0);
+
+        let replayed = app_request(
+            &app,
+            authed_empty_request(Method::POST, "/api/outbox/missing/replay", "secret"),
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
