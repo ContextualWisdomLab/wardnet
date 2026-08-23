@@ -34,6 +34,7 @@ start_server() {
       WAF_IDS_STATE_PATH="$STATE_FILE" \
       DNSBL_ORIGIN="dnsbl.test" \
       EVENT_LIMIT="5" \
+      CONTROL_PLANE_DATABASE_URL="" \
       cargo run --quiet
   ) >"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"

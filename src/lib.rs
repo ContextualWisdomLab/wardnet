@@ -35,6 +35,7 @@ pub use waf_ids_core::{
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
+mod control_plane;
 mod coraza_audit;
 mod coraza_inprocess;
 mod credentials;
@@ -45,7 +46,10 @@ mod proven_engine;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CredentialRegistry,
+    CredentialSource,
+};
 pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
 
@@ -84,6 +88,8 @@ pub struct AppState {
     /// Addresses that already passed policy; the HTTP clients resolve through
     /// this pin board instead of a second OS DNS lookup.
     pins: Arc<destination::DestinationPins>,
+    /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
+    control_plane: Option<Arc<control_plane::PostgresPlane>>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -128,6 +134,24 @@ impl AppState {
         Ok(Self::new(data, config))
     }
 
+    /// Load from PostgreSQL, seeding the tenant snapshot when empty.
+    pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
+        let plane = control_plane::PostgresPlane::connect(database_url).await?;
+        let mut data = match plane.load().await? {
+            Some(loaded) => loaded,
+            None => AppData::seeded(),
+        };
+        let event_limit = config.event_limit.max(1);
+        enforce_event_limit(&mut data, event_limit);
+        plane.save(&data).await?;
+        Ok(Self::new(data, config).with_control_plane(Arc::new(plane)))
+    }
+
+    fn with_control_plane(mut self, plane: Arc<control_plane::PostgresPlane>) -> Self {
+        self.control_plane = Some(plane);
+        self
+    }
+
     fn new(data: AppData, config: AppConfig) -> Self {
         let pins = Arc::new(destination::DestinationPins::default());
         Self {
@@ -151,6 +175,7 @@ impl AppState {
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
             pins,
+            control_plane: None,
         }
     }
 
@@ -294,6 +319,9 @@ impl AppState {
     }
 
     async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
+        if let Some(plane) = &self.control_plane {
+            return plane.save(data).await;
+        }
         let Some(path) = self.state_path.as_deref() else {
             return Ok(());
         };
@@ -303,7 +331,9 @@ impl AppState {
     fn health_status(&self) -> HealthStatus {
         HealthStatus {
             status: "ok".to_string(),
-            persistence: if self.state_path.is_some() {
+            persistence: if self.control_plane.is_some() {
+                "postgres".to_string()
+            } else if self.state_path.is_some() {
                 "file".to_string()
             } else {
                 "memory".to_string()
@@ -429,6 +459,7 @@ pub struct SupportBundle {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthStatus {
     pub status: String,
+    /// `postgres` (production authority), `file` (loopback/community), or `memory`.
     pub persistence: String,
     pub dnsbl_origin: String,
     pub event_limit: usize,
@@ -3214,7 +3245,7 @@ fn outbound_http_client(pins: Arc<destination::DestinationPins>) -> reqwest::Cli
         .expect("failed to build fail-closed outbound HTTP client")
 }
 
-fn bind_is_loopback(bind_addr: &str) -> bool {
+pub(crate) fn bind_is_loopback(bind_addr: &str) -> bool {
     let trimmed = bind_addr.trim();
     if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
         return addr.ip().is_loopback();
@@ -3263,6 +3294,7 @@ pub async fn run_from_env(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
+        std::env::var("CONTROL_PLANE_DATABASE_URL").ok(),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -3327,9 +3359,17 @@ pub async fn run_from_env(
         in_process,
     };
     let destination_policy = startup_destination_policy(&bind_addr)?;
-    let state = AppState::load(config)
-        .await
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+    let control_plane_url = credentials
+        .get_credential(CRED_CONTROL_PLANE_URL)
+        .map(str::to_owned);
+    control_plane::require_postgres_for_bind(&bind_addr, control_plane_url.as_deref())
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let state = match control_plane_url.as_deref() {
+        Some(url) => AppState::load_postgres(config, url).await,
+        None => AppState::load(config).await,
+    }
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    let state = state
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
@@ -3392,6 +3432,7 @@ mod tests {
             "PROVEN_ENGINE_FAIL_CLOSED",
             "DESTINATION_ALLOWLIST",
             "DESTINATION_DENYLIST",
+            "CONTROL_PLANE_DATABASE_URL",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -3504,6 +3545,25 @@ mod tests {
             run_from_env(Box::pin(std::future::ready(())))
                 .await
                 .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_fail_closes_public_bind_without_postgres() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::remove_var("CONTROL_PLANE_DATABASE_URL");
+        }
+        let error = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .expect_err("production bind must require postgres");
+        let message = error.to_string();
+        assert!(
+            message.contains("CONTROL_PLANE_DATABASE_URL"),
+            "operator must see the production authority requirement: {message}"
         );
         clear_run_env();
     }

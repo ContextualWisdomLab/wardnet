@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T16:01Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-23T16:20Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -92,11 +92,15 @@ Management auth is shared secrets (`X-Admin-Token`) plus optional multi-token
 RBAC. Keyverse (OIDC/SCIM/FIDO2) is not wired. Fail-closed (#78) is the
 prerequisite shipped on PR #94.
 
-### Durable control plane (issue #80)
+### Durable control plane (issue #80) — **production gate + RLS snapshot this pass**
 
-Optional JSON file + atomic rename. Not PostgreSQL, no tenant isolation, no
-migrations, no hot-partition strategy. 3NF/snake_case two-word names apply when
-the store lands.
+PostgreSQL is required for non-loopback binds (`CONTROL_PLANE_DATABASE_URL`).
+`src/control_plane.rs` migrates 3NF two-word tables with default-deny RLS
+(`FORCE ROW LEVEL SECURITY`, `wardnet.tenant_id`). Snapshot persist is one
+transaction. JSON file / memory remain loopback/community only.
+`/healthz.persistence` is `postgres` | `file` | `memory`. Remaining: rustls,
+non-owner role, backup/restore drill, event HASH partitioning, optimistic
+concurrency.
 
 ### Fail-closed credentials (issue #78) — **closed on PR #94**
 
@@ -150,30 +154,21 @@ loops.
 
 ## This loop’s shipped gap
 
-Issue **#86** in-process libcoraza remainder ([#97](https://github.com/ContextualWisdomLab/wardnet/pull/97), stacked on #96).
-Operator-visible: `CORAZA_LIB_PATH` + `CORAZA_RULES_PATH`/`CORAZA_DIRECTIVES`;
-`/healthz.proven_engine=coraza_in_process`; `GET /api/waf/engine-status`
-`in_process_configured` / `in_process_rules`; missing library fails before
-readiness (`tests/binary.rs::binary_fail_closes_when_libcoraza_path_is_missing`).
-Driving tests: `gateway_blocks_live_request_from_in_process_libcoraza` and
-`stub_engine_blocks_crs_probe_and_allows_clean`. Two real smokes this hour:
-default `/healthz` + `/admin` (`ingest_hints_only`); stub-loaded `/healthz` +
-`/api/commercial/readiness` (`coraza_in_process`, `target_sale_value_krw`
-2_000_000_000). Do not re-implement #78, the #86 sidecar slice, or the #79 pin.
+Issue **#80** first slice (PostgreSQL production authority). Non-loopback binds
+fail closed without `CONTROL_PLANE_DATABASE_URL`. Operator-visible:
+`/healthz.persistence=postgres`; credentials key `control_plane_url`. Driving
+tests: `run_from_env_fail_closes_public_bind_without_postgres`,
+`binary_fail_closes_non_loopback_listen_without_postgres`,
+`binary_fail_closes_when_control_plane_url_is_not_postgres`,
+`postgres_roundtrip_seeded_snapshot_when_database_url_is_set` (CI postgres
+service). Do not re-implement #78, the #86 sidecar/libcoraza slices, or the
+#79 pin.
 
 ## Next hourly loop (do, do not report)
 
-1. Second independent APPROVE on #91/#92 (Copilot re-requested; still 1/2;
-   `--auto` already enabled). Merge if exact-HEAD second independent APPROVE
-   exists. Do not `--admin`.
-2. Keep #94/#95/#96/#97 merge-ready. Merge order #95 then #96 then #97. Do
-   not re-implement #78, the #86 sidecar, or the #79 pin.
-3. Strix FAILURE on #72/#77/#93 is org LiteLLM provider infra, not wardnet
-   code; do not rotate keys. Watch ContextualWisdomLab/.github branch
-   `codex/strix-fail-closed-provider-evidence`.
-4. Sticky opencode `CHANGES_REQUESTED` on #72 head `6881f47` — review job does
-   not post APPROVE.
-5. Next runtime gap if policy still blocks: #80 durable PostgreSQL control
-   plane, or #81 outbox/workers, or #86 detection-quality corpora / Suricata
-   tail.
-6. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.
+1. Second independent APPROVE on #91/#92. Do not `--admin`.
+2. Keep #94/#95/#96/#97 and this #80 PR merge-ready. Merge order #95 then #96
+   then #97 then this. Do not re-implement shipped slices.
+3. Next runtime gap if policy still blocks: #81 outbox/workers on this
+   postgres authority, or rustls / backup drill remainder of #80.
+4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.

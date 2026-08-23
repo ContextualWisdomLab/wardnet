@@ -61,6 +61,7 @@ fn binary_does_not_report_readiness_before_state_validation() {
         .env_remove("CORAZA_LIB_PATH")
         .env_remove("CORAZA_RULES_PATH")
         .env_remove("CORAZA_DIRECTIVES")
+        .env_remove("CONTROL_PLANE_DATABASE_URL")
         .output()
         .expect("spawn gateway binary for startup validation check");
     let _ = std::fs::remove_file(&state_path);
@@ -112,6 +113,62 @@ fn binary_fail_closes_when_libcoraza_path_is_missing() {
     );
 }
 
+#[test]
+fn binary_fail_closes_non_loopback_listen_without_postgres() {
+    let output = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
+        .env("BIND_ADDR", "0.0.0.0:0")
+        .env_remove("CONTROL_PLANE_DATABASE_URL")
+        .env_remove("WAF_IDS_STATE_PATH")
+        .env_remove("ADMIN_TOKEN")
+        .env_remove("ADMIN_TOKENS")
+        .env_remove("CORAZA_LIB_PATH")
+        .output()
+        .expect("spawn gateway binary for production postgres gate");
+    assert!(
+        !output.status.success(),
+        "production bind without postgres must fail: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("CONTROL_PLANE_DATABASE_URL"),
+        "startup error should name the missing control plane:\n{combined}"
+    );
+    assert!(
+        !combined.contains("waf-ids-ai-soc listening on"),
+        "readiness must not be reported without production postgres:\n{combined}"
+    );
+}
+
+#[test]
+fn binary_fail_closes_when_control_plane_url_is_not_postgres() {
+    let output = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
+        .env("BIND_ADDR", "127.0.0.1:0")
+        .env("CONTROL_PLANE_DATABASE_URL", "mysql://not-postgres")
+        .env_remove("WAF_IDS_STATE_PATH")
+        .env_remove("CORAZA_LIB_PATH")
+        .output()
+        .expect("spawn gateway binary for control-plane URL check");
+    assert!(
+        !output.status.success(),
+        "non-postgres URL must fail startup: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("postgres://"),
+        "startup error should require a postgres URL:\n{combined}"
+    );
+    assert!(
+        !combined.contains("waf-ids-ai-soc listening on"),
+        "readiness must not be reported for a rejected control-plane URL:\n{combined}"
+    );
+}
+
 fn spawn_ready_gateway() -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
         .env("BIND_ADDR", "127.0.0.1:0")
@@ -124,6 +181,7 @@ fn spawn_ready_gateway() -> Child {
         .env_remove("CORAZA_RULES_PATH")
         .env_remove("CORAZA_DIRECTIVES")
         .env_remove("CORAZA_WAF_URL")
+        .env_remove("CONTROL_PLANE_DATABASE_URL")
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn gateway binary");
