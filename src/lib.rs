@@ -307,6 +307,7 @@ async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
 #[cfg(test)]
 pub(crate) mod persist_fault {
     use std::cell::Cell;
+    use tokio::runtime::{Handle, RuntimeFlavor};
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub(crate) enum Fault {
@@ -315,13 +316,36 @@ pub(crate) mod persist_fault {
     }
 
     thread_local! {
-        /// Thread-local, not global: the default `#[tokio::test]` flavor is
-        /// `current_thread`, so one test's entire async call tree (including
-        /// every nested `persist_state` call) runs on the one OS thread the
+        /// Thread-local, not global: the `#[tokio::test(flavor = "current_thread")]`
+        /// tests this crate uses run each test's entire async call tree
+        /// (including every nested `persist_state` call) on the one OS thread the
         /// test harness assigned to that test function. A thread-local flag
         /// therefore can't leak into, or be clobbered by, a concurrently
         /// running test on another thread -- no cross-test lock needed.
+        ///
+        /// Fault injection is guarded by a runtime-flavor check in
+        /// `inject_persist_fault`; a `multi_thread` runtime would silently drop
+        /// the fault because the worker thread running `persist_state` differs
+        /// from the test thread, so the guard panics instead of silently
+        /// skipping coverage.
         pub(crate) static ACTIVE: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    /// Panic if the current Tokio runtime is not `current_thread`.
+    ///
+    /// The thread-local `ACTIVE` flag is only visible on the OS thread that set
+    /// it. In a `multi_thread` runtime, `persist_state` may run on a different
+    /// worker thread, which would see `None` and silently miss the injected
+    /// failure. Guarding at call time turns that silent coverage loss into a
+    /// loud test failure.
+    pub(crate) fn assert_current_thread_runtime() {
+        let handle = Handle::current();
+        assert_eq!(
+            handle.runtime_flavor(),
+            RuntimeFlavor::CurrentThread,
+            "persist_fault injection requires a `#[tokio::test(flavor = \"current_thread\")]` runtime; \
+             a multi-thread runtime would drop the injected fault on a worker thread"
+        );
     }
 }
 
@@ -6401,6 +6425,10 @@ mod tests {
     /// mid-test). Thread-local (see `persist_fault::ACTIVE`'s doc comment),
     /// so this never needs to coordinate with any other test.
     ///
+    /// Panics if the test runtime is `multi_thread`, because the thread-local
+    /// flag would not be visible to the worker thread that actually runs
+    /// `persist_state`.
+    ///
     /// Deterministic replacement for permission-based fault injection
     /// (`chmod 0o500`): a root or DAC-ignoring test runner writes straight
     /// through a read-only directory, so the previous approach was
@@ -6417,11 +6445,12 @@ mod tests {
     }
 
     fn inject_persist_fault(fault: persist_fault::Fault) -> FaultGuard {
+        persist_fault::assert_current_thread_runtime();
         persist_fault::ACTIVE.with(|cell| cell.set(Some(fault)));
         FaultGuard
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn load_surfaces_injected_write_temp_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
         let state_dir = temp_state_path("write-temp-fault");
@@ -6441,7 +6470,7 @@ mod tests {
         let _ = fs::remove_dir_all(state_dir).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn load_surfaces_injected_rename_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::Rename);
         let state_dir = temp_state_path("rename-fault");
