@@ -43,6 +43,11 @@ before binding a non-loopback address. Use `sslmode=require` or
 `sslmode=verify-full` for rustls. `/healthz.persistence` reports `postgres`.
 Loopback still uses `WAF_IDS_STATE_PATH` or in-memory state.
 
+After migrations, the session `SET ROLE`s to `wardnet_runtime` (NOSUPERUSER,
+NOBYPASSRLS, not table owner) so FORCE RLS binds. Provision that role and
+`GRANT` it to the login user if the URL user cannot `CREATE ROLE`. Missing
+`wardnet.tenant_id` yields no rows.
+
 `GET /api/backup` (admin read) exports a hashed logical snapshot. `POST /api/backup`
 restores after schema-version and payload-hash checks. `POST /api/backup/drill`
 restores into an isolated tenant, compares invariants, and drops the drill
@@ -59,5 +64,5 @@ https://doi.org/10.6028/NIST.SP.800-34r1
   `pg_dump`) so RLS tenant context is preserved and secrets (admin tokens,
   database URL) are never copied.
 
-Remaining: non-owner runtime role, HASH partitioning for `security_event`,
+Remaining: HASH partitioning for `security_event`,
 optimistic concurrency.
