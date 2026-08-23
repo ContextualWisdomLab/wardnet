@@ -1,0 +1,48 @@
+# Doctoring — in-path Coraza sidecar adapter
+
+This note grounds the issue #86 slice shipped this loop: live `/gateway`
+transactions are evaluated by a proven WAF engine through a sidecar adapter.
+IEEE PDFs are not redistributed.
+
+## Adopted standards and literature
+
+OWASP Foundation. (n.d.). *OWASP Core Rule Set documentation*.
+https://coreruleset.org/docs/
+
+- **Design impact:** CRS remains the detection authority. Wardnet POSTs the
+  live method/URI/body to `CORAZA_WAF_URL` and parses the sidecar body with the
+  existing Coraza audit adapter. Builtin signatures are a residual scorer, not
+  a replacement for CRS.
+
+Coraza. (n.d.). *Coraza Web Application Firewall*.
+https://coraza.io/docs/
+
+- **Design impact:** The sidecar contract is Coraza audit JSON (interrupted
+  transaction + `messages[]`). A 403 without audit JSON is still treated as an
+  interruption. Transport failures do not leak the sidecar URL into SOC events.
+
+Saltzer, J. H., & Schroeder, M. D. (1975). The protection of information in
+computer systems. *Proceedings of the IEEE*, *63*(9), 1278–1308.
+https://doi.org/10.1109/PROC.1975.9939
+
+- **Design impact:** Fail-safe defaults. `PROVEN_ENGINE_FAIL_CLOSED` is opt-in
+  (`true`/`1`/`yes`/`on`). Production deployments with `CORAZA_WAF_URL` must
+  set it so an unreachable engine does not silently allow traffic. Unset, the
+  gateway degrades to ingest-hint scoring and records `engine_unavailable`
+  only when fail-closed.
+
+National Institute of Standards and Technology. (2022). *Secure Software
+Development Framework (SSDF) version 1.1* (NIST SP 800-218).
+https://doi.org/10.6028/NIST.SP.800-218
+
+- **Design impact:** PW.1 / PW.4 — well-secured software and reuse of existing,
+  well-secured components. The in-process `coraza` crate needs Go+C at build
+  time; a sidecar adapter keeps CI hermetic while still placing CRS in the
+  enforcement path.
+
+## Operator next action
+
+Point `CORAZA_WAF_URL` at a Coraza (or CRS-compatible) evaluate endpoint that
+returns Coraza audit JSON. Set `PROVEN_ENGINE_FAIL_CLOSED=true` in production.
+Confirm `GET /api/waf/engine-status` reports `mode=coraza_sidecar` and
+`in_path=true` before exposing `/gateway`.

@@ -39,10 +39,12 @@ mod coraza_audit;
 mod credentials;
 mod misp_import;
 mod opencti_import;
+mod proven_engine;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -71,6 +73,8 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
+    /// In-path Coraza sidecar consult. Disabled unless `CORAZA_WAF_URL` is set.
+    proven_engine: ProvenEngineConfig,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -135,6 +139,7 @@ impl AppState {
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
+            proven_engine: ProvenEngineConfig::disabled(),
         }
     }
 
@@ -156,6 +161,12 @@ impl AppState {
     /// disables it (the default), hiding the analysis surface in the console.
     pub fn with_soc_llm(mut self, config: Option<SocLlmConfig>) -> Self {
         self.soc_llm = config;
+        self
+    }
+
+    /// Configure the in-path Coraza sidecar adapter. Builder-style.
+    pub fn with_proven_engine(mut self, config: ProvenEngineConfig) -> Self {
+        self.proven_engine = config;
         self
     }
 
@@ -255,6 +266,8 @@ impl AppState {
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+            proven_engine: self.proven_engine.mode().to_string(),
+            proven_engine_fail_closed: self.proven_engine.fail_closed,
         }
     }
 }
@@ -376,6 +389,10 @@ pub struct HealthStatus {
     pub credentials_source: String,
     /// True when at least one admin write token is configured.
     pub admin_auth_configured: bool,
+    /// `coraza_sidecar` when `CORAZA_WAF_URL` is set; otherwise `ingest_hints_only`.
+    pub proven_engine: String,
+    /// True when a configured sidecar outage fails the live transaction closed.
+    pub proven_engine_fail_closed: bool,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -469,6 +486,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/ids/suricata/eve", post(import_suricata_eve))
         .route("/api/waf/coraza/audit", post(import_coraza_audit))
+        .route("/api/waf/engine-status", get(waf_engine_status))
         .route("/api/threat-intel/stix", post(import_stix_document))
         .route("/api/threat-intel/misp", post(import_misp_document))
         .route("/api/threat-intel/taxii/poll", post(poll_taxii_collection))
@@ -2150,6 +2168,62 @@ async fn gateway(
     }
 
     let body_text = String::from_utf8_lossy(&body);
+    let request_uri = match uri.query() {
+        Some(query) => format!("{gateway_path}?{query}"),
+        None => gateway_path.to_string(),
+    };
+    let engine_outcome =
+        consult_proven_engine(&state, method.as_str(), &request_uri, &body_text, client_ip).await;
+    if let ProvenEngineOutcome::Unavailable { reason } = &engine_outcome
+        && state.proven_engine.fail_closed
+    {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "engine_unavailable",
+            reason.clone(),
+            0,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "action": "engine_unavailable",
+                "route_id": route.id,
+                "reason": reason,
+            })),
+        )
+            .into_response();
+    }
+    if let ProvenEngineOutcome::Hit(hit) = &engine_outcome
+        && (hit.action == "block" || hit.score >= route.block_threshold.unwrap_or(BLOCK_SCORE))
+        && route.mode == EnforcementMode::Block
+    {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "blocked",
+            hit.reason.clone(),
+            hit.score,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "action": "blocked",
+                "route_id": route.id,
+                "score": hit.score,
+                "reason": hit.reason,
+                "engine": "coraza"
+            })),
+        )
+            .into_response();
+    }
+
     let scored = score_request(
         gateway_path,
         uri.query(),
@@ -2215,6 +2289,39 @@ async fn gateway(
         Ok(response) => response,
         Err(message) => error(StatusCode::BAD_GATEWAY, message),
     }
+}
+
+/// Consult the configured Coraza sidecar for this live transaction.
+async fn consult_proven_engine(
+    state: &AppState,
+    method: &str,
+    request_uri: &str,
+    body_text: &str,
+    client_ip: Option<IpAddr>,
+) -> ProvenEngineOutcome {
+    let Some(url) = state
+        .proven_engine
+        .sidecar_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+    else {
+        return ProvenEngineOutcome::NotConfigured;
+    };
+    proven_engine::evaluate_sidecar(&state.http, &url, method, request_uri, body_text, client_ip)
+        .await
+}
+
+/// Operator-visible proven-engine status (no sidecar URL; that may identify
+/// an internal host).
+async fn waf_engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "mode": state.proven_engine.mode(),
+        "in_path": state.proven_engine.in_path(),
+        "fail_closed": state.proven_engine.fail_closed,
+        "sidecar_configured": state.proven_engine.in_path(),
+    }))
 }
 
 fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
@@ -2773,7 +2880,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
     </section>
     <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
-      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests. Set <code>CORAZA_WAF_URL</code> so each live <code>/gateway</code> transaction is evaluated by a Coraza sidecar (do not invent WAF rules here). See <code>GET /api/waf/engine-status</code>.</p>
     </section>
     <section class="card"><h2>STIX threat intelligence</h2>
       <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p>
@@ -2970,6 +3077,27 @@ pub fn parse_u32_env(
     }
 }
 
+/// Parse a boolean environment value (`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`).
+/// Returns `default` when absent.
+pub fn parse_bool_env(
+    name: &str,
+    raw: Option<&str>,
+    default: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match raw {
+        None => Ok(default),
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must be a boolean, got {value:?}"),
+            )
+            .into()),
+        },
+    }
+}
+
 /// Parse a `u64` environment value (already read as an optional string),
 /// returning `default` when absent and a configuration error when malformed.
 pub fn parse_u64_env(
@@ -3038,12 +3166,29 @@ pub async fn run_from_env(
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
+    let coraza_waf_url = std::env::var("CORAZA_WAF_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let proven_engine_fail_closed = parse_bool_env(
+        "PROVEN_ENGINE_FAIL_CLOSED",
+        std::env::var("PROVEN_ENGINE_FAIL_CLOSED").ok().as_deref(),
+        false,
+    )?;
+    let proven_engine = match coraza_waf_url {
+        Some(url) => ProvenEngineConfig::sidecar(url, proven_engine_fail_closed),
+        None => ProvenEngineConfig {
+            sidecar_url: None,
+            fail_closed: proven_engine_fail_closed,
+        },
+    };
     let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
+        .with_proven_engine(proven_engine)
         .with_max_body_size(max_body_bytes);
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
@@ -3088,6 +3233,8 @@ mod tests {
             "RATE_LIMIT",
             "RATE_LIMIT_WINDOW",
             "MAX_BODY_BYTES",
+            "CORAZA_WAF_URL",
+            "PROVEN_ENGINE_FAIL_CLOSED",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -3119,6 +3266,14 @@ mod tests {
             30
         );
         assert!(parse_u64_env("RATE_LIMIT_WINDOW", Some("abc"), 60).is_err());
+    }
+
+    #[test]
+    fn parse_bool_env_reads_optional_env() {
+        assert!(parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", None, true).unwrap());
+        assert!(!parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", Some("false"), true).unwrap());
+        assert!(parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", Some("YES"), false).unwrap());
+        assert!(parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", Some("maybe"), false).is_err());
     }
 
     #[test]
@@ -4904,6 +5059,168 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/waf/coraza/audit")
         );
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/waf/engine-status")
+        );
+    }
+
+    async fn spawn_coraza_sidecar_mock() -> String {
+        let sidecar = Router::new().route(
+            "/",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let uri = body
+                    .pointer("/transaction/request/uri")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if uri.contains("crs-probe=1") {
+                    Json(serde_json::json!({
+                        "transaction": {
+                            "is_interrupted": true,
+                            "request": { "uri": uri },
+                            "response": { "http_code": 403 }
+                        },
+                        "messages": [{
+                            "message": "SQL Injection Attack Detected via libinjection",
+                            "data": { "id": 942100, "severity": 2 }
+                        }]
+                    }))
+                    .into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "transaction": {
+                            "is_interrupted": false,
+                            "request": { "uri": uri }
+                        },
+                        "messages": []
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, sidecar).into_future());
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn gateway_blocks_live_request_from_coraza_sidecar() {
+        let sidecar_url = spawn_coraza_sidecar_mock().await;
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(sidecar_url, true));
+        let app = build_app(state);
+
+        let status = json_body::<serde_json::Value>(
+            app_request(&app, empty_request(Method::GET, "/api/waf/engine-status")).await,
+        )
+        .await;
+        assert_eq!(status["mode"], "coraza_sidecar");
+        assert_eq!(status["in_path"], true);
+        assert_eq!(status["fail_closed"], true);
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.proven_engine, "coraza_sidecar");
+        assert!(health.proven_engine_fail_closed);
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "sidecar-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = json_body(blocked).await;
+        assert_eq!(body["action"], "blocked");
+        assert_eq!(body["engine"], "coraza");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("942100"),
+            "block reason must cite the CRS rule from the sidecar: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_fail_closes_when_coraza_sidecar_is_unreachable() {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = dead.local_addr().unwrap();
+        drop(dead);
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(format!("http://{addr}/"), true));
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "sidecar-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let denied = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = json_body(denied).await;
+        assert_eq!(body["action"], "engine_unavailable");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("sidecar"),
+            "unavailable reason must name the sidecar, not leak a URL: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_degrades_when_sidecar_down_without_fail_closed() {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = dead.local_addr().unwrap();
+        drop(dead);
+        let state = AppState::seeded(Some("secret".to_string())).with_proven_engine(
+            ProvenEngineConfig::sidecar(format!("http://{addr}/"), false),
+        );
+        let app = build_app(state);
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -6614,6 +6931,8 @@ mod tests {
                 event_limit: 25,
                 credentials_source: "none".to_string(),
                 admin_auth_configured: false,
+                proven_engine: "ingest_hints_only".to_string(),
+                proven_engine_fail_closed: false,
             }
         );
 

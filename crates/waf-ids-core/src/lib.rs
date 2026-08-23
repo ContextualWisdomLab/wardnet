@@ -1261,6 +1261,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             false,
         ),
         buyer_evidence_endpoint(
+            "waf_engine_status",
+            "GET",
+            "/api/waf/engine-status",
+            "application/json",
+            "in-path Coraza sidecar vs ingest-hint enforcement status (no sidecar URL)",
+            false,
+        ),
+        buyer_evidence_endpoint(
             "stix_indicator_ingest",
             "POST",
             "/api/threat-intel/stix",
