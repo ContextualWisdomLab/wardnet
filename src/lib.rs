@@ -3147,6 +3147,14 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
+    let state = AppState::load(config)
+        .await
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+        .with_rate_limit(rate_limit, rate_limit_window)
+        .with_admin_tokens(admin_tokens)
+        .with_credentials_source(credentials.source())
+        .with_listen_loopback(listen_is_loopback_only(&bind_addr))
+        .with_max_body_size(max_body_bytes);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     let auth_mode = if listen_is_loopback_only(&bind_addr) && !has_write_capable_admin {
@@ -3158,14 +3166,6 @@ pub async fn run_from_env(
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let state = AppState::load(config)
-        .await
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
-        .with_rate_limit(rate_limit, rate_limit_window)
-        .with_admin_tokens(admin_tokens)
-        .with_credentials_source(credentials.source())
-        .with_listen_loopback(listen_is_loopback_only(&bind_addr))
-        .with_max_body_size(max_body_bytes);
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;
@@ -3331,7 +3331,7 @@ mod tests {
             std::env::set_var("BIND_ADDR", "127.0.0.1:0");
             std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
         }
-        // Bind succeeds, but loading corrupt persisted state maps to an error.
+        // Corrupt persisted state fails closed before the listener binds.
         assert!(
             run_from_env(Box::pin(std::future::ready(())))
                 .await
