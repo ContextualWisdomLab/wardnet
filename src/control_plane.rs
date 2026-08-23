@@ -25,19 +25,23 @@ use waf_ids_core::{
 /// Default tenant used until Keyverse supplies claims (#82).
 pub const DEFAULT_TENANT_ID: &str = "local-lab";
 
-const MIGRATION_VERSION: i32 = 3;
+const MIGRATION_VERSION: i32 = 4;
 /// Oldest logical-backup schema that restores on this binary.
 ///
-/// v3 only provisions `wardnet_runtime`; it does not change table shape. A
-/// snapshot exported at schema 2 is restorable here so a role-only upgrade
-/// cannot void the declared RPO.
+/// v3 only provisions `wardnet_runtime`. v4 HASH-partitions `security_event`
+/// without changing the logical snapshot shape. A snapshot exported at schema
+/// 2 is restorable here so those upgrades cannot void the declared RPO.
 const MIN_RESTORABLE_SCHEMA_VERSION: i32 = 2;
+/// HASH partitions for `security_event` (by `tenant_id`).
+pub const EVENT_PARTITION_MODULUS: i32 = 8;
 /// Non-owner, non-superuser role used after migrations so FORCE RLS binds.
 pub const RUNTIME_ROLE: &str = "wardnet_runtime";
 /// Declared RPO: last successful `GET /api/backup` (on-demand logical snapshot).
 pub const BACKUP_RPO: &str = "on-demand-logical-snapshot";
 /// Declared RTO budget for an isolated restore drill.
 pub const BACKUP_RTO_BUDGET_MS: u64 = 60_000;
+/// Session advisory lock for schema/partition DDL (cross-process).
+const MIGRATION_LOCK_KEY: i64 = 80_201_680;
 
 /// Recoverable forward migration. Two-word snake_case names, 3NF, RLS.
 pub const MIGRATION_SQL: &str = r#"
@@ -261,6 +265,119 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
 GRANT SELECT ON schema_migration TO wardnet_runtime;
 "#;
 
+fn hash_partition_sql_for(parent: &str) -> Result<String, String> {
+    if parent.is_empty()
+        || !parent.as_bytes()[0].is_ascii_lowercase()
+        || !parent
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err("hash partition parent must be a lowercase SQL identifier".to_string());
+    }
+    let modulus = EVENT_PARTITION_MODULUS;
+    let unpartitioned = format!("{parent}_unpartitioned");
+    Ok(format!(
+        r#"
+DO $hash$
+DECLARE
+  kind "char";
+  i integer;
+BEGIN
+  SELECT c.relkind INTO kind
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = current_schema()
+    AND c.relname = '{parent}';
+
+  IF kind = 'r' THEN
+    ALTER TABLE {parent} RENAME TO {unpartitioned};
+    DROP INDEX IF EXISTS {parent}_tenant_event;
+    CREATE TABLE {parent} (
+      tenant_id TEXT NOT NULL REFERENCES tenant_account (tenant_id),
+      event_id BIGINT NOT NULL,
+      timestamp_unix BIGINT NOT NULL,
+      client_address TEXT,
+      route_id TEXT,
+      action_name TEXT NOT NULL,
+      event_reason TEXT NOT NULL,
+      event_score INTEGER NOT NULL,
+      request_path TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, event_id)
+    ) PARTITION BY HASH (tenant_id);
+    i := 0;
+    WHILE i < {modulus} LOOP
+      EXECUTE format(
+        'CREATE TABLE {parent}_p%s PARTITION OF {parent} FOR VALUES WITH (MODULUS {modulus}, REMAINDER %s)',
+        i, i
+      );
+      i := i + 1;
+    END LOOP;
+    INSERT INTO {parent} (
+      tenant_id, event_id, timestamp_unix, client_address, route_id,
+      action_name, event_reason, event_score, request_path
+    )
+    SELECT tenant_id, event_id, timestamp_unix, client_address, route_id,
+      action_name, event_reason, event_score, request_path
+    FROM {unpartitioned};
+    DROP TABLE {unpartitioned};
+    ALTER TABLE {parent} ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE {parent} FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation ON {parent};
+    CREATE POLICY tenant_isolation ON {parent}
+      USING (tenant_id = current_setting('wardnet.tenant_id', true))
+      WITH CHECK (tenant_id = current_setting('wardnet.tenant_id', true));
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardnet_runtime') THEN
+      GRANT SELECT, INSERT, UPDATE, DELETE ON {parent} TO wardnet_runtime;
+      i := 0;
+      WHILE i < {modulus} LOOP
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE, DELETE ON {parent}_p%s TO wardnet_runtime',
+          i
+        );
+        i := i + 1;
+      END LOOP;
+    END IF;
+  ELSIF kind = 'p' THEN
+    i := 0;
+    WHILE i < {modulus} LOOP
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relname = format('{parent}_p%s', i)
+      ) THEN
+        EXECUTE format(
+          'CREATE TABLE {parent}_p%s PARTITION OF {parent} FOR VALUES WITH (MODULUS {modulus}, REMAINDER %s)',
+          i, i
+        );
+      END IF;
+      i := i + 1;
+    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardnet_runtime') THEN
+      GRANT SELECT, INSERT, UPDATE, DELETE ON {parent} TO wardnet_runtime;
+      i := 0;
+      WHILE i < {modulus} LOOP
+        IF EXISTS (
+          SELECT 1 FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = current_schema()
+            AND c.relname = format('{parent}_p%s', i)
+        ) THEN
+          EXECUTE format(
+            'GRANT SELECT, INSERT, UPDATE, DELETE ON {parent}_p%s TO wardnet_runtime',
+            i
+          );
+        END IF;
+        i := i + 1;
+      END LOOP;
+    END IF;
+  END IF;
+END
+$hash$;
+"#,
+    ))
+}
+
 /// Fail closed when a non-loopback bind has no control-plane URL.
 pub fn require_postgres_for_bind(
     bind_addr: &str,
@@ -413,6 +530,51 @@ async fn assume_runtime_role(client: &Client) -> Result<(), String> {
     Ok(())
 }
 
+async fn apply_schema(client: &Client) -> Result<(), String> {
+    let applied = match client
+        .query_one(
+            "SELECT COALESCE(MAX(migration_version), 0) FROM schema_migration",
+            &[],
+        )
+        .await
+    {
+        Ok(row) => row.get::<_, i32>(0),
+        Err(_) => 0,
+    };
+    if applied < MIGRATION_VERSION {
+        client
+            .batch_execute(MIGRATION_SQL)
+            .await
+            .map_err(|error| format!("control plane migration failed: {error:?}"))?;
+        client
+            .execute(
+                "INSERT INTO schema_migration (migration_version) VALUES ($1) ON CONFLICT (migration_version) DO NOTHING",
+                &[&MIGRATION_VERSION],
+            )
+            .await
+            .map_err(|error| format!("control plane migration version failed: {error}"))?;
+    }
+    let hash_sql = hash_partition_sql_for("security_event")?;
+    client
+        .batch_execute(&hash_sql)
+        .await
+        .map_err(|error| format!("control plane event hash partition failed: {error:?}"))?;
+    Ok(())
+}
+
+async fn event_partition_count(client: &Client) -> Result<i64, String> {
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::bigint
+             FROM pg_partition_tree('security_event'::regclass)
+             WHERE level = 1",
+            &[],
+        )
+        .await
+        .map_err(|error| format!("control plane event partition count failed: {error}"))?;
+    Ok(row.get(0))
+}
+
 /// Serializes schema application across connections (DROP/CREATE POLICY is not concurrent-safe).
 static MIGRATION_GATE: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
@@ -478,31 +640,15 @@ impl PostgresPlane {
     async fn migrate(&self) -> Result<(), String> {
         let _gate = MIGRATION_GATE.lock().await;
         let client = self.client.lock().await;
-        let applied = match client
-            .query_one(
-                "SELECT COALESCE(MAX(migration_version), 0) FROM schema_migration",
-                &[],
-            )
-            .await
-        {
-            Ok(row) => row.get::<_, i32>(0),
-            Err(_) => 0,
-        };
-        if applied >= MIGRATION_VERSION {
-            return Ok(());
-        }
         client
-            .batch_execute(MIGRATION_SQL)
+            .execute("SELECT pg_advisory_lock($1)", &[&MIGRATION_LOCK_KEY])
             .await
-            .map_err(|error| format!("control plane migration failed: {error:?}"))?;
-        client
-            .execute(
-                "INSERT INTO schema_migration (migration_version) VALUES ($1) ON CONFLICT (migration_version) DO NOTHING",
-                &[&MIGRATION_VERSION],
-            )
-            .await
-            .map_err(|error| format!("control plane migration version failed: {error}"))?;
-        Ok(())
+            .map_err(|error| format!("control plane migration lock failed: {error}"))?;
+        let result = apply_schema(&client).await;
+        let _ = client
+            .execute("SELECT pg_advisory_unlock($1)", &[&MIGRATION_LOCK_KEY])
+            .await;
+        result
     }
 
     async fn assume_runtime_role(&self) -> Result<(), String> {
@@ -537,6 +683,35 @@ impl PostgresPlane {
             .get(0);
         tx.rollback().await.map_err(|error| error.to_string())?;
         Ok(count)
+    }
+
+    pub async fn event_partition_count(&self) -> Result<i64, String> {
+        let client = self.client.lock().await;
+        event_partition_count(&client).await
+    }
+
+    #[cfg(test)]
+    async fn security_event_tableoid(&self) -> Result<String, String> {
+        let mut client = self.client.lock().await;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "SELECT set_config('wardnet.tenant_id', $1, true)",
+            &[&self.tenant_id],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let row = tx
+            .query_one(
+                "SELECT tableoid::regclass::text FROM security_event WHERE tenant_id = $1 LIMIT 1",
+                &[&self.tenant_id],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+        Ok(row.get(0))
     }
 
     #[cfg(test)]
@@ -2752,5 +2927,149 @@ mod tests {
             .expect("load tenant a")
             .expect("tenant a rows");
         assert!(!loaded_a.routes.is_empty());
+    }
+
+    #[test]
+    fn hash_partition_parent_rejects_injection() {
+        assert!(hash_partition_sql_for("security_event").is_ok());
+        assert!(hash_partition_sql_for("event_hash_probe").is_ok());
+        assert!(hash_partition_sql_for("event;drop").is_err());
+        assert!(hash_partition_sql_for("Event").is_err());
+        assert!(hash_partition_sql_for("").is_err());
+        let sql = hash_partition_sql_for("security_event").expect("sql");
+        assert!(sql.contains("PARTITION BY HASH (tenant_id)"));
+        assert!(sql.contains(&format!("MODULUS {EVENT_PARTITION_MODULUS}")));
+    }
+
+    async fn owner_client(url: &str) -> tokio_postgres::Client {
+        let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+            .await
+            .expect("owner connect");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+    }
+
+    #[tokio::test]
+    async fn postgres_security_event_is_hash_partitioned() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("event-hash");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane");
+        assert_eq!(
+            plane
+                .event_partition_count()
+                .await
+                .expect("partition count"),
+            i64::from(EVENT_PARTITION_MODULUS)
+        );
+        let mut seeded = AppData::seeded();
+        seeded.events.push(sample_event(1, "/hash-path"));
+        seeded.next_event_id = 2;
+        plane.save(&seeded).await.expect("seed with unmasked event");
+        let loaded = plane.load().await.expect("load").expect("snapshot");
+        assert!(
+            loaded.events.iter().any(|event| event.path == "/hash-path"
+                && event.client_ip.map(|ip| ip.to_string()) == Some("198.51.100.20".into())),
+            "HASH partitions must keep client IPs and paths unmasked"
+        );
+        let tableoid = plane
+            .security_event_tableoid()
+            .await
+            .expect("child tableoid");
+        assert!(
+            tableoid.starts_with("security_event_p"),
+            "row must land in a HASH child, got {tableoid}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_hash_partition_convert_preserves_unmasked_probe_rows() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("hash-probe");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane so tenant_account and role exist");
+        plane.save(&AppData::seeded()).await.expect("seed tenant");
+
+        let client = owner_client(&url).await;
+        client
+            .batch_execute(
+                "DROP TABLE IF EXISTS event_hash_probe CASCADE;
+                 CREATE TABLE event_hash_probe (
+                   tenant_id TEXT NOT NULL REFERENCES tenant_account (tenant_id),
+                   event_id BIGINT NOT NULL,
+                   timestamp_unix BIGINT NOT NULL,
+                   client_address TEXT,
+                   route_id TEXT,
+                   action_name TEXT NOT NULL,
+                   event_reason TEXT NOT NULL,
+                   event_score INTEGER NOT NULL,
+                   request_path TEXT NOT NULL,
+                   PRIMARY KEY (tenant_id, event_id)
+                 );",
+            )
+            .await
+            .expect("unpartitioned probe");
+        client
+            .execute(
+                "INSERT INTO event_hash_probe (
+                    tenant_id, event_id, timestamp_unix, client_address, route_id,
+                    action_name, event_reason, event_score, request_path
+                 ) VALUES ($1, 1, 1700000000, '198.51.100.20', 'demo', 'blocked', 'fixture', 80, '/probe-path')",
+                &[&tenant],
+            )
+            .await
+            .expect("probe row");
+        let sql = hash_partition_sql_for("event_hash_probe").expect("probe sql");
+        client
+            .batch_execute(&sql)
+            .await
+            .expect("convert unpartitioned probe");
+        let kind: String = client
+            .query_one(
+                "SELECT relkind::text FROM pg_class WHERE relname = 'event_hash_probe'",
+                &[],
+            )
+            .await
+            .expect("kind")
+            .get(0);
+        assert_eq!(kind, "p");
+        let children: i64 = client
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM pg_partition_tree('event_hash_probe'::regclass) WHERE level = 1",
+                &[],
+            )
+            .await
+            .expect("children")
+            .get(0);
+        assert_eq!(children, i64::from(EVENT_PARTITION_MODULUS));
+        let row = client
+            .query_one(
+                "SELECT client_address, request_path, tableoid::regclass::text
+                 FROM event_hash_probe WHERE event_id = 1",
+                &[],
+            )
+            .await
+            .expect("converted row");
+        let ip: String = row.get(0);
+        let path: String = row.get(1);
+        let tableoid: String = row.get(2);
+        assert_eq!(ip, "198.51.100.20");
+        assert_eq!(path, "/probe-path");
+        assert!(
+            tableoid.starts_with("event_hash_probe_p"),
+            "converted row must land in a HASH child, got {tableoid}"
+        );
+        client
+            .batch_execute("DROP TABLE IF EXISTS event_hash_probe CASCADE")
+            .await
+            .expect("drop probe");
     }
 }
