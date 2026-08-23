@@ -1951,13 +1951,32 @@ fn apply_engine_enforcement_hints(
         let path_indicator = ThreatIndicator {
             value: path_only.to_string(),
             indicator_type: "path".to_string(),
-            severity,
+            severity: severity.clone(),
             source: source.to_string(),
             ttl_seconds: TTL_SECONDS,
         };
         if validate_threat(&path_indicator).is_ok() {
             upsert_threat(&mut data.threats, path_indicator);
             written += 1;
+        }
+    }
+    // Query token from the proven-engine audit URI is applied to later
+    // gateway requests (any client IP) so CRS/Suricata evidence is in-path,
+    // not only an IP reputation hint for the original source.
+    if let Some((_, query)) = path.split_once('?') {
+        let token = query.trim();
+        if token.len() >= 8 {
+            let payload = ThreatIndicator {
+                value: token.to_string(),
+                indicator_type: "engine_payload".to_string(),
+                severity,
+                source: source.to_string(),
+                ttl_seconds: TTL_SECONDS,
+            };
+            if validate_threat(&payload).is_ok() {
+                upsert_threat(&mut data.threats, payload);
+                written += 1;
+            }
         }
     }
     written
@@ -5119,6 +5138,19 @@ mod tests {
         )
         .await;
         assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
+
+        // Same CRS payload from a new client is blocked via the engine_payload
+        // hint (in-path adapter), not only the original source IP.
+        let same_payload_new_ip = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/search?q=1'+OR+1=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(
+            same_payload_new_ip.status(),
+            StatusCode::FORBIDDEN,
+            "proven-engine payload must enforce for any client IP"
+        );
 
         let audit: Vec<AuditLogEntry> = json_body(
             app_request(

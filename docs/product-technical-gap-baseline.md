@@ -68,11 +68,13 @@ still say `waf-ids-ai-soc`. Kubernetes manifest remains
 this pass: docs and health copy already mention Wardnet in newer surfaces;
 wholesale crate rename is deferred (not a merge blocker).
 
-### Proven-engine enforcement (issue #86)
+### Proven-engine enforcement (issue #86) — **partial this pass**
 
-Coraza audit JSON and Suricata EVE ingest exist as **admin-token import
-adapters**. They are not an in-process enforcement engine on `/gateway`.
-Scoring still uses in-repo indicators + DNSBL. Do not invent CRS replacements.
+Coraza/Suricata ingest still maps proven-engine hits into DNSBL + threat
+indicators. This pass also writes an `engine_payload` hint from the audit URI
+query so the **same CRS payload is blocked for any client IP** on `/gateway`
+(not only the original source). In-process OWASP CRS/Coraza on every
+transaction, Suricata tail/shipper, and detection-quality corpora remain open.
 
 ### Identity (issue #82, Keyverse)
 
