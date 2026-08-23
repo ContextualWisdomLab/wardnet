@@ -26,6 +26,12 @@ use waf_ids_core::{
 pub const DEFAULT_TENANT_ID: &str = "local-lab";
 
 const MIGRATION_VERSION: i32 = 3;
+/// Oldest logical-backup schema that restores on this binary.
+///
+/// v3 only provisions `wardnet_runtime`; it does not change table shape. A
+/// snapshot exported at schema 2 is restorable here so a role-only upgrade
+/// cannot void the declared RPO.
+const MIN_RESTORABLE_SCHEMA_VERSION: i32 = 2;
 /// Non-owner, non-superuser role used after migrations so FORCE RLS binds.
 pub const RUNTIME_ROLE: &str = "wardnet_runtime";
 /// Declared RPO: last successful `GET /api/backup` (on-demand logical snapshot).
@@ -705,9 +711,11 @@ impl ControlPlaneBackup {
 
     /// Fail closed when the schema is unsupported or the artifact was tampered with.
     pub fn verify(&self) -> Result<(), String> {
-        if self.schema_version != MIGRATION_VERSION {
+        if self.schema_version < MIN_RESTORABLE_SCHEMA_VERSION
+            || self.schema_version > MIGRATION_VERSION
+        {
             return Err(format!(
-                "backup schema_version {} is unsupported; expected {MIGRATION_VERSION}",
+                "backup schema_version {} is unsupported; accepted {MIN_RESTORABLE_SCHEMA_VERSION}..={MIGRATION_VERSION}",
                 self.schema_version
             ));
         }
@@ -2586,6 +2594,23 @@ mod tests {
         .seal()
         .expect("seal");
         assert!(backup.verify().is_ok());
+
+        let mut prior = backup.clone();
+        prior.schema_version = MIN_RESTORABLE_SCHEMA_VERSION;
+        let prior = prior.seal().expect("re-seal compatible prior schema");
+        assert!(
+            prior.verify().is_ok(),
+            "role-only schema 3 must restore schema-{MIN_RESTORABLE_SCHEMA_VERSION} logical backups"
+        );
+
+        let mut too_old = backup.clone();
+        too_old.schema_version = MIN_RESTORABLE_SCHEMA_VERSION - 1;
+        assert!(
+            too_old
+                .verify()
+                .expect_err("older than restorable window")
+                .contains("unsupported")
+        );
 
         let mut bad_schema = backup.clone();
         bad_schema.schema_version = MIGRATION_VERSION + 1;

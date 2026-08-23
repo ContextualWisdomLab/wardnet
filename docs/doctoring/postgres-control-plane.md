@@ -48,11 +48,15 @@ NOBYPASSRLS, not table owner) so FORCE RLS binds. Provision that role and
 `GRANT` it to the login user if the URL user cannot `CREATE ROLE`. Missing
 `wardnet.tenant_id` yields no rows.
 
-`GET /api/backup` (admin read) exports a hashed logical snapshot. `POST /api/backup`
-restores after schema-version and payload-hash checks. `POST /api/backup/drill`
-restores into an isolated tenant, compares invariants, and drops the drill
-rows. Declared RPO: last successful export (`on-demand-logical-snapshot`).
-Declared RTO: 60 seconds. `/healthz.backup` is `ready` on PostgreSQL.
+`GET /api/backup` (admin read) exports a hashed logical snapshot stamped with
+the current `MIGRATION_VERSION`. `POST /api/backup` restores after schema-version
+and payload-hash checks. Role-only migrations (v3 `wardnet_runtime`) do not
+change table shape, so `verify()` accepts schema versions
+`MIN_RESTORABLE_SCHEMA_VERSION` (2) through the current version rather than
+rejecting pre-upgrade snapshots. `POST /api/backup/drill` restores into an
+isolated tenant, compares invariants, and drops the drill rows. Declared RPO:
+last successful export (`on-demand-logical-snapshot`). Declared RTO: 60 seconds.
+`/healthz.backup` is `ready` on PostgreSQL.
 
 National Institute of Standards and Technology. (2010). *Contingency planning
 guide for federal information systems* (NIST SP 800-34 rev. 1).
