@@ -31,13 +31,16 @@ Development Framework (SSDF) version 1.1* (NIST SP 800-218).
 https://doi.org/10.6028/NIST.SP.800-218
 
 - **Design impact:** PW.1 — fail closed when a production bind has no
-  control-plane URL, when the URL is not `postgres://`, or when TLS
-  `sslmode=require` is requested before rustls is wired.
+  control-plane URL, when the URL is not `postgres://`, or when
+  `sslmode=allow` / `prefer` could silently drop to plaintext. `require` /
+  `verify-full` use rustls with Mozilla roots; certificates are always
+  verified.
 
 ## Operator next action
 
 Set `CONTROL_PLANE_DATABASE_URL` (or credentials-file key `control_plane_url`)
-before binding a non-loopback address. `/healthz.persistence` reports
-`postgres`. Loopback still uses `WAF_IDS_STATE_PATH` or in-memory state.
-Remaining: rustls, non-owner runtime role, backup/restore drill, HASH
-partitioning for `security_event`, optimistic concurrency.
+before binding a non-loopback address. Use `sslmode=require` or
+`sslmode=verify-full` for rustls. `/healthz.persistence` reports `postgres`.
+Loopback still uses `WAF_IDS_STATE_PATH` or in-memory state. Remaining:
+non-owner runtime role, backup/restore drill, HASH partitioning for
+`security_event`, optimistic concurrency.

@@ -44,7 +44,7 @@ Production binds already require `CONTROL_PLANE_DATABASE_URL`. On that path:
 - `POST /api/outbox/{message_id}/replay` (admin write) requeues dead letters
 
 Loopback file/memory adapters keep in-process stdout SIEM and report
-`outbox=disabled`. Remaining: rustls for the control-plane connection, a
+`outbox=disabled`. Remaining: a
 non-owner runtime role, backup/restore drill, HASH partitioning, and additional
 consumers (TAXII poll, Clearfolio, contextual-orchestrator) on the same
 message/receipt contract.

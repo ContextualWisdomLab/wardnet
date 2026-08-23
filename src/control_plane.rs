@@ -14,6 +14,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
+use tokio_postgres_rustls::MakeRustlsConnect;
 use waf_ids_core::{
     AppData, AuditLogEntry, CommercialProfile, DnsblEntry, EnforcementMode, LicenseStatus,
     ProductEdition, RouteConfig, SecurityEvent, Severity, ThreatFeedStatus, ThreatIndicator,
@@ -245,8 +246,7 @@ pub fn require_postgres_for_bind(
     }
 }
 
-/// Structural URL checks. TLS (`sslmode=require`) is fail-closed until rustls
-/// is wired. Password stays in the registry, not logs.
+/// Structural URL checks. Password stays in the registry, not logs.
 pub fn parse_database_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -256,12 +256,48 @@ pub fn parse_database_url(raw: &str) -> Result<String, String> {
     if !(lower.starts_with("postgres://") || lower.starts_with("postgresql://")) {
         return Err("CONTROL_PLANE_DATABASE_URL must be a postgres:// URL".to_string());
     }
-    if lower.contains("sslmode=require") || lower.contains("sslmode=verify") {
-        return Err(
-            "CONTROL_PLANE_DATABASE_URL TLS (sslmode=require/verify) is not wired yet".to_string(),
-        );
-    }
+    ssl_mode(raw)?;
     Ok(raw.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SslMode {
+    Disable,
+    Require,
+}
+
+/// `disable` (or omitted) uses plaintext. `require` / `verify-ca` /
+/// `verify-full` use rustls with Mozilla roots (certificates are always
+/// verified — stricter than libpq `require`). `allow` / `prefer` are rejected
+/// because they can silently drop to plaintext.
+fn ssl_mode(raw: &str) -> Result<SslMode, String> {
+    let lower = raw.to_ascii_lowercase();
+    let Some((_, query)) = lower.split_once('?') else {
+        return Ok(SslMode::Disable);
+    };
+    for part in query.split('&').flat_map(|chunk| chunk.split('#')) {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key != "sslmode" {
+            continue;
+        }
+        return match value {
+            "disable" => Ok(SslMode::Disable),
+            "require" | "verify-ca" | "verify-full" => Ok(SslMode::Require),
+            other => Err(format!(
+                "unsupported sslmode {other}; use disable or require/verify-full"
+            )),
+        };
+    }
+    Ok(SslMode::Disable)
+}
+
+fn rustls_connector() -> Result<MakeRustlsConnect, String> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+    Ok(MakeRustlsConnect::with_webpki_roots())
 }
 
 /// Serializes schema application across connections (DROP/CREATE POLICY is not concurrent-safe).
@@ -280,12 +316,32 @@ impl PostgresPlane {
 
     pub async fn connect_tenant(url: &str, tenant_id: &str) -> Result<Self, String> {
         let url = parse_database_url(url)?;
-        let (client, connection) = tokio_postgres::connect(&url, NoTls)
-            .await
-            .map_err(|error| format!("control plane connect failed: {error}"))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let (client, connection) = match ssl_mode(&url)? {
+            SslMode::Disable => {
+                let (client, connection) = tokio_postgres::connect(&url, NoTls)
+                    .await
+                    .map_err(|error| format!("control plane connect failed: {error}"))?;
+                (
+                    client,
+                    tokio::spawn(async move {
+                        let _ = connection.await;
+                    }),
+                )
+            }
+            SslMode::Require => {
+                let tls = rustls_connector()?;
+                let (client, connection) = tokio_postgres::connect(&url, tls)
+                    .await
+                    .map_err(|error| format!("control plane TLS connect failed: {error}"))?;
+                (
+                    client,
+                    tokio::spawn(async move {
+                        let _ = connection.await;
+                    }),
+                )
+            }
+        };
+        std::mem::drop(connection);
         let plane = Self {
             client: Mutex::new(client),
             tenant_id: tenant_id.to_string(),
@@ -1448,12 +1504,43 @@ mod tests {
     }
 
     #[test]
-    fn database_url_rejects_non_postgres_and_tls_until_wired() {
+    fn database_url_rejects_non_postgres_and_ambiguous_sslmode() {
         parse_database_url("").unwrap_err();
         parse_database_url("mysql://x").unwrap_err();
-        parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=require").unwrap_err();
+        parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=prefer").unwrap_err();
+        parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=allow").unwrap_err();
+        parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=require").unwrap();
+        parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full").unwrap();
         parse_database_url("postgres://wardnet@127.0.0.1/wardnet").unwrap();
         parse_database_url("postgresql://wardnet@127.0.0.1/wardnet?sslmode=disable").unwrap();
+        assert_eq!(
+            ssl_mode("postgres://wardnet@127.0.0.1/wardnet").unwrap(),
+            SslMode::Disable
+        );
+        assert_eq!(
+            ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=require").unwrap(),
+            SslMode::Require
+        );
+    }
+
+    #[tokio::test]
+    async fn require_tls_fails_closed_against_plaintext_postgres() {
+        let Ok(url) = std::env::var("CONTROL_PLANE_TEST_DATABASE_URL") else {
+            return;
+        };
+        if url.trim().is_empty() {
+            return;
+        }
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let tls_url = format!("{url}{separator}sslmode=require");
+        let error = match PostgresPlane::connect(&tls_url).await {
+            Ok(_) => panic!("plaintext CI postgres must not satisfy rustls"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("TLS") || error.contains("ssl") || error.contains("certificate"),
+            "operator must see a TLS failure, not a silent plaintext fallback: {error}"
+        );
     }
 
     #[test]

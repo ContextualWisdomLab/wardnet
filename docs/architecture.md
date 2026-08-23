@@ -29,7 +29,7 @@ flowchart LR
 
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
 - `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests. Persistence, destination-list, and sidecar settings validate before the readiness line is printed.
-- `src/control_plane.rs`: PostgreSQL production authority (issue #80). Non-loopback binds require `CONTROL_PLANE_DATABASE_URL`. Tenant isolation is default-deny RLS. The JSON file adapter remains loopback/community only.
+- `src/control_plane.rs`: PostgreSQL production authority (issue #80). Non-loopback binds require `CONTROL_PLANE_DATABASE_URL`. Tenant isolation is default-deny RLS. `sslmode=require` uses rustls. The JSON file adapter remains loopback/community only.
 - `src/outbox.rs`: transactional outbox + leased workers (issue #81). Security events append incrementally with an outbox row in the same transaction. Workers claim with `SKIP LOCKED`. `GET /api/outbox` and `/healthz.outbox` are operator-visible.
 - `src/destination.rs`: fail-closed outbound URL policy (issue #79) for every `http`/`https` send. CIDR allowlist exceptions are per resolved address; blocking DNS is offloaded from Tokio workers. The outbound HTTP client DNS resolver returns only addresses that already passed policy (TCP peer pin / DNS-rebinding TOCTOU close).
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
