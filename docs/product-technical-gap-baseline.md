@@ -25,7 +25,7 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| this | feat(store): logical backup and isolated restore drill | `feat/issue-80-backup-restore` stacked on #101 | local fmt/test/clippy + two `/healthz` smokes; live `postgres_backup_restore_drill_preserves_unmasked_invariants` | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 then #101 first. Do not `--admin`. Do not re-implement rustls, outbox, or retention. |
+| [#102](https://github.com/ContextualWisdomLab/wardnet/pull/102) | feat(store): logical backup and isolated restore drill | `feat/issue-80-backup-restore` stacked on #101 | local fmt/test/clippy + two `/healthz` smokes; live `postgres_backup_restore_drill_preserves_unmasked_invariants` | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 then #101 first. Do not `--admin`. Do not re-implement rustls, outbox, or retention. |
 | [#101](https://github.com/ContextualWisdomLab/wardnet/pull/101) | feat(store): bound outbox listing and prune processed rows | `feat/issue-81-outbox-retention` (`0c2167a`) stacked on #100 | still-valid Devin prune-cap finding fixed this pass (`EVENT_LIMIT` on save/ack) | Author; Devin COMMENTED (prune thread addressed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #100 first. Do not `--admin`. |
 | [#100](https://github.com/ContextualWisdomLab/wardnet/pull/100) | feat(store): rustls for production PostgreSQL `sslmode=require` | `feat/issue-80-postgres-rustls` stacked on #99 | local fmt/test/clippy + two `/healthz` smokes; live `sslmode=require` fails closed against plaintext postgres | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 first. Do not `--admin`. Do not re-implement the postgres gate or outbox. |
 | [#99](https://github.com/ContextualWisdomLab/wardnet/pull/99) | feat(store): transactional outbox and leased workers | `feat/issue-81-outbox-workers` stacked on #98 | local fmt/test/clippy + two `/healthz` smokes + postgres `/healthz.outbox=ready` prior hour | Author; Devin COMMENTED (unbounded list closed on #101) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 first. Do not `--admin`. |
@@ -192,9 +192,9 @@ outbox slice, rustls, or bounded list/retention.
 ## Next hourly loop (do, do not report)
 
 1. Second independent APPROVE on #91/#92. Do not `--admin`.
-2. Keep #94/#95/#96/#97/#98/#99/#100/#101 and this backup PR merge-ready. Merge
+2. Keep #94/#95/#96/#97/#98/#99/#100/#101 and #102 merge-ready. Merge
    order #94 independently; #95 then #96 then #97 then #98 then #99 then #100
-   then #101 then this.
+   then #101 then #102.
 3. Next runtime gap if policy still blocks: non-owner runtime role remainder of
    #80, or additional #81 consumers (TAXII / Clearfolio / orchestrator).
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.
