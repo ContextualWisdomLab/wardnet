@@ -137,7 +137,9 @@ impl AppState {
 
     /// Load from PostgreSQL, seeding the tenant snapshot when empty.
     pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
-        let plane = control_plane::PostgresPlane::connect(database_url).await?;
+        let plane = control_plane::PostgresPlane::connect(database_url)
+            .await?
+            .with_event_limit(config.event_limit);
         let mut data = match plane.load().await? {
             Some(loaded) => loaded,
             None => AppData::seeded(),

@@ -334,6 +334,8 @@ static MIGRATION_GATE: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new
 pub struct PostgresPlane {
     client: Mutex<Client>,
     tenant_id: String,
+    /// Processed-outbox retention; mirrors operator `EVENT_LIMIT`.
+    event_limit: i64,
 }
 
 impl PostgresPlane {
@@ -374,9 +376,16 @@ impl PostgresPlane {
         let plane = Self {
             client: Mutex::new(client),
             tenant_id: tenant_id.to_string(),
+            event_limit: LIST_LIMIT,
         };
         plane.migrate().await?;
         Ok(plane)
+    }
+
+    /// Use the operator-configured `EVENT_LIMIT` for processed-outbox retention.
+    pub fn with_event_limit(mut self, event_limit: usize) -> Self {
+        self.event_limit = event_limit.max(1) as i64;
+        self
     }
 
     async fn migrate(&self) -> Result<(), String> {
@@ -418,7 +427,7 @@ impl PostgresPlane {
     /// Replace the tenant snapshot in one transaction (mutation + audit + outbox).
     pub async fn save(&self, data: &AppData) -> Result<(), String> {
         let mut client = self.client.lock().await;
-        save_snapshot(&mut client, &self.tenant_id, data).await
+        save_snapshot(&mut client, &self.tenant_id, data, self.event_limit).await
     }
 
     /// Append one security event and its outbox row without rewriting the snapshot.
@@ -441,7 +450,15 @@ impl PostgresPlane {
         F: Fn(&OutboxMessage) -> Result<String, DispatchError>,
     {
         let mut client = self.client.lock().await;
-        drain_once(&mut client, &self.tenant_id, owner, now_unix, dispatch).await
+        drain_once(
+            &mut client,
+            &self.tenant_id,
+            owner,
+            now_unix,
+            self.event_limit,
+            dispatch,
+        )
+        .await
     }
 
     pub async fn outbox_health(&self, now_unix: i64) -> Result<OutboxHealth, String> {
@@ -509,7 +526,12 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
     }))
 }
 
-async fn save_snapshot(client: &mut Client, tenant_id: &str, data: &AppData) -> Result<(), String> {
+async fn save_snapshot(
+    client: &mut Client,
+    tenant_id: &str,
+    data: &AppData,
+    keep: i64,
+) -> Result<(), String> {
     let tx = client
         .transaction()
         .await
@@ -703,7 +725,7 @@ async fn save_snapshot(client: &mut Client, tenant_id: &str, data: &AppData) -> 
     }
 
     enqueue_snapshot_outbox(&tx, tenant_id, data).await?;
-    prune_processed_outbox(&tx, tenant_id, LIST_LIMIT).await?;
+    prune_processed_outbox(&tx, tenant_id, keep).await?;
 
     tx.commit()
         .await
@@ -1079,6 +1101,7 @@ async fn drain_once<F>(
     tenant_id: &str,
     owner: &str,
     now_unix: i64,
+    keep: i64,
     dispatch: F,
 ) -> Result<usize, String>
 where
@@ -1088,13 +1111,21 @@ where
     let mut processed = 0;
     for message in claimed {
         if receipt_exists(client, tenant_id, &message.idempotency_key).await? {
-            ack_processed(client, tenant_id, &message, "duplicate-receipt", now_unix).await?;
+            ack_processed(
+                client,
+                tenant_id,
+                &message,
+                "duplicate-receipt",
+                now_unix,
+                keep,
+            )
+            .await?;
             processed += 1;
             continue;
         }
         match dispatch(&message) {
             Ok(evidence) => {
-                ack_processed(client, tenant_id, &message, &evidence, now_unix).await?;
+                ack_processed(client, tenant_id, &message, &evidence, now_unix, keep).await?;
                 processed += 1;
             }
             Err(error) => {
@@ -1230,6 +1261,7 @@ async fn ack_processed(
     message: &OutboxMessage,
     evidence: &str,
     now_unix: i64,
+    keep: i64,
 ) -> Result<(), String> {
     let tx = client
         .transaction()
@@ -1270,7 +1302,7 @@ async fn ack_processed(
     )
     .await
     .map_err(|error| format!("control plane ack outbox_message failed: {error}"))?;
-    prune_processed_outbox(&tx, tenant_id, LIST_LIMIT).await?;
+    prune_processed_outbox(&tx, tenant_id, keep).await?;
     tx.commit()
         .await
         .map_err(|error| format!("control plane ack commit failed: {error}"))?;
@@ -2011,6 +2043,65 @@ mod tests {
                 .iter()
                 .any(|message| message.message_status == STATUS_DEAD_LETTER),
             "dead letters must not be pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_ack_and_save_prune_to_configured_event_limit() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("outbox-ack-limit");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("test database")
+            .with_event_limit(2);
+        plane.save(&AppData::seeded()).await.expect("seed");
+        let now = unix_now_i64().saturating_add(60);
+        let _ = plane
+            .drain_once("setup", now, |_| Ok("setup".into()))
+            .await
+            .expect("ack snapshot outbox");
+        for id in 1..=4 {
+            plane
+                .append_security_event(&sample_event(id, "/ack-limit"), 1_000)
+                .await
+                .expect("enqueue pending");
+        }
+        let processed = plane
+            .drain_once("worker-ack-limit", now.saturating_add(30), |_| {
+                Ok("ack".into())
+            })
+            .await
+            .expect("drain pending");
+        assert_eq!(processed, 4);
+        let listed = plane
+            .list_outbox_limited(100)
+            .await
+            .expect("list after ack prune");
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|message| message.message_status == STATUS_PROCESSED)
+                .count(),
+            2,
+            "ack must prune processed rows to the configured EVENT_LIMIT, not LIST_LIMIT"
+        );
+        plane
+            .save(&AppData::seeded())
+            .await
+            .expect("save must use the same retention cap");
+        let after_save = plane
+            .list_outbox_limited(100)
+            .await
+            .expect("list after save prune");
+        assert_eq!(
+            after_save
+                .iter()
+                .filter(|message| message.message_status == STATUS_PROCESSED)
+                .count(),
+            2,
+            "save_snapshot must prune processed rows to EVENT_LIMIT"
         );
     }
 }
