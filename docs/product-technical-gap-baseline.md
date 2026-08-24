@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23 (exact-head inventory of then-open GitHub PRs and
+Snapshot date: 2026-08-23 (point-in-time inventory of then-open GitHub PRs and
 Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -92,7 +92,9 @@ Shipped:
 
 - `require_write_auth_for_bind` in `src/credentials.rs` (driven by unit tests
   and by `run_from_env` / the real binary).
-- Non-loopback `BIND_ADDR` without a write-capable principal exits before bind
+- Non-loopback `BIND_ADDR` without a write-capable admin principal from
+  `ADMIN_TOKEN`, a write-capable entry in `ADMIN_TOKENS`, or
+  `WAF_IDS_CREDENTIALS_PATH` exits before bind
   (`tests/binary.rs::binary_fail_closes_non_loopback_listen_without_admin`).
 - Loopback remains usable; `/healthz.auth_mode` is `development` or `production`.
 - `401` vs `403` on management writes; constant-time compare; strict
@@ -146,8 +148,9 @@ Remaining holes on untouched handlers stay listed for later loops.
 ## This loop’s shipped gap
 
 Issue **#78**: fail-closed management credentials on non-loopback listen.
-Operator-visible: a cluster bind (`0.0.0.0:8080`) without `ADMIN_TOKEN` no
-longer becomes ready with open management writes.
+Operator-visible: a cluster bind (`0.0.0.0:8080`) without a write-capable admin
+principal from `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` entry, or
+`WAF_IDS_CREDENTIALS_PATH` no longer becomes ready with open management writes.
 
 ## Next hourly loop (do, do not report)
 
