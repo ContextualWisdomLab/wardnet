@@ -58,7 +58,7 @@ impl CredentialRegistry {
 
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
-            .is_some_and(|v| !v.is_empty())
+            .is_some_and(|v| !v.trim().is_empty())
             || self
                 .get_credential(CRED_ADMIN_TOKENS)
                 .is_some_and(|v| !v.trim().is_empty())
@@ -109,13 +109,13 @@ impl CredentialRegistry {
         }
 
         if !values.contains_key(CRED_ADMIN_TOKEN)
-            && let Some(token) = env_admin_token.filter(|value| !value.is_empty())
+            && let Some(token) = env_admin_token.filter(|value| !value.trim().is_empty())
         {
             values.insert(CRED_ADMIN_TOKEN.to_string(), token);
             from_env = true;
         }
         if !values.contains_key(CRED_ADMIN_TOKENS)
-            && let Some(tokens) = env_admin_tokens.filter(|value| !value.is_empty())
+            && let Some(tokens) = env_admin_tokens.filter(|value| !value.trim().is_empty())
         {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             from_env = true;
@@ -213,11 +213,11 @@ pub fn require_write_auth_for_bind(
 
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
+        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
         serde_json::Value::Null | serde_json::Value::String(_) => None,
         other => {
             let text = other.to_string();
-            if text.is_empty() || text == "null" {
+            if text.trim().is_empty() || text == "null" {
                 None
             } else {
                 Some(text)
