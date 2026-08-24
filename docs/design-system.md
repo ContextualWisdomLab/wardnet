@@ -53,7 +53,13 @@ carried by token swaps only, no component markup changes between modes.
 | `--fs-metric` | 28px/700 | KPI tile value |
 | `--radius` | 8px | cards, inputs (6px), badges (pill) |
 
-Controls (`button`, `input`, `select`) are `min-height: 44px` (WCAG 2.5.5 target size).
+Primary form controls (`button`, `input`, `select`) use `min-height: 44px` as a
+Wardnet ergonomic floor. **Height alone is not target-size conformance evidence.**
+WCAG 2.2 SC 2.5.8 Target Size (Minimum), Level AA, requires a pointer target to be
+at least 24 × 24 CSS pixels or satisfy one of the criterion's specified exceptions,
+including its spacing rule. SC 2.5.5 Target Size (Enhanced), Level AAA, requires
+44 × 44 CSS pixels except its specified exceptions. Do not claim SC 2.5.5 from the
+44px height rule unless both axes of the actual target/hit area have been measured.
 
 ## Components
 
@@ -87,7 +93,7 @@ Each entry: **anatomy · states · usage · a11y · data**.
 
 ### Button
 - **Variants** `btn-primary` (brand fill — one primary action per form), `btn-secondary` (bordered, on surface), `btn-ghost` (in the brand header).
-- **States** default / `:focus-visible` ring / `aria-pressed` (toggle). 44px min.
+- **States** default / `:focus-visible` ring / `aria-pressed` (toggle). Runtime CSS guarantees a 44px minimum height; target width/hit area must still be verified before making a WCAG target-size claim.
 
 ### Form field
 - **Anatomy** `label.field` wrapping caption + control + optional `.field-help`.
@@ -124,7 +130,8 @@ First tab stop, off-screen until focused, jumps to `#main`.
 ## Accessibility checklist (per screen)
 
 - [ ] All text pairs ≥ 4.5:1 (see table); non-text state has a text label too.
-- [ ] Every control ≥ 44×44 and reachable by keyboard with a visible focus ring.
+- [ ] Every pointer target is verified against WCAG 2.2 SC 2.5.8: at least 24 × 24 CSS px or a documented applicable exception/spacing result. Important controls should aim for 44 × 44 CSS px; SC 2.5.5 Level AAA is not claimed from height alone.
+- [ ] Every interactive control is reachable by keyboard with a visible focus ring.
 - [ ] Tables use `<table>/<th scope>`; forms use wrapping `<label>`.
 - [ ] Live regions announce KPI refresh and write results.
 - [ ] High Contrast mode usable (borders `#000`, text ≥ 17:1).
@@ -144,4 +151,10 @@ never inline hex on an element; put it in a token first.
   A single admin-token field in the header authorizes writes (`X-Admin-Token`);
   server validation is surfaced verbatim via toast.
 - Single brand; only Default + High Contrast themes (no dark, no density).
-- No automated a11y/visual regression test yet; contrast is verified manually.
+- No automated accessibility/visual target-size regression test yet; contrast is verified manually and target-size claims remain fail-closed until measured.
+
+## Standards evidence (APA 7)
+
+World Wide Web Consortium. (n.d.). *Understanding Success Criterion 2.5.8: Target Size (Minimum).* Retrieved August 25, 2026, from https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
+
+World Wide Web Consortium. (n.d.). *Understanding Success Criterion 2.5.5: Target Size (Enhanced).* Retrieved August 25, 2026, from https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html
