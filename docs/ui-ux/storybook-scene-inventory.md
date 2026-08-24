@@ -16,7 +16,7 @@ operator instrument panel).
 
 ## How to exercise each scene
 
-1. `cargo run` (loopback; optional `ADMIN_TOKEN=dev-secret`).
+1. `cargo run` on loopback; no admin credential is required for read-only development startup. For authenticated scenes, generate a unique per-process `ADMIN_TOKEN` outside the source tree and do not reuse a repository literal.
 2. Open `http://127.0.0.1:8080/admin`.
 3. Drive the event in the table. Expected result is the operator’s next action,
    not a status narrative.
@@ -26,7 +26,7 @@ operator instrument panel).
 | Area | Console contract | Edge-case events |
 | --- | --- | --- |
 | Accessibility | Skip link, wrapping labels, `th scope`, live regions, High Contrast `aria-pressed`, text+colour badges | Keyboard-only create-route; High Contrast + focus ring visible on every control; screen-reader hears KPI refresh (`aria-live=polite`) and toast (`assertive`) |
-| Touch & Interaction | Controls `min-height: 44px` (WCAG 2.5.5) | Tap primary save on a 390px-wide viewport; toast auto-dismiss ~4.5s; do not rely on hover |
+| Touch & Interaction | Primary controls use a 44px minimum height as an ergonomic floor. This height alone is **not** evidence of WCAG 2.5.5 conformance. WCAG 2.2 SC 2.5.8 (Level AA) requires pointer targets to be at least 24 × 24 CSS px or satisfy a specified exception/spacing rule; SC 2.5.5 (Level AAA) requires 44 × 44 CSS px except its specified exceptions. | Tap primary save on a 390px-wide viewport; verify the actual target/hit-area on both axes before claiming target-size conformance; toast auto-dismiss ~4.5s; do not rely on hover |
 | Performance | No framework, no extra network for CSS/JS; `Promise.allSettled` per card | One failing `/api/*` card shows `.err` and does not blank the page; large event list capped at 25 with truncation copy |
 | Style Selection | Default tokens vs High Contrast (`data-theme=hc`, `localStorage["waf-theme"]`) | Toggle High Contrast, reload, theme persists; never raw hex on a component |
 | Layout & Responsive | Card grid `repeat(auto-fit, minmax(340px, 1fr))` | 1280px desktop and 390px mobile: header, KPI strip, and create forms remain usable; no horizontal trap |
@@ -65,3 +65,9 @@ If a future pass adds a static `storybook/` package, CSF stories must mount
 the same CSS tokens (not a parallel palette) and replay the events above.
 Until then this file is the inventory of record. Do not claim `/admin` loads
 Storybook.
+
+## Standards evidence (APA 7)
+
+World Wide Web Consortium. (n.d.). *Understanding Success Criterion 2.5.8: Target Size (Minimum).* Retrieved August 25, 2026, from https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
+
+World Wide Web Consortium. (n.d.). *Understanding Success Criterion 2.5.5: Target Size (Enhanced).* Retrieved August 25, 2026, from https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html
