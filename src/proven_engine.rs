@@ -250,15 +250,23 @@ pub async fn evaluate_sidecar(
             match bounded_sidecar_text(response).await {
                 Ok(text) => {
                     let outcome = outcome_from_sidecar_body(&text);
-                    if matches!(outcome, ProvenEngineOutcome::Clean) && status.as_u16() == 403 {
-                        ProvenEngineOutcome::Hit(CorazaIngestedHit {
-                            client_ip,
-                            action: "block".to_string(),
-                            reason: "coraza/crs: transaction interrupted".to_string(),
-                            score: 50,
-                            path: uri.to_string(),
-                            timestamp_unix: None,
-                        })
+                    if status.as_u16() == 403 {
+                        // A 403 is an interruption decision regardless of
+                        // body shape: audit JSON keeps its parsed hit, while
+                        // empty or non-JSON bodies (e.g. a CRS default block
+                        // page) fall back to the interrupted evidence so a
+                        // real CRS block never downgrades to allow.
+                        match outcome {
+                            ProvenEngineOutcome::Hit(hit) => ProvenEngineOutcome::Hit(hit),
+                            _ => ProvenEngineOutcome::Hit(CorazaIngestedHit {
+                                client_ip,
+                                action: "block".to_string(),
+                                reason: "coraza/crs: transaction interrupted".to_string(),
+                                score: 50,
+                                path: uri.to_string(),
+                                timestamp_unix: None,
+                            }),
+                        }
                     } else {
                         outcome
                     }
@@ -373,6 +381,36 @@ mod tests {
                 assert!(reason.contains("404"), "{reason}");
             }
             other => panic!("expected unavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sidecar_403_with_non_json_body_is_an_interruption_hit() {
+        let app = axum::Router::new().route(
+            "/",
+            post(|| async { (StatusCode::FORBIDDEN, "<html>blocked</html>") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        let client = reqwest::Client::new();
+        match evaluate_sidecar(
+            &client,
+            &format!("http://{addr}/"),
+            "GET",
+            "/app?q=crs-probe=1",
+            "",
+            Some("198.51.100.9".parse().unwrap()),
+            &[],
+        )
+        .await
+        {
+            ProvenEngineOutcome::Hit(hit) => {
+                assert_eq!(hit.action, "block");
+                assert!(hit.reason.contains("interrupted"), "{}", hit.reason);
+                assert_eq!(hit.path, "/app?q=crs-probe=1");
+            }
+            other => panic!("expected interruption hit, got {other:?}"),
         }
     }
 
