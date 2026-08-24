@@ -2406,8 +2406,9 @@ async fn consult_proven_engine(
         let method = method.to_owned();
         let request_uri = request_uri.to_owned();
         let body_text = body_text.to_owned();
+        let headers_owned = forwarded_headers.to_vec();
         return match tokio::task::spawn_blocking(move || {
-            engine.evaluate(&method, &request_uri, &body_text, client_ip)
+            engine.evaluate(&method, &request_uri, &body_text, client_ip, &headers_owned)
         })
         .await
         {
