@@ -257,6 +257,47 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_env_admin_token_does_not_authorize_public_bind() {
+        let registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            Some("   \t".to_string()),
+            None,
+        )
+        .unwrap();
+        let has_write_capable_admin = registry
+            .get_credential(CRED_ADMIN_TOKEN)
+            .is_some_and(|token| !token.is_empty());
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), None);
+        assert!(require_write_auth_for_bind("0.0.0.0:0", has_write_capable_admin).is_err());
+    }
+
+    #[test]
+    fn whitespace_file_admin_token_does_not_authorize_public_bind() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-whitespace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"admin_token":"   \t"}"#).unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap();
+        let has_write_capable_admin = registry
+            .get_credential(CRED_ADMIN_TOKEN)
+            .is_some_and(|token| !token.is_empty());
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), None);
+        assert!(require_write_auth_for_bind("0.0.0.0:0", has_write_capable_admin).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_overrides_env_per_key() {
         let dir = std::env::temp_dir().join(format!(
             "wardnet-creds-{}-{}",
