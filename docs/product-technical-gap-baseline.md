@@ -158,6 +158,16 @@ Remaining holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
+Issue **#86** slice review-hardening (PR #95): forwarded-header allowlist to
+the engine (`host`/`user-agent`/`accept`/`content-type`/`referer`/`origin`/
+`x-requested-with`/`x-forwarded-for`/`x-real-ip`/`cookie`; never
+`Authorization`; 32 headers / 8 KiB caps), 1 MiB streamed response cap,
+explicit status contract (2xx parse, 403 interruption fallback, everything
+else `Unavailable`), `engine_hit` evidence on monitor-mode routes and
+sub-threshold hits, and `engine_unavailable` events for fail-open outages.
+Redirects were already disabled on the shared outbound client. Redistributable
+NIST SP 800-94 PDF committed to `docs/papers/` and cited in doctoring.
+
 Issue **#86** slice: in-path Coraza sidecar adapter on live `/gateway`
 transactions (branch `feat/issue-86-in-path-coraza`, not stacked onto PR #94
 after that PR was restored to issue-#78-only scope). Operator-visible:
