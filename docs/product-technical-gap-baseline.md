@@ -168,6 +168,15 @@ sidecar interrupt blocks the **current** request (not only a later client
 matching ingest hints). #78 remains on PR #94; #79 destination policy was
 unscoped from #94 and was not re-implemented here.
 
+Issue **#79** TCP-peer pin on PR #96 (still unmerged; policy blocks). After
+`assert_outbound` allows a host, reqwest DNS returns only those evaluated
+addresses so a rebinding answer cannot reach loopback/private/metadata.
+Operator-visible: `/healthz.destination_mode` plus pin tests
+`proxy_request_connects_to_pinned_policy_addresses` (real `proxy_request` to
+`pin-test.invalid` mapped to a local listener) and
+`outbound_http_fails_closed_without_a_preauthorized_pin`. #78 remains on PR
+#94. #86 sidecar remains on PR #95 — do not re-implement those slices.
+
 Issue **#86** in-process libcoraza remainder ([#97](https://github.com/ContextualWisdomLab/wardnet/pull/97), stacked on #96).
 Operator-visible: `CORAZA_LIB_PATH` + `CORAZA_RULES_PATH`/`CORAZA_DIRECTIVES`;
 `/healthz.proven_engine=coraza_in_process`; `GET /api/waf/engine-status`
