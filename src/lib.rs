@@ -5922,6 +5922,12 @@ mod tests {
                 .iter()
                 .any(|path| path == "docs/runbooks/release.md")
         );
+        assert!(
+            final_readiness
+                .buyer_evidence
+                .iter()
+                .any(|path| path == "docs/doctoring/signed-release.md")
+        );
 
         let manifest: BuyerEvidenceManifest = json_body(
             app_request(
@@ -5954,6 +5960,12 @@ mod tests {
                 .document_paths
                 .iter()
                 .any(|path| path == "docs/figma/enterprise-product-architecture.md")
+        );
+        assert!(
+            manifest
+                .document_paths
+                .iter()
+                .any(|path| path == "docs/doctoring/signed-release.md")
         );
 
         let support: SupportBundle =

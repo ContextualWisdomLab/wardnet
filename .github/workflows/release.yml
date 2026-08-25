@@ -9,38 +9,124 @@ permissions:
   contents: write
   packages: write
   id-token: write
+  attestations: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Admit annotated vX.Y.Z tag only
+        run: scripts/admit-release-tag.sh "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+      - uses: anchore/sbom-action/download-syft@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
       - name: Build release binary
         run: cargo build --locked --release
-      - name: Stage checksums
+      - name: Stage binary and binary SBOM
         run: |
           mkdir -p dist
           cp target/release/waf-ids-ai-soc dist/waf-ids-ai-soc-linux-x86_64
-          (cd dist && ../scripts/release-checksums.sh waf-ids-ai-soc-linux-x86_64 > SHA256SUMS)
-          cat dist/SHA256SUMS
-      - name: GitHub Release
+          scripts/release-sbom.sh --output dist/sbom.spdx.json dist/waf-ids-ai-soc-linux-x86_64
+      - name: Publish GHCR image by digest
+        id: image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/waf-ids-ai-soc-linux-x86_64 \
-            dist/SHA256SUMS \
-            --generate-notes \
-            --verify-tag
-      - name: Publish immutable GHCR image
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
+          set -euo pipefail
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           image="ghcr.io/contextualwisdomlab/waf-ids-ai-soc"
           tag="${GITHUB_REF_NAME}"
           docker build -t "${image}:${tag}" .
-          docker push "${image}:${tag}"
+          push_out="$(docker push "${image}:${tag}")"
+          digest="$(printf '%s\n' "$push_out" | awk '/digest:/{d=$NF} END{print d}')"
+          test -n "$digest"
+          ref="${image}@${digest}"
+          printf '%s\n' "$ref" > dist/IMAGE-DIGEST.txt
+          scripts/release-sbom.sh --output dist/image.sbom.spdx.json "$ref"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+      - name: Checksums and keyless blob signatures
+        run: |
+          set -euo pipefail
+          (cd dist && ../scripts/release-checksums.sh \
+            waf-ids-ai-soc-linux-x86_64 \
+            sbom.spdx.json \
+            image.sbom.spdx.json \
+            IMAGE-DIGEST.txt > SHA256SUMS)
+          cat dist/SHA256SUMS
+          cosign sign-blob --yes \
+            --bundle dist/waf-ids-ai-soc-linux-x86_64.sigstore.json \
+            dist/waf-ids-ai-soc-linux-x86_64
+          cosign sign-blob --yes \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            dist/SHA256SUMS
+          cosign sign-blob --yes \
+            --bundle dist/sbom.spdx.json.sigstore.json \
+            dist/sbom.spdx.json
+          cosign sign-blob --yes \
+            --bundle dist/image.sbom.spdx.json.sigstore.json \
+            dist/image.sbom.spdx.json
+          cosign sign-blob --yes \
+            --bundle dist/IMAGE-DIGEST.txt.sigstore.json \
+            dist/IMAGE-DIGEST.txt
+      - name: Sign image and attest image SBOM (keyless)
+        run: |
+          set -euo pipefail
+          ref="${{ steps.image.outputs.ref }}"
+          cosign sign --yes "$ref"
+          cosign attest --yes --predicate dist/image.sbom.spdx.json --type spdxjson "$ref"
+      - name: SLSA provenance for binary
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: dist/waf-ids-ai-soc-linux-x86_64
+      - name: SLSA provenance for image
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/contextualwisdomlab/waf-ids-ai-soc
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Attest binary SBOM
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-path: dist/waf-ids-ai-soc-linux-x86_64
+          sbom-path: dist/sbom.spdx.json
+      - name: Attest image SBOM
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-name: ghcr.io/contextualwisdomlab/waf-ids-ai-soc
+          subject-digest: ${{ steps.image.outputs.digest }}
+          sbom-path: dist/image.sbom.spdx.json
+          push-to-registry: true
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          {
+            echo "Promotion authority is the image digest and Sigstore signatures, not the tag."
+            echo
+            echo "Image: \`${{ steps.image.outputs.ref }}\`"
+            echo "Tag alias: \`ghcr.io/contextualwisdomlab/waf-ids-ai-soc:${GITHUB_REF_NAME}\`"
+            echo
+            echo "Verify: \`docs/runbooks/release.md\`"
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            dist/waf-ids-ai-soc-linux-x86_64 \
+            dist/SHA256SUMS \
+            dist/sbom.spdx.json \
+            dist/image.sbom.spdx.json \
+            dist/IMAGE-DIGEST.txt \
+            dist/waf-ids-ai-soc-linux-x86_64.sigstore.json \
+            dist/SHA256SUMS.sigstore.json \
+            dist/sbom.spdx.json.sigstore.json \
+            dist/image.sbom.spdx.json.sigstore.json \
+            dist/IMAGE-DIGEST.txt.sigstore.json \
+            --notes-file "$notes" \
+            --verify-tag

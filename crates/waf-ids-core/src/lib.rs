@@ -1135,6 +1135,8 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
             "docs/security/threat-model.md".to_string(),
             "docs/security/compliance-mapping.md".to_string(),
             "docs/runbooks/release.md".to_string(),
+            "docs/doctoring/signed-release.md".to_string(),
+            "docs/papers/nist-sp-800-218-ssdf.pdf".to_string(),
         ],
     }
 }
@@ -1172,6 +1174,8 @@ pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenc
             "docs/figma/enterprise-product-architecture.md".to_string(),
             "docs/ponytail/2026-07-02-complexity-audit.md".to_string(),
             "docs/runbooks/release.md".to_string(),
+            "docs/doctoring/signed-release.md".to_string(),
+            "docs/papers/nist-sp-800-218-ssdf.pdf".to_string(),
         ],
         deployment_assets: readiness.deployment_assets,
     }

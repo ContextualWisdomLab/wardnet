@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T20:20Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-24T06:10Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
@@ -25,7 +25,10 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
-| [#107](https://github.com/ContextualWisdomLab/wardnet/pull/107) | feat(release): tagged GitHub Release with SHA-256 and immutable GHCR | `feat/issue-84-signed-release` stacked on #106 | local fmt/test/clippy + two `/healthz` smokes (2B KRW, evidence includes release runbook) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 first. Do not `--admin`. |
+| [#110](https://github.com/ContextualWisdomLab/wardnet/pull/110) | feat(waf): CI attack-evidence battery against the live binary (issue #11) | `feat/issue-11-attack-evidence-ci` stacked on #109 | local fmt/test/clippy green; battery + fixture tests pass | Author this pass | Org 2-approval + self-author. Merge the stack below first; retarget to `main` when #109 lands. |
+| [#109](https://github.com/ContextualWisdomLab/wardnet/pull/109) | feat(release): refuse lightweight tags and pin k8s by digest | `feat/issue-84-unsigned-tag-admission` stacked on #108 | local fmt/test/clippy + two `/healthz` smokes (2B KRW) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 then #107 then #108 first. Do not `--admin`. |
+| [#108](https://github.com/ContextualWisdomLab/wardnet/pull/108) | feat(release): keyless cosign, SPDX SBOM, SLSA on the same tag | `feat/issue-84-cosign-sbom` stacked on #107 | local fmt/test/clippy + two `/healthz` smokes (2B KRW, evidence includes signed-release doctoring) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 then #107 first. Do not `--admin`. Do not re-implement checksums. |
+| [#107](https://github.com/ContextualWisdomLab/wardnet/pull/107) | feat(release): tagged GitHub Release with SHA-256 and immutable GHCR | `feat/issue-84-signed-release` stacked on #106 | still-valid Devin basename checksums + rust GRANT race (`tuple concurrently updated`) fixed this pass; local fmt/test/clippy + two `/healthz` smokes | Author this pass; Devin COMMENTED (checksum thread still-valid, now fixed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 first. Do not `--admin`. |
 | [#106](https://github.com/ContextualWisdomLab/wardnet/pull/106) | feat(store): outbox consumers for TAXII, Clearfolio, and orchestrator | `feat/issue-81-outbox-consumers` stacked on #105 | local fmt/test/clippy + smoke.sh + two `/healthz` and `/admin`/`/api/commercial/readiness` (2B KRW) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 first. Do not `--admin`. Do not re-implement OCC or prior store slices. |
 | [#105](https://github.com/ContextualWisdomLab/wardnet/pull/105) | feat(store): optimistic concurrency on postgres snapshots | `feat/issue-80-optimistic-concurrency` stacked on #99 | Devin still-valid startup-version 409 fixed this pass (`load_postgres` advances `snapshot_version` after save); local fmt/test/clippy + two `/healthz` smokes | Author; Devin COMMENTED (startup false-conflict addressed, thread resolved) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 first. Do not `--admin`. Do not re-implement HASH/role/backup. |
 | [#104](https://github.com/ContextualWisdomLab/wardnet/pull/104) | feat(store): HASH-partition security_event by tenant | merged into rustls stack then #99 | prior hour | Author prior hour | Folded into #99. Do not re-implement. |
@@ -59,7 +62,7 @@ by ruleset `18156473` (not by failing Checks). Do not `--admin` merge.
 | [#87](https://github.com/ContextualWisdomLab/wardnet/issues/87) | [Production readiness] Close the evidence-backed Wardnet production gate | medium |
 | [#86](https://github.com/ContextualWisdomLab/wardnet/issues/86) | [P0] Put proven WAF/IDS engines in the enforcement path and publish detection-quality evidence | **critical — in-process + sidecar slices shipped, unmerged** |
 | [#85](https://github.com/ContextualWisdomLab/wardnet/issues/85) | [P1] Establish production telemetry, SLOs, incident response, and disaster-recovery evidence | high |
-| [#84](https://github.com/ContextualWisdomLab/wardnet/issues/84) | [P1] Build an immutable signed release, promotion, and rollback pipeline | **high — checksums/GHCR tag this pass; cosign remainder** |
+| [#84](https://github.com/ContextualWisdomLab/wardnet/issues/84) | [P1] Build an immutable signed release, promotion, and rollback pipeline | **high — checksums/GHCR #107; cosign/SBOM #108; annotated-tag admission this pass** |
 | [#83](https://github.com/ContextualWisdomLab/wardnet/issues/83) | [P1] Add bounded distributed admission control, trusted client attribution, and overload behavior | high |
 | [#82](https://github.com/ContextualWisdomLab/wardnet/issues/82) | [P1] Integrate Keyverse identity, tenant authorization, consent, and human approval evidence | high (blocked) |
 | [#81](https://github.com/ContextualWisdomLab/wardnet/issues/81) | [P0] Add a transactional outbox and idempotent leased workers for external effects | **critical — first slice on #99; retention on #101; TAXII/Clearfolio/orchestrator consumers this pass** |
@@ -201,16 +204,28 @@ holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
-Issue **#84** first slice: `vX.Y.Z` tags produce a locked binary, SHA-256
-checksums, a GitHub Release, and an immutable GHCR image. Promotion and
-rollback are tag-for-tag (`docs/runbooks/release.md`). Do not re-implement
-#78–#81 store slices or OCC.
+Issue **#11** first slice (PR #110, stacked on #109): the build-script libcoraza
+ABI stub now carries a deterministic OWASP CRS battery (942100 SQLi, 941100
+XSS, 930100 traversal, 932100 RCE incl. `; cat /etc/passwd` overlap ordering,
+944120 Log4j JNDI; raw + percent-encoded needles), and a live-binary test fires
+nine cases over real HTTP asserting 403 + `engine=coraza` + cited rule id,
+benign forwarding, and unmasked `X-Forwarded-For` attribution in `/api/events`.
+Doctoring: `docs/doctoring/ci-attack-evidence-battery.md` (APA 7th). Detection
+*quality* stays with operator-supplied real libcoraza + CRS; CI proves the path.
+
+Strix infra-failure loop: PRs #72/#77/#93/#94/#95 failed strix on provider
+infrastructure (`openai-direct/gpt-5.6-luna` exit-1 fallbacks and 5400 s NIM
+timeouts — zero findings). All five were re-scanned via central
+`repository_dispatch` (`strix-scan`) with matching base/head payloads. Do not
+treat these as code findings; do not rotate review-agent keys.
 
 ## Next hourly loop (do, do not report)
 
-1. Second independent APPROVE on #91/#92. Do not `--admin`.
-2. Keep #94 independently; #95 then #96 then #97 then #98 then #99 then #105
-   then #106 then this release PR merge-ready. Do not `--admin`.
-3. Next runtime gap if policy still blocks: cosign/SBOM on the same tag, or
-   Keyverse identity (#82).
+1. Merge stack bottom-up as agent approvals land: #95 then retarget+update
+   #96 → merge, then #97, #98, #99, #105, #106, #107, #108, #109, then
+   retarget #110 to `main`.
+2. Second independent APPROVE comes from the OpenCode review agent via the
+   org scheduler (`Required PR Review Merge Scheduler`, budget 1/run); keep
+   heads current so dispatches bind to the exact head.
+3. Resolve any new CHANGES_REQUESTED from opencode/noema on current heads.
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.
