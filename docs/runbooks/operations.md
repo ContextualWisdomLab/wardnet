@@ -103,7 +103,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - durable database storage with backups
 - SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
-- In-process libcoraza embedding (HTTP sidecar consult at `CORAZA_WAF_URL` evaluates each live `/gateway` transaction; audit ingest at `POST /api/waf/coraza/audit` still fuses block hits into DNSBL/`client_ip` indicators). Set `PROVEN_ENGINE_FAIL_CLOSED=true` in production so a sidecar outage does not silently allow traffic.
+- Detection-quality corpora and Suricata EVE tail/shipper remain open. In-process libcoraza (`CORAZA_LIB_PATH` + `CORAZA_RULES_PATH` or `CORAZA_DIRECTIVES`) evaluates each live `/gateway` transaction; otherwise HTTP sidecar consult at `CORAZA_WAF_URL`. Audit ingest at `POST /api/waf/coraza/audit` still fuses block hits into DNSBL/`client_ip` indicators. Set `PROVEN_ENGINE_FAIL_CLOSED=true` in production so an engine outage does not silently allow traffic.
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement

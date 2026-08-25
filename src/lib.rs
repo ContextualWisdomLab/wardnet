@@ -36,6 +36,7 @@ pub use waf_ids_core::{
 };
 
 mod coraza_audit;
+mod coraza_inprocess;
 mod credentials;
 mod destination;
 mod misp_import;
@@ -75,7 +76,7 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
-    /// In-path Coraza sidecar consult. Disabled unless `CORAZA_WAF_URL` is set.
+    /// In-path Coraza consult (in-process libcoraza and/or sidecar).
     proven_engine: ProvenEngineConfig,
     /// Fail-closed destination policy for every outbound http/https call.
     destination: DestinationPolicy,
@@ -174,7 +175,8 @@ impl AppState {
         self
     }
 
-    /// Configure the in-path Coraza sidecar adapter. Builder-style.
+    /// Configure the in-path Coraza adapter (sidecar and/or libcoraza).
+    /// Builder-style.
     pub fn with_proven_engine(mut self, config: ProvenEngineConfig) -> Self {
         self.proven_engine = config;
         self
@@ -434,9 +436,9 @@ pub struct HealthStatus {
     pub credentials_source: String,
     /// True when at least one admin write token is configured.
     pub admin_auth_configured: bool,
-    /// `coraza_sidecar` when `CORAZA_WAF_URL` is set; otherwise `ingest_hints_only`.
+    /// `coraza_in_process`, `coraza_sidecar`, or `ingest_hints_only`.
     pub proven_engine: String,
-    /// True when a configured sidecar outage fails the live transaction closed.
+    /// True when a configured engine outage fails the live transaction closed.
     pub proven_engine_fail_closed: bool,
     /// `production` (fail-closed classes) or `development` (loopback class permitted).
     pub destination_mode: String,
@@ -2391,7 +2393,7 @@ async fn gateway(
     }
 }
 
-/// Consult the configured Coraza sidecar for this live transaction.
+/// Consult in-process libcoraza first; otherwise the Coraza sidecar.
 async fn consult_proven_engine(
     state: &AppState,
     method: &str,
@@ -2400,6 +2402,22 @@ async fn consult_proven_engine(
     client_ip: Option<IpAddr>,
     forwarded_headers: &[(String, String)],
 ) -> ProvenEngineOutcome {
+    if let Some(engine) = state.proven_engine.in_process.clone() {
+        let method = method.to_owned();
+        let request_uri = request_uri.to_owned();
+        let body_text = body_text.to_owned();
+        let headers_owned = forwarded_headers.to_vec();
+        return match tokio::task::spawn_blocking(move || {
+            engine.evaluate(&method, &request_uri, &body_text, client_ip, &headers_owned)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => ProvenEngineOutcome::Unavailable {
+                reason: "coraza in-process task failed".to_string(),
+            },
+        };
+    }
     let Some(url) = state
         .proven_engine
         .sidecar_url
@@ -2425,14 +2443,20 @@ async fn consult_proven_engine(
     .await
 }
 
-/// Operator-visible proven-engine status (no sidecar URL; that may identify
-/// an internal host).
+/// Operator-visible proven-engine status (no sidecar URL or library path;
+/// those may identify an internal host).
 async fn waf_engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "mode": state.proven_engine.mode(),
         "in_path": state.proven_engine.in_path(),
         "fail_closed": state.proven_engine.fail_closed,
-        "sidecar_configured": state.proven_engine.in_path(),
+        "sidecar_configured": state.proven_engine.sidecar_configured(),
+        "in_process_configured": state.proven_engine.in_process.is_some(),
+        "in_process_rules": state
+            .proven_engine
+            .in_process
+            .as_ref()
+            .map(|engine| engine.rules()),
     }))
 }
 
@@ -2994,7 +3018,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
     </section>
     <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
-      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests. Set <code>CORAZA_WAF_URL</code> so each live <code>/gateway</code> transaction is evaluated by a Coraza sidecar (do not invent WAF rules here). See <code>GET /api/waf/engine-status</code>.</p>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests. Set <code>CORAZA_LIB_PATH</code> plus <code>CORAZA_RULES_PATH</code> (or <code>CORAZA_DIRECTIVES</code>) for in-process libcoraza, or <code>CORAZA_WAF_URL</code> for a sidecar. Do not invent WAF rules here. See <code>GET /api/waf/engine-status</code>.</p>
     </section>
     <section class="card"><h2>STIX threat intelligence</h2>
       <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p>
@@ -3323,12 +3347,33 @@ pub async fn run_from_env(
         std::env::var("PROVEN_ENGINE_FAIL_CLOSED").ok().as_deref(),
         false,
     )?;
-    let proven_engine = match coraza_waf_url {
-        Some(url) => ProvenEngineConfig::sidecar(url, proven_engine_fail_closed),
-        None => ProvenEngineConfig {
-            sidecar_url: None,
-            fail_closed: proven_engine_fail_closed,
-        },
+    let coraza_lib_path = std::env::var("CORAZA_LIB_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let coraza_rules_path = std::env::var("CORAZA_RULES_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let coraza_directives = std::env::var("CORAZA_DIRECTIVES")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let in_process = match coraza_lib_path {
+        Some(path) => Some(Arc::new(
+            crate::coraza_inprocess::InProcessCoraza::load(
+                Path::new(&path),
+                coraza_rules_path.as_deref().map(Path::new),
+                coraza_directives.as_deref(),
+            )
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
+        )),
+        None => None,
+    };
+    let proven_engine = ProvenEngineConfig {
+        sidecar_url: coraza_waf_url,
+        fail_closed: proven_engine_fail_closed,
+        in_process,
     };
     let destination_policy = startup_destination_policy(&bind_addr)?;
     let state = AppState::load(config)
@@ -3390,6 +3435,9 @@ mod tests {
             "RATE_LIMIT_WINDOW",
             "MAX_BODY_BYTES",
             "CORAZA_WAF_URL",
+            "CORAZA_LIB_PATH",
+            "CORAZA_RULES_PATH",
+            "CORAZA_DIRECTIVES",
             "PROVEN_ENGINE_FAIL_CLOSED",
             "DESTINATION_ALLOWLIST",
             "DESTINATION_DENYLIST",
@@ -5295,6 +5343,8 @@ mod tests {
         assert_eq!(status["mode"], "coraza_sidecar");
         assert_eq!(status["in_path"], true);
         assert_eq!(status["fail_closed"], true);
+        assert_eq!(status["sidecar_configured"], true);
+        assert_eq!(status["in_process_configured"], false);
 
         let health: HealthStatus =
             json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
@@ -5338,6 +5388,68 @@ mod tests {
         assert!(
             body["reason"].as_str().unwrap_or("").contains("942100"),
             "block reason must cite the CRS rule from the sidecar: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_blocks_live_request_from_in_process_libcoraza() {
+        let engine = crate::coraza_inprocess::load_stub_engine();
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::in_process(engine, true));
+        let app = build_app(state);
+
+        let status = json_body::<serde_json::Value>(
+            app_request(&app, empty_request(Method::GET, "/api/waf/engine-status")).await,
+        )
+        .await;
+        assert_eq!(status["mode"], "coraza_in_process");
+        assert_eq!(status["in_path"], true);
+        assert_eq!(status["in_process_configured"], true);
+        assert_eq!(status["sidecar_configured"], false);
+        assert!(status["in_process_rules"].as_i64().unwrap_or(0) >= 1);
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.proven_engine, "coraza_in_process");
+        assert!(health.proven_engine_fail_closed);
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "libcoraza-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = json_body(blocked).await;
+        assert_eq!(body["action"], "blocked");
+        assert_eq!(body["engine"], "coraza");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("942100"),
+            "block reason must cite the CRS rule from libcoraza: {body}"
         );
     }
 

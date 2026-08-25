@@ -62,7 +62,7 @@ The core stays an in-repo workspace crate on purpose (no git submodule) until it
 
 ## Runtime Configuration
 
-Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `ADMIN_TOKEN` (write token for `X-Admin-Token`), `ADMIN_TOKENS` (comma-separated `token:actor` pairs for multi-token RBAC with per-token audit actors), `WAF_IDS_STATE_PATH` (optional JSON state file; omitted = seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT` (default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`, `CORAZA_WAF_URL` (optional in-path Coraza sidecar), `PROVEN_ENGINE_FAIL_CLOSED` (boolean; default false — set true in production when a sidecar URL is set).
+Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `ADMIN_TOKEN` (write token for `X-Admin-Token`), `ADMIN_TOKENS` (comma-separated `token:actor` pairs for multi-token RBAC with per-token audit actors), `WAF_IDS_STATE_PATH` (optional JSON state file; omitted = seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT` (default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`, `CORAZA_LIB_PATH` / `CORAZA_RULES_PATH` / `CORAZA_DIRECTIVES` (optional in-process libcoraza), `CORAZA_WAF_URL` (optional in-path Coraza sidecar), `PROVEN_ENGINE_FAIL_CLOSED` (boolean; default false — set true in production when an engine is set).
 
 ## Key Conventions
 
