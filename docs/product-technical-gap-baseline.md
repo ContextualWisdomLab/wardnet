@@ -25,6 +25,7 @@ not “waiting on review/CI time”.
 
 | PR | Title | Head | Checks | Reviews | Merge blocker |
 | --- | --- | --- | --- | --- | --- |
+| [#110](https://github.com/ContextualWisdomLab/wardnet/pull/110) | feat(waf): CI attack-evidence battery against the live binary (issue #11) | `feat/issue-11-attack-evidence-ci` stacked on #109 | local fmt/test/clippy green; battery + fixture tests pass | Author this pass | Org 2-approval + self-author. Merge the stack below first; retarget to `main` when #109 lands. |
 | [#109](https://github.com/ContextualWisdomLab/wardnet/pull/109) | feat(release): refuse lightweight tags and pin k8s by digest | `feat/issue-84-unsigned-tag-admission` stacked on #108 | local fmt/test/clippy + two `/healthz` smokes (2B KRW) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 then #107 then #108 first. Do not `--admin`. |
 | [#108](https://github.com/ContextualWisdomLab/wardnet/pull/108) | feat(release): keyless cosign, SPDX SBOM, SLSA on the same tag | `feat/issue-84-cosign-sbom` stacked on #107 | local fmt/test/clippy + two `/healthz` smokes (2B KRW, evidence includes signed-release doctoring) | Author this pass | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 then #107 first. Do not `--admin`. Do not re-implement checksums. |
 | [#107](https://github.com/ContextualWisdomLab/wardnet/pull/107) | feat(release): tagged GitHub Release with SHA-256 and immutable GHCR | `feat/issue-84-signed-release` stacked on #106 | still-valid Devin basename checksums + rust GRANT race (`tuple concurrently updated`) fixed this pass; local fmt/test/clippy + two `/healthz` smokes | Author this pass; Devin COMMENTED (checksum thread still-valid, now fixed) | Org 2-approval + self-author. Merge #95 then #96 then #97 then #98 then #99 then #105 then #106 first. Do not `--admin`. |
@@ -203,16 +204,28 @@ holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
-Issue **#84** remainder: lightweight tags are refused
-(`scripts/admit-release-tag.sh`). Kubernetes pin is the GHCR content digest
-(`scripts/pin-k8s-digest.sh`); tag aliases fail closed. Do not re-implement
-checksums, cosign/SBOM, or store slices.
+Issue **#11** first slice (PR #110, stacked on #109): the build-script libcoraza
+ABI stub now carries a deterministic OWASP CRS battery (942100 SQLi, 941100
+XSS, 930100 traversal, 932100 RCE incl. `; cat /etc/passwd` overlap ordering,
+944120 Log4j JNDI; raw + percent-encoded needles), and a live-binary test fires
+nine cases over real HTTP asserting 403 + `engine=coraza` + cited rule id,
+benign forwarding, and unmasked `X-Forwarded-For` attribution in `/api/events`.
+Doctoring: `docs/doctoring/ci-attack-evidence-battery.md` (APA 7th). Detection
+*quality* stays with operator-supplied real libcoraza + CRS; CI proves the path.
+
+Strix infra-failure loop: PRs #72/#77/#93/#94/#95 failed strix on provider
+infrastructure (`openai-direct/gpt-5.6-luna` exit-1 fallbacks and 5400 s NIM
+timeouts — zero findings). All five were re-scanned via central
+`repository_dispatch` (`strix-scan`) with matching base/head payloads. Do not
+treat these as code findings; do not rotate review-agent keys.
 
 ## Next hourly loop (do, do not report)
 
-1. Second independent APPROVE on #91/#92. Do not `--admin`.
-2. Keep #94 independently; #95 then #96 then #97 then #98 then #99 then #105
-   then #106 then #107 then #108 then this admission PR merge-ready.
-3. Next runtime gap if policy still blocks: coverage/attack-evidence bundle
-   for signed artifacts, or Keyverse identity (#82).
+1. Merge stack bottom-up as agent approvals land: #95 then retarget+update
+   #96 → merge, then #97, #98, #99, #105, #106, #107, #108, #109, then
+   retarget #110 to `main`.
+2. Second independent APPROVE comes from the OpenCode review agent via the
+   org scheduler (`Required PR Review Merge Scheduler`, budget 1/run); keep
+   heads current so dispatches bind to the exact head.
+3. Resolve any new CHANGES_REQUESTED from opencode/noema on current heads.
 4. Refresh this file’s PR/Issue tables from `gh pr list` / `gh issue list`.
