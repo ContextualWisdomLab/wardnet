@@ -192,6 +192,44 @@ holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
+Issue **#86** slice review-hardening (PR #95): forwarded-header allowlist to
+the engine (`host`/`user-agent`/`accept`/`content-type`/`referer`/`origin`/
+`x-requested-with`/`x-forwarded-for`/`x-real-ip`/`cookie`; never
+`Authorization`; 32 headers / 8 KiB caps), 1 MiB streamed response cap,
+explicit status contract (2xx parse, 403 interruption fallback, everything
+else `Unavailable`), `engine_hit` evidence on monitor-mode routes and
+sub-threshold hits, and `engine_unavailable` events for fail-open outages.
+Redirects were already disabled on the shared outbound client. Redistributable
+NIST SP 800-94 PDF committed to `docs/papers/` and cited in doctoring.
+
+Issue **#86** slice: in-path Coraza sidecar adapter on live `/gateway`
+transactions (branch `feat/issue-86-in-path-coraza`, not stacked onto PR #94
+after that PR was restored to issue-#78-only scope). Operator-visible:
+`GET /api/waf/engine-status` reports whether CRS is in the request path; a
+sidecar interrupt blocks the **current** request (not only a later client
+matching ingest hints). #78 remains on PR #94; #79 destination policy was
+unscoped from #94 and was not re-implemented here.
+
+Issue **#86** in-process libcoraza remainder ([#97](https://github.com/ContextualWisdomLab/wardnet/pull/97), stacked on #96).
+Operator-visible: `CORAZA_LIB_PATH` + `CORAZA_RULES_PATH`/`CORAZA_DIRECTIVES`;
+`/healthz.proven_engine=coraza_in_process`; `GET /api/waf/engine-status`
+`in_process_configured` / `in_process_rules`; missing library fails before
+readiness (`tests/binary.rs::binary_fail_closes_when_libcoraza_path_is_missing`).
+Driving tests: `gateway_blocks_live_request_from_in_process_libcoraza` and
+`stub_engine_blocks_crs_probe_and_allows_clean`. In-process transactions now
+receive the same bounded forwarded-header allowlist as the sidecar (never
+`Authorization`). Do not re-implement #78, the #86 sidecar slice, or the #79 pin.
+
+Issue **#80** first slice (PostgreSQL production authority). Non-loopback binds
+fail closed without `CONTROL_PLANE_DATABASE_URL`. Operator-visible:
+`/healthz.persistence=postgres`; credentials key `control_plane_url`. Driving
+tests: `run_from_env_fail_closes_public_bind_without_postgres`,
+`binary_fail_closes_non_loopback_listen_without_postgres`,
+`binary_fail_closes_when_control_plane_url_is_not_postgres`,
+`postgres_roundtrip_seeded_snapshot_when_database_url_is_set` (CI postgres
+service). Do not re-implement #78, the #86 sidecar/libcoraza slices, or the
+#79 pin.
+
 Issue **#80** remaining: HASH-partition `security_event` by `tenant_id` (8
 children) stacked on #103. Still-valid #103 Devin finding: `verify()` now
 accepts schema 2..=current so a role-only/HASH-layout upgrade cannot void
