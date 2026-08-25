@@ -2266,11 +2266,40 @@ async fn gateway(
         Some(query) => format!("{gateway_path}?{query}"),
         None => gateway_path.to_string(),
     };
-    let engine_outcome =
-        consult_proven_engine(&state, method.as_str(), &request_uri, &body_text, client_ip).await;
-    if let ProvenEngineOutcome::Unavailable { reason } = &engine_outcome
-        && state.proven_engine.fail_closed
-    {
+    let forwarded_headers = proven_engine::engine_forwarded_headers(&headers);
+    let engine_outcome = consult_proven_engine(
+        &state,
+        method.as_str(),
+        &request_uri,
+        &body_text,
+        client_ip,
+        &forwarded_headers,
+    )
+    .await;
+    if let ProvenEngineOutcome::Unavailable { reason } = &engine_outcome {
+        if state.proven_engine.fail_closed {
+            record_event(
+                &state,
+                client_ip,
+                Some(route.id.clone()),
+                "engine_unavailable",
+                reason.clone(),
+                0,
+                gateway_path,
+            )
+            .await;
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "action": "engine_unavailable",
+                    "route_id": route.id,
+                    "reason": reason,
+                })),
+            )
+                .into_response();
+        }
+        // Fail-open deployments still leave evidence that the engine was
+        // down for this request; scoring continues below.
         record_event(
             &state,
             client_ip,
@@ -2281,15 +2310,25 @@ async fn gateway(
             gateway_path,
         )
         .await;
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "action": "engine_unavailable",
-                "route_id": route.id,
-                "reason": reason,
-            })),
-        )
-            .into_response();
+    }
+    if let ProvenEngineOutcome::Hit(hit) = &engine_outcome {
+        let enforcing_block = hit.action == "block" && route.mode == EnforcementMode::Block;
+        let threshold_hit = hit.score >= route.block_threshold.unwrap_or(BLOCK_SCORE);
+        if !(enforcing_block || (threshold_hit && route.mode == EnforcementMode::Block)) {
+            // Monitor-mode routes and sub-threshold hits keep the CRS
+            // evidence in the event stream instead of dropping it, while
+            // enforcement stays a Block-route decision.
+            record_event(
+                &state,
+                client_ip,
+                Some(route.id.clone()),
+                "engine_hit",
+                hit.reason.clone(),
+                hit.score,
+                gateway_path,
+            )
+            .await;
+        }
     }
     if let ProvenEngineOutcome::Hit(hit) = &engine_outcome
         && (hit.action == "block" || hit.score >= route.block_threshold.unwrap_or(BLOCK_SCORE))
@@ -2392,13 +2431,15 @@ async fn consult_proven_engine(
     request_uri: &str,
     body_text: &str,
     client_ip: Option<IpAddr>,
+    forwarded_headers: &[(String, String)],
 ) -> ProvenEngineOutcome {
     if let Some(engine) = state.proven_engine.in_process.clone() {
         let method = method.to_owned();
         let request_uri = request_uri.to_owned();
         let body_text = body_text.to_owned();
+        let headers_owned = forwarded_headers.to_vec();
         return match tokio::task::spawn_blocking(move || {
-            engine.evaluate(&method, &request_uri, &body_text, client_ip)
+            engine.evaluate(&method, &request_uri, &body_text, client_ip, &headers_owned)
         })
         .await
         {
@@ -2421,8 +2462,16 @@ async fn consult_proven_engine(
     if let Err(reason) = state.assert_outbound(&url).await {
         return ProvenEngineOutcome::Unavailable { reason };
     }
-    proven_engine::evaluate_sidecar(&state.http, &url, method, request_uri, body_text, client_ip)
-        .await
+    proven_engine::evaluate_sidecar(
+        &state.http,
+        &url,
+        method,
+        request_uri,
+        body_text,
+        client_ip,
+        forwarded_headers,
+    )
+    .await
 }
 
 /// Operator-visible proven-engine status (no sidecar URL or library path;
@@ -5513,12 +5562,168 @@ mod tests {
             ProvenEngineConfig::sidecar(format!("http://{addr}/"), false),
         );
         let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "demo",
+                    "path_prefix": "/demo",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        // Fail-open keeps serving, but the outage must leave event evidence.
         let allowed = app_request(
             &app,
             gateway_get_from_ip("/gateway/demo?q=hello", "198.51.100.9"),
         )
         .await;
         assert_eq!(allowed.status(), StatusCode::OK);
+        let events: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event["action"] == "engine_unavailable"),
+            "fail-open outage must be recorded: {events:?}"
+        );
+    }
+
+    /// Sidecar mock that records whether forwarded client headers arrived.
+    async fn spawn_header_capturing_sidecar() -> (String, Arc<Mutex<Option<serde_json::Value>>>) {
+        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let capture = captured.clone();
+        let sidecar = Router::new()
+            .route(
+                "/",
+                post(
+                    |State(capture): State<Arc<Mutex<Option<serde_json::Value>>>>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        *capture.lock().await = Some(body.clone());
+                        Json(serde_json::json!({
+                            "transaction": {
+                                "is_interrupted": false
+                            },
+                            "messages": []
+                        }))
+                        .into_response()
+                    },
+                ),
+            )
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, sidecar).into_future());
+        (format!("http://{addr}/"), captured)
+    }
+
+    #[tokio::test]
+    async fn gateway_forwards_allowlisted_headers_to_sidecar() {
+        let (sidecar_url, captured) = spawn_header_capturing_sidecar().await;
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(sidecar_url, true));
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "hdr",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/gateway/app?q=hello")
+            .header("X-Forwarded-For", "198.51.100.9")
+            .header("User-Agent", "sqlmap/1.8")
+            .header("Authorization", "Bearer must-not-forward")
+            .body(Body::empty())
+            .unwrap();
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = captured.lock().await.clone().expect("captured payload");
+        let headers = body.pointer("/transaction/request/headers").unwrap();
+        let names: Vec<&str> = headers
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"user-agent"), "{names:?}");
+        assert!(
+            !names.contains(&"authorization"),
+            "credentials must not reach the engine: {names:?}"
+        );
+        let ua = headers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "user-agent")
+            .unwrap();
+        assert_eq!(ua["value"], "sqlmap/1.8");
+    }
+
+    #[tokio::test]
+    async fn monitor_route_records_engine_hit_evidence() {
+        let sidecar_url = spawn_coraza_sidecar_mock().await;
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(sidecar_url, true));
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "watch",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        // crs-probe=1 triggers the mock's 942100 interruption, but the route
+        // only monitors: the hit must be recorded without enforcement.
+        let response = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert!(
+            events.iter().any(|event| event["action"] == "engine_hit"
+                && event["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("942100")),
+            "monitor routes keep CRS evidence: {events:?}"
+        );
     }
 
     #[tokio::test]
