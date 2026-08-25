@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 
 pub const EVENT_SECURITY_RECORDED: &str = "security_event.recorded";
 pub const EVENT_SNAPSHOT_REPLACED: &str = "policy.snapshot_replaced";
+pub const EVENT_TAXII_POLLED: &str = "taxii.collection_polled";
+pub const EVENT_CLEARFOLIO_SUBMITTED: &str = "clearfolio.document_submitted";
+pub const EVENT_SOC_ANALYSIS_REQUESTED: &str = "soc.analysis_requested";
 pub const SCHEMA_VERSION: i32 = 1;
 pub const MAX_ATTEMPTS: i32 = 8;
 pub const LEASE_SECONDS: i64 = 30;
@@ -56,7 +59,6 @@ pub struct OutboxHealth {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchError {
     /// Retryable worker failure (timeout, 429, connection reset).
-    #[allow(dead_code)]
     Transient(String),
     /// Poisoned or unauthorized payload; dead-letter without further retries.
     Permanent(String),
@@ -93,6 +95,28 @@ pub fn snapshot_ids(
     let idempotency_key =
         format!("policy.snapshot:{tenant_id}:{event_sequence}:{audit_sequence}:{hash}");
     (idempotency_key.clone(), idempotency_key)
+}
+
+/// Stable message id / idempotency key for operator-triggered external effects.
+pub fn effect_ids(event_type: &str, tenant_id: &str, unique: &str) -> (String, String) {
+    let idempotency_key = format!("{event_type}:{tenant_id}:{unique}");
+    (idempotency_key.clone(), idempotency_key)
+}
+
+/// Classify an HTTP status for leased workers. 429 and 5xx retry; other 4xx die.
+pub fn classify_http_status(status: u16, body: &str) -> Result<(), DispatchError> {
+    let preview: String = body.chars().take(200).collect();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else if status == 429 || (500..600).contains(&status) {
+        Err(DispatchError::Transient(format!(
+            "HTTP {status}: {preview}"
+        )))
+    } else {
+        Err(DispatchError::Permanent(format!(
+            "HTTP {status}: {preview}"
+        )))
+    }
 }
 
 /// Bounded exponential backoff with deterministic jitter from `message_id`.
@@ -184,5 +208,37 @@ mod tests {
                 .unwrap()
                 .starts_with("local-ack:")
         );
+        snapshot.event_type = EVENT_TAXII_POLLED.into();
+        assert!(dispatch_stdout(&snapshot).is_err());
+    }
+
+    #[test]
+    fn classify_http_status_retries_rate_limits_and_5xx() {
+        assert!(classify_http_status(200, "ok").is_ok());
+        assert!(classify_http_status(202, "{}").is_ok());
+        assert!(matches!(
+            classify_http_status(429, "slow"),
+            Err(DispatchError::Transient(_))
+        ));
+        assert!(matches!(
+            classify_http_status(503, "down"),
+            Err(DispatchError::Transient(_))
+        ));
+        assert!(matches!(
+            classify_http_status(400, "bad"),
+            Err(DispatchError::Permanent(_))
+        ));
+        assert!(matches!(
+            classify_http_status(401, "no"),
+            Err(DispatchError::Permanent(_))
+        ));
+    }
+
+    #[test]
+    fn effect_ids_are_stable_and_unmasked() {
+        let (id, key) = effect_ids(EVENT_TAXII_POLLED, "local-lab", "1:abc");
+        assert_eq!(id, key);
+        assert!(id.contains("taxii.collection_polled"));
+        assert!(id.contains("local-lab"));
     }
 }
