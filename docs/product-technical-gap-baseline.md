@@ -175,6 +175,24 @@ Remaining holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
+Issue **#86** slice review-hardening (PR #95): forwarded-header allowlist to
+the engine (`host`/`user-agent`/`accept`/`content-type`/`referer`/`origin`/
+`x-requested-with`/`x-forwarded-for`/`x-real-ip`/`cookie`; never
+`Authorization`; 32 headers / 8 KiB caps), 1 MiB streamed response cap,
+explicit status contract (2xx parse, 403 interruption fallback, everything
+else `Unavailable`), `engine_hit` evidence on monitor-mode routes and
+sub-threshold hits, and `engine_unavailable` events for fail-open outages.
+Redirects were already disabled on the shared outbound client. Redistributable
+NIST SP 800-94 PDF committed to `docs/papers/` and cited in doctoring.
+
+Issue **#86** slice: in-path Coraza sidecar adapter on live `/gateway`
+transactions (branch `feat/issue-86-in-path-coraza`, not stacked onto PR #94
+after that PR was restored to issue-#78-only scope). Operator-visible:
+`GET /api/waf/engine-status` reports whether CRS is in the request path; a
+sidecar interrupt blocks the **current** request (not only a later client
+matching ingest hints). #78 remains on PR #94; #79 destination policy was
+unscoped from #94 and was not re-implemented here.
+
 Issue **#79** TCP-peer pin on PR #96 (still unmerged; policy blocks). After
 `assert_outbound` allows a host, reqwest DNS returns only those evaluated
 addresses so a rebinding answer cannot reach loopback/private/metadata.
