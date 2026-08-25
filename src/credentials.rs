@@ -258,12 +258,8 @@ mod tests {
 
     #[test]
     fn whitespace_env_admin_token_does_not_authorize_public_bind() {
-        let registry = CredentialRegistry::bootstrap_secrets(
-            None,
-            Some("   \t".to_string()),
-            None,
-        )
-        .unwrap();
+        let registry =
+            CredentialRegistry::bootstrap_secrets(None, Some("   \t".to_string()), None).unwrap();
         let has_write_capable_admin = registry
             .get_credential(CRED_ADMIN_TOKEN)
             .is_some_and(|token| !token.is_empty());
