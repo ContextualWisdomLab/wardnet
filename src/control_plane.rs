@@ -11,6 +11,7 @@ use crate::outbox::{
     STATUS_LEASED, STATUS_PENDING, STATUS_PROCESSED,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Instant;
@@ -25,7 +26,7 @@ use waf_ids_core::{
 /// Default tenant used until Keyverse supplies claims (#82).
 pub const DEFAULT_TENANT_ID: &str = "local-lab";
 
-const MIGRATION_VERSION: i32 = 4;
+const MIGRATION_VERSION: i32 = 5;
 /// Oldest logical-backup schema that restores on this binary.
 ///
 /// v3 only provisions `wardnet_runtime`. v4 HASH-partitions `security_event`
@@ -53,7 +54,8 @@ CREATE TABLE IF NOT EXISTS schema_migration (
 CREATE TABLE IF NOT EXISTS tenant_account (
   tenant_id TEXT PRIMARY KEY,
   event_sequence BIGINT NOT NULL,
-  audit_sequence BIGINT NOT NULL
+  audit_sequence BIGINT NOT NULL,
+  snapshot_version BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tenant_profile (
@@ -263,6 +265,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   dnsbl_entry, security_event, audit_record, threat_feed,
   outbox_message, outbox_receipt TO wardnet_runtime;
 GRANT SELECT ON schema_migration TO wardnet_runtime;
+ALTER TABLE tenant_account ADD COLUMN IF NOT EXISTS snapshot_version BIGINT NOT NULL DEFAULT 0;
 "#;
 
 fn hash_partition_sql_for(parent: &str) -> Result<String, String> {
@@ -575,7 +578,8 @@ async fn event_partition_count(client: &Client) -> Result<i64, String> {
     Ok(row.get(0))
 }
 
-/// Serializes schema application across connections (DROP/CREATE POLICY is not concurrent-safe).
+/// Serializes schema application and runtime GRANTs across connections
+/// (DROP/CREATE POLICY and ACL updates are not concurrent-safe).
 static MIGRATION_GATE: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Live PostgreSQL snapshot store for one tenant.
@@ -629,7 +633,6 @@ impl PostgresPlane {
             event_limit: LIST_LIMIT,
         };
         plane.migrate().await?;
-        plane.assume_runtime_role().await?;
         Ok(plane)
     }
 
@@ -646,16 +649,18 @@ impl PostgresPlane {
             .execute("SELECT pg_advisory_lock($1)", &[&MIGRATION_LOCK_KEY])
             .await
             .map_err(|error| format!("control plane migration lock failed: {error}"))?;
-        let result = apply_schema(&client).await;
+        // HASH convert GRANT and SET ROLE GRANT both mutate pg_class ACL
+        // tuples. Hold the lock across both so parallel connects cannot
+        // `tuple concurrently updated`.
+        let result = async {
+            apply_schema(&client).await?;
+            assume_runtime_role(&client).await
+        }
+        .await;
         let _ = client
             .execute("SELECT pg_advisory_unlock($1)", &[&MIGRATION_LOCK_KEY])
             .await;
         result
-    }
-
-    async fn assume_runtime_role(&self) -> Result<(), String> {
-        let client = self.client.lock().await;
-        assume_runtime_role(&client).await
     }
 
     #[cfg(test)]
@@ -752,6 +757,7 @@ impl PostgresPlane {
         append_security_event(&mut client, &self.tenant_id, event, event_limit).await
     }
 
+    #[cfg(test)]
     pub async fn drain_once<F>(
         &self,
         owner: &str,
@@ -771,6 +777,160 @@ impl PostgresPlane {
             dispatch,
         )
         .await
+    }
+
+    /// Claim due messages, dispatch without holding the client lock, then ack.
+    /// HTTP consumers must not pin the PostgreSQL connection during outbound I/O.
+    pub async fn drain_due_async<F, Fut>(
+        &self,
+        owner: &str,
+        now_unix: i64,
+        dispatch: F,
+    ) -> Result<usize, String>
+    where
+        F: Fn(OutboxMessage) -> Fut,
+        Fut: Future<Output = Result<String, DispatchError>>,
+    {
+        let claimed = {
+            let mut client = self.client.lock().await;
+            claim_batch(&mut client, &self.tenant_id, owner, now_unix).await?
+        };
+        let mut processed = 0;
+        for message in claimed {
+            let duplicate = {
+                let mut client = self.client.lock().await;
+                receipt_exists(&mut client, &self.tenant_id, &message.idempotency_key).await?
+            };
+            if duplicate {
+                let mut client = self.client.lock().await;
+                ack_processed(
+                    &mut client,
+                    &self.tenant_id,
+                    &message,
+                    "duplicate-receipt",
+                    now_unix,
+                    self.event_limit,
+                )
+                .await?;
+                processed += 1;
+                continue;
+            }
+            match dispatch(message.clone()).await {
+                Ok(evidence) => {
+                    let mut client = self.client.lock().await;
+                    ack_processed(
+                        &mut client,
+                        &self.tenant_id,
+                        &message,
+                        &evidence,
+                        now_unix,
+                        self.event_limit,
+                    )
+                    .await?;
+                    processed += 1;
+                }
+                Err(error) => {
+                    let mut client = self.client.lock().await;
+                    fail_claimed(&mut client, &self.tenant_id, &message, now_unix, &error).await?;
+                }
+            }
+        }
+        Ok(processed)
+    }
+
+    /// Persist an operator-triggered external effect (TAXII / Clearfolio / SOC).
+    /// Secrets must not appear in `payload_json`.
+    pub async fn enqueue_effect(
+        &self,
+        event_type: &'static str,
+        aggregate_id: &str,
+        payload_json: String,
+    ) -> Result<String, String> {
+        let created_unix = unix_now_i64();
+        let hash = outbox::payload_hash(&payload_json);
+        let unique = format!("{created_unix}:{hash}");
+        let (message_id, idempotency_key) =
+            outbox::effect_ids(event_type, &self.tenant_id, &unique);
+        let mut client = self.client.lock().await;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| format!("control plane effect transaction failed: {error}"))?;
+        tx.execute(
+            "SELECT set_config('wardnet.tenant_id', $1, true)",
+            &[&self.tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+        insert_outbox(
+            &tx,
+            &self.tenant_id,
+            &OutboxInsert {
+                message_id: message_id.clone(),
+                aggregate_id: aggregate_id.to_string(),
+                aggregate_version: created_unix,
+                event_type,
+                created_unix,
+                payload_json,
+                payload_hash: hash,
+                idempotency_key,
+            },
+        )
+        .await?;
+        prune_processed_outbox(&tx, &self.tenant_id, self.event_limit).await?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("control plane effect commit failed: {error}"))?;
+        Ok(message_id)
+    }
+
+    /// Load one outbox row plus receipt evidence when processed.
+    pub async fn get_outbox_item(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<(OutboxMessage, Option<String>)>, String> {
+        let mut client = self.client.lock().await;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| format!("control plane get-outbox transaction failed: {error}"))?;
+        tx.execute(
+            "SELECT set_config('wardnet.tenant_id', $1, true)",
+            &[&self.tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+        let row = tx
+            .query_opt(
+                "SELECT message_id, aggregate_id, aggregate_version, event_type, schema_version,
+                        created_unix, payload_json, payload_hash, idempotency_key, message_status,
+                        lease_owner, lease_expires_unix, attempt_count, first_attempt_unix,
+                        last_attempt_unix, next_available_unix, terminal_reason
+                 FROM outbox_message WHERE tenant_id = $1 AND message_id = $2",
+                &[&self.tenant_id, &message_id],
+            )
+            .await
+            .map_err(|error| format!("control plane get outbox_message failed: {error}"))?;
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .map_err(|error| format!("control plane get-outbox commit failed: {error}"))?;
+            return Ok(None);
+        };
+        let message = row_to_outbox(&row, &self.tenant_id);
+        let evidence = tx
+            .query_opt(
+                "SELECT receipt_evidence FROM outbox_receipt
+                 WHERE tenant_id = $1 AND message_id = $2",
+                &[&self.tenant_id, &message_id],
+            )
+            .await
+            .map_err(|error| format!("control plane get outbox_receipt failed: {error}"))?
+            .map(|row| row.get::<_, String>(0));
+        tx.commit()
+            .await
+            .map_err(|error| format!("control plane get-outbox commit failed: {error}"))?;
+        Ok(Some((message, evidence)))
     }
 
     pub async fn outbox_health(&self, now_unix: i64) -> Result<OutboxHealth, String> {
@@ -951,7 +1111,7 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
     let account = tx
         .query_opt(
-            "SELECT event_sequence, audit_sequence FROM tenant_account WHERE tenant_id = $1",
+            "SELECT event_sequence, audit_sequence, snapshot_version FROM tenant_account WHERE tenant_id = $1",
             &[&tenant_id],
         )
         .await
@@ -984,6 +1144,7 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
         next_audit_log_id: account.get::<_, i64>(1) as u64,
         commercial,
         threat_feeds,
+        snapshot_version: account.get::<_, i64>(2) as u64,
     }))
 }
 
@@ -1004,7 +1165,7 @@ async fn save_snapshot(
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
 
-    write_snapshot_rows(&tx, tenant_id, data).await?;
+    write_snapshot_rows(&tx, tenant_id, data, true).await?;
     enqueue_snapshot_outbox(&tx, tenant_id, data).await?;
     prune_processed_outbox(&tx, tenant_id, keep).await?;
 
@@ -1018,27 +1179,59 @@ async fn write_snapshot_rows(
     tx: &Transaction<'_>,
     tenant_id: &str,
     data: &AppData,
+    enforce_snapshot_version: bool,
 ) -> Result<(), String> {
-    tx.execute(
-        "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (tenant_id) DO UPDATE SET
-           event_sequence = EXCLUDED.event_sequence,
-           audit_sequence = EXCLUDED.audit_sequence",
-        &[
-            &tenant_id,
-            &(data.next_event_id as i64),
-            &(data.next_audit_log_id as i64),
-        ],
-    )
-    .await
-    .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?;
+    let expected = data.snapshot_version as i64;
+    let next_version = if enforce_snapshot_version {
+        expected.saturating_add(1)
+    } else {
+        expected
+    };
+    let written = if enforce_snapshot_version {
+        tx.execute(
+            "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id) DO UPDATE SET
+               event_sequence = GREATEST(tenant_account.event_sequence, EXCLUDED.event_sequence),
+               audit_sequence = EXCLUDED.audit_sequence,
+               snapshot_version = EXCLUDED.snapshot_version
+             WHERE tenant_account.snapshot_version = $5",
+            &[
+                &tenant_id,
+                &(data.next_event_id as i64),
+                &(data.next_audit_log_id as i64),
+                &next_version,
+                &expected,
+            ],
+        )
+        .await
+        .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?
+    } else {
+        tx.execute(
+            "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id) DO UPDATE SET
+               event_sequence = EXCLUDED.event_sequence,
+               audit_sequence = EXCLUDED.audit_sequence,
+               snapshot_version = EXCLUDED.snapshot_version",
+            &[
+                &tenant_id,
+                &(data.next_event_id as i64),
+                &(data.next_audit_log_id as i64),
+                &next_version,
+            ],
+        )
+        .await
+        .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?
+    };
+    if enforce_snapshot_version && written == 0 {
+        return Err("control plane snapshot conflict".to_string());
+    }
 
     for table in [
         "route_config",
         "threat_indicator",
         "dnsbl_entry",
-        "security_event",
         "audit_record",
         "threat_feed",
         "tenant_profile",
@@ -1049,6 +1242,14 @@ async fn write_snapshot_rows(
         )
         .await
         .map_err(|error| format!("control plane delete {table} failed: {error}"))?;
+    }
+    if !enforce_snapshot_version {
+        tx.execute(
+            "DELETE FROM security_event WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane delete security_event failed: {error}"))?;
     }
 
     let features = serde_json::to_string(&data.commercial.features)
@@ -1142,7 +1343,8 @@ async fn write_snapshot_rows(
             "INSERT INTO security_event (
                 tenant_id, event_id, timestamp_unix, client_address, route_id,
                 action_name, event_reason, event_score, request_path
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (tenant_id, event_id) DO NOTHING",
             &[
                 &tenant_id,
                 &(event.id as i64),
@@ -1572,6 +1774,7 @@ async fn insert_outbox(
     Ok(())
 }
 
+#[cfg(test)]
 async fn drain_once<F>(
     client: &mut Client,
     tenant_id: &str,
@@ -2063,7 +2266,7 @@ async fn restore_backup(
     )
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
-    write_snapshot_rows(&tx, tenant_id, &backup.snapshot).await?;
+    write_snapshot_rows(&tx, tenant_id, &backup.snapshot, false).await?;
     for table in ["outbox_receipt", "outbox_message"] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE tenant_id = $1"),
@@ -2374,7 +2577,8 @@ mod tests {
         if url.trim().is_empty() {
             return;
         }
-        let plane = PostgresPlane::connect(&url)
+        let tenant = unique_tenant("roundtrip");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
             .await
             .expect("test database must accept the control plane");
         let seeded = AppData::seeded();
@@ -2388,7 +2592,7 @@ mod tests {
         assert_eq!(loaded.threats, seeded.threats);
         assert_eq!(loaded.dnsbl, seeded.dnsbl);
         assert_eq!(loaded.next_event_id, seeded.next_event_id);
-        assert_eq!(loaded.commercial.tenant_id, DEFAULT_TENANT_ID);
+        assert_eq!(loaded.commercial.tenant_id, tenant);
         let messages = plane
             .list_outbox_limited(LIST_LIMIT)
             .await
@@ -2633,6 +2837,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_parallel_connect_does_not_race_grants() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("parallel-grant");
+        let (first, second) = tokio::join!(
+            PostgresPlane::connect_tenant(&url, &tenant),
+            PostgresPlane::connect_tenant(&url, &tenant),
+        );
+        first.expect("first parallel connect");
+        second.expect("second parallel connect");
+    }
+
+    #[tokio::test]
     async fn postgres_outbox_list_is_bounded_and_prunes_processed() {
         let Some(url) = test_database_url() else {
             return;
@@ -2760,8 +2978,13 @@ mod tests {
             2,
             "ack must prune processed rows to the configured EVENT_LIMIT, not LIST_LIMIT"
         );
+        let current = plane
+            .load()
+            .await
+            .expect("load for prune save")
+            .expect("tenant exists");
         plane
-            .save(&AppData::seeded())
+            .save(&current)
             .await
             .expect("save must use the same retention cap");
         let after_save = plane
@@ -3094,5 +3317,87 @@ mod tests {
             .batch_execute("DROP TABLE IF EXISTS event_hash_probe CASCADE")
             .await
             .expect("drop probe");
+    }
+
+    #[tokio::test]
+    async fn postgres_stale_snapshot_save_conflicts() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("occ");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane a");
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane b");
+        plane_a.save(&AppData::seeded()).await.expect("first save");
+        let mut loaded_a = plane_a.load().await.expect("load a").expect("tenant a");
+        let loaded_b = plane_b.load().await.expect("load b").expect("tenant b");
+        assert_eq!(loaded_a.snapshot_version, loaded_b.snapshot_version);
+        loaded_a.routes[0].path_prefix = "/occ-a".into();
+        plane_a.save(&loaded_a).await.expect("winner save");
+        let mut stale = loaded_b;
+        stale.routes[0].path_prefix = "/occ-b".into();
+        let error = plane_b
+            .save(&stale)
+            .await
+            .expect_err("stale snapshot must conflict");
+        assert!(
+            error.contains("snapshot conflict"),
+            "operator must see a snapshot conflict: {error}"
+        );
+        let winner = plane_a.load().await.expect("reload").expect("tenant");
+        assert_eq!(winner.routes[0].path_prefix, "/occ-a");
+        assert!(winner.snapshot_version > loaded_a.snapshot_version);
+    }
+
+    #[tokio::test]
+    async fn postgres_enqueues_external_effect_and_async_drain_records_receipt() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("outbox-effect");
+        let plane = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("test database");
+        plane.save(&AppData::seeded()).await.expect("seed");
+        let now = unix_now_i64().saturating_add(60);
+        let _ = plane
+            .drain_once("setup", now, |_| Ok("setup".into()))
+            .await
+            .expect("ack snapshot");
+        let payload = serde_json::json!({
+            "objects_url": "https://taxii.example/api1/collections/c/objects/",
+            "feed_id": "taxii-lab",
+            "path": "/gateway/login",
+            "client_ip": "198.51.100.20"
+        })
+        .to_string();
+        let message_id = plane
+            .enqueue_effect(crate::outbox::EVENT_TAXII_POLLED, "taxii-lab", payload)
+            .await
+            .expect("enqueue taxii poll");
+        let processed = plane
+            .drain_due_async(
+                "effect-worker",
+                now.saturating_add(30),
+                |message| async move {
+                    assert_eq!(message.event_type, crate::outbox::EVENT_TAXII_POLLED);
+                    assert!(message.payload_json.contains("198.51.100.20"));
+                    assert!(message.payload_json.contains("/gateway/login"));
+                    Ok("taxii-ack:unmasked".into())
+                },
+            )
+            .await
+            .expect("async drain");
+        assert_eq!(processed, 1);
+        let (message, evidence) = plane
+            .get_outbox_item(&message_id)
+            .await
+            .expect("get item")
+            .expect("enqueued");
+        assert_eq!(message.message_status, STATUS_PROCESSED);
+        assert_eq!(evidence.as_deref(), Some("taxii-ack:unmasked"));
     }
 }

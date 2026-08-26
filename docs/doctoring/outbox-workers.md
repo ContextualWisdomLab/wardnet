@@ -50,6 +50,9 @@ the exactly-once ack. Dead letters are never pruned.
 
 Loopback file/memory adapters keep in-process stdout SIEM and report
 `outbox=disabled`. `security_event` HASH partitioning is on the PostgreSQL
-plane. Remaining consumers: TAXII poll, Clearfolio, contextual-orchestrator
-on the same message/receipt contract. Backup/restore drill is on the
-PostgreSQL plane.
+plane. TAXII poll, Clearfolio submit, and contextual-orchestrator analysis
+use the same message/receipt contract on PostgreSQL (`GET /api/outbox/{id}`
+for receipt evidence). HTTP dispatch releases the database lock for the
+outbound call. Inline TAXII secrets are rejected on the durable path;
+`taxii_bearer` is a credential-registry secret. Backup/restore drill is on
+the PostgreSQL plane.
