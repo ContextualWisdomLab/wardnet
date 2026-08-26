@@ -14,6 +14,7 @@ delivery evidence.
 
 | PR | Exact head | Base | Current evidence / blocker |
 | --- | --- | --- | --- |
+| #117 stateless MCP status tool | pre-evidence `ca7367e992d8e31b44e34a7b7798ab94153e89c0` | `#95` | this documentation commit necessarily advances the live head; PR API is authoritative; local fmt/clippy/full tests and focused k6 passed; hosted checks, review, and base integration required |
 | #115 official threat feeds | `2c3f06f49e699430abd4c493ea363f69aad4fdd6` | `main` | blocked; three unresolved threads and Strix failure |
 | #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
 | #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
@@ -37,7 +38,7 @@ is the acceptance evidence.
 | Requested surface | Protected `main` | Active evidence | Acceptance gap |
 | --- | --- | --- | --- |
 | Web API | implemented | Axum management/SOC APIs and live binary tests | route lifecycle completion remains #112 |
-| MCP | absent | stacked `feat/mcp-control-plane`: authenticated stateless `2026-07-28` Streamable HTTP discovery plus read-only `wardnet_status` tool and protocol/security tests | protected merge plus authenticated deployed-client evidence |
+| MCP | absent | stacked #117: authenticated stateless `2026-07-28` Streamable HTTP discovery plus read-only `wardnet_status` tool and protocol/security tests | protected merge plus authenticated deployed-client evidence |
 | DNSBL publishing | HTTP zone export only | `/dnsbl/zone` plus fuzzed escaping | live DNS serving exists only in unmerged #95 stack |
 | DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
 | Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
@@ -240,7 +241,7 @@ holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
-MCP surface (stacked on PR #95): `POST /mcp` implements the stable stateless
+MCP surface ([#117](https://github.com/ContextualWisdomLab/wardnet/pull/117), stacked on PR #95): `POST /mcp` implements the stable stateless
 MCP `2026-07-28` contract with `server/discover`, deterministic cacheable
 `tools/list`, `tools/call`, and `ping`. The read-only `wardnet_status` tool
 reuses the support-bundle read model rather than duplicating control-plane
