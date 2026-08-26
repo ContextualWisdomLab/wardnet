@@ -303,7 +303,8 @@ async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
 /// `0o500` directories, turning the intended error-path regression into a
 /// flake (or a silent non-test) depending on the CI user. Injecting the
 /// exact failure instead makes the regression deterministic on every
-/// environment. See `CLAUDE.md`'s Tests section.
+/// environment. See `CLAUDE.md`'s Tests section for the deterministic-testing
+/// research basis and its applicability boundary.
 #[cfg(test)]
 pub(crate) mod persist_fault {
     use std::cell::Cell;
