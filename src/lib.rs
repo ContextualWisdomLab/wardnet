@@ -945,14 +945,10 @@ async fn replace_route(
                     StatusCode::PRECONDITION_REQUIRED,
                     "If-Match is required when replacing an existing route".to_string(),
                 )),
-                Some(current)
-                    if expected != Some("*") && expected != Some(route_etag(current).as_str()) =>
-                {
-                    Err((
-                        StatusCode::PRECONDITION_FAILED,
-                        "route changed; GET the latest representation and retry".to_string(),
-                    ))
-                }
+                Some(current) if !if_match_satisfied(expected, &route_etag(current)) => Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "route changed; GET the latest representation and retry".to_string(),
+                )),
                 _ => {
                     let status = if existed {
                         StatusCode::OK
@@ -1009,7 +1005,7 @@ async fn delete_route(
                     "If-Match is required when deleting a route".to_string(),
                 ));
             }
-            if expected != Some("*") && expected != Some(route_etag(&data.routes[index]).as_str()) {
+            if !if_match_satisfied(expected, &route_etag(&data.routes[index])) {
                 return Err((
                     StatusCode::PRECONDITION_FAILED,
                     "route changed; GET the latest representation and retry".to_string(),
@@ -1042,6 +1038,15 @@ fn route_etag(route: &RouteConfig) -> String {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     });
     format!("\"{hash:016x}\"")
+}
+
+fn if_match_satisfied(value: Option<&str>, current_etag: &str) -> bool {
+    value.is_some_and(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == "*" || candidate == current_etag)
+    })
 }
 
 async fn list_threats(State(state): State<AppState>) -> Json<Vec<ThreatIndicator>> {
@@ -3738,7 +3743,10 @@ mod tests {
                 .uri("/api/routes/demo")
                 .header("content-type", "application/json")
                 .header("x-admin-token", "writer")
-                .header(header::IF_MATCH, etag)
+                .header(
+                    header::IF_MATCH,
+                    format!("\"stale\", {}", etag.to_str().unwrap()),
+                )
                 .body(Body::from(replacement.to_string()))
                 .unwrap(),
         )
