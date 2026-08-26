@@ -74,3 +74,23 @@ These are threat-intelligence feeds consumed by gateway scoring. The authoritati
 zone exports exact IPv4 host entries only; CIDR ranges and IPv6 entries remain available to
 inline gateway scoring rather than being expanded into an unbounded zone. Wardnet is not a
 recursive DNS resolver and does not configure an upstream DNS resolver.
+
+## Scrubbed runtime evidence (2026-08-27)
+
+A bounded local run of this PR's production refresh endpoint fetched and parsed the official
+Spamhaus TLS sources without publishing indicator rows. `spamhaus-drop-v4` returned HTTP 200
+and atomically installed 1,703 DNSBL ranges; `spamhaus-drop-v6` returned HTTP 200 and installed
+92 ranges. Both status records captured a successful attempt timestamp, a response digest,
+`Last-Modified`, and the upstream copyright notice. Neither response supplied an ETag.
+
+The same run exercised URLhaus and ThreatFox through the official registry, but no matching KV
+credentials were available. Both failed closed with HTTP 502 before an upstream request;
+`last_attempt_unix` and `last_success_unix` remained unset, no digest or indicator counts were
+fabricated, and an operator can retry immediately after adding a credential. The source
+registry continued to expose attribution, terms links, parser identity, indicator types, and
+the one-hour refresh/two-hour TTL policy without exposing credential values.
+
+Last-known-good behavior is covered by the bounded official refresh integration test: timeout,
+oversized body, parse, and validation failures retain the prior source-owned rows while recording
+the failure status. The live successful snapshot above establishes the parser and persistence
+path against current official content; it does not redistribute or enumerate any IOC row.
