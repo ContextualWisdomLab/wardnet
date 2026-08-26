@@ -65,7 +65,7 @@ Open `http://127.0.0.1:8080/admin`.
 Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
-- `ADMIN_TOKEN`: write token for management writes via `X-Admin-Token`. Optional only on loopback (`127.0.0.1` / `::1` / `localhost`). Required before readiness on any non-loopback `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public).
+- `ADMIN_TOKEN`: write token for management writes via `X-Admin-Token`. Optional only for numeric loopback binds (`127.0.0.0/8` or `::1`). Hostnames such as `localhost` fail closed because Wardnet cannot prove before binding that every resolved address is loopback. Required before readiness on any other `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public).
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
