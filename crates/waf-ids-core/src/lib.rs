@@ -1432,7 +1432,10 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
-        if entry.prefix_len.is_some() {
+        if !matches!(
+            (entry.address, entry.prefix_len),
+            (IpAddr::V4(_), None | Some(32)) | (IpAddr::V6(_), None | Some(128))
+        ) {
             continue;
         }
         if let IpAddr::V4(address) = entry.address {
@@ -1632,6 +1635,33 @@ mod tests {
         );
         assert!(zone.contains("10.2.0.192 IN TXT \"back\\\\slash and \\\"quote\\\" source=unit\""));
         assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_keeps_exact_ipv4_hosts_and_omits_subnets() {
+        let entries = [
+            DnsblEntry {
+                address: "198.51.100.7".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "exact host".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: Some(32),
+            },
+            DnsblEntry {
+                address: "198.51.100.0".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "subnet".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: Some(24),
+            },
+        ];
+
+        let zone = export_dnsbl_zone("dnsbl.example", &entries);
+
+        assert!(zone.contains("7.100.51.198 IN A 127.0.0.2"));
+        assert!(!zone.contains("0.100.51.198"));
     }
 
     #[test]
