@@ -7,7 +7,9 @@ inside `DNSBL_ORIGIN` before entering recursive egress resolution. A query name
 uses RFC 5782 reversed-octet form, for example
 `99.2.0.192.dnsbl.example`. Listed addresses receive authoritative A and TXT
 records; unlisted, malformed, and zone-apex names receive authoritative
-`NXDOMAIN` and are never forwarded upstream.
+`NXDOMAIN` with an RFC 2308 SOA for negative caching and are never forwarded
+upstream. Listed names queried for unsupported types return the same SOA with
+empty `NOERROR` (NODATA).
 
 The implementation reuses the live `AppState` DNSBL entries,
 `waf_ids_core::dnsbl_matches`, persisted-entry validation, per-entry TTLs, and
@@ -28,7 +30,7 @@ sequenceDiagram
         S-->>D: code, reason, source, TTL
         D-->>C: AA=1, A 127/8 or bounded TXT
     else unlisted or malformed
-        D-->>C: AA=1, NXDOMAIN
+        D-->>C: AA=1, NXDOMAIN plus SOA
     else outside DNSBL origin
         D->>R: Existing destination-policy resolution
     end
@@ -44,7 +46,8 @@ sequenceDiagram
   boundary.
 - DNSBL answers set the authoritative bit and do not advertise recursion.
 - Unsupported types for a listed name return authoritative empty `NOERROR`;
-  non-DNSBL names retain the existing A/AAAA resolver contract.
+  both NODATA and NXDOMAIN include the zone SOA for bounded negative caching.
+  Non-DNSBL names retain the existing A/AAAA resolver contract.
 - IPv6 nibble-reversed DNSBL publication remains a documented gap; the existing
   zone exporter and this runtime slice intentionally cover the current IPv4
   publication contract.
@@ -52,8 +55,8 @@ sequenceDiagram
 ## Verification
 
 `src/egress_dns.rs` tests cover A/TXT content, CIDR membership, TTL propagation,
-authoritative `NXDOMAIN`, malformed names, and real loopback UDP/TCP exchanges
-through the production server loop. Repository readiness still requires
+authoritative `NXDOMAIN`/NODATA SOA records, malformed names, and real loopback
+UDP/TCP exchanges through the production server loop. Repository readiness still requires
 protected-branch checks and deployed port-53 evidence.
 
 ## References

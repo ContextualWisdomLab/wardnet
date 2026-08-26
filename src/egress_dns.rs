@@ -2,8 +2,8 @@ use crate::AppState;
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
     rr::{
-        RData, Record, RecordType,
-        rdata::{A, AAAA, TXT},
+        Name, RData, Record, RecordType,
+        rdata::{A, AAAA, SOA, TXT},
     },
     serialize::binary::{BinDecodable, BinEncodable, BinEncoder},
 };
@@ -92,6 +92,7 @@ async fn answer_dnsbl(
     response.add_query(query.clone());
     let Some(address) = address else {
         response.metadata.response_code = ResponseCode::NXDomain;
+        add_negative_soa(&mut response, &state.dnsbl_origin);
         return Some(response);
     };
     let entries = state.inner.read().await.dnsbl.clone();
@@ -105,6 +106,7 @@ async fn answer_dnsbl(
         .collect();
     if matches.is_empty() {
         response.metadata.response_code = ResponseCode::NXDomain;
+        add_negative_soa(&mut response, &state.dnsbl_origin);
         return Some(response);
     }
     match query.query_type() {
@@ -130,9 +132,34 @@ async fn answer_dnsbl(
                 ));
             }
         }
-        _ => {}
+        _ => add_negative_soa(&mut response, &state.dnsbl_origin),
     }
     Some(response)
+}
+
+fn add_negative_soa(response: &mut Message, origin: &str) {
+    let Ok(zone) = Name::from_ascii(format!("{}.", origin.trim_matches('.'))) else {
+        return;
+    };
+    let Ok(primary) = Name::from_ascii(format!("ns.{zone}")) else {
+        return;
+    };
+    let Ok(responsible) = Name::from_ascii(format!("hostmaster.{zone}")) else {
+        return;
+    };
+    response.authorities.push(Record::from_rdata(
+        zone,
+        DNS_TTL_SECONDS,
+        RData::SOA(SOA::new(
+            primary,
+            responsible,
+            1,
+            3600,
+            600,
+            86400,
+            DNS_TTL_SECONDS,
+        )),
+    ));
 }
 
 fn dnsbl_query_address(host: &str, origin: &str) -> Option<Option<std::net::Ipv4Addr>> {
@@ -333,6 +360,16 @@ mod tests {
         assert!(
             matches!(&txt.answers[0].data, RData::TXT(value) if value.to_string().contains("credential abuse source=test:feed"))
         );
+
+        let nodata = Message::from_bytes(
+            &answer(&state, &typed_query_packet(14, name, RecordType::MX))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
+        assert!(nodata.answers.is_empty());
+        assert!(matches!(nodata.authorities[0].data, RData::SOA(_)));
     }
 
     #[tokio::test]
@@ -392,6 +429,7 @@ mod tests {
             assert!(response.metadata.authoritative);
             assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
             assert!(response.answers.is_empty());
+            assert!(matches!(response.authorities[0].data, RData::SOA(_)));
         }
     }
 

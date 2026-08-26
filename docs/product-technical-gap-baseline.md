@@ -251,7 +251,8 @@ Authoritative DNSBL serving (stacked on PR #95): the existing bounded UDP/TCP
 listener now intercepts names under `DNSBL_ORIGIN`, decodes RFC 5782 reversed
 IPv4 octets, validates persisted entries, applies exact/CIDR matching, and
 returns authoritative A/TXT records with per-entry TTLs. Unlisted, malformed,
-and apex names return authoritative `NXDOMAIN` without recursive leakage.
+and apex names return authoritative `NXDOMAIN` without recursive leakage;
+NXDOMAIN and NODATA carry an RFC 2308 SOA for negative caching.
 Focused tests exercise content, range membership, malformed inputs, and real
 UDP/TCP server exchanges. IPv6 DNSBL publication and deployed port-53 evidence
 remain open.
