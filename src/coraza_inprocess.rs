@@ -16,6 +16,10 @@ use libloading::Library;
 use crate::coraza_audit::CorazaIngestedHit;
 use crate::proven_engine::ProvenEngineOutcome;
 
+/// Maximum number of client headers forwarded into one libcoraza transaction.
+/// Mirrors the sidecar allowlist bound; `Authorization` never forwards.
+const FORWARDED_HEADER_LIMIT: usize = 32;
+
 const CORAZA_ERROR: c_int = -1;
 const CORAZA_INTERRUPTION: c_int = 1;
 
@@ -127,14 +131,19 @@ impl InProcessCoraza {
 
     /// Evaluate one HTTP transaction. Never includes the library path in the
     /// outcome reason (that can identify a host layout).
+    ///
+    /// `headers` carries a bounded allowlist of forwarded client headers so
+    /// CRS rules that inspect `User-Agent`, cookies, and friends see the same
+    /// input a sidecar deployment would. `Authorization` must not be passed.
     pub fn evaluate(
         &self,
         method: &str,
         uri: &str,
         body: &str,
         client_ip: Option<IpAddr>,
+        headers: &[(String, String)],
     ) -> ProvenEngineOutcome {
-        match self.evaluate_inner(method, uri, body, client_ip) {
+        match self.evaluate_inner(method, uri, body, client_ip, headers) {
             Ok(outcome) => outcome,
             Err(reason) => ProvenEngineOutcome::Unavailable { reason },
         }
@@ -146,6 +155,7 @@ impl InProcessCoraza {
         uri: &str,
         body: &str,
         client_ip: Option<IpAddr>,
+        headers: &[(String, String)],
     ) -> Result<ProvenEngineOutcome, String> {
         let method_c = c_string(method)?;
         let uri_c = c_string(uri)?;
@@ -175,15 +185,20 @@ impl InProcessCoraza {
             {
                 return Err("coraza in-process uri phase failed".to_string());
             }
-            let host_name = c_string("Host")?;
-            let host_value = c_string("wardnet")?;
-            let _ = (self.api.add_request_header)(
-                tx.tx,
-                host_name.as_ptr(),
-                c_len("Host".len())?,
-                host_value.as_ptr(),
-                c_len("wardnet".len())?,
-            );
+            for (name, value) in headers.iter().take(FORWARDED_HEADER_LIMIT) {
+                // Interior NULs cannot cross the C ABI; skip such values
+                // rather than failing the whole transaction.
+                let (Ok(name_c), Ok(value_c)) = (c_string(name), c_string(value)) else {
+                    continue;
+                };
+                let _ = (self.api.add_request_header)(
+                    tx.tx,
+                    name_c.as_ptr(),
+                    c_len(name.len())?,
+                    value_c.as_ptr(),
+                    c_len(value.len())?,
+                );
+            }
             let header_rc = (self.api.process_request_headers)(tx.tx);
             if header_rc == CORAZA_ERROR {
                 return Err("coraza in-process header phase failed".to_string());
@@ -347,6 +362,7 @@ unsafe fn hit_from_intervention(
     if ptr.is_null() {
         return ProvenEngineOutcome::Hit(CorazaIngestedHit {
             client_ip,
+            interrupted: true,
             action: "block".to_string(),
             reason: "coraza/crs: transaction interrupted".to_string(),
             score: 50,
@@ -377,6 +393,7 @@ unsafe fn hit_from_intervention(
     }
     ProvenEngineOutcome::Hit(CorazaIngestedHit {
         client_ip,
+        interrupted: true,
         action: action.to_string(),
         reason,
         score,
@@ -459,7 +476,7 @@ mod tests {
     fn stub_engine_blocks_crs_probe_and_allows_clean() {
         let engine = load_stub_engine();
         assert!(engine.rules() >= 1);
-        match engine.evaluate("GET", "/app?crs-probe=1", "", None) {
+        match engine.evaluate("GET", "/app?crs-probe=1", "", None, &[]) {
             ProvenEngineOutcome::Hit(hit) => {
                 assert_eq!(hit.action, "block");
                 assert!(hit.reason.contains("942100"), "{}", hit.reason);
@@ -468,7 +485,7 @@ mod tests {
             other => panic!("expected hit, got {other:?}"),
         }
         assert_eq!(
-            engine.evaluate("GET", "/app?q=hello", "", None),
+            engine.evaluate("GET", "/app?q=hello", "", None, &[]),
             ProvenEngineOutcome::Clean
         );
     }

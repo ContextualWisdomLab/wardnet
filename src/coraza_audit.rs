@@ -13,6 +13,9 @@ use crate::suricata_eve::parse_suricata_timestamp;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorazaIngestedHit {
     pub client_ip: Option<IpAddr>,
+    /// True only when the engine explicitly interrupted the live transaction.
+    /// Severity-derived audit classification must not substitute for this bit.
+    pub interrupted: bool,
     /// `block` or `monitor` (gateway enforcement vocabulary).
     pub action: String,
     pub reason: String,
@@ -179,6 +182,7 @@ pub fn coraza_hit_from_value(value: &serde_json::Value) -> Option<CorazaIngested
 
     Some(CorazaIngestedHit {
         client_ip,
+        interrupted,
         action,
         reason,
         score,

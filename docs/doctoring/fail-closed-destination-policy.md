@@ -10,13 +10,15 @@ https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Preve
 
 - **Design impact:** Parse URLs structurally, disable redirects, ignore ambient
   proxy variables, and deny internal address classes unless an operator
-  allowlist names them. Deny-overrides (`DESTINATION_DENYLIST`) win.
+  allowlist names them. Deny-overrides in the credential-registry
+  `destination_denylist` key win.
 
 OWASP Foundation. (2025). *OWASP Application Security Verification Standard
 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/
 
 - **Design impact:** ASVS V13 SSRF and V4 access control — administrative
-  route upserts and request-time proxying both call the same checker.
+  route upserts validate structure without requiring live DNS; request-time
+  proxying and startup sidecar preflight call the same checker.
 
 Saltzer, J. H., & Schroeder, M. D. (1975). The protection of information in
 computer systems. *Proceedings of the IEEE*, *63*(9), 1278–1308.
@@ -46,10 +48,13 @@ https://doi.org/10.6028/NIST.SP.800-218
 
 ## Operator next action
 
-If a legitimate internal origin is denied, add it to `DESTINATION_ALLOWLIST`
-(`host`, `*.suffix`, or `CIDR`) and restart. A CIDR entry also authorizes
-non-default ports on matching addresses. To block a previously allowed name,
-put it in `DESTINATION_DENYLIST`. Loopback development still permits
+If a legitimate internal origin is denied, add it to the credential-registry
+`destination_allowlist` key (`host`, `*.suffix`, or `CIDR`) and restart. The
+`DESTINATION_ALLOWLIST` environment variable is bootstrap transport only. A
+CIDR entry authorizes an internal address and non-default ports only when every
+resolved answer matches an allowlisted CIDR. Hostname entries never exempt a
+denied address class. To block a previously allowed name, use the
+`destination_denylist` registry key. Loopback development still permits
 loopback-class destinations so local fixtures work; production non-loopback
 listeners use the strict class list. `/healthz.destination_mode` reports
 `production` or `development`. CIDR prefixes outside `/32` (IPv4) or `/128`

@@ -1409,7 +1409,7 @@ async fn load_commercial<C: GenericClient>(
         .await
         .map_err(|error| format!("control plane load tenant_profile failed: {error}"))?;
     let Some(row) = row else {
-        return Ok(CommercialProfile::seeded());
+        return Ok(seeded_commercial_for_tenant(tenant_id));
     };
     let features: String = row.get(9);
     Ok(CommercialProfile {
@@ -1426,6 +1426,13 @@ async fn load_commercial<C: GenericClient>(
         features: serde_json::from_str(&features)
             .map_err(|error| format!("control plane feature_list is not JSON: {error}"))?,
     })
+}
+
+fn seeded_commercial_for_tenant(tenant_id: &str) -> CommercialProfile {
+    CommercialProfile {
+        tenant_id: tenant_id.to_string(),
+        ..CommercialProfile::seeded()
+    }
 }
 
 async fn load_routes<C: GenericClient>(
@@ -2612,6 +2619,16 @@ mod tests {
             score: 80,
             path: path.into(),
         }
+    }
+
+    #[test]
+    fn seeded_commercial_profile_preserves_the_requested_tenant() {
+        let profile = seeded_commercial_for_tenant("tenant-fresh-42");
+        assert_eq!(profile.tenant_id, "tenant-fresh-42");
+        assert_eq!(
+            profile.deployment_id,
+            CommercialProfile::seeded().deployment_id
+        );
     }
 
     #[tokio::test]

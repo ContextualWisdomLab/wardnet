@@ -11,18 +11,9 @@ metadata:
 type: Opaque
 stringData:
   ADMIN_TOKEN: replace-with-secret-manager-sync
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: waf-ids-ai-soc-state
-  namespace: waf-ids-ai-soc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 2Gi
+  EGRESS_PROXY_TOKEN: replace-with-separate-secret-manager-sync
+  # Provision this TLS PostgreSQL service and wardnet_runtime role before rollout.
+  CONTROL_PLANE_DATABASE_URL: postgres://wardnet:replace-with-secret-manager-sync@wardnet-postgres.database.svc.cluster.local:5432/wardnet?sslmode=require
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -53,23 +44,36 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 5353
+              name: egress-dns-udp
+              protocol: UDP
+            - containerPort: 5353
+              name: egress-dns-tcp
+              protocol: TCP
           env:
             - name: BIND_ADDR
               value: 0.0.0.0:8080
             - name: DNSBL_ORIGIN
               value: dnsbl.example
+            - name: EGRESS_DNS_BIND_ADDR
+              value: 0.0.0.0:5353
             - name: EVENT_LIMIT
               value: "1000"
-            - name: WAF_IDS_STATE_PATH
-              value: /var/lib/waf-ids-ai-soc/state.json
+            - name: CONTROL_PLANE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: CONTROL_PLANE_DATABASE_URL
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: waf-ids-ai-soc-admin
                   key: ADMIN_TOKEN
-          volumeMounts:
-            - name: state
-              mountPath: /var/lib/waf-ids-ai-soc
+            - name: EGRESS_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: EGRESS_PROXY_TOKEN
           readinessProbe:
             httpGet:
               path: /healthz
@@ -95,10 +99,6 @@ spec:
               drop:
                 - ALL
             readOnlyRootFilesystem: true
-      volumes:
-        - name: state
-          persistentVolumeClaim:
-            claimName: waf-ids-ai-soc-state
 ---
 apiVersion: v1
 kind: Service
@@ -112,3 +112,11 @@ spec:
     - name: http
       port: 80
       targetPort: http
+    - name: egress-dns-udp
+      port: 53
+      targetPort: egress-dns-udp
+      protocol: UDP
+    - name: egress-dns-tcp
+      port: 53
+      targetPort: egress-dns-tcp
+      protocol: TCP

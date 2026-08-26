@@ -26,6 +26,11 @@ Transaction isolation*. https://www.postgresql.org/docs/current/transaction-iso.
   commits in one transaction so a policy mutation cannot land without its audit
   records.
 
+The current control plane intentionally owns one mutex-protected PostgreSQL
+connection, so handlers, health checks, and the outbox worker serialize database
+work. This is a bounded correctness-first ceiling, not a pool; adopt a role-aware
+pool when measured queue latency requires concurrent database operations.
+
 PostgreSQL Global Development Group. (2026). *PostgreSQL documentation: Table
 partitioning*. https://www.postgresql.org/docs/current/ddl-partitioning.html
 
@@ -81,6 +86,14 @@ https://doi.org/10.6028/NIST.SP.800-34r1
 queries prune and high-volume appends do not share one btree. Existing
 unpartitioned tables convert under `pg_advisory_lock`; rows keep unmasked
 client IPs and paths. `/healthz.event_partitions` reports the child count.
+
+Management mutations currently persist one transactionally consistent tenant
+snapshot: they replace the tenant's management rows and retained
+`security_event` rows, then enqueue one snapshot outbox message. Event ingest
+itself remains incremental. This makes an administrative write O(retained
+events); operators should keep `EVENT_LIMIT` bounded and monitor transaction
+latency. A future measured scaling step is table-specific management upserts
+that preserve the same atomic outbox contract.
 
 Snapshot persist compares `tenant_account.snapshot_version` and fails closed
 on a stale token (HTTP 409). Operator restores overwrite the token.

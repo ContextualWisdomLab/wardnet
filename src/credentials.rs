@@ -12,6 +12,9 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
 pub const CRED_CONTROL_PLANE_URL: &str = "control_plane_url";
+pub const CRED_EGRESS_PROXY_TOKEN: &str = "egress_proxy_token";
+pub const CRED_DESTINATION_ALLOWLIST: &str = "destination_allowlist";
+pub const CRED_DESTINATION_DENYLIST: &str = "destination_denylist";
 pub const CRED_SOC_LLM_TOKEN: &str = "soc_llm_token";
 pub const CRED_TAXII_BEARER: &str = "taxii_bearer";
 
@@ -77,6 +80,9 @@ impl CredentialRegistry {
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
         env_control_plane_url: Option<String>,
+        env_egress_proxy_token: Option<String>,
+        env_destination_allowlist: Option<String>,
+        env_destination_denylist: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         let mut from_file = false;
@@ -96,6 +102,9 @@ impl CredentialRegistry {
                         CRED_ADMIN_TOKEN,
                         CRED_ADMIN_TOKENS,
                         CRED_CONTROL_PLANE_URL,
+                        CRED_EGRESS_PROXY_TOKEN,
+                        CRED_DESTINATION_ALLOWLIST,
+                        CRED_DESTINATION_DENYLIST,
                         CRED_SOC_LLM_TOKEN,
                         CRED_TAXII_BEARER,
                     ] {
@@ -135,6 +144,23 @@ impl CredentialRegistry {
         {
             values.insert(CRED_CONTROL_PLANE_URL.to_string(), url);
             from_env = true;
+        }
+        if !values.contains_key(CRED_EGRESS_PROXY_TOKEN)
+            && let Some(token) = env_egress_proxy_token.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_EGRESS_PROXY_TOKEN.to_string(), token);
+            from_env = true;
+        }
+        for (key, value) in [
+            (CRED_DESTINATION_ALLOWLIST, env_destination_allowlist),
+            (CRED_DESTINATION_DENYLIST, env_destination_denylist),
+        ] {
+            if !values.contains_key(key)
+                && let Some(value) = value.filter(|value| !value.trim().is_empty())
+            {
+                values.insert(key.to_string(), value);
+                from_env = true;
+            }
         }
 
         let source = if from_file {
@@ -191,6 +217,9 @@ mod tests {
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
             None,
+            Some("proxy-secret".to_string()),
+            Some("public.example".to_string()),
+            Some("blocked.example".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -199,13 +228,33 @@ mod tests {
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
         );
+        assert_eq!(
+            registry.get_credential(CRED_EGRESS_PROXY_TOKEN),
+            Some("proxy-secret")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_DESTINATION_ALLOWLIST),
+            Some("public.example")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_DESTINATION_DENYLIST),
+            Some("blocked.example")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
-        let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
+        let registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            None,
+            Some(String::new()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
@@ -251,6 +300,9 @@ mod tests {
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -282,6 +334,9 @@ mod tests {
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -309,6 +364,9 @@ mod tests {
             Some("env-secret".to_string()),
             None,
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -331,7 +389,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None).unwrap_err();
+        let err =
+            CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None, None, None, None)
+                .unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
     }
