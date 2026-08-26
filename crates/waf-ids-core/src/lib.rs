@@ -85,6 +85,8 @@ pub struct OfficialThreatFeed {
     pub last_error: Option<String>,
     #[serde(default)]
     pub source_notice: Option<String>,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
 }
 
 pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
@@ -96,6 +98,8 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
             &["ipv4_cidr"][..],
             "The Spamhaus Project",
             "https://www.spamhaus.org/blocklists/drop-fair-use-policy/",
+            86_400,
+            172_800,
         ),
         (
             "spamhaus-drop-v6",
@@ -104,6 +108,8 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
             &["ipv6_cidr"][..],
             "The Spamhaus Project",
             "https://www.spamhaus.org/blocklists/drop-fair-use-policy/",
+            86_400,
+            172_800,
         ),
         (
             "urlhaus-online",
@@ -112,6 +118,8 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
             &["url", "domain"][..],
             "URLhaus by abuse.ch",
             "https://abuse.ch/terms-of-use/",
+            3_600,
+            7_200,
         ),
         (
             "threatfox-recent",
@@ -120,11 +128,22 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
             &["domain", "ipv4", "ipv6"][..],
             "ThreatFox by abuse.ch",
             "https://abuse.ch/terms-of-use/",
+            3_600,
+            7_200,
         ),
     ]
     .into_iter()
     .map(
-        |(source_id, official_url, parser, indicator_types, attribution, license_url)| {
+        |(
+            source_id,
+            official_url,
+            parser,
+            indicator_types,
+            attribution,
+            license_url,
+            refresh_interval_seconds,
+            ttl_seconds,
+        )| {
             OfficialThreatFeed {
                 source_id: source_id.to_string(),
                 official_url: official_url.to_string(),
@@ -135,22 +154,15 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
                     .collect(),
                 attribution: attribution.to_string(),
                 license_url: license_url.to_string(),
-                refresh_interval_seconds: if source_id.starts_with("spamhaus") {
-                    86_400
-                } else {
-                    3_600
-                },
-                ttl_seconds: if source_id.starts_with("spamhaus") {
-                    172_800
-                } else {
-                    7_200
-                },
+                refresh_interval_seconds,
+                ttl_seconds,
                 etag: None,
                 last_modified: None,
                 last_attempt_unix: None,
                 last_success_unix: None,
                 last_error: None,
                 source_notice: None,
+                content_sha256: None,
             }
         },
     )

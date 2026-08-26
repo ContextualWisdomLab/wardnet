@@ -68,16 +68,25 @@ fn parse_urlhaus(
     body: &str,
 ) -> Result<ParsedOfficialFeed, String> {
     let mut parsed = ParsedOfficialFeed::default();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields = csv_fields(line)?;
-        let Some(url) = fields
-            .iter()
-            .find(|field| field.starts_with("http://") || field.starts_with("https://"))
-        else {
+    let csv_body = body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(csv_body.as_bytes());
+    let headers = reader
+        .headers()
+        .map_err(|error| format!("invalid URLhaus CSV header: {error}"))?
+        .clone();
+    let url_index = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case("url"))
+        .ok_or_else(|| "URLhaus CSV is missing url header".to_string())?;
+    for record in reader.records() {
+        let record = record.map_err(|error| format!("invalid URLhaus CSV record: {error}"))?;
+        let Some(url) = record.get(url_index).filter(|url| !url.is_empty()) else {
             continue;
         };
         parsed
@@ -215,29 +224,6 @@ fn threatfox_ip(value: &str) -> Option<IpAddr> {
         .or_else(|| value.rsplit_once(':').and_then(|(ip, _)| ip.parse().ok()))
 }
 
-fn csv_fields(line: &str) -> Result<Vec<String>, String> {
-    let mut fields = Vec::new();
-    let mut field = String::new();
-    let mut quoted = false;
-    let mut chars = line.chars().peekable();
-    while let Some(character) = chars.next() {
-        match character {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                field.push('"');
-                chars.next();
-            }
-            '"' => quoted = !quoted,
-            ',' if !quoted => fields.push(std::mem::take(&mut field)),
-            other => field.push(other),
-        }
-    }
-    if quoted {
-        return Err("unterminated quoted CSV field".to_string());
-    }
-    fields.push(field);
-    Ok(fields)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,7 +257,7 @@ mod tests {
             "urlhaus_recent_csv",
             "urlhaus-online",
             7200,
-            "# attribution\n1,2026-01-01,https://evil.example/a,online\n",
+            "# attribution\nid,dateadded,url,url_status,reporter\n1,2026-01-01,https://evil.example/a,online,\"analyst\nteam\"\n",
         )
         .unwrap();
         assert!(

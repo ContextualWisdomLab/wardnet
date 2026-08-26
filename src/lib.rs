@@ -7,6 +7,7 @@ use axum::{
     routing::{any, get, post},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
@@ -304,6 +305,18 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
         } else {
             data.official_threat_feeds.push(feed);
         }
+    }
+}
+
+fn upsert_official_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) {
+    if let Some(existing) = entries.iter_mut().find(|item| {
+        item.address == entry.address
+            && item.prefix_len == entry.prefix_len
+            && item.source == entry.source
+    }) {
+        *existing = entry;
+    } else {
+        entries.push(entry);
     }
 }
 
@@ -1366,6 +1379,7 @@ async fn refresh_official_threat_feed(
             return official_feed_failure(&state, &source_id, now, &message, true).await;
         }
     };
+    let content_sha256 = format!("{:x}", Sha256::digest(body.as_bytes()));
     let import = ThreatFeedImport {
         feed_id: source_id.clone(),
         source: feed.attribution.clone(),
@@ -1385,7 +1399,7 @@ async fn refresh_official_threat_feed(
                 upsert_threat(&mut data.threats, threat);
             }
             for entry in import.dnsbl {
-                upsert_dnsbl(&mut data.dnsbl, entry);
+                upsert_official_dnsbl(&mut data.dnsbl, entry);
             }
             let threat_count = data
                 .threats
@@ -1421,6 +1435,7 @@ async fn refresh_official_threat_feed(
                 status.source_notice = parsed
                     .source_notice
                     .or_else(|| status.source_notice.clone());
+                status.content_sha256 = Some(content_sha256);
             }
             record_successful_audit_log(
                 data,
@@ -3711,6 +3726,7 @@ mod tests {
             .unwrap();
         assert_eq!(source.etag.as_deref(), Some("\"drop-v1\""));
         assert_eq!(source.source_notice.as_deref(), Some("Copyright Spamhaus"));
+        assert_eq!(source.content_sha256.as_deref().map(str::len), Some(64));
 
         inspect
             .inner
@@ -4490,6 +4506,25 @@ mod tests {
         assert_eq!(feed.official_url, canonical.official_url);
         assert_eq!(feed.parser, canonical.parser);
         assert_eq!(feed.etag.as_deref(), Some("preserved"));
+    }
+
+    #[test]
+    fn official_dnsbl_upsert_preserves_overlapping_source_provenance() {
+        let mut entries = Vec::new();
+        for source in ["spamhaus-drop-v4", "threatfox-recent"] {
+            upsert_official_dnsbl(
+                &mut entries,
+                DnsblEntry {
+                    address: "198.51.100.7".parse().unwrap(),
+                    prefix_len: None,
+                    code: "127.0.0.2".to_string(),
+                    reason: "official evidence".to_string(),
+                    source: source.to_string(),
+                    ttl_seconds: 300,
+                },
+            );
+        }
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

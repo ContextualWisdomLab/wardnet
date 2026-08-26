@@ -4,7 +4,8 @@ Wardnet keeps operator-supplied `POST /api/threat-feeds/import` separate from a
 closed registry of official upstreams. The registry is persisted with source identity,
 URL template, parser, supported indicator types, attribution and terms link, HTTP
 validators, refresh interval, TTL, last attempt/success/error, and the upstream copyright
-notice when supplied.
+notice when supplied. Each successful `200` also records a SHA-256 digest of the exact
+validated response body; this is local provenance evidence, not an upstream signature.
 
 | Source id | Upstream contract | Default refresh / TTL | Credential |
 | --- | --- | --- | --- |
@@ -27,6 +28,14 @@ redistribution. The canonical formats are documented by
 [Spamhaus](https://www.spamhaus.org/blocklists/do-not-route-or-peer/),
 [URLhaus](https://urlhaus.abuse.ch/api/), and
 [ThreatFox](https://threatfox.abuse.ch/api/).
+
+The current contracts were rechecked against those official pages on 2026-08-27:
+Spamhaus publishes the two JSON URLs, requires attribution and preservation of its date/©
+notice, re-evaluates DROP daily, and says daily fetching is sufficient. URLhaus documents
+the authenticated `recent.csv` export URL. ThreatFox requires `Auth-Key` and documents
+`get_iocs` with a one-day minimum window. Neither abuse.ch API documents a detached
+checksum for these responses, so Wardnet records its own digest after TLS retrieval and
+full-response validation while retaining ETag/Last-Modified when provided.
 
 ## Credentials
 
