@@ -11,6 +11,7 @@ metadata:
 type: Opaque
 stringData:
   ADMIN_TOKEN: replace-with-secret-manager-sync
+  EGRESS_PROXY_TOKEN: replace-with-separate-secret-manager-sync
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -53,11 +54,19 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 5353
+              name: egress-dns-udp
+              protocol: UDP
+            - containerPort: 5353
+              name: egress-dns-tcp
+              protocol: TCP
           env:
             - name: BIND_ADDR
               value: 0.0.0.0:8080
             - name: DNSBL_ORIGIN
               value: dnsbl.example
+            - name: EGRESS_DNS_BIND_ADDR
+              value: 0.0.0.0:5353
             - name: EVENT_LIMIT
               value: "1000"
             - name: WAF_IDS_STATE_PATH
@@ -67,6 +76,11 @@ spec:
                 secretKeyRef:
                   name: waf-ids-ai-soc-admin
                   key: ADMIN_TOKEN
+            - name: EGRESS_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: EGRESS_PROXY_TOKEN
           volumeMounts:
             - name: state
               mountPath: /var/lib/waf-ids-ai-soc
@@ -112,3 +126,11 @@ spec:
     - name: http
       port: 80
       targetPort: http
+    - name: egress-dns-udp
+      port: 53
+      targetPort: egress-dns-udp
+      protocol: UDP
+    - name: egress-dns-tcp
+      port: 53
+      targetPort: egress-dns-tcp
+      protocol: TCP

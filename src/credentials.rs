@@ -12,6 +12,7 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
 pub const CRED_CONTROL_PLANE_URL: &str = "control_plane_url";
+pub const CRED_EGRESS_PROXY_TOKEN: &str = "egress_proxy_token";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -75,6 +76,7 @@ impl CredentialRegistry {
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
         env_control_plane_url: Option<String>,
+        env_egress_proxy_token: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         let mut from_file = false;
@@ -90,7 +92,12 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_CONTROL_PLANE_URL,
+                        CRED_EGRESS_PROXY_TOKEN,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
@@ -126,6 +133,12 @@ impl CredentialRegistry {
             && let Some(url) = env_control_plane_url.filter(|value| !value.is_empty())
         {
             values.insert(CRED_CONTROL_PLANE_URL.to_string(), url);
+            from_env = true;
+        }
+        if !values.contains_key(CRED_EGRESS_PROXY_TOKEN)
+            && let Some(token) = env_egress_proxy_token.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_EGRESS_PROXY_TOKEN.to_string(), token);
             from_env = true;
         }
 
@@ -168,6 +181,7 @@ mod tests {
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
             None,
+            Some("proxy-secret".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -176,13 +190,18 @@ mod tests {
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
         );
+        assert_eq!(
+            registry.get_credential(CRED_EGRESS_PROXY_TOKEN),
+            Some("proxy-secret")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
         let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
+            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None, None)
+                .unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
@@ -211,6 +230,7 @@ mod tests {
             Some(&path),
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
+            None,
             None,
         )
         .unwrap();
@@ -243,6 +263,7 @@ mod tests {
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -270,6 +291,7 @@ mod tests {
             Some("env-secret".to_string()),
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -292,7 +314,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None).unwrap_err();
+        let err =
+            CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
     }

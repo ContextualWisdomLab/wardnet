@@ -1,8 +1,8 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    extract::{DefaultBodyLimit, Path as PathParam, Query, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -11,13 +11,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs,
+    io::copy_bidirectional,
+    net::TcpStream,
     sync::{Mutex, RwLock},
 };
 use waf_ids_core::{
@@ -36,11 +38,44 @@ pub use waf_ids_core::{
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
+const EGRESS_DNS_TTL: Duration = Duration::from_secs(30);
+const EGRESS_DNS_MAX_ENTRIES: usize = 1024;
+
+#[derive(Default)]
+struct EgressDnsCache {
+    inner: Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
+}
+
+impl EgressDnsCache {
+    async fn lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let mut cache = self.inner.lock().await;
+        let (expires, addresses) = cache.get(&host)?;
+        if *expires <= Instant::now() {
+            cache.remove(&host);
+            return None;
+        }
+        Some(addresses.clone())
+    }
+
+    async fn record(&self, host: &str, addresses: &[IpAddr]) {
+        let mut cache = self.inner.lock().await;
+        if cache.len() >= EGRESS_DNS_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            host.trim_end_matches('.').to_ascii_lowercase(),
+            (Instant::now() + EGRESS_DNS_TTL, addresses.to_vec()),
+        );
+    }
+}
+
 mod control_plane;
 mod coraza_audit;
 mod coraza_inprocess;
 mod credentials;
 mod destination;
+mod egress_dns;
 mod misp_import;
 mod opencti_import;
 mod outbox;
@@ -49,8 +84,8 @@ mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{
-    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CredentialRegistry,
-    CredentialSource,
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_EGRESS_PROXY_TOKEN,
+    CredentialRegistry, CredentialSource,
 };
 pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
@@ -65,6 +100,8 @@ pub struct AppState {
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
     admin_tokens: HashMap<String, AdminPrincipal>,
+    /// Dedicated browser-proxy password loaded from the credential registry.
+    egress_proxy_token: Option<String>,
     /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
     credentials_source: CredentialSource,
     state_path: Option<PathBuf>,
@@ -90,6 +127,7 @@ pub struct AppState {
     /// Addresses that already passed policy; the HTTP clients resolve through
     /// this pin board instead of a second OS DNS lookup.
     pins: Arc<destination::DestinationPins>,
+    egress_dns: Arc<EgressDnsCache>,
     /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
     control_plane: Option<Arc<control_plane::PostgresPlane>>,
 }
@@ -165,6 +203,7 @@ impl AppState {
             feed_http: outbound_http_client(Arc::clone(&pins)),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
+            egress_proxy_token: None,
             credentials_source: CredentialSource::None,
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
@@ -179,6 +218,7 @@ impl AppState {
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
             pins,
+            egress_dns: Arc::new(EgressDnsCache::default()),
             control_plane: None,
         }
     }
@@ -265,6 +305,11 @@ impl AppState {
     /// precedence over the single `admin_token`. Builder-style.
     pub fn with_admin_tokens(mut self, tokens: HashMap<String, AdminPrincipal>) -> Self {
         self.admin_tokens = tokens;
+        self
+    }
+
+    pub fn with_egress_proxy_token(mut self, token: Option<String>) -> Self {
+        self.egress_proxy_token = token.filter(|value| !value.is_empty());
         self
     }
 
@@ -672,8 +717,113 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
+        .fallback(connect_proxy)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+fn proxy_authenticate() -> Response {
+    let mut response = (
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        "proxy authentication required",
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::PROXY_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"wardnet\""),
+    );
+    response
+}
+
+fn proxy_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.egress_proxy_token.as_deref() else {
+        return false;
+    };
+    let Some(encoded) = headers
+        .get(header::PROXY_AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = BASE64.decode(encoded) else {
+        return false;
+    };
+    let Ok(credentials) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    let Some((username, token)) = credentials.split_once(':') else {
+        return false;
+    };
+    if username != "wardnet" || token.is_empty() {
+        return false;
+    }
+    token == expected
+}
+
+async fn connect_proxy(State(state): State<AppState>, mut request: Request) -> Response {
+    if request.method() != Method::CONNECT {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !proxy_authorized(&state, request.headers()) {
+        return proxy_authenticate();
+    }
+    let Some(authority) = request.uri().authority() else {
+        return (StatusCode::BAD_REQUEST, "CONNECT authority is required").into_response();
+    };
+    if authority.port_u16() != Some(443) {
+        return (StatusCode::FORBIDDEN, "CONNECT permits port 443 only").into_response();
+    }
+    let host = authority.host().trim_end_matches('.');
+    if host.is_empty() {
+        return (StatusCode::BAD_REQUEST, "CONNECT host is invalid").into_response();
+    }
+
+    let addresses = match state.egress_dns.lookup(host).await {
+        Some(addresses) => addresses,
+        None => {
+            let policy_url = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+                format!("https://[{host}]/")
+            } else {
+                format!("https://{host}/")
+            };
+            match state.resolve_outbound(&policy_url).await {
+                Ok(decision) => {
+                    state.egress_dns.record(host, &decision.ips).await;
+                    decision.ips
+                }
+                Err(_) => {
+                    return (StatusCode::FORBIDDEN, "destination policy denied CONNECT")
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    let mut upstream = None;
+    for address in addresses.into_iter().take(16) {
+        if let Ok(Ok(stream)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(SocketAddr::new(address, 443)),
+        )
+        .await
+        {
+            upstream = Some(stream);
+            break;
+        }
+    }
+    let Some(mut upstream) = upstream else {
+        return (StatusCode::BAD_GATEWAY, "upstream connection failed").into_response();
+    };
+
+    let upgrade = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+        if let Ok(upgraded) = upgrade.await {
+            let mut client = hyper_util::rt::TokioIo::new(upgraded);
+            let _ = copy_bidirectional(&mut client, &mut upstream).await;
+        }
+    });
+    StatusCode::OK.into_response()
 }
 
 fn outbound_fetch_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
@@ -3887,6 +4037,7 @@ pub async fn run_from_env(
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
         std::env::var("CONTROL_PLANE_DATABASE_URL").ok(),
+        std::env::var("EGRESS_PROXY_TOKEN").ok(),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -3964,17 +4115,45 @@ pub async fn run_from_env(
     let state = state
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
+        .with_egress_proxy_token(
+            credentials
+                .get_credential(CRED_EGRESS_PROXY_TOKEN)
+                .map(str::to_owned),
+        )
         .with_credentials_source(credentials.source())
         .with_proven_engine(proven_engine)
         .with_destination_policy(destination_policy)
         .with_max_body_size(max_body_bytes);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
+    let egress_dns = match std::env::var("EGRESS_DNS_BIND_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(bind) => {
+            let udp = tokio::net::UdpSocket::bind(&bind).await?;
+            let dns_addr = udp.local_addr()?;
+            let tcp = tokio::net::TcpListener::bind(dns_addr).await?;
+            Some((udp, tcp, dns_addr))
+        }
+        None => None,
+    };
     println!("waf-ids-ai-soc listening on http://{local_addr}");
+    if let Some((_, _, dns_addr)) = &egress_dns {
+        println!("wardnet egress DNS listening on udp+tcp://{dns_addr}");
+    }
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
     let stop_workers = Arc::new(tokio::sync::Notify::new());
+    if let Some((udp, tcp, _)) = egress_dns {
+        let dns_state = state.clone();
+        let stop = Arc::clone(&stop_workers);
+        tokio::spawn(async move {
+            egress_dns::serve(dns_state, udp, tcp, stop).await;
+        });
+    }
     if state.control_plane.is_some() {
         let worker_state = state.clone();
         let stop = Arc::clone(&stop_workers);
@@ -4395,6 +4574,40 @@ mod tests {
         assert_eq!(insecure.status(), StatusCode::BAD_REQUEST);
         let insecure_body: serde_json::Value = json_body(insecure).await;
         assert_eq!(insecure_body["code"], "invalid_url");
+    }
+
+    #[tokio::test]
+    async fn connect_proxy_requires_basic_auth_and_denies_private_destination() {
+        let state = AppState::seeded(None)
+            .with_egress_proxy_token(Some("secret".to_string()))
+            .with_destination_policy(DestinationPolicy::production());
+        let app = build_app(state);
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .body(Body::empty())
+            .unwrap();
+        let unauthorized = app_request(&app, request).await;
+        assert_eq!(
+            unauthorized.status(),
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED
+        );
+        assert_eq!(
+            unauthorized.headers()[header::PROXY_AUTHENTICATE],
+            "Basic realm=\"wardnet\""
+        );
+
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .header(
+                header::PROXY_AUTHORIZATION,
+                format!("Basic {}", BASE64.encode("wardnet:secret")),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let denied = app_request(&app, request).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

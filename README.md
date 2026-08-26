@@ -66,6 +66,11 @@ Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
 - `ADMIN_TOKEN`: optional write token for management writes via `X-Admin-Token`
+- `EGRESS_PROXY_TOKEN`: dedicated browser-proxy password. Secret; prefer the
+  `egress_proxy_token` key in `WAF_IDS_CREDENTIALS_PATH`.
+- `EGRESS_DNS_BIND_ADDR`: optional internal UDP+TCP DNS listener address, for
+  example `0.0.0.0:5353`. Only public A/AAAA answers are returned and cached
+  for 30 seconds.
 - `DESTINATION_ALLOWLIST` / `DESTINATION_DENYLIST`: comma-separated hosts, `*.suffix`, or CIDRs for outbound `http`/`https`. Denylist wins. CIDR matches apply per resolved address and also authorize non-default ports. Loopback/private/metadata/site-local destinations are denied unless allowlisted (loopback development still permits loopback-class destinations). After a host is allowed, outbound HTTP connects only to those evaluated addresses (original Host/SNI). `/healthz.destination_mode` reports `production` or `development`.
 - `WAF_IDS_STATE_PATH`: optional JSON state path for loopback/community. When omitted, the service runs with seeded in-memory state. Production (non-loopback) binds require `CONTROL_PLANE_DATABASE_URL` instead.
 - `CONTROL_PLANE_DATABASE_URL`: PostgreSQL URL for the production control plane (`postgres://…`). Secret; prefer `WAF_IDS_CREDENTIALS_PATH` key `control_plane_url`. `sslmode=require` / `verify-full` uses rustls with Mozilla roots (certificates always verified). `sslmode=disable` or omitted is plaintext. `allow`/`prefer` are rejected. After migrate, the session runs as `wardnet_runtime` (NOSUPERUSER, NOBYPASSRLS). `security_event` is HASH-partitioned by `tenant_id`. `/healthz.persistence` reports `postgres` when connected; `/healthz.event_partitions` reports the child count.
@@ -122,6 +127,9 @@ and caps `max_bytes` at 8 MiB. A missing, malformed, or unsupported
 `Content-Type` is rejected rather than inferred from bytes. Errors return stable
 `code` and safe `error` fields. Security research grounding is recorded in
 [`docs/research/outbound-egress-security.md`](docs/research/outbound-egress-security.md).
+
+Camoufox/Firefox network enforcement uses both the DNS listener and authenticated
+HTTP CONNECT proxy; see [`docs/camoufox-egress.md`](docs/camoufox-egress.md).
 
 Add a blocking route:
 
