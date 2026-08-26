@@ -236,6 +236,31 @@ impl AppState {
         Ok(result)
     }
 
+    async fn try_mutate_and_persist<T, E>(
+        &self,
+        mutate: impl FnOnce(&mut AppData) -> Result<T, E>,
+    ) -> Result<Result<T, E>, String> {
+        let _guard = self.persist_lock.lock().await;
+        let (result, snapshot, previous) = {
+            let mut data = self.inner.write().await;
+            let previous = data.clone();
+            let result = match mutate(&mut data) {
+                Ok(value) => value,
+                Err(error) => {
+                    *data = previous;
+                    return Ok(Err(error));
+                }
+            };
+            (result, data.clone(), previous)
+        };
+        if let Err(error) = self.persist_snapshot(&snapshot).await {
+            let mut data = self.inner.write().await;
+            *data = previous;
+            return Err(error);
+        }
+        Ok(Ok(result))
+    }
+
     async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
         let Some(path) = self.state_path.as_deref() else {
             return Ok(());
@@ -853,8 +878,8 @@ async fn create_route(
     headers: HeaderMap,
     Json(route): Json<RouteConfig>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -886,7 +911,7 @@ async fn get_route(
 }
 
 /// Replaces one route. Existing routes require the ETag returned by GET in
-/// `If-Match`; a missing route is created without a precondition.
+/// `If-Match`; a missing route is created only when no precondition is supplied.
 async fn replace_route(
     State(state): State<AppState>,
     PathParam(route_id): PathParam<String>,
@@ -908,18 +933,26 @@ async fn replace_route(
         .and_then(|value| value.to_str().ok());
     let actor = audit_actor(&state, &headers);
     match state
-        .mutate_and_persist(|data| {
+        .try_mutate_and_persist(|data| {
             let existing = data.routes.iter().find(|item| item.id == route_id);
             let existed = existing.is_some();
             match existing {
+                None if expected.is_some() => Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "If-Match requires an existing route".to_string(),
+                )),
                 Some(_) if expected.is_none() => Err((
                     StatusCode::PRECONDITION_REQUIRED,
                     "If-Match is required when replacing an existing route".to_string(),
                 )),
-                Some(current) if expected != Some(route_etag(current).as_str()) => Err((
-                    StatusCode::PRECONDITION_FAILED,
-                    "route changed; GET the latest representation and retry".to_string(),
-                )),
+                Some(current)
+                    if expected != Some("*") && expected != Some(route_etag(current).as_str()) =>
+                {
+                    Err((
+                        StatusCode::PRECONDITION_FAILED,
+                        "route changed; GET the latest representation and retry".to_string(),
+                    ))
+                }
                 _ => {
                     let status = if existed {
                         StatusCode::OK
@@ -959,9 +992,16 @@ async fn delete_route(
         .and_then(|value| value.to_str().ok());
     let actor = audit_actor(&state, &headers);
     match state
-        .mutate_and_persist(|data| {
+        .try_mutate_and_persist(|data| {
             let Some(index) = data.routes.iter().position(|route| route.id == route_id) else {
-                return Err((StatusCode::NOT_FOUND, "route not found".to_string()));
+                return Err(if expected.is_some() {
+                    (
+                        StatusCode::PRECONDITION_FAILED,
+                        "If-Match requires an existing route".to_string(),
+                    )
+                } else {
+                    (StatusCode::NOT_FOUND, "route not found".to_string())
+                });
             };
             if expected.is_none() {
                 return Err((
@@ -969,7 +1009,7 @@ async fn delete_route(
                     "If-Match is required when deleting a route".to_string(),
                 ));
             }
-            if expected != Some(route_etag(&data.routes[index]).as_str()) {
+            if expected != Some("*") && expected != Some(route_etag(&data.routes[index]).as_str()) {
                 return Err((
                     StatusCode::PRECONDITION_FAILED,
                     "route changed; GET the latest representation and retry".to_string(),
@@ -3665,6 +3705,32 @@ mod tests {
         .await;
         assert_eq!(no_precondition.status(), StatusCode::PRECONDITION_REQUIRED);
 
+        let missing_with_precondition = app_request(
+            &app,
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/routes/new")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "writer")
+                .header(header::IF_MATCH, "*")
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "new",
+                        "path_prefix": "/new",
+                        "upstream": "mock://new",
+                        "mode": "monitor",
+                        "enabled": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            missing_with_precondition.status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+
         let replaced = app_request(
             &app,
             Request::builder()
@@ -3678,8 +3744,6 @@ mod tests {
         )
         .await;
         assert_eq!(replaced.status(), StatusCode::OK);
-        let replacement_etag = replaced.headers().get(header::ETAG).unwrap().clone();
-
         let stale_delete = app_request(
             &app,
             Request::builder()
@@ -3699,12 +3763,27 @@ mod tests {
                 .method(Method::DELETE)
                 .uri("/api/routes/demo")
                 .header("x-admin-token", "writer")
-                .header(header::IF_MATCH, replacement_etag)
+                .header(header::IF_MATCH, "*")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let missing_delete_with_precondition = app_request(
+            &app,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/routes/demo")
+                .header("x-admin-token", "writer")
+                .header(header::IF_MATCH, "*")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            missing_delete_with_precondition.status(),
+            StatusCode::PRECONDITION_FAILED
+        );
         assert_eq!(
             app_request(&app, empty_request(Method::GET, "/api/routes/demo"))
                 .await
@@ -3746,7 +3825,7 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
         let created = app_request(
             &app,
@@ -6688,6 +6767,25 @@ mod tests {
             },
         );
         let app = build_app(state);
+
+        let rejected = app_request(
+            &app,
+            json_request(
+                Method::PUT,
+                "/api/routes/mock",
+                None,
+                &RouteConfig {
+                    id: "mock".to_string(),
+                    path_prefix: "/unchanged".to_string(),
+                    upstream: "mock://mock".to_string(),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                    block_threshold: None,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::PRECONDITION_REQUIRED);
 
         let route_response = app_request(
             &app,

@@ -72,7 +72,8 @@ paths:
       parameters:
         - name: If-Match
           in: header
-          required: true
+          required: false
+          description: Required for every delete; a missing value returns 428.
           schema: { type: string }
       responses:
         '204': { description: Route deleted }
@@ -98,7 +99,7 @@ components:
         upstream: { type: string }
         mode: { type: string, enum: [monitor, block] }
         enabled: { type: boolean }
-        block_threshold: { type: [integer, 'null'], minimum: 1, maximum: 100 }
+        block_threshold: { type: [integer, 'null'], minimum: 1 }
     Error:
       type: object
       required: [error]
