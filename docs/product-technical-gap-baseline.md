@@ -3,7 +3,7 @@
 Snapshot date: 2026-08-23T20:06Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
-## Current delivery evidence — 2026-08-27T03:11+09:00
+## Current delivery evidence — 2026-08-27T03:42+09:00
 
 Protected `main` is `107117634764c901dff540044585d64088fafedb`. The active
 organization ruleset `18156473` requires one independent approval, resolved
@@ -18,19 +18,19 @@ delivery evidence.
 | #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
 | #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
 | #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
-| #105 optimistic concurrency | `f92f3aa0ed209e9818c29205fd12c6f2fad60e4a` | `#95` | stacked only; three unresolved threads |
-| #95 in-path Coraza and accumulated production stack | `723aed03b8f06d30df1fc56991d1148be18fb760` | `main` | MCP #117 merged; release write permissions narrowed to the publishing job after Scorecard findings; exact-head checks and independent approval required |
+| #95 in-path Coraza and accumulated production stack | `9cdd2d70efb00fda5814405594193650b28c3dd7` | `main` | #105, MCP #117, and DNSBL #118 merged; explicit interruptions now win over advisory severity hits; all review threads resolved; exact-head checks and independent approval required |
 | #94 fail-closed public admin auth | `094f653a0545436384762adf585e912373425de7` | `main` | blocked; exact-head review/check evidence required |
 | #93 deterministic persistence fault seam | `3663c57373df4f3edcd0c1cfdf1deb18f461b91c` | `main` | stale change request and exact-head checks required |
-| #90 SIEM/OpenTelemetry export | `8e4484d13499d99c9ae31e1a3b6ccd419d6ed934` | `main` | two unresolved threads; Strix failure |
-| #88 LiteLLM virtual-key ingress guard | `608d51f1d4f7422aa2e036030f3586ee6e066530` | `main` | three unresolved threads; Strix failure |
+| #90 SIEM/OpenTelemetry export | `d451eb408d4c5e833ad0156334eb87b44476f625` | `main` | exact-head review/check evidence required |
+| #88 LiteLLM virtual-key ingress guard | `cbe21a11ab4e16cb932544f229aa698c9c54b773` | `main` | exact-head review/check evidence required |
 | #77 Rust toolchain refresh | `b87e3ec4bd96731f0d0c55232dd702c12a1442c8` | `main` | stale change request; Strix failure |
 | #72 external admin secret | `892f9277ba86831a449fa6808a63b44eacab793f` | `main` | stale change request; Strix failure |
 
-The shared GPT-5.4 function-tools/reasoning-effort Strix defect was fixed on
-`ContextualWisdomLab/.github` protected `main` at `f655a901`; exact-head reruns
-were dispatched for #95 and #114. A passing rerun, not that central merge alone,
-is the acceptance evidence.
+The central Strix live-model repair remains unmerged: prerequisite
+`ContextualWisdomLab/.github#1356` updates the protected smoke contract, then
+`#1297` resolves current NVIDIA catalog models with direct-OpenAI fallback.
+Only passing exact-head reruns after those protected merges are acceptance
+evidence.
 
 ### Surface completion matrix
 
@@ -41,7 +41,7 @@ is the acceptance evidence.
 | DNSBL publishing | HTTP zone export only | `/dnsbl/zone`; this branch adds authoritative IPv4 A/TXT and NXDOMAIN over the existing UDP/TCP listener | protected merge, deployed port-53 evidence, and IPv6 nibble-reversed support |
 | DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
 | Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
-| Ingress reverse proxy | partial | `/gateway/{*path}` decision loop | headers, streaming/upgrades, trusted client attribution, TLS and k6 evidence |
+| Ingress reverse proxy | partial | `/gateway/{*path}` decision loop; stacked k6 harness proves zero-failure monitored decisions at 32/64 concurrent local users and removes no-op in-memory state clones | headers, streaming/upgrades, trusted client attribution, TLS, durable/deployed k6 evidence |
 | Wardnet naming | incomplete | #114 exact-head rename | protected merge and image/deployment/runtime smoke evidence |
 
 There is no verified Wardnet hourly maintenance scheduler execution. Nightly
@@ -230,10 +230,15 @@ future encryption-at-rest.
 
 ### Coverage / docstring bar
 
-Org 100% line/branch/docstring applies to **changed** surfaces this loop
-(HASH convert SQL, restorable schema window, `/healthz.event_partitions`,
-admin KPI tile, probe upgrade preserving unmasked IPs/paths). Remaining
-holes on untouched handlers stay listed for later loops.
+The 100% line/branch/docstring requirement is **not achieved**. An exact local
+`cargo llvm-cov --locked --workspace --all-features --summary-only
+--fail-under-lines 100` run on 2026-08-27 measured 76.30% lines and 71.18%
+functions; LLVM emitted no branch metric. The largest measured gap is
+`src/control_plane.rs` at 15.91% lines. Current hosted `coverage-source-tree`
+and `coverage-evidence` successes therefore do not prove source coverage.
+Acceptance requires a real CI `cargo llvm-cov` gate, measured branch coverage,
+and a separate public-item documentation coverage audit; adding a failing 100%
+gate before closing the existing gaps would only make every PR permanently red.
 
 ### Ecosystem connectors (leverage order)
 
