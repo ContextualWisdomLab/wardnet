@@ -57,7 +57,6 @@ async fn answer(state: &AppState, packet: &[u8]) -> Option<Vec<u8>> {
                 response.metadata.response_code = ResponseCode::Refused;
                 return encode(response);
             };
-            state.egress_dns.record(&host, &decision.ips).await;
             decision.ips
         }
     };
