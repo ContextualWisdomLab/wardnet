@@ -6467,10 +6467,10 @@ mod tests {
         let error = result
             .err()
             .expect("injected write fault must fail loading");
+        let temp_prefix = state_dir.join(format!(".state.json.tmp-{}-", std::process::id()));
         let prefix = format!(
-            "failed to write temporary state file {}/.state.json.tmp-{}-",
-            state_dir.display(),
-            std::process::id()
+            "failed to write temporary state file {}",
+            temp_prefix.display()
         );
         let unique = error
             .strip_prefix(&prefix)
