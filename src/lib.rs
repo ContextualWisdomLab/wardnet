@@ -289,11 +289,19 @@ impl AppState {
 
 fn backfill_official_threat_feeds(data: &mut AppData) {
     for feed in waf_ids_core::official_threat_feed_registry() {
-        if !data
+        if let Some(existing) = data
             .official_threat_feeds
-            .iter()
-            .any(|existing| existing.source_id == feed.source_id)
+            .iter_mut()
+            .find(|existing| existing.source_id == feed.source_id)
         {
+            existing.official_url = feed.official_url;
+            existing.parser = feed.parser;
+            existing.indicator_types = feed.indicator_types;
+            existing.attribution = feed.attribution;
+            existing.license_url = feed.license_url;
+            existing.refresh_interval_seconds = feed.refresh_interval_seconds;
+            existing.ttl_seconds = feed.ttl_seconds;
+        } else {
             data.official_threat_feeds.push(feed);
         }
     }
@@ -412,7 +420,7 @@ pub struct HealthStatus {
     pub persistence: String,
     pub dnsbl_origin: String,
     pub event_limit: usize,
-    /// Bootstrap origin for admin secrets: `file`, `env`, or `none` (never secret values).
+    /// Bootstrap origin for admin secrets: `file`, `env`, `mixed`, or `none` (never secret values).
     pub credentials_source: String,
     /// True when at least one admin write token is configured.
     pub admin_auth_configured: bool,
@@ -4457,6 +4465,31 @@ mod tests {
                 .iter()
                 .any(|feed| feed.source_id == missing.source_id)
         );
+    }
+
+    #[test]
+    fn backfill_reconciles_registry_metadata_but_preserves_refresh_state() {
+        let mut data = AppData::seeded();
+        let feed = &mut data.official_threat_feeds[0];
+        feed.official_url = "https://stale.invalid/feed".to_string();
+        feed.parser = "stale".to_string();
+        feed.etag = Some("preserved".to_string());
+        let source_id = feed.source_id.clone();
+
+        backfill_official_threat_feeds(&mut data);
+
+        let canonical = waf_ids_core::official_threat_feed_registry()
+            .into_iter()
+            .find(|feed| feed.source_id == source_id)
+            .unwrap();
+        let feed = data
+            .official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == source_id)
+            .unwrap();
+        assert_eq!(feed.official_url, canonical.official_url);
+        assert_eq!(feed.parser, canonical.parser);
+        assert_eq!(feed.etag.as_deref(), Some("preserved"));
     }
 
     #[test]
