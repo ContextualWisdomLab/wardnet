@@ -120,7 +120,7 @@ Management writes are upserts:
 
 - routes are keyed by `id`
 - threat indicators are keyed by `indicator_type`, `value`, and `source`
-- DNSBL entries are keyed by `address`
+- DNSBL entries are keyed by `address`, `prefix_len`, and `source` so independent evidence is retained
 
 DNSBL response codes must be IPv4 loopback-style values in `127.0.0.0/8`.
 

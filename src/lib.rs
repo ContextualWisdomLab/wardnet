@@ -308,18 +308,6 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
     }
 }
 
-fn upsert_official_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) {
-    if let Some(existing) = entries.iter_mut().find(|item| {
-        item.address == entry.address
-            && item.prefix_len == entry.prefix_len
-            && item.source == entry.source
-    }) {
-        *existing = entry;
-    } else {
-        entries.push(entry);
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub admin_token: Option<String>,
@@ -1335,7 +1323,7 @@ async fn refresh_official_threat_feed(
             return official_feed_failure(
                 &state,
                 &source_id,
-                now,
+                now_unix(),
                 "official feed request failed",
                 true,
             )
@@ -1356,7 +1344,7 @@ async fn refresh_official_threat_feed(
         return finish_official_feed_not_modified(
             &state,
             &source_id,
-            now,
+            now_unix(),
             etag,
             last_modified,
             audit_actor(&state, &headers),
@@ -1365,18 +1353,18 @@ async fn refresh_official_threat_feed(
     }
     if !response.status().is_success() {
         let message = format!("official feed returned HTTP {}", response.status().as_u16());
-        return official_feed_failure(&state, &source_id, now, &message, true).await;
+        return official_feed_failure(&state, &source_id, now_unix(), &message, true).await;
     }
     let body = match read_official_feed_body(response).await {
         Ok(body) => body,
         Err(message) => {
-            return official_feed_failure(&state, &source_id, now, &message, true).await;
+            return official_feed_failure(&state, &source_id, now_unix(), &message, true).await;
         }
     };
     let parsed = match official_feeds::parse(&feed.parser, &source_id, feed.ttl_seconds, &body) {
         Ok(parsed) => parsed,
         Err(message) => {
-            return official_feed_failure(&state, &source_id, now, &message, true).await;
+            return official_feed_failure(&state, &source_id, now_unix(), &message, true).await;
         }
     };
     let content_sha256 = format!("{:x}", Sha256::digest(body.as_bytes()));
@@ -1388,8 +1376,9 @@ async fn refresh_official_threat_feed(
         dnsbl: parsed.dnsbl,
     };
     if let Err(message) = validate_threat_feed_import(&import) {
-        return official_feed_failure(&state, &source_id, now, message, true).await;
+        return official_feed_failure(&state, &source_id, now_unix(), message, true).await;
     }
+    let completed_at = now_unix();
     let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
@@ -1399,7 +1388,7 @@ async fn refresh_official_threat_feed(
                 upsert_threat(&mut data.threats, threat);
             }
             for entry in import.dnsbl {
-                upsert_official_dnsbl(&mut data.dnsbl, entry);
+                upsert_dnsbl(&mut data.dnsbl, entry);
             }
             let threat_count = data
                 .threats
@@ -1416,7 +1405,7 @@ async fn refresh_official_threat_feed(
                 ThreatFeedStatus {
                     feed_id: source_id.clone(),
                     source: feed.attribution.clone(),
-                    last_updated_unix: now,
+                    last_updated_unix: completed_at,
                     threat_count,
                     dnsbl_count,
                     ttl_seconds: feed.ttl_seconds,
@@ -1429,8 +1418,8 @@ async fn refresh_official_threat_feed(
             {
                 status.etag = etag.or_else(|| status.etag.clone());
                 status.last_modified = last_modified.or_else(|| status.last_modified.clone());
-                status.last_attempt_unix = Some(now);
-                status.last_success_unix = Some(now);
+                status.last_attempt_unix = Some(completed_at);
+                status.last_success_unix = Some(completed_at);
                 status.last_error = None;
                 status.source_notice = parsed
                     .source_notice
@@ -1449,7 +1438,7 @@ async fn refresh_official_threat_feed(
                 not_modified: false,
                 threat_count,
                 dnsbl_count,
-                refreshed_at_unix: now,
+                refreshed_at_unix: completed_at,
             }
         })
         .await
@@ -4512,7 +4501,7 @@ mod tests {
     fn official_dnsbl_upsert_preserves_overlapping_source_provenance() {
         let mut entries = Vec::new();
         for source in ["spamhaus-drop-v4", "threatfox-recent"] {
-            upsert_official_dnsbl(
+            upsert_dnsbl(
                 &mut entries,
                 DnsblEntry {
                     address: "198.51.100.7".parse().unwrap(),
@@ -6494,8 +6483,9 @@ mod tests {
         let mut second_source = dnsbl[0].clone();
         second_source.source = "second-feed".to_string();
         upsert_dnsbl(&mut dnsbl, second_source);
-        assert_eq!(dnsbl.len(), 1);
-        assert_eq!(dnsbl[0].source, "second-feed");
+        assert_eq!(dnsbl.len(), 2);
+        assert_eq!(dnsbl[0].source, "unit");
+        assert_eq!(dnsbl[1].source, "second-feed");
 
         let mut feeds = vec![ThreatFeedStatus {
             feed_id: "feed-a".to_string(),
