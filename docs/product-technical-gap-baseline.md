@@ -3,7 +3,7 @@
 Snapshot date: 2026-08-23T20:06Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
-## Current delivery evidence — 2026-08-27T01:13+09:00
+## Current delivery evidence — 2026-08-27T03:11+09:00
 
 Protected `main` is `107117634764c901dff540044585d64088fafedb`. The active
 organization ruleset `18156473` requires one independent approval, resolved
@@ -14,15 +14,14 @@ delivery evidence.
 
 | PR | Exact head | Base | Current evidence / blocker |
 | --- | --- | --- | --- |
-| #117 stateless MCP status tool | pre-evidence `ca7367e992d8e31b44e34a7b7798ab94153e89c0` | `#95` | this documentation commit necessarily advances the live head; PR API is authoritative; local fmt/clippy/full tests and focused k6 passed; hosted checks, review, and base integration required |
-| #115 official threat feeds | `2c3f06f49e699430abd4c493ea363f69aad4fdd6` | `main` | blocked; three unresolved threads and Strix failure |
+| #115 official threat feeds | `3625e07d1f21c30026d9c1086935186e55f654fa` | `main` | blocked; review required and exact-head checks required |
 | #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
 | #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
 | #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
 | #105 optimistic concurrency | `f92f3aa0ed209e9818c29205fd12c6f2fad60e4a` | `#95` | stacked only; three unresolved threads |
-| #95 in-path Coraza and accumulated production stack | `f6eabf3523d25198e7fc3ff450d53e90f325dccf` | `main` | optimistic concurrency/release evidence and prior DNS/engine repairs accumulated; refreshed exact-head checks and independent approval required |
-| #94 fail-closed public admin auth | `7c6dc3d091915d19ce1d67a81cf6a9759a101cd4` | `main` | five unresolved threads; Strix failure |
-| #93 deterministic persistence fault seam | `1d3c13cab6dcd474ccc6d497f8d9f1c1efa848e4` | `main` | one unresolved thread, stale change request, Strix failure |
+| #95 in-path Coraza and accumulated production stack | `723aed03b8f06d30df1fc56991d1148be18fb760` | `main` | MCP #117 merged; release write permissions narrowed to the publishing job after Scorecard findings; exact-head checks and independent approval required |
+| #94 fail-closed public admin auth | `094f653a0545436384762adf585e912373425de7` | `main` | blocked; exact-head review/check evidence required |
+| #93 deterministic persistence fault seam | `3663c57373df4f3edcd0c1cfdf1deb18f461b91c` | `main` | stale change request and exact-head checks required |
 | #90 SIEM/OpenTelemetry export | `8e4484d13499d99c9ae31e1a3b6ccd419d6ed934` | `main` | two unresolved threads; Strix failure |
 | #88 LiteLLM virtual-key ingress guard | `608d51f1d4f7422aa2e036030f3586ee6e066530` | `main` | three unresolved threads; Strix failure |
 | #77 Rust toolchain refresh | `b87e3ec4bd96731f0d0c55232dd702c12a1442c8` | `main` | stale change request; Strix failure |
@@ -38,8 +37,8 @@ is the acceptance evidence.
 | Requested surface | Protected `main` | Active evidence | Acceptance gap |
 | --- | --- | --- | --- |
 | Web API | implemented | Axum management/SOC APIs and live binary tests | route lifecycle completion remains #112 |
-| MCP | absent | stacked #117: authenticated stateless `2026-07-28` Streamable HTTP discovery plus read-only `wardnet_status` tool and protocol/security tests | protected merge plus authenticated deployed-client evidence |
-| DNSBL publishing | HTTP zone export only | `/dnsbl/zone` plus fuzzed escaping | live DNS serving exists only in unmerged #95 stack |
+| MCP | absent | #117 merged into #95: authenticated stateless `2026-07-28` Streamable HTTP discovery plus read-only `wardnet_status` tool and protocol/security tests | protected merge plus authenticated deployed-client evidence |
+| DNSBL publishing | HTTP zone export only | `/dnsbl/zone`; this branch adds authoritative IPv4 A/TXT and NXDOMAIN over the existing UDP/TCP listener | protected merge, deployed port-53 evidence, and IPv6 nibble-reversed support |
 | DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
 | Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
 | Ingress reverse proxy | partial | `/gateway/{*path}` decision loop | headers, streaming/upgrades, trusted client attribution, TLS and k6 evidence |
@@ -248,7 +247,17 @@ holes on untouched handlers stay listed for later loops.
 
 ## This loop’s shipped gap
 
-MCP surface ([#117](https://github.com/ContextualWisdomLab/wardnet/pull/117), stacked on PR #95): `POST /mcp` implements the stable stateless
+Authoritative DNSBL serving (stacked on PR #95): the existing bounded UDP/TCP
+listener now intercepts names under `DNSBL_ORIGIN`, decodes RFC 5782 reversed
+IPv4 octets, validates persisted entries, applies exact/CIDR matching, and
+returns authoritative A/TXT records with per-entry TTLs. Unlisted, malformed,
+and apex names return authoritative `NXDOMAIN` without recursive leakage;
+NXDOMAIN and NODATA carry an RFC 2308 SOA for negative caching.
+Focused tests exercise content, range membership, malformed inputs, and real
+UDP/TCP server exchanges. IPv6 DNSBL publication and deployed port-53 evidence
+remain open.
+
+MCP surface ([#117](https://github.com/ContextualWisdomLab/wardnet/pull/117), merged into PR #95): `POST /mcp` implements the stable stateless
 MCP `2026-07-28` contract with `server/discover`, deterministic cacheable
 `tools/list`, `tools/call`, and `ping`. The read-only `wardnet_status` tool
 reuses the support-bundle read model rather than duplicating control-plane
