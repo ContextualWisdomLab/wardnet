@@ -93,7 +93,8 @@ mod suricata_eve;
 mod taxii;
 pub use credentials::{
     CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_DESTINATION_ALLOWLIST,
-    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CredentialRegistry, CredentialSource,
+    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CRED_SOC_LLM_TOKEN, CRED_TAXII_BEARER,
+    CredentialRegistry, CredentialSource,
 };
 pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
@@ -125,6 +126,10 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
+    /// Optional TAXII Bearer for durable polls. Never logged or written to outbox.
+    taxii_bearer: Option<String>,
+    /// Exact URL origin authorized to receive the registry TAXII bearer.
+    taxii_bearer_origin: Option<String>,
     /// In-path Coraza consult (in-process libcoraza and/or sidecar).
     proven_engine: ProvenEngineConfig,
     /// Fail-closed destination policy for every outbound http/https call.
@@ -180,16 +185,41 @@ impl AppState {
 
     /// Load from PostgreSQL, seeding the tenant snapshot when empty.
     pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
-        let plane = control_plane::PostgresPlane::connect(database_url)
-            .await?
-            .with_event_limit(config.event_limit);
-        let mut data = match plane.load().await? {
-            Some(loaded) => loaded,
-            None => AppData::seeded(),
-        };
+        Self::load_postgres_from_plane(
+            config,
+            control_plane::PostgresPlane::connect(database_url).await?,
+        )
+        .await
+    }
+
+    /// Load a specific tenant snapshot. `save` bumps `snapshot_version`; the
+    /// in-memory token must match that next value or the first management write
+    /// false-conflicts (HTTP 409) forever.
+    pub async fn load_postgres_for_tenant(
+        config: AppConfig,
+        database_url: &str,
+        tenant_id: &str,
+    ) -> Result<Self, String> {
+        Self::load_postgres_from_plane(
+            config,
+            control_plane::PostgresPlane::connect_tenant(database_url, tenant_id).await?,
+        )
+        .await
+    }
+
+    async fn load_postgres_from_plane(
+        config: AppConfig,
+        plane: control_plane::PostgresPlane,
+    ) -> Result<Self, String> {
+        let plane = plane.with_event_limit(config.event_limit);
+        let loaded = plane.load().await?;
+        let mut data = loaded.clone().unwrap_or_else(AppData::seeded);
         let event_limit = config.event_limit.max(1);
         enforce_event_limit(&mut data, event_limit);
-        plane.save(&data).await?;
+        if loaded.is_none() {
+            plane.save(&data).await?;
+            data.snapshot_version = data.snapshot_version.saturating_add(1);
+        }
         Ok(Self::new(data, config).with_control_plane(Arc::new(plane)))
     }
 
@@ -215,6 +245,8 @@ impl AppState {
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
+            taxii_bearer: None,
+            taxii_bearer_origin: None,
             proven_engine: ProvenEngineConfig::disabled(),
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
@@ -242,6 +274,13 @@ impl AppState {
     /// disables it (the default), hiding the analysis surface in the console.
     pub fn with_soc_llm(mut self, config: Option<SocLlmConfig>) -> Self {
         self.soc_llm = config;
+        self
+    }
+
+    /// Optional TAXII Bearer from the credential registry. Never written to outbox payloads.
+    pub fn with_taxii_bearer(mut self, token: Option<String>, origin: Option<String>) -> Self {
+        self.taxii_bearer = token.filter(|value| !value.is_empty());
+        self.taxii_bearer_origin = origin;
         self
     }
 
@@ -389,8 +428,20 @@ impl AppState {
             (result, data.clone(), previous)
         };
         if let Err(error) = self.persist_snapshot(&snapshot).await {
+            let latest = if error.contains("snapshot conflict") {
+                match &self.control_plane {
+                    Some(plane) => plane.load().await.ok().flatten(),
+                    None => None,
+                }
+            } else {
+                None
+            };
             let mut data = self.inner.write().await;
-            *data = previous;
+            if let Some(latest) = latest {
+                *data = latest;
+            } else {
+                *data = previous;
+            }
             return Err(error);
         }
         Ok(result)
@@ -398,7 +449,10 @@ impl AppState {
 
     async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
         if let Some(plane) = &self.control_plane {
-            return plane.save(data).await;
+            plane.save(data).await?;
+            let mut inner = self.inner.write().await;
+            inner.snapshot_version = data.snapshot_version.saturating_add(1);
+            return Ok(());
         }
         let Some(path) = self.state_path.as_deref() else {
             return Ok(());
@@ -699,6 +753,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/events", get(list_events))
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/outbox", get(list_outbox))
+        .route("/api/outbox/{message_id}", get(get_outbox_item))
         .route("/api/outbox/{message_id}/replay", post(replay_outbox))
         .route("/api/backup", get(get_backup).post(restore_backup))
         .route("/api/backup/drill", post(backup_drill))
@@ -1149,27 +1204,84 @@ async fn clearfolio_submit(
             format!("unknown document kind: {kind}"),
         );
     };
+    if state.control_plane.is_some() {
+        let body_text = String::from_utf8_lossy(&bytes).into_owned();
+        let actor = audit_actor(&state, &headers);
+        let intent = ClearfolioSubmitIntent {
+            kind: kind.clone(),
+            filename,
+            body_text,
+            actor: actor.clone(),
+        };
+        return enqueue_external_effect(
+            &state,
+            actor,
+            outbox::EVENT_CLEARFOLIO_SUBMITTED,
+            &kind,
+            &intent,
+        )
+        .await;
+    }
+    match execute_clearfolio_submit(&state, &config, filename, bytes).await {
+        Ok((status, body)) => clearfolio_bytes_response(status, body),
+        Err(error) => dispatch_http_error(error),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClearfolioSubmitIntent {
+    kind: String,
+    filename: String,
+    body_text: String,
+    actor: String,
+}
+
+fn clearfolio_bytes_response(status: u16, body: Vec<u8>) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, [("content-type", "application/json")], body).into_response()
+}
+
+fn dispatch_http_error(failure: outbox::DispatchError) -> Response {
+    let message = failure.as_str();
+    let status = match &failure {
+        outbox::DispatchError::Permanent(text)
+            if text.contains("destination") || text.starts_with("HTTP 4") =>
+        {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    error(status, message.to_string())
+}
+
+async fn execute_clearfolio_submit(
+    state: &AppState,
+    config: &ClearfolioConfig,
+    filename: String,
+    bytes: Vec<u8>,
+) -> Result<(u16, Vec<u8>), outbox::DispatchError> {
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(filename)
         .mime_str("text/plain")
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
     let submit_url = clearfolio_submit_url(&config.base_url);
-    let http = match state.outbound_client(&submit_url).await {
-        Ok(http) => http,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
-    };
+    let http = state
+        .outbound_client(&submit_url)
+        .await
+        .map_err(outbox::DispatchError::Permanent)?;
     let mut request = http.post(submit_url).multipart(form);
-    for (name, value) in clearfolio_tenant_headers(&config) {
+    for (name, value) in clearfolio_tenant_headers(config) {
         request = request.header(name, value);
     }
-    match request.send().await {
-        Ok(response) => clearfolio_relay_json(response).await,
-        Err(err) => error(
-            StatusCode::BAD_GATEWAY,
-            format!("clearfolio request failed: {err}"),
-        ),
-    }
+    let response = request.send().await.map_err(|err| {
+        outbox::DispatchError::Transient(format!("clearfolio request failed: {err}"))
+    })?;
+    let status = response.status().as_u16();
+    let body = response.bytes().await.unwrap_or_default().to_vec();
+    let preview = String::from_utf8_lossy(&body);
+    outbox::classify_http_status(status, &preview)?;
+    Ok((status, body))
 }
 
 /// Proxies one Clearfolio job-status read (tenant headers applied server-side),
@@ -1328,45 +1440,70 @@ async fn soc_analyze(
             format!("unknown event id: {}", request.event_id),
         );
     };
-    let body = soc_llm_chat_body(&config.model, &event);
+    if state.control_plane.is_some() {
+        let actor = audit_actor(&state, &headers);
+        let intent = SocAnalyzeIntent {
+            event: event.clone(),
+            actor: actor.clone(),
+        };
+        return enqueue_external_effect(
+            &state,
+            actor,
+            outbox::EVENT_SOC_ANALYSIS_REQUESTED,
+            &event.id.to_string(),
+            &intent,
+        )
+        .await;
+    }
+    match execute_soc_analyze(&state, &config, &event).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => dispatch_http_error(error),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SocAnalyzeIntent {
+    event: SecurityEvent,
+    actor: String,
+}
+
+async fn execute_soc_analyze(
+    state: &AppState,
+    config: &SocLlmConfig,
+    event: &SecurityEvent,
+) -> Result<SocAnalyzeResponse, outbox::DispatchError> {
+    let body = soc_llm_chat_body(&config.model, event);
     let endpoint = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
-    let http = match state.outbound_client(&endpoint).await {
-        Ok(http) => http,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
-    };
+    let http = state
+        .outbound_client(&endpoint)
+        .await
+        .map_err(outbox::DispatchError::Permanent)?;
     let response = http
         .post(endpoint)
         .bearer_auth(&config.token)
         .json(&body)
         .send()
-        .await;
-    match response {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(json) => match soc_llm_extract_content(&json) {
-                Some(analysis) => Json(SocAnalyzeResponse {
-                    event_id: event.id,
-                    model: config.model,
-                    analysis,
-                })
-                .into_response(),
-                None => error(
-                    StatusCode::BAD_GATEWAY,
-                    "llm response missing choices[0].message.content",
-                ),
-            },
-            Err(err) => error(
-                StatusCode::BAD_GATEWAY,
-                format!("llm response read failed: {err}"),
-            ),
-        },
-        Err(err) => error(
-            StatusCode::BAD_GATEWAY,
-            format!("llm request failed: {err}"),
-        ),
-    }
+        .await
+        .map_err(|err| outbox::DispatchError::Transient(format!("llm request failed: {err}")))?;
+    let status = response.status().as_u16();
+    let json = response.json::<serde_json::Value>().await.map_err(|err| {
+        outbox::DispatchError::Transient(format!("llm response read failed: {err}"))
+    })?;
+    let preview = json.to_string();
+    outbox::classify_http_status(status, &preview)?;
+    let analysis = soc_llm_extract_content(&json).ok_or_else(|| {
+        outbox::DispatchError::Permanent(
+            "llm response missing choices[0].message.content".to_string(),
+        )
+    })?;
+    Ok(SocAnalyzeResponse {
+        event_id: event.id,
+        model: config.model.clone(),
+        analysis,
+    })
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
@@ -1433,7 +1570,7 @@ async fn create_route(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1469,7 +1606,7 @@ async fn create_threat(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1505,7 +1642,7 @@ async fn create_dnsbl(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1556,6 +1693,20 @@ struct OutboxListView {
     messages: Vec<outbox::OutboxMessage>,
 }
 
+#[derive(Serialize)]
+struct OutboxItemView {
+    status: String,
+    message: outbox::OutboxMessage,
+    receipt_evidence: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OutboxAcceptedView {
+    status: String,
+    message_id: String,
+    event_type: String,
+}
+
 async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admin_authenticated(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
@@ -1576,7 +1727,84 @@ async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Respo
             messages,
         })
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
+    }
+}
+
+async fn get_outbox_item(
+    State(state): State<AppState>,
+    PathParam(message_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox item reads require the PostgreSQL control plane",
+        );
+    };
+    match plane.get_outbox_item(&message_id).await {
+        Ok(Some((message, receipt_evidence))) => Json(OutboxItemView {
+            status: "ready".to_string(),
+            message,
+            receipt_evidence,
+        })
+        .into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            format!("unknown outbox message {message_id}"),
+        ),
+        Err(message) => persist_error(message),
+    }
+}
+
+async fn enqueue_external_effect(
+    state: &AppState,
+    actor: String,
+    event_type: &'static str,
+    aggregate_id: &str,
+    payload: &impl Serialize,
+) -> Response {
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox enqueue requires the PostgreSQL control plane",
+        );
+    };
+    let payload_json =
+        serde_json::to_string(payload).expect("outbox effect payload is JSON-serializable");
+    match plane
+        .enqueue_effect(event_type, aggregate_id, payload_json)
+        .await
+    {
+        Ok(message_id) => {
+            if let Err(error) = state
+                .mutate_and_persist(|data| {
+                    record_successful_audit_log(
+                        data,
+                        actor,
+                        event_type,
+                        "outbox_message",
+                        message_id.clone(),
+                    );
+                })
+                .await
+            {
+                eprintln!("failed to audit outbox enqueue {message_id}: {error}");
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(OutboxAcceptedView {
+                    status: "accepted".to_string(),
+                    message_id,
+                    event_type: event_type.to_string(),
+                }),
+            )
+                .into_response()
+        }
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1618,7 +1846,7 @@ async fn replay_outbox(
             "message_id": message_id
         }))
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1651,7 +1879,7 @@ async fn get_backup(State(state): State<AppState>, headers: HeaderMap) -> Respon
             artifact: Some(artifact),
         })
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1706,7 +1934,7 @@ async fn restore_backup(
             "payload_hash": backup.payload_hash,
         }))
         .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1846,7 +2074,7 @@ async fn update_commercial_license(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1889,7 +2117,7 @@ async fn import_threat_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1980,7 +2208,7 @@ async fn import_stix_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2071,7 +2299,7 @@ async fn import_misp_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2167,7 +2395,7 @@ async fn import_opencti_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2218,6 +2446,16 @@ struct TaxiiPollResult {
     last_updated_unix: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaxiiPollIntent {
+    objects_url: String,
+    feed_id: String,
+    source: String,
+    ttl_seconds: u64,
+    added_after: Option<String>,
+    actor: String,
+}
+
 /// Poll a TAXII 2.1 collection objects endpoint and import STIX indicators.
 /// Secrets in the request body are never written to audit logs.
 async fn poll_taxii_collection(
@@ -2255,6 +2493,47 @@ async fn poll_taxii_collection(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
+
+    if state.control_plane.is_some() {
+        let has_inline_secret = request
+            .bearer_token
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || request
+                .username
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            || request
+                .password
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+        if has_inline_secret {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "durable TAXII poll cannot store credentials in the outbox; configure taxii_bearer in the credential registry",
+            );
+        }
+        let actor = audit_actor(&state, &headers);
+        let intent = TaxiiPollIntent {
+            objects_url,
+            feed_id: request.feed_id.trim().to_string(),
+            source: request.source.trim().to_string(),
+            ttl_seconds: request.ttl_seconds,
+            added_after: request.added_after.clone(),
+            actor: actor.clone(),
+        };
+        return enqueue_external_effect(
+            &state,
+            actor,
+            outbox::EVENT_TAXII_POLLED,
+            &intent.feed_id,
+            &intent,
+        )
+        .await;
+    }
 
     let body_text = match fetch_taxii_objects(
         &state,
@@ -2307,7 +2586,7 @@ async fn poll_taxii_collection(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2347,6 +2626,18 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let inline_bearer = bearer_token.map(str::trim).filter(|s| !s.is_empty());
+    let bearer = if inline_bearer.is_some() {
+        inline_bearer
+    } else if let Some(token) = state.taxii_bearer.as_deref() {
+        let request_origin = url_origin(url)?;
+        if state.taxii_bearer_origin.as_deref() != Some(request_origin.as_str()) {
+            return Err("TAXII URL is outside the configured bearer origin".to_string());
+        }
+        Some(token)
+    } else {
+        None
+    };
     let http = state.outbound_client(url).await?;
     let mut request = http
         .get(url)
@@ -2357,8 +2648,7 @@ async fn fetch_taxii_objects(
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ));
-
-    if let Some(token) = bearer_token.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(token) = bearer {
         request = request.bearer_auth(token);
     } else if let Some(user) = username.map(str::trim).filter(|s| !s.is_empty()) {
         request = request.basic_auth(user, password);
@@ -2391,6 +2681,57 @@ async fn fetch_taxii_objects(
         bytes.extend_from_slice(&chunk);
     }
     String::from_utf8(bytes).map_err(|error| format!("TAXII response is not valid UTF-8: {error}"))
+}
+
+fn taxii_fetch_error_to_dispatch(message: String) -> outbox::DispatchError {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("failed to poll")
+        || lower.contains("failed to read")
+        || lower.contains("http 429")
+        || lower.contains("http 5")
+    {
+        outbox::DispatchError::Transient(message)
+    } else {
+        outbox::DispatchError::Permanent(message)
+    }
+}
+
+async fn execute_taxii_poll(
+    state: &AppState,
+    intent: &TaxiiPollIntent,
+) -> Result<TaxiiPollResult, outbox::DispatchError> {
+    let body_text = fetch_taxii_objects(state, &intent.objects_url, None, None, None)
+        .await
+        .map_err(taxii_fetch_error_to_dispatch)?;
+    let stix_json = taxii::stix_json_from_taxii_response(&body_text)
+        .map_err(outbox::DispatchError::Permanent)?;
+    let material =
+        stix_import::parse_stix_document(&stix_json, intent.source.trim(), intent.ttl_seconds)
+            .map_err(outbox::DispatchError::Permanent)?;
+    let feed = ThreatFeedImport {
+        feed_id: intent.feed_id.clone(),
+        source: intent.source.clone(),
+        ttl_seconds: intent.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    validate_threat_feed_import(&feed)
+        .map_err(|message| outbox::DispatchError::Permanent(message.to_string()))?;
+    let skipped_objects = material.skipped_objects;
+    let result =
+        apply_threat_feed_import(state, intent.actor.clone(), "poll_taxii_collection", feed)
+            .await
+            .map_err(outbox::DispatchError::Transient)?;
+    Ok(TaxiiPollResult {
+        feed_id: result.feed_id,
+        objects_url: intent.objects_url.clone(),
+        upserted_threats: result.upserted_threats,
+        upserted_dnsbl: result.upserted_dnsbl,
+        skipped_objects,
+        last_updated_unix: result.last_updated_unix,
+    })
 }
 
 /// Ingest Suricata EVE JSON (single object, array, or NDJSON). Admin-auth only.
@@ -2492,7 +2833,7 @@ async fn import_suricata_eve(
         .await
     {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2594,7 +2935,7 @@ async fn import_coraza_audit(
         .await
     {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2753,7 +3094,7 @@ async fn import_phishing_database_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -3547,6 +3888,14 @@ fn parse_phishing_ips(feed: &str, limit: usize) -> Vec<IpAddr> {
     values
 }
 
+fn persist_error(message: String) -> Response {
+    if message.contains("snapshot conflict") {
+        error(StatusCode::CONFLICT, message)
+    } else {
+        error(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
+}
+
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
@@ -3722,13 +4071,13 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated MISP Event/attribute JSON to <code>/api/threat-intel/misp</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IDS-worthy attributes (ip-src/ip-dst, domain, url, composites, hashes) into threats/DNSBL; attributes with <code>to_ids=false</code> are skipped. Live MISP REST pull is a follow-up.</p>
     </section>
     <section class="card"><h2>TAXII 2.1 collection poll</h2>
-      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>), optional Basic/Bearer credentials, and optional <code>added_after</code>. Fetches TAXII objects, normalizes to STIX, and upserts threats/DNSBL. Credentials are never written to audit logs.</p>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>) and optional <code>added_after</code>. PostgreSQL enqueues <code>taxii.collection_polled</code> (202) for the leased worker; file/memory still fetches on the request path. Inline Basic/Bearer is memory-only — durable polls use <code>taxii_bearer</code> in the credential registry. Credentials are never written to outbox payloads or audit logs. Poll <code>GET /api/outbox/{message_id}</code> for receipt evidence. Indicator values stay unmasked.</p>
     </section>
     <section class="card"><h2>OpenCTI threat intelligence</h2>
       <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
-      <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
+      <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator). PostgreSQL enqueues <code>soc.analysis_requested</code>; analysis never auto-enforces. Client IPs and paths stay unmasked.</p>
       <div class="row">
         <input id="socEventId" class="hdr-input" type="number" min="1" placeholder="Event id" aria-label="Security event id to analyze">
         <button type="button" id="socAnalyzeBtn" class="btn-secondary">Analyze event</button>
@@ -3748,7 +4097,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
     <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
-      <p class="muted">Render live SOC evidence in the Clearfolio document viewer.</p>
+      <p class="muted">Render live SOC evidence in the Clearfolio document viewer. PostgreSQL enqueues <code>clearfolio.document_submitted</code>; poll the outbox receipt for <code>jobId</code>. SOC export paths and IPs stay unmasked.</p>
       <div class="row">
         <button type="button" class="btn-secondary" data-doc="evidence-manifest">Open evidence manifest</button>
         <button type="button" class="btn-secondary" data-doc="soc-export">Open SOC export</button>
@@ -3864,6 +4213,20 @@ $('backupDrillBtn').addEventListener('click',async()=>{
     guard('backupBody',loadBackup);guard('auditBody',loadAudit);
   }catch(e){out.innerHTML='<span class="err">Drill error: '+esc(e.message)+'</span>';toast('Restore drill failed: '+e.message,false);}});
 function cfHeaders(){const t=($('adminToken').value||'').trim();return t?{'x-admin-token':t}:{};}
+async function pollOutboxReceipt(id,pick){
+  const h=cfHeaders();
+  for(let i=0;i<40;i++){
+    const r=await fetch('/api/outbox/'+encodeURIComponent(id),{headers:h});
+    if(r.status===404){await new Promise(res=>setTimeout(res,400));continue;}
+    if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+    const j=await r.json();
+    const status=j.message&&j.message.message_status;
+    if(status==='dead_letter')throw new Error((j.message&&j.message.terminal_reason)||'dead letter');
+    if(j.receipt_evidence){const v=pick(j.receipt_evidence);if(v)return v;}
+    await new Promise(res=>setTimeout(res,400));
+  }
+  throw new Error('outbox timed out');
+}
 async function pollClearfolio(id){
   for(let i=0;i<40;i++){
     const r=await fetch('/api/clearfolio/jobs/'+encodeURIComponent(id),{headers:cfHeaders()});
@@ -3877,7 +4240,14 @@ async function openClearfolioDoc(kind,base){
   try{
     const sr=await fetch('/api/clearfolio/documents/'+encodeURIComponent(kind),{method:'POST',headers:cfHeaders()});
     if(!sr.ok)throw new Error((await sr.json().catch(()=>({}))).error||sr.statusText);
-    const job=await sr.json();const id=job.jobId||job.job_id;if(!id)throw new Error('no job id returned');
+    const job=await sr.json();
+    let id=job.jobId||job.job_id;
+    if(!id && job.message_id){
+      st.textContent='Queued outbox '+job.message_id+'…';
+      const evidence=await pollOutboxReceipt(job.message_id, ev=>{try{const p=JSON.parse(ev);return p.jobId||p.job_id;}catch(e){return null;}});
+      id=evidence;
+    }
+    if(!id)throw new Error('no job id returned');
     st.textContent='Converting… (job '+id+')';
     const doc=await pollClearfolio(id);
     frame.src=base.replace(/\/+$/,'')+'/viewer/'+encodeURIComponent(doc);frame.hidden=false;st.textContent='Document ready.';
@@ -3894,7 +4264,15 @@ async function analyzeSocEvent(){
   try{
     const r=await fetch('/api/soc/analyze',{method:'POST',headers:{'content-type':'application/json',...cfHeaders()},body:JSON.stringify({event_id:id})});
     if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.statusText);
-    const j=await r.json();out.textContent=j.analysis||'(no analysis)';
+    const j=await r.json();
+    if(j.analysis){out.textContent=j.analysis;return;}
+    if(j.message_id){
+      out.textContent='Queued outbox '+j.message_id+'…';
+      const analysis=await pollOutboxReceipt(j.message_id, ev=>{try{const p=JSON.parse(ev);return p.analysis||ev;}catch(e){return ev;}});
+      out.textContent=analysis||'(no analysis)';
+      return;
+    }
+    out.textContent='(no analysis)';
   }catch(e){out.innerHTML='<span class="err">Analysis error: '+esc(e.message)+'</span>';}}
 async function initSocLlm(){
   let cfg;try{cfg=await getJSON('/api/soc/llm-config');}catch(e){return;}
@@ -4014,6 +4392,63 @@ pub(crate) fn bind_is_loopback(bind_addr: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn startup_clearfolio() -> Option<ClearfolioConfig> {
+    let base_url = std::env::var("CLEARFOLIO_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    Some(ClearfolioConfig {
+        base_url,
+        tenant_id: std::env::var("CLEARFOLIO_TENANT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "buyer-demo".to_string()),
+        subject_id: std::env::var("CLEARFOLIO_SUBJECT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "buyer-demo".to_string()),
+        permissions: std::env::var("CLEARFOLIO_PERMISSIONS")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "job:read".to_string()),
+    })
+}
+
+fn startup_soc_llm(credentials: &CredentialRegistry) -> Option<SocLlmConfig> {
+    let base_url = std::env::var("SOC_LLM_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    Some(SocLlmConfig {
+        base_url,
+        token: credentials
+            .get_credential(CRED_SOC_LLM_TOKEN)
+            .unwrap_or("")
+            .to_string(),
+        model: std::env::var("SOC_LLM_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "contextual-orchestrator".to_string()),
+    })
+}
+
+fn url_origin(raw: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| "URL origin is invalid".to_string())?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL origin has no host".to_string())?;
+    let mut origin = format!("{}://{}", url.scheme(), host.to_ascii_lowercase());
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(origin)
+}
+
 fn startup_destination_policy(
     bind_addr: &str,
     registry: &CredentialRegistry,
@@ -4065,7 +4500,7 @@ pub async fn run_from_env(
     let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
         .ok()
         .map(PathBuf::from);
-    let credentials = CredentialRegistry::bootstrap_secrets(
+    let mut credentials = CredentialRegistry::bootstrap_secrets(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
@@ -4074,6 +4509,8 @@ pub async fn run_from_env(
         std::env::var("DESTINATION_ALLOWLIST").ok(),
         std::env::var("DESTINATION_DENYLIST").ok(),
     )?;
+    credentials.load_optional_secret(CRED_SOC_LLM_TOKEN, std::env::var("SOC_LLM_TOKEN").ok());
+    credentials.load_optional_secret(CRED_TAXII_BEARER, std::env::var("TAXII_BEARER").ok());
     let config = AppConfig {
         admin_token: credentials
             .get_credential(CRED_ADMIN_TOKEN)
@@ -4140,6 +4577,22 @@ pub async fn run_from_env(
     let control_plane_url = credentials
         .get_credential(CRED_CONTROL_PLANE_URL)
         .map(str::to_owned);
+    let taxii_bearer = credentials
+        .get_credential(CRED_TAXII_BEARER)
+        .map(str::to_owned);
+    let taxii_bearer_origin = std::env::var("TAXII_BEARER_ORIGIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| url_origin(&value))
+        .transpose()?;
+    if taxii_bearer.is_some() && taxii_bearer_origin.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "taxii_bearer requires TAXII_BEARER_ORIGIN",
+        )
+        .into());
+    }
     control_plane::require_postgres_for_bind(&bind_addr, control_plane_url.as_deref())
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let state = match control_plane_url.as_deref() {
@@ -4158,7 +4611,10 @@ pub async fn run_from_env(
         .with_credentials_source(credentials.source())
         .with_proven_engine(proven_engine)
         .with_destination_policy(destination_policy)
-        .with_max_body_size(max_body_bytes);
+        .with_max_body_size(max_body_bytes)
+        .with_clearfolio(startup_clearfolio())
+        .with_soc_llm(startup_soc_llm(&credentials))
+        .with_taxii_bearer(taxii_bearer, taxii_bearer_origin);
     validate_sidecar_destination(&state).await?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -4216,12 +4672,62 @@ async fn run_outbox_worker(state: AppState, mut stop: tokio::sync::watch::Receiv
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Some(plane) = &state.control_plane {
+                    let worker_state = state.clone();
                     let _ = plane
-                        .drain_once(&owner, now_unix() as i64, outbox::dispatch_stdout)
+                        .drain_due_async(&owner, now_unix() as i64, move |message| {
+                            let state = worker_state.clone();
+                            async move { dispatch_outbox_message(&state, &message).await }
+                        })
                         .await;
                 }
             }
         }
+    }
+}
+
+async fn dispatch_outbox_message(
+    state: &AppState,
+    message: &outbox::OutboxMessage,
+) -> Result<String, outbox::DispatchError> {
+    match message.event_type.as_str() {
+        outbox::EVENT_SECURITY_RECORDED | outbox::EVENT_SNAPSHOT_REPLACED => {
+            outbox::dispatch_stdout(message)
+        }
+        outbox::EVENT_TAXII_POLLED => {
+            let intent: TaxiiPollIntent = serde_json::from_str(&message.payload_json)
+                .map_err(|error| outbox::DispatchError::Permanent(error.to_string()))?;
+            let result = execute_taxii_poll(state, &intent).await?;
+            Ok(serde_json::to_string(&result).expect("TaxiiPollResult is JSON-serializable"))
+        }
+        outbox::EVENT_CLEARFOLIO_SUBMITTED => {
+            let intent: ClearfolioSubmitIntent = serde_json::from_str(&message.payload_json)
+                .map_err(|error| outbox::DispatchError::Permanent(error.to_string()))?;
+            let config = state.clearfolio.clone().ok_or_else(|| {
+                outbox::DispatchError::Permanent(
+                    "Clearfolio integration is not configured".to_string(),
+                )
+            })?;
+            let (_status, body) = execute_clearfolio_submit(
+                state,
+                &config,
+                intent.filename,
+                intent.body_text.into_bytes(),
+            )
+            .await?;
+            Ok(String::from_utf8_lossy(&body).into_owned())
+        }
+        outbox::EVENT_SOC_ANALYSIS_REQUESTED => {
+            let intent: SocAnalyzeIntent = serde_json::from_str(&message.payload_json)
+                .map_err(|error| outbox::DispatchError::Permanent(error.to_string()))?;
+            let config = state.soc_llm.clone().ok_or_else(|| {
+                outbox::DispatchError::Permanent("LLM SOC analysis is not configured".to_string())
+            })?;
+            let result = execute_soc_analyze(state, &config, &intent.event).await?;
+            Ok(serde_json::to_string(&result).expect("SocAnalyzeResponse is JSON-serializable"))
+        }
+        other => Err(outbox::DispatchError::Permanent(format!(
+            "unknown outbox event type {other}"
+        ))),
     }
 }
 
@@ -4269,6 +4775,14 @@ mod tests {
             "DESTINATION_ALLOWLIST",
             "DESTINATION_DENYLIST",
             "CONTROL_PLANE_DATABASE_URL",
+            "CLEARFOLIO_BASE_URL",
+            "CLEARFOLIO_TENANT_ID",
+            "CLEARFOLIO_SUBJECT_ID",
+            "CLEARFOLIO_PERMISSIONS",
+            "SOC_LLM_BASE_URL",
+            "SOC_LLM_TOKEN",
+            "SOC_LLM_MODEL",
+            "TAXII_BEARER",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -4402,6 +4916,290 @@ mod tests {
             "operator must see the production authority requirement: {message}"
         );
         clear_run_env();
+    }
+
+    fn control_plane_test_database_url() -> Option<String> {
+        std::env::var("CONTROL_PLANE_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    fn unique_test_tenant(label: &str) -> String {
+        format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        )
+    }
+
+    #[tokio::test]
+    async fn postgres_first_management_write_does_not_conflict() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("occ-load");
+        let state = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("startup save must succeed");
+        state
+            .mutate_and_persist(|data| {
+                data.routes[0].path_prefix = "/after-start".into();
+            })
+            .await
+            .expect("first management write after load_postgres must not false-conflict");
+        let inner = state.inner.read().await;
+        assert_eq!(inner.routes[0].path_prefix, "/after-start");
+        assert!(inner.snapshot_version >= 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_conflict_refreshes_replica_for_a_later_retry() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("occ-refresh");
+        let seed = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("seed tenant");
+        drop(seed);
+        let winner = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("winner load");
+        let loser = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("loser load");
+        winner
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/winner".into())
+            .await
+            .expect("winner save");
+        let conflict = loser
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/loser-stale".into())
+            .await
+            .expect_err("stale replica must conflict once");
+        assert!(conflict.contains("snapshot conflict"));
+        assert_eq!(loser.inner.read().await.routes[0].path_prefix, "/winner");
+        loser
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/loser-retry".into())
+            .await
+            .expect("refreshed replica must be able to retry");
+    }
+
+    #[tokio::test]
+    async fn startup_clearfolio_and_soc_llm_read_optional_config() {
+        let _guard = ENV_GUARD.lock().await;
+        unsafe {
+            std::env::remove_var("CLEARFOLIO_BASE_URL");
+            std::env::remove_var("SOC_LLM_BASE_URL");
+        }
+        assert!(startup_clearfolio().is_none());
+        let empty = CredentialRegistry::empty();
+        assert!(startup_soc_llm(&empty).is_none());
+        unsafe {
+            std::env::set_var("CLEARFOLIO_BASE_URL", "http://viewer.example");
+            std::env::set_var("SOC_LLM_BASE_URL", "http://llm.example");
+        }
+        let cf = startup_clearfolio().expect("clearfolio");
+        assert_eq!(cf.base_url, "http://viewer.example");
+        assert_eq!(cf.tenant_id, "buyer-demo");
+        let mut registry = CredentialRegistry::empty();
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("llm-secret".into()));
+        let llm = startup_soc_llm(&registry).expect("soc llm");
+        assert_eq!(llm.base_url, "http://llm.example");
+        assert_eq!(llm.token, "llm-secret");
+        assert_eq!(llm.model, "contextual-orchestrator");
+        unsafe {
+            std::env::remove_var("CLEARFOLIO_BASE_URL");
+            std::env::remove_var("SOC_LLM_BASE_URL");
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_outbox_consumers_enqueue_taxii_clearfolio_and_soc() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let taxii_body = r#"{
+          "more": false,
+          "objects": [
+            {
+              "type": "indicator",
+              "id": "indicator--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "name": "outbox-taxii-ip",
+              "pattern": "[ipv4-addr:value = '198.51.100.44']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00.000Z"
+            }
+          ]
+        }"#;
+        let taxii_app = Router::new().route(
+            "/api1/collections/lab/objects/",
+            get(move || async move {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/taxii+json;version=2.1")],
+                    taxii_body,
+                )
+            }),
+        );
+        let taxii_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taxii_addr = taxii_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(taxii_listener, taxii_app).into_future());
+
+        let clearfolio_app = Router::new().route(
+            "/api/v1/convert/jobs",
+            post(|| async {
+                (
+                    StatusCode::ACCEPTED,
+                    [("content-type", "application/json")],
+                    r#"{"jobId":"J-OUTBOX","status":"PENDING"}"#,
+                )
+            }),
+        );
+        let cf_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cf_addr = cf_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(cf_listener, clearfolio_app).into_future());
+
+        let llm_addr = spawn_chat_mock(
+            r#"{"choices":[{"message":{"content":"Likely scanner. High. Keep 198.51.100.44 blocked."}}]}"#,
+        )
+        .await;
+
+        let tenant = unique_test_tenant("outbox-consumers");
+        let mut data = AppData::seeded();
+        data.events.push(SecurityEvent {
+            id: 1,
+            timestamp_unix: 1_700_000_000,
+            client_ip: Some("198.51.100.44".parse().unwrap()),
+            route_id: Some("demo".into()),
+            action: "blocked".into(),
+            reason: "scanner".into(),
+            score: 90,
+            path: "/gateway/login".into(),
+        });
+        data.next_event_id = 2;
+        let plane = control_plane::PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane");
+        plane.save(&data).await.expect("seed tenant");
+        data.snapshot_version = data.snapshot_version.saturating_add(1);
+        let state = AppState::new(data, AppConfig::memory(Some("secret".into())))
+            .with_control_plane(Arc::new(plane))
+            .with_destination_policy(DestinationPolicy::development())
+            .with_clearfolio(Some(clearfolio_test_config(&format!("http://{cf_addr}"))))
+            .with_soc_llm(Some(SocLlmConfig {
+                base_url: format!("http://{llm_addr}"),
+                token: "test-token".into(),
+                model: "contextual-orchestrator".into(),
+            }));
+        let drain_state = state.clone();
+        let app = build_app(state);
+
+        let taxii = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                Some("secret"),
+                &serde_json::json!({
+                    "api_root": format!("http://{taxii_addr}/api1"),
+                    "collection_id": "lab",
+                    "feed_id": "taxii-outbox",
+                    "source": "taxii:outbox",
+                    "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(taxii.status(), StatusCode::ACCEPTED);
+        let taxii_body: serde_json::Value = json_body(taxii).await;
+        let taxii_id = taxii_body["message_id"].as_str().unwrap().to_string();
+
+        let secrets = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                Some("secret"),
+                &serde_json::json!({
+                    "objects_url": format!("http://{taxii_addr}/api1/collections/lab/objects/"),
+                    "feed_id": "taxii-outbox",
+                    "source": "taxii:outbox",
+                    "ttl_seconds": 3600,
+                    "bearer_token": "must-not-persist"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(secrets.status(), StatusCode::BAD_REQUEST);
+
+        let submit = app_request(
+            &app,
+            authed_empty_request(
+                Method::POST,
+                "/api/clearfolio/documents/soc-export",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::ACCEPTED);
+
+        let analyze = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/soc/analyze",
+                Some("secret"),
+                &serde_json::json!({"event_id": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(analyze.status(), StatusCode::ACCEPTED);
+
+        let processed = drain_state
+            .control_plane
+            .as_ref()
+            .unwrap()
+            .drain_due_async("test-worker", now_unix() as i64, |message| {
+                let state = drain_state.clone();
+                async move { dispatch_outbox_message(&state, &message).await }
+            })
+            .await
+            .expect("drain consumers");
+        assert!(processed >= 3, "taxii, clearfolio, and soc must process");
+
+        let item: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, &format!("/api/outbox/{taxii_id}"), "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(item["message"]["message_status"], "processed");
+        let evidence = item["receipt_evidence"].as_str().unwrap();
+        assert!(evidence.contains("198.51.100.44") || evidence.contains("taxii-outbox"));
+        assert!(!evidence.contains("must-not-persist"));
+
+        let listed: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/outbox", "secret"),
+            )
+            .await,
+        )
+        .await;
+        let types: Vec<&str> = listed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["event_type"].as_str())
+            .collect();
+        assert!(types.contains(&"taxii.collection_polled"));
+        assert!(types.contains(&"clearfolio.document_submitted"));
+        assert!(types.contains(&"soc.analysis_requested"));
     }
 
     #[tokio::test]
@@ -5759,6 +6557,24 @@ mod tests {
                 .iter()
                 .any(|path| path == "Dockerfile")
         );
+        assert!(
+            final_readiness
+                .deployment_assets
+                .iter()
+                .any(|path| path == ".github/workflows/release.yml")
+        );
+        assert!(
+            final_readiness
+                .buyer_evidence
+                .iter()
+                .any(|path| path == "docs/runbooks/release.md")
+        );
+        assert!(
+            final_readiness
+                .buyer_evidence
+                .iter()
+                .any(|path| path == "docs/doctoring/signed-release.md")
+        );
 
         let manifest: BuyerEvidenceManifest = json_body(
             app_request(
@@ -5791,6 +6607,12 @@ mod tests {
                 .document_paths
                 .iter()
                 .any(|path| path == "docs/figma/enterprise-product-architecture.md")
+        );
+        assert!(
+            manifest
+                .document_paths
+                .iter()
+                .any(|path| path == "docs/doctoring/signed-release.md")
         );
 
         let support: SupportBundle =
@@ -7057,6 +7879,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_taxii_bearer_is_bound_to_one_origin_before_dns() {
+        let state = AppState::seeded(None).with_taxii_bearer(
+            Some("synthetic-taxii-token".to_string()),
+            Some("https://taxii.example".to_string()),
+        );
+        let error = fetch_taxii_objects(
+            &state,
+            "https://attacker.invalid/collections/c/objects/",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("registry bearer must not cross its configured origin");
+        assert!(error.contains("outside the configured bearer origin"));
+    }
+
+    #[tokio::test]
     async fn opencti_observable_ingest_updates_threats_dnsbl_and_feed_freshness() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(
@@ -7272,6 +8112,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                snapshot_version: 0,
             },
             AppConfig {
                 admin_token: None,
@@ -8189,6 +9030,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                snapshot_version: 0,
             },
             AppConfig {
                 admin_token: None,
@@ -8435,6 +9277,13 @@ mod tests {
         )
         .await;
         assert_eq!(replayed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let item = app_request(
+            &app,
+            authed_empty_request(Method::GET, "/api/outbox/missing", "secret"),
+        )
+        .await;
+        assert_eq!(item.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let denied_backup = app_request(&app, empty_request(Method::GET, "/api/backup")).await;
         assert_eq!(denied_backup.status(), StatusCode::UNAUTHORIZED);

@@ -2,8 +2,12 @@
 //!
 //! Compiled as a cdylib by `build.rs`. It is not a WAF: it implements the
 //! current libcoraza export surface so Wardnet can exercise in-process loading
-//! without Go at CI build time. Interruptions fire only for the documented
-//! `crs-probe=1` contract used by the sidecar tests.
+//! without Go at CI build time. Interruptions fire for the documented
+//! `crs-probe=1` contract used by the sidecar tests and for the hermetic
+//! OWASP CRS attack battery (issue #11) that the live-gateway evidence test
+//! fires at the real binary. Detection *quality* against real traffic stays
+//! with an operator-supplied libcoraza + Core Rule Set; this fixture only
+//! proves Wardnet's load → evaluate → block → record path end to end.
 
 #![deny(warnings)]
 
@@ -38,8 +42,144 @@ struct Waf {
 
 struct Tx {
     uri: String,
+    headers: String,
+    body: String,
     interrupted: bool,
     rule_id: i32,
+    message: String,
+}
+
+/// One hermetic CRS battery entry: a lowercase substring needle, the OWASP
+/// Core Rule Set rule id it stands for, and the canonical CRS message text.
+/// First match wins, mirroring CRS phase ordering closely enough for the
+/// deterministic evidence test.
+struct BatteryEntry {
+    needle: &'static str,
+    rule_id: i32,
+    message: &'static str,
+}
+
+const SQLI_MESSAGE: &str = "SQL Injection Attack Detected via libinjection";
+const XSS_MESSAGE: &str = "XSS Attack Detected via libinjection";
+const TRAVERSAL_MESSAGE: &str = "Path Traversal Attack (/../)";
+const RCE_MESSAGE: &str = "Remote Command Execution: Unix Command Injection";
+const LOG4J_MESSAGE: &str = "Log4j JNDI Remote Code Execution attempt";
+
+const BATTERY: &[BatteryEntry] = &[
+    BatteryEntry {
+        needle: "crs-probe=1",
+        rule_id: 942100,
+        message: SQLI_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "crs-probe%3d1",
+        rule_id: 942100,
+        message: SQLI_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "' or '1'='1",
+        rule_id: 942100,
+        message: SQLI_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "%27%20or%20%271%27%3d%271",
+        rule_id: 942100,
+        message: SQLI_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "union select",
+        rule_id: 942100,
+        message: SQLI_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "union%20select",
+        rule_id: 942100,
+        message: SQLI_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "<script",
+        rule_id: 941100,
+        message: XSS_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "%3cscript",
+        rule_id: 941100,
+        message: XSS_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "onerror=alert",
+        rule_id: 941100,
+        message: XSS_MESSAGE,
+    },
+    // RCE and Log4j entries precede traversal entries because command
+    // fixtures such as `; cat /etc/passwd` also contain traversal-looking
+    // substrings; first-match ordering keeps rule attribution deterministic.
+    BatteryEntry {
+        needle: "; cat ",
+        rule_id: 932100,
+        message: RCE_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "%3b%20cat%20",
+        rule_id: 932100,
+        message: RCE_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "/bin/sh",
+        rule_id: 932100,
+        message: RCE_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "$(whoami)",
+        rule_id: 932100,
+        message: RCE_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "${jndi",
+        rule_id: 944120,
+        message: LOG4J_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "%24%7bjndi",
+        rule_id: 944120,
+        message: LOG4J_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "../",
+        rule_id: 930100,
+        message: TRAVERSAL_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "..%2f",
+        rule_id: 930100,
+        message: TRAVERSAL_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "..%252f",
+        rule_id: 930100,
+        message: TRAVERSAL_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "etc/passwd",
+        rule_id: 930100,
+        message: TRAVERSAL_MESSAGE,
+    },
+    BatteryEntry {
+        needle: "etc%2fpasswd",
+        rule_id: 930100,
+        message: TRAVERSAL_MESSAGE,
+    },
+];
+
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack.to_ascii_lowercase().contains(needle)
+}
+
+/// Runs the battery over one phase's accumulated request text. Returns the
+/// matched entry so each phase can mark the transaction with the same rule
+/// id and message that `coraza_intervention` reports later.
+fn battery_match(text: &str) -> Option<&'static BatteryEntry> {
+    BATTERY.iter().find(|entry| contains_ignore_case(text, entry.needle))
 }
 
 struct Store {
@@ -153,8 +293,11 @@ pub extern "C" fn coraza_new_transaction(waf: usize) -> usize {
         id,
         Tx {
             uri: String::new(),
+            headers: String::new(),
+            body: String::new(),
             interrupted: false,
             rule_id: 0,
+            message: String::new(),
         },
     );
     id
@@ -186,21 +329,38 @@ pub extern "C" fn coraza_process_uri(
         return CORAZA_ERROR;
     };
     tx.uri = uri.to_string();
-    if uri.contains("crs-probe=1") {
+    if let Some(entry) = battery_match(uri) {
         tx.interrupted = true;
-        tx.rule_id = 942100;
+        tx.rule_id = entry.rule_id;
+        tx.message = entry.message.to_string();
     }
     CORAZA_OK
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coraza_add_request_header(
-    _tx: usize,
-    _name: *const c_char,
+    tx: usize,
+    name: *const c_char,
     _name_len: c_int,
-    _value: *const c_char,
+    value: *const c_char,
     _value_len: c_int,
 ) -> c_int {
+    let (Ok(name), Ok(value)) = (c_str(name), c_str(value)) else {
+        return CORAZA_ERROR;
+    };
+    let mut store = store().lock().expect("stub lock");
+    let Some(tx) = store.txs.get_mut(&tx) else {
+        return CORAZA_ERROR;
+    };
+    tx.headers.push_str(name);
+    tx.headers.push(':');
+    tx.headers.push_str(value);
+    tx.headers.push('\n');
+    if let Some(entry) = battery_match(&tx.headers) {
+        tx.interrupted = true;
+        tx.rule_id = entry.rule_id;
+        tx.message = entry.message.to_string();
+    }
     CORAZA_OK
 }
 
@@ -216,10 +376,31 @@ pub extern "C" fn coraza_process_request_headers(tx: usize) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn coraza_append_request_body(
-    _tx: usize,
-    _data: *const u8,
-    _length: c_int,
+    tx: usize,
+    data: *const u8,
+    length: c_int,
 ) -> c_int {
+    if length < 0 {
+        return CORAZA_ERROR;
+    }
+    let bytes = if data.is_null() || length == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, length as usize) }
+    };
+    let Ok(chunk) = std::str::from_utf8(bytes) else {
+        return CORAZA_ERROR;
+    };
+    let mut store = store().lock().expect("stub lock");
+    let Some(tx) = store.txs.get_mut(&tx) else {
+        return CORAZA_ERROR;
+    };
+    tx.body.push_str(chunk);
+    if let Some(entry) = battery_match(&tx.body) {
+        tx.interrupted = true;
+        tx.rule_id = entry.rule_id;
+        tx.message = entry.message.to_string();
+    }
     CORAZA_OK
 }
 
@@ -243,8 +424,8 @@ pub extern "C" fn coraza_intervention(tx: usize) -> *mut CorazaIntervention {
         return std::ptr::null_mut();
     }
     let action = CString::new("deny").expect("static action");
-    let data = CString::new("SQL Injection Attack Detected via libinjection")
-        .expect("static data");
+    let data = CString::new(tx.message.clone())
+        .expect("battery messages contain no interior NUL");
     let it = Box::new(CorazaIntervention {
         action: action.into_raw(),
         status: 403,
