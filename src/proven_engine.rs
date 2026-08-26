@@ -156,7 +156,8 @@ pub fn outcome_from_sidecar_body(body: &str) -> ProvenEngineOutcome {
                 let idx = parsed
                     .hits
                     .iter()
-                    .position(|hit| hit.action == "block")
+                    .position(|hit| hit.interrupted)
+                    .or_else(|| parsed.hits.iter().position(|hit| hit.action == "block"))
                     .unwrap_or(0);
                 ProvenEngineOutcome::Hit(parsed.hits.swap_remove(idx))
             }
@@ -618,6 +619,21 @@ mod tests {
                 assert!(hit.score >= 50);
             }
             other => panic!("expected hit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interrupted_hit_wins_over_earlier_severity_only_hit() {
+        let raw = r#"[
+          {"transaction":{"is_interrupted":false,"request":{"uri":"/monitor"}},"messages":[{"data":{"severity":2}}]},
+          {"transaction":{"is_interrupted":true,"request":{"uri":"/blocked"},"response":{"http_code":403}},"messages":[]}
+        ]"#;
+        match outcome_from_sidecar_body(raw) {
+            ProvenEngineOutcome::Hit(hit) => {
+                assert!(hit.interrupted);
+                assert_eq!(hit.path, "/blocked");
+            }
+            other => panic!("expected interrupted hit, got {other:?}"),
         }
     }
 
