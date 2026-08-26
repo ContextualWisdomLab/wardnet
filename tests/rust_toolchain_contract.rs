@@ -5,11 +5,16 @@ const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const DEPENDABOT: &str = include_str!("../.github/dependabot.yml");
 
 #[test]
-fn stable_toolchain_is_exact_in_local_and_ci_contracts() {
+fn pinned_toolchain_is_consistent_in_local_and_ci_contracts() {
     assert!(RUST_TOOLCHAIN.contains("channel = \"1.97.1\""));
     assert!(!RUST_TOOLCHAIN.contains("channel = \"stable\""));
-    assert_eq!(CI_WORKFLOW.matches("toolchain: 1.97.1").count(), 1);
-    assert!(!CI_WORKFLOW.contains("toolchain: stable"));
+    let ci_toolchains = CI_WORKFLOW
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("toolchain: "))
+        .collect::<Vec<_>>();
+    assert!(!ci_toolchains.is_empty());
+    assert!(ci_toolchains.iter().all(|toolchain| *toolchain == "1.97.1"));
 }
 
 #[test]
