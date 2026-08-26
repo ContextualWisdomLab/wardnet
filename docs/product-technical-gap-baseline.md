@@ -20,7 +20,7 @@ delivery evidence.
 | #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
 | #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
 | #105 optimistic concurrency | `f92f3aa0ed209e9818c29205fd12c6f2fad60e4a` | `#95` | stacked only; three unresolved threads |
-| #95 in-path Coraza and accumulated production stack | `ae66601d8db1bb16f8b0f9adb4b5238c0e6ebe40` | `main` | DNS and engine fail-closed review repairs landed after the MCP stack point; refreshed exact-head checks and independent approval required |
+| #95 in-path Coraza and accumulated production stack | `f6eabf3523d25198e7fc3ff450d53e90f325dccf` | `main` | optimistic concurrency/release evidence and prior DNS/engine repairs accumulated; refreshed exact-head checks and independent approval required |
 | #94 fail-closed public admin auth | `7c6dc3d091915d19ce1d67a81cf6a9759a101cd4` | `main` | five unresolved threads; Strix failure |
 | #93 deterministic persistence fault seam | `1d3c13cab6dcd474ccc6d497f8d9f1c1efa848e4` | `main` | one unresolved thread, stale change request, Strix failure |
 | #90 SIEM/OpenTelemetry export | `8e4484d13499d99c9ae31e1a3b6ccd419d6ed934` | `main` | two unresolved threads; Strix failure |
