@@ -99,7 +99,7 @@ async fn answer_dnsbl(
         .iter()
         .filter(|entry| {
             waf_ids_core::validate_dnsbl(entry).is_ok()
-                && waf_ids_core::dnsbl_matches(entry, address.into())
+                && waf_ids_core::dnsbl_matches(entry, address)
         })
         .take(DNS_MAX_ANSWERS)
         .collect();
@@ -161,7 +161,7 @@ fn add_negative_soa(response: &mut Message, origin: &str) {
     ));
 }
 
-fn dnsbl_query_address(host: &str, origin: &str) -> Option<Option<std::net::Ipv4Addr>> {
+fn dnsbl_query_address(host: &str, origin: &str) -> Option<Option<std::net::IpAddr>> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let origin = origin.trim_matches('.').to_ascii_lowercase();
     if host == origin {
@@ -173,10 +173,24 @@ fn dnsbl_query_address(host: &str, origin: &str) -> Option<Option<std::net::Ipv4
         .map(str::parse::<u8>)
         .collect::<Result<Vec<_>, _>>()
         .ok();
-    Some(octets.and_then(|octets| {
+    if let Some(address) = octets.and_then(|octets| {
         (octets.len() == 4)
             .then(|| std::net::Ipv4Addr::new(octets[3], octets[2], octets[1], octets[0]))
-    }))
+    }) {
+        return Some(Some(address.into()));
+    }
+    let nibbles = relative.split('.').collect::<Vec<_>>();
+    Some(
+        (nibbles.len() == 32 && nibbles.iter().all(|nibble| nibble.len() == 1))
+            .then(|| {
+                let value = nibbles.into_iter().rev().collect::<String>();
+                u128::from_str_radix(&value, 16)
+                    .ok()
+                    .map(std::net::Ipv6Addr::from)
+                    .map(std::net::IpAddr::V6)
+            })
+            .flatten(),
+    )
 }
 
 fn bounded_txt(value: &str) -> String {
@@ -369,6 +383,48 @@ mod tests {
         assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
         assert!(nodata.answers.is_empty());
         assert!(matches!(nodata.authorities[0].data, RData::SOA(_)));
+    }
+
+    #[tokio::test]
+    async fn serves_ipv6_dnsbl_names_with_nibble_reversal_and_cidr_matching() {
+        let state = AppState::seeded(None);
+        state.inner.write().await.dnsbl = vec![waf_ids_core::DnsblEntry {
+            address: "2001:db8::".parse().unwrap(),
+            prefix_len: Some(64),
+            code: "127.0.0.8".to_string(),
+            reason: "IPv6 abuse".to_string(),
+            source: "test:feed".to_string(),
+            ttl_seconds: 600,
+        }];
+        let name = "3.6.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.dnsbl.local";
+
+        assert_eq!(
+            dnsbl_query_address(name, "dnsbl.local"),
+            Some(Some("2001:db8::63".parse().unwrap()))
+        );
+        let response = Message::from_bytes(
+            &answer(&state, &typed_query_packet(15, name, RecordType::A))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(response.metadata.authoritative);
+        assert!(
+            matches!(response.answers[0].data, RData::A(A(address)) if address.to_string() == "127.0.0.8")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_ipv6_dnsbl_names() {
+        for relative in [
+            "3.6.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.2",
+            "g.6.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2",
+        ] {
+            assert_eq!(
+                dnsbl_query_address(&format!("{relative}.dnsbl.local"), "dnsbl.local"),
+                Some(None)
+            );
+        }
     }
 
     #[tokio::test]
