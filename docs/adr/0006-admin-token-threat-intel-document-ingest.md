@@ -28,16 +28,17 @@ operator documentation (OpenCTI, n.d.).
    - `POST /api/threat-intel/stix` — STIX 2.x indicator or bundle JSON
    - `POST /api/threat-intel/misp` — MISP Event / attribute JSON
      (`to_ids=false` attributes skipped)
-   - `POST /api/threat-intel/taxii/poll` — TAXII 2.1 collection
-     objects URL (or API root + collection id); optional Basic/Bearer;
-     normalize to STIX then upsert
    - `POST /api/threat-intel/opencti` — OpenCTI observable / indicator
      export JSON
-2. Map supported IP, domain, URL, and hash material into
+2. Support operator-initiated remote TAXII ingestion at
+   `POST /api/threat-intel/taxii/poll`: receive a TAXII 2.1 objects URL
+   (or API root plus collection id) and optional credentials, fetch the
+   external endpoint, normalize its response to STIX, then upsert it.
+3. Map supported IP, domain, URL, and hash material into
    `ThreatIndicator` and `DnsblEntry` rows and update feed freshness.
-3. **Live MISP REST pull** and **live OpenCTI GraphQL pull** remain
+4. **Live MISP REST pull** and **live OpenCTI GraphQL pull** remain
    follow-ups. They are not accepted replacements for document ingest.
-4. Never write TAXII or admin credentials into audit-log payloads.
+5. Never write TAXII or admin credentials into audit-log payloads.
 
 ## Consequences
 

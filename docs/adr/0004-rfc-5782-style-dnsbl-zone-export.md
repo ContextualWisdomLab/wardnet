@@ -24,7 +24,9 @@ Mockapetris, 1987b, RFC 1035 / STD 13).
 ## Decision
 
 1. Export an **RFC 5782-style DNSBL zone** at `GET /dnsbl/zone` using
-   the configured `DNSBL_ORIGIN` (default `dnsbl.local`).
+   the configured `DNSBL_ORIGIN`. The `dnsbl.local` default is for local
+   development only; authoritative deployments must explicitly configure a
+   non-`.local` origin because `.local.` is reserved for mDNS.
 2. Require every published DNSBL **response code** to be an IPv4
    loopback-style address in **`127.0.0.0/8`**. Reject codes outside
    that range at the management API.
@@ -46,6 +48,9 @@ Mockapetris, 1987b, RFC 1035 / STD 13).
 - IPv6 DNSxL layout in RFC 5782 is not an accepted serving mode here.
 
 ## References
+
+Cheshire, S., & Krochmal, M. (2013). *Multicast DNS* (RFC 6762).
+RFC Editor. https://doi.org/10.17487/RFC6762
 
 Levine, J. (2010). *DNS blacklists and whitelists* (RFC 5782). RFC
 Editor. https://doi.org/10.17487/RFC5782

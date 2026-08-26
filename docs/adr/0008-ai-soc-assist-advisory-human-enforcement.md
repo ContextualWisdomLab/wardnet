@@ -45,7 +45,10 @@ not a product certification.
 ## Consequences
 
 - Operators can wire contextual-orchestrator (or another compatible
-  endpoint) without giving that hook control-plane write authority.
+  endpoint) without giving that hook control-plane write authority. The
+  current runtime sends `orchestration_mode` but cannot prove that a generic
+  OpenAI-compatible endpoint honored it; such endpoints are not evidence of
+  ADR 0010 compliance until an acknowledgement contract is implemented.
 - Adaptive orchestration changes inference execution, not Wardnet's
   human enforcement boundary; see ADR 0010 for its accepted contract.
 - Human approval stays required until audit trails, rollback, and

@@ -41,7 +41,8 @@ cited.
 
 ## Consequences
 
-- Invariants include: no panic on arbitrary input; non-empty score
+- Invariants include: no panic on arbitrary valid UTF-8 JSON input for the
+  state parser; non-empty score
   reasons; deterministic scoring; serde round-trip of parsed state;
   no empty token key or empty actor; TXT payloads fully escaped;
   every published A-record code in `127.0.0.0/8`.
