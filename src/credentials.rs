@@ -16,7 +16,7 @@ pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialSource {
-    /// At least one secret came from `WAF_IDS_CREDENTIALS_PATH`.
+    /// At least one secret came from `WARDNET_CREDENTIALS_PATH`.
     File,
     /// Secrets came only from env bootstrap (`ADMIN_TOKEN` / `ADMIN_TOKENS`).
     Env,

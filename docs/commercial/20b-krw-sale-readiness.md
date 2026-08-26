@@ -11,7 +11,7 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 5. Threat feed updates must be importable through `POST /api/threat-feeds/import`.
 6. The product must expose fresh/stale threat feed evidence through `GET /api/threat-feeds/freshness`.
 7. The product must expose SOC event export through `GET /api/events.ndjson`.
-8. The product must retain threat feed status, imported HTTP indicators, DNSBL entries, gateway routes, and security events across restart when `WAF_IDS_STATE_PATH` is configured.
+8. The product must retain threat feed status, imported HTTP indicators, DNSBL entries, gateway routes, and security events across restart when `WARDNET_STATE_PATH` is configured.
 9. The readiness API must report blockers instead of returning a vague success state.
 10. The support bundle API must return health, KPIs, license metadata, readiness checks, feed freshness, and evidence counts without secrets.
 11. The product must expose a buyer evidence manifest through `GET /api/commercial/evidence-manifest` so evaluators can verify required runtime APIs, committed documents, and deployment assets from one contract.
@@ -53,4 +53,4 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 
 The project is still a commercial baseline, not a complete enterprise WAF/IDS suite. Production buyers should require follow-on integration of Coraza/OWASP CRS, Suricata EVE ingest, durable database storage, SSO/RBAC, audit logs, signed release artifacts, and production SIEM mapping before internet-edge deployment.
 
-The current library boundary is `crates/waf-ids-core`, a local workspace crate. A submodule is not justified until an independently versioned adapter or SDK exists.
+The current library boundary is `crates/wardnet-core`, a local workspace crate. A submodule is not justified until an independently versioned adapter or SDK exists.

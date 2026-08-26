@@ -4,7 +4,7 @@
 
 **Goal:** Add buyer-verifiable threat-feed freshness and SOC/SIEM event export evidence to the existing 2B KRW product package.
 
-**Architecture:** Keep one Rust workspace. Add deterministic freshness helpers to `waf-ids-core`, keep NDJSON serialization in the root app crate where `serde_json` already exists, expose both through Axum, and verify through tests and smoke.
+**Architecture:** Keep one Rust workspace. Add deterministic freshness helpers to `wardnet-core`, keep NDJSON serialization in the root app crate where `serde_json` already exists, expose both through Axum, and verify through tests and smoke.
 
 **Tech Stack:** Rust 2024, Axum, Tokio, Serde, Cargo workspace, shell smoke test, GitHub Actions, FigJam.
 

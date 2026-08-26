@@ -1,10 +1,10 @@
 // The gateway entrypoint is intentionally a thin shim: all configuration
-// parsing, binding, and serving live in `waf_ids_ai_soc::run_from_env` so they
+// parsing, binding, and serving live in `wardnet::run_from_env` so they
 // are unit-testable, while this file is covered end-to-end by `tests/binary.rs`.
 #[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    waf_ids_ai_soc::run_from_env(Box::pin(shutdown_signal())).await
+    wardnet::run_from_env(Box::pin(shutdown_signal())).await
 }
 
 #[cfg(all(not(test), unix))]

@@ -981,61 +981,62 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
 /// dependency — the format is a few lines of text.
 pub fn prometheus_exposition(kpi: &SocKpiSnapshot) -> String {
     let metrics: [(&str, &str, usize); 10] = [
+        ("routes", "Configured gateway routes.", kpi.route_count),
         (
-            "waf_ids_routes",
-            "Configured gateway routes.",
-            kpi.route_count,
-        ),
-        (
-            "waf_ids_threat_indicators",
+            "threat_indicators",
             "Operator threat indicators loaded.",
             kpi.threat_indicator_count,
         ),
         (
-            "waf_ids_dnsbl_entries",
+            "dnsbl_entries",
             "DNSBL reputation entries.",
             kpi.dnsbl_entry_count,
         ),
         (
-            "waf_ids_threat_feeds",
+            "threat_feeds",
             "Imported threat feeds.",
             kpi.threat_feed_count,
         ),
         (
-            "waf_ids_threat_feeds_fresh",
+            "threat_feeds_fresh",
             "Threat feeds within their TTL.",
             kpi.fresh_threat_feed_count,
         ),
         (
-            "waf_ids_threat_feeds_stale",
+            "threat_feeds_stale",
             "Threat feeds past their TTL.",
             kpi.stale_threat_feed_count,
         ),
         (
-            "waf_ids_security_events",
+            "security_events",
             "Total recorded security events.",
             kpi.event_count,
         ),
         (
-            "waf_ids_security_events_blocked",
+            "security_events_blocked",
             "Security events with a blocked action.",
             kpi.blocked_event_count,
         ),
         (
-            "waf_ids_security_events_monitored",
+            "security_events_monitored",
             "Security events with a monitored action.",
             kpi.monitor_event_count,
         ),
         (
-            "waf_ids_audit_log_entries",
+            "audit_log_entries",
             "Recorded management audit-log entries.",
             kpi.audit_log_count,
         ),
     ];
     let mut out = String::new();
-    for (name, help, value) in metrics {
+    for (suffix, help, value) in metrics {
+        let name = format!("wardnet_{suffix}");
         out.push_str(&format!(
             "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+        ));
+        let legacy = format!("waf_ids_{suffix}");
+        out.push_str(&format!(
+            "# HELP {legacy} Deprecated compatibility alias for {name}.\n# TYPE {legacy} gauge\n{legacy} {value}\n"
         ));
     }
     out
@@ -1122,7 +1123,7 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
         deployment_assets: vec![
             "Dockerfile".to_string(),
             "deploy/docker-compose.yml".to_string(),
-            "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string(),
+            "deploy/kubernetes/wardnet.yaml".to_string(),
         ],
         buyer_evidence: vec![
             "docs/commercial/20b-krw-sale-readiness.md".to_string(),

@@ -1,4 +1,4 @@
-# WAF IDS AI SOC Design
+# Wardnet Design
 
 ## Objective
 

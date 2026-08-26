@@ -5,7 +5,7 @@
 Build:
 
 ```bash
-docker build -t contextualwisdomlab/waf-ids-ai-soc:local .
+docker build -t contextualwisdomlab/wardnet:local .
 ```
 
 Run:
@@ -16,8 +16,8 @@ docker run --rm \
   -e BIND_ADDR=0.0.0.0:8080 \
   -e ADMIN_TOKEN=replace-me \
   -e DNSBL_ORIGIN=dnsbl.example \
-  -v waf_ids_state:/var/lib/waf-ids-ai-soc \
-  contextualwisdomlab/waf-ids-ai-soc:local
+  -v wardnet_state:/var/lib/wardnet \
+  contextualwisdomlab/wardnet:local
 ```
 
 ## Compose
@@ -29,10 +29,10 @@ ADMIN_TOKEN=replace-me docker compose up --build
 
 ## Kubernetes
 
-Review `deploy/kubernetes/waf-ids-ai-soc.yaml` before applying. Replace the placeholder admin secret with a secret-manager synchronization flow.
+Review `deploy/kubernetes/wardnet.yaml` before applying. Replace the placeholder admin secret with a secret-manager synchronization flow.
 
 ```bash
-kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
+kubectl apply -f deploy/kubernetes/wardnet.yaml
 ```
 
 ## Production Requirements

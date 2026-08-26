@@ -4,7 +4,7 @@
 
 ```bash
 ADMIN_TOKEN=dev-secret \
-WAF_IDS_STATE_PATH=./waf-ids-state.local.json \
+WARDNET_STATE_PATH=./wardnet-state.local.json \
 DNSBL_ORIGIN=dnsbl.local \
 EVENT_LIMIT=1000 \
 cargo run
@@ -21,7 +21,7 @@ on each request.
 | Bootstrap transport | Variable / path | Notes |
 | --- | --- | --- |
 | Env (dev / CI) | `ADMIN_TOKEN`, `ADMIN_TOKENS` | Still supported; seeds the registry only |
-| Credentials file (preferred for lab/prod packaging) | `WAF_IDS_CREDENTIALS_PATH` | JSON object with `admin_token` and/or `admin_tokens` keys; file values win per key over env |
+| Credentials file (preferred for lab/prod packaging) | `WARDNET_CREDENTIALS_PATH` | JSON object with `admin_token` and/or `admin_tokens` keys; file values win per key over env |
 
 Example credentials file:
 
@@ -45,8 +45,8 @@ Example credentials file:
 Token values never appear in audit log payloads.
 
 ```bash
-WAF_IDS_CREDENTIALS_PATH=./credentials.local.json \
-WAF_IDS_STATE_PATH=./waf-ids-state.local.json \
+WARDNET_CREDENTIALS_PATH=./credentials.local.json \
+WARDNET_STATE_PATH=./wardnet-state.local.json \
 cargo run
 ```
 
@@ -76,7 +76,7 @@ scripts/smoke.sh
 
 The smoke test starts the service on a temporary port with a temporary JSON state file, verifies admin and management surfaces, creates a blocking route, registers a commercial license, imports a threat feed, triggers a blocked gateway request, checks KPIs, readiness, support bundle, and DNSBL export, restarts the process, and verifies that route/license/feed data persisted.
 
-When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling file and atomically replaces the configured state path. If a management write cannot be persisted, the in-memory mutation is rolled back and the API returns `500`.
+When `WARDNET_STATE_PATH` is enabled, the process writes a temporary sibling file and atomically replaces the configured state path. If a management write cannot be persisted, the in-memory mutation is rolled back and the API returns `500`.
 
 ## Safe Change Procedure
 

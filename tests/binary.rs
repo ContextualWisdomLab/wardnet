@@ -41,9 +41,9 @@ fn binary_serves_until_force_stopped_on_windows() {
 }
 
 fn spawn_ready_gateway() -> Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wardnet"))
         .env("BIND_ADDR", "127.0.0.1:0")
-        .env_remove("WAF_IDS_STATE_PATH")
+        .env_remove("WARDNET_STATE_PATH")
         .env_remove("EVENT_LIMIT")
         .env_remove("RATE_LIMIT")
         .env_remove("RATE_LIMIT_WINDOW")

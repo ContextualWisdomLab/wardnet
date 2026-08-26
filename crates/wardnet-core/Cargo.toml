@@ -1,5 +1,5 @@
 [package]
-name = "waf-ids-core"
+name = "wardnet-core"
 version = "0.1.0"
 edition = "2024"
 description = "Core WAF/IDS/AI SOC domain models, scoring, DNSBL, and commercial readiness logic"
