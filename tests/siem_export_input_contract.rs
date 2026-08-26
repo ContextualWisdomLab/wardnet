@@ -150,6 +150,29 @@ fn hyphenated_credential_markers_are_redacted() {
 }
 
 #[test]
+fn whitespace_delimited_credentials_never_reach_any_export_format() {
+    let input = concat!(
+        "{\"id\":16,\"timestamp_unix\":1723456794,",
+        "\"client_ip\":null,\"route_id\":null,\"action\":\"monitor\",",
+        "\"reason\":\"token = alpha password :bravo Authorization: Bearer charlie\",",
+        "\"score\":1,\"path\":\"/\"}\n"
+    );
+
+    for format in ["ocsf", "otlp-json", "rfc5424"] {
+        let output = exporter(&["--format", format], input);
+        assert!(
+            output.status.success(),
+            "{format} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body = String::from_utf8(output.stdout).expect("UTF-8 export");
+        for secret in ["alpha", "bravo", "charlie"] {
+            assert!(!body.contains(secret), "{format} leaked {secret}: {body}");
+        }
+    }
+}
+
+#[test]
 fn rfc5424_header_contains_the_event_timestamp() {
     let output = exporter(&["--format", "rfc5424"], &event(13, 1_723_456_791));
     assert!(

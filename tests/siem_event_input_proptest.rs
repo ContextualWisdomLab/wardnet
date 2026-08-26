@@ -99,6 +99,27 @@ fn normalization_redacts_colon_and_equals_credentials() {
 }
 
 #[test]
+fn normalization_redacts_whitespace_delimited_assignments() {
+    let input = event(
+        1,
+        1_723_456_789,
+        "monitor",
+        "token = alpha password :bravo api_key: charlie Authorization: Bearer delta",
+        "/",
+    );
+    let events = read_events(Cursor::new(input)).expect("valid sanitized event");
+    let reason = &events[0].reason;
+
+    for secret in ["alpha", "bravo", "charlie", "delta"] {
+        assert!(!reason.contains(secret), "leaked {secret} in {reason}");
+    }
+    assert!(reason.contains("token = [REDACTED]"));
+    assert!(reason.contains("password :[REDACTED]"));
+    assert!(reason.contains("api_key: [REDACTED]"));
+    assert!(reason.contains("Authorization: [REDACTED] [REDACTED]"));
+}
+
+#[test]
 fn oversized_reason_is_bounded_without_poisoning_the_batch() {
     let oversized = "signal ".repeat(400);
     let input = format!(

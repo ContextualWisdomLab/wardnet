@@ -248,13 +248,28 @@ fn sanitize_text(value: &str, maximum: usize) -> String {
         if !output.is_empty() {
             output.push(' ');
         }
-        let redacted = if redact_next {
-            "[REDACTED]".to_string()
+        let (redacted, keep_redacting) = if redact_next && matches!(token, ":" | "=") {
+            // Operators commonly render assignments with whitespace around
+            // the separator (`token = value`). The separator is not the
+            // credential, so retain it and redact the following token.
+            (token.to_string(), true)
+        } else if redact_next {
+            let separator = token
+                .chars()
+                .next()
+                .filter(|character| matches!(character, ':' | '='));
+            let redacted = separator.map_or_else(
+                || "[REDACTED]".to_string(),
+                |separator| format!("{separator}[REDACTED]"),
+            );
+            // Preserve the two-token `Authorization: Bearer value` chain.
+            (redacted, is_authorization_marker(token))
         } else {
-            redact_token(token)
+            let redacted = redact_token(token);
+            (redacted, is_authorization_marker(token))
         };
         output.push_str(&redacted);
-        redact_next = is_authorization_marker(token);
+        redact_next = keep_redacting;
     }
     truncate_chars(&output, maximum)
 }
@@ -300,6 +315,12 @@ fn redact_token(token: &str) -> String {
             for separator in ['=', ':'] {
                 let key = format!("{variant}{separator}");
                 if let Some(index) = boundary_match_index(&normalized, &key) {
+                    // A bare `token:`/`password=` token is a marker whose
+                    // value follows after whitespace, not an assignment with
+                    // an empty credential value.
+                    if index + key.len() == token.len() {
+                        continue;
+                    }
                     return format!(
                         "{}{}[REDACTED]",
                         &token[..index],
