@@ -2992,7 +2992,12 @@ pub fn parse_u64_env(
 fn renamed_env(primary: &str, legacy: &str) -> Option<String> {
     std::env::var(primary)
         .ok()
-        .or_else(|| std::env::var(legacy).ok())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var(legacy)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
 }
 
 /// Read gateway configuration from the process environment, bind the listener,
@@ -3125,6 +3130,16 @@ mod tests {
         assert_eq!(
             renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH").as_deref(),
             Some("wardnet.json")
+        );
+        unsafe { std::env::set_var("WARDNET_STATE_PATH", " ") };
+        assert_eq!(
+            renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH").as_deref(),
+            Some("legacy.json")
+        );
+        unsafe { std::env::set_var("WAF_IDS_STATE_PATH", "") };
+        assert_eq!(
+            renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH"),
+            None
         );
         clear_run_env();
     }
