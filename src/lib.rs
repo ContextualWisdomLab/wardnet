@@ -867,8 +867,31 @@ async fn evaluate_egress_destination(
     if !admin_authorized(&state, &headers) {
         return error(StatusCode::FORBIDDEN, "admin principal is read-only");
     }
+    if destination::validate_outbound_url(request.url.trim()).is_err() {
+        return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
+    }
     let decision = match state.resolve_outbound(request.url.trim()).await {
         Ok(decision) => decision,
+        Err(message)
+            if message.contains("DNS timed out")
+                || message.contains("DNS capacity timed out") =>
+        {
+            return error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "destination DNS evaluation timed out",
+            );
+        }
+        Err(message)
+            if message.contains("DNS failed")
+                || message.contains("resolved to no addresses")
+                || message.contains("DNS capacity closed")
+                || message.contains("evaluation cancelled") =>
+        {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "destination DNS evaluation is unavailable",
+            );
+        }
         Err(_) => return error(StatusCode::FORBIDDEN, "destination policy denied the URL"),
     };
     let actor = audit_actor(&state, &headers);
@@ -10029,6 +10052,20 @@ mod tests {
             .status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/egress",
+                    Some("writer"),
+                    &serde_json::json!({"url": "not-a-url"}),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
         let evaluated: serde_json::Value = json_body(
             app_request(
                 &app,
@@ -10064,6 +10101,26 @@ mod tests {
                 && entry.resource_id == "camoufox.example.test"
                 && entry.actor == "w"
         }));
+
+        let unavailable = build_app(
+            AppState::seeded(None)
+                .with_admin_tokens(parse_admin_tokens("writer:w:write"))
+                .with_resolver(Arc::new(PinMapResolver(HashMap::new()))),
+        );
+        assert_eq!(
+            app_request(
+                &unavailable,
+                json_request(
+                    Method::POST,
+                    "/api/egress",
+                    Some("writer"),
+                    &serde_json::json!({"url": "https://unavailable.example.test/"}),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]

@@ -25,8 +25,11 @@ paths:
                 url: { type: string, format: uri }
       responses:
         '200': { description: Destination allowed, DNS-pinned, persisted and audited }
+        '400': { description: Structurally invalid destination URL }
         '401': { description: Missing or invalid admin credential }
         '403': { description: Read-only principal or destination denied }
+        '503': { description: Destination DNS evaluation unavailable }
+        '504': { description: Destination DNS evaluation timed out }
         '500': { description: Audit persistence failed and was rolled back }
 components:
   securitySchemes:

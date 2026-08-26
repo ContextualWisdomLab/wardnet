@@ -312,6 +312,11 @@ fn parse_outbound_url(raw: &str) -> Result<ParsedOutbound, String> {
     })
 }
 
+/// Validate the structural URL boundary without performing DNS resolution.
+pub(crate) fn validate_outbound_url(raw: &str) -> Result<(), String> {
+    parse_outbound_url(raw).map(|_| ())
+}
+
 fn host_is_ambiguous_literal(host: &str) -> bool {
     if host.chars().all(|c| c.is_ascii_digit()) {
         return true;
