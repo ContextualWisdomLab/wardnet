@@ -3743,10 +3743,15 @@ async fn record_event(
     let action = action.to_string();
     let path = path.to_string();
     let event_limit = state.event_limit;
-    let _guard = state.persist_lock.lock().await;
+    let durable = state.control_plane.is_some() || state.state_path.is_some();
+    let _guard = if durable {
+        Some(state.persist_lock.lock().await)
+    } else {
+        None
+    };
     let (event, previous) = {
         let mut data = state.inner.write().await;
-        let previous = data.clone();
+        let previous = durable.then(|| data.clone());
         let id = data.next_event_id;
         data.next_event_id += 1;
         let event = SecurityEvent {
@@ -3768,12 +3773,16 @@ async fn record_event(
     } else {
         // File/memory has no leased worker; emit the SIEM line on the request path.
         println!("{}", security_event_log_line(&event));
-        let snapshot = state.inner.read().await.clone();
-        state.persist_snapshot(&snapshot).await
+        if state.state_path.is_some() {
+            let snapshot = state.inner.read().await.clone();
+            state.persist_snapshot(&snapshot).await
+        } else {
+            Ok(())
+        }
     };
     if let Err(error) = persist {
         let mut data = state.inner.write().await;
-        *data = previous;
+        *data = previous.expect("durable event writes retain rollback state");
         eprintln!("failed to persist security event: {error}");
     }
 }

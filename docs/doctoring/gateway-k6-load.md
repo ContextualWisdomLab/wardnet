@@ -1,0 +1,63 @@
+# Gateway k6 load evidence
+
+## Contract
+
+`scripts/k6-gateway.sh` starts the real Rust server on an isolated loopback
+port and runs `tests/load/gateway.js` against the seeded monitored ingress
+route. The check fails on any HTTP error or response that did not traverse the
+expected route. k6 reports request rate and latency percentiles without turning
+an unapproved latency target into a release claim.
+
+The default scenario holds 32 concurrent virtual users for 30 seconds. Operators
+can set `K6_VUS` and `K6_DURATION` to reproduce a deployment-specific capacity
+test. A protected release still needs the same test against the deployed data
+plane, with a latency objective agreed for that deployment.
+
+```mermaid
+sequenceDiagram
+    participant K as k6 virtual users
+    participant G as Wardnet gateway
+    participant W as WAF decision path
+    participant M as Seeded mock upstream
+    K->>G: GET /gateway/demo/load
+    G->>W: route, rate-limit, and score
+    W-->>G: monitored
+    G->>M: select mock route
+    M-->>K: 200 monitored
+```
+
+## Run
+
+```bash
+scripts/k6-gateway.sh
+K6_VUS=64 K6_DURATION=60s scripts/k6-gateway.sh
+```
+
+The harness uses in-memory state so this scenario measures the asynchronous
+gateway decision path rather than local state-file durability. PostgreSQL and
+real-upstream load profiles remain separate deployment acceptance tests.
+
+## Local evidence — 2026-08-27T03:42+09:00
+
+On the local macOS 26.5.1 arm64 development host, k6 2.2.0 produced the
+following 15-second comparison against the same exact binary and monitored
+mock route:
+
+| State | Users | Requests/s | p95 | Failed requests |
+| --- | ---: | ---: | ---: | ---: |
+| Before removing no-op in-memory state clones | 32 | 607.12 | 154.06 ms | 0 / 9,156 |
+| Before removing no-op in-memory state clones | 64 | 378.73 | 432.36 ms | 0 / 5,810 |
+| After removing no-op in-memory state clones | 32 | 3,902.28 | 19.00 ms | 0 / 58,576 |
+| After removing no-op in-memory state clones | 64 | 2,925.91 | 77.28 ms | 0 / 43,934 |
+
+The bottleneck was full `AppData` rollback and persistence-snapshot cloning on
+every request even when neither a state file nor PostgreSQL existed. Wardnet
+now skips that impossible rollback work only in memory mode. Durable adapters
+retain serialization, snapshots, and rollback. The remaining throughput drop
+between 32 and 64 users should be profiled against the deployed persistence and
+upstream path before setting a service-level objective.
+
+## References
+
+Grafana Labs. (n.d.). *Grafana k6 documentation*. Retrieved August 27, 2026,
+from https://grafana.com/docs/k6/latest/
