@@ -184,9 +184,6 @@ pub fn listen_is_loopback_only(bind_addr: &str) -> bool {
     let Some(host) = bind_host(trimmed) else {
         return false;
     };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
     host.parse::<std::net::IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
@@ -447,8 +444,8 @@ mod tests {
         assert!(listen_is_loopback_only("127.0.0.1:0"));
         assert!(listen_is_loopback_only("127.0.0.1:8080"));
         assert!(listen_is_loopback_only("[::1]:8080"));
-        assert!(listen_is_loopback_only("localhost:8080"));
-        assert!(listen_is_loopback_only("LOCALHOST:9"));
+        assert!(!listen_is_loopback_only("localhost:8080"));
+        assert!(!listen_is_loopback_only("LOCALHOST:9"));
         assert!(!listen_is_loopback_only("0.0.0.0:0"));
         assert!(!listen_is_loopback_only("0.0.0.0:8080"));
         assert!(!listen_is_loopback_only("[::]:8080"));
