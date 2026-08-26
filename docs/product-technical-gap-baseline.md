@@ -1,9 +1,9 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-27T03:59+09:00 (exact-head inventory of open GitHub PRs
+Snapshot date: 2026-08-27T05:53+09:00 (exact-head inventory of open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
-## Current delivery evidence — 2026-08-27T03:59+09:00
+## Current delivery evidence — 2026-08-27T05:53+09:00
 
 Protected `main` is `107117634764c901dff540044585d64088fafedb`. The active
 organization ruleset `18156473` requires one independent approval, resolved
@@ -14,25 +14,27 @@ delivery evidence.
 
 | PR | Exact head | Base | Current evidence / blocker |
 | --- | --- | --- | --- |
-| #115 official threat feeds | `1db1b96952eddde29ec9b54ac502d33c345636be` | `main` | blocked; review required and exact-head checks required |
-| #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
-| #112 route lifecycle API | `4fc314a1011f3d15ae9cd8fa32db190621ee36fa` | `main` | review required; exact-head checks required |
-| #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
-| #95 in-path Coraza and accumulated production stack | `6aa8e237cc6b9556ea0ddd0796803e8d69db0096` | `main` | #105, MCP #117, DNSBL #118, and k6 #119 merged; explicit interruptions win over advisory severity hits; exact-head checks and independent approval required |
-| #94 fail-closed public admin auth | `094f653a0545436384762adf585e912373425de7` | `main` | blocked; exact-head review/check evidence required |
-| #93 deterministic persistence fault seam | `3663c57373df4f3edcd0c1cfdf1deb18f461b91c` | `main` | stale change request and exact-head checks required |
-| #90 SIEM/OpenTelemetry export | `d451eb408d4c5e833ad0156334eb87b44476f625` | `main` | exact-head review/check evidence required |
+| #115 official threat feeds | `7ab2108c53dbd59f1170c09355148cab0cf2e675` | `main` | blocked; review required and exact-head checks required |
+| #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | review required; refreshed exact-head Strix required |
+| #112 route lifecycle API | `f6b5978c4f61910285d3a997afa9fdfdf2f1fc5f` | `main` | review required; refreshed exact-head Strix required |
+| #111 accepted ADR set | `95f27199acc2eef1108598ccb8baa38a87bfe768` | `main` | all exact-head checks green and review thread resolved; one independent approval required |
+| #95 in-path Coraza and accumulated production stack | `cc83ded9ddc93ea21ed83d8c89d142fe1b085f7b` | `main` | #105, MCP #117, DNSBL #118/#122, and k6 #119/#121 merged; startup SIGTERM readiness race fixed; refreshed Strix and one independent approval required |
+| #94 fail-closed public admin auth | `d7fa9a16a796f17ceb86892ab62390aead0a80c3` | `main` | exact-head review and refreshed Strix required |
+| #93 deterministic persistence fault seam | `b38feb94894dc3419a7b31e492d3bba002c1b526` | `main` | stale change request and refreshed Strix required |
+| #90 SIEM/OpenTelemetry export | `7a5d2b57444a7190e90a1b679a48a5502b8b8bf9` | `main` | exact-head review/check evidence required |
 | #88 LiteLLM virtual-key ingress guard | `cbe21a11ab4e16cb932544f229aa698c9c54b773` | `main` | exact-head review/check evidence required |
-| #77 Rust toolchain refresh | `b87e3ec4bd96731f0d0c55232dd702c12a1442c8` | `main` | stale change request; Strix failure |
+| #77 Rust toolchain refresh | `17cca73671125f4dd5b8ce59a60a42f29c0e3d93` | `main` | stale change request; Strix failure |
 | #72 external admin secret | `892f9277ba86831a449fa6808a63b44eacab793f` | `main` | stale change request; Strix failure |
 
-The central Strix live-model repair remains unmerged: prerequisite
-`ContextualWisdomLab/.github#1356` at `418413d6b8f859036564ac8a66aa77f108282472`
-updates the protected smoke contract, then `#1297` at
-`9e7dbcaf7dba88affaf823f1829ad757453cbae0` resolves current NVIDIA catalog
-models with direct-OpenAI fallback.
-Only passing exact-head reruns after those protected merges are acceptance
-evidence.
+The central Strix live-model repair remains unmerged. Prerequisite
+`ContextualWisdomLab/.github#1356` is merged; `#1297` is now at
+`1cd261b84edb2a34ec35470647821e44741a3757`. It resolves current NVIDIA
+catalog models, retries the authenticated OpenRouter dynamic router on its
+provider-scoped transient 502, and retains direct OpenAI as the final
+cross-provider fallback. The trusted-main smoke transition passes on this
+head; its authoritative model scan and remaining hosted checks are still
+running. Only a protected merge and passing consumer exact-head reruns are
+acceptance evidence.
 
 ### Surface completion matrix
 
@@ -46,10 +48,14 @@ evidence.
 | Ingress reverse proxy | partial | `/gateway/{*path}` decision loop; stacked k6 harness records zero-failure monitored decisions at 32/64 concurrent local users and removes no-op in-memory state clones | headers, streaming/upgrades, trusted client attribution, TLS, arrival-rate capacity and durable/deployed k6 evidence |
 | Wardnet naming | incomplete | #114 exact-head rename | protected merge and image/deployment/runtime smoke evidence |
 
-There is no verified Wardnet hourly maintenance scheduler execution. Nightly
-fuzz and weekly scorecard runs do not prove the requested hourly PR/review/gap
-loop. Acceptance requires a durable caller that rereads live PR and issue state,
-plus at least one recorded successful scheduled run.
+A durable Wardnet hourly maintenance caller is registered as launchd label
+`com.contextualwisdomlab.wardnet-hourly` with `StartInterval=3600`. Its prompt
+re-reads repository instructions, product documents, live PR/issue/review/check/
+ruleset state, and this baseline before each loop. The first triggered run
+completed on 2026-08-27 with `runs=1` and exit code `0`; registration plus that
+successful execution proves the caller is operational. A single local run does
+not prove long-term schedule reliability, so subsequent run history and emitted
+changes remain operability evidence to retain.
 
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
 **$20 billion USD** figure is the long-loop quality bar for this program, not a
