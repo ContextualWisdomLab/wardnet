@@ -43,7 +43,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           docker build -t "${image}:${tag}" .
           push_out="$(docker push "${image}:${tag}")"
-          digest="$(printf '%s\n' "$push_out" | awk '/digest:/{d=$NF} END{print d}')"
+          digest="$(printf '%s\n' "$push_out" | awk '{for (i=1;i<=NF;i++) if ($i ~ /^sha256:/) d=$i} END{print d}')"
           test -n "$digest"
           ref="${image}@${digest}"
           printf '%s\n' "$ref" > dist/IMAGE-DIGEST.txt
