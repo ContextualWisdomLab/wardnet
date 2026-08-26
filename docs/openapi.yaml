@@ -1,0 +1,119 @@
+openapi: 3.1.0
+info:
+  title: Wardnet operator API
+  version: 0.1.0
+  description: Operator contract for the route lifecycle. Legacy collection POST remains supported.
+paths:
+  /api/routes:
+    get:
+      summary: List gateway routes
+      responses:
+        '200':
+          description: Route collection
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Route' }
+    post:
+      summary: Legacy route upsert
+      security: [{ AdminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Route' }
+      responses:
+        '201': { description: Route upserted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/routes/{route_id}:
+    parameters:
+      - name: route_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get one route and its concurrency token
+      responses:
+        '200':
+          description: Route
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Route' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Create or conditionally replace one route
+      security: [{ AdminToken: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Required when the route already exists.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Route' }
+      responses:
+        '200': { description: Route replaced }
+        '201': { description: Route created }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { description: ETag does not match }
+        '428': { description: If-Match required for an existing route }
+    delete:
+      summary: Conditionally delete one route
+      security: [{ AdminToken: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: Route deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { description: ETag does not match }
+        '428': { description: If-Match required }
+components:
+  securitySchemes:
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+  schemas:
+    Route:
+      type: object
+      additionalProperties: false
+      required: [id, path_prefix, upstream, mode, enabled]
+      properties:
+        id: { type: string, minLength: 1 }
+        path_prefix: { type: string, pattern: '^/' }
+        upstream: { type: string }
+        mode: { type: string, enum: [monitor, block] }
+        enabled: { type: boolean }
+        block_threshold: { type: [integer, 'null'], minimum: 1, maximum: 100 }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+  responses:
+    BadRequest:
+      description: Invalid route or path/body identity mismatch
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Missing or invalid admin credential
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Authenticated principal is read-only
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Route not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }

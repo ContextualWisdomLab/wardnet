@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -442,6 +442,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/api/version", get(version))
         .route("/api/routes", get(list_routes).post(create_route))
+        .route(
+            "/api/routes/{route_id}",
+            get(get_route).put(replace_route).delete(delete_route),
+        )
         .route("/api/threats", get(list_threats).post(create_threat))
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
@@ -868,6 +872,136 @@ async fn create_route(
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
+}
+
+async fn get_route(
+    State(state): State<AppState>,
+    PathParam(route_id): PathParam<String>,
+) -> Response {
+    let data = state.inner.read().await;
+    let Some(route) = data.routes.iter().find(|route| route.id == route_id) else {
+        return error(StatusCode::NOT_FOUND, "route not found");
+    };
+    route_response(StatusCode::OK, route)
+}
+
+/// Replaces one route. Existing routes require the ETag returned by GET in
+/// `If-Match`; a missing route is created without a precondition.
+async fn replace_route(
+    State(state): State<AppState>,
+    PathParam(route_id): PathParam<String>,
+    headers: HeaderMap,
+    Json(route): Json<RouteConfig>,
+) -> Response {
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
+    }
+    if route.id != route_id {
+        return error(StatusCode::BAD_REQUEST, "path route_id must match body id");
+    }
+    if let Err(message) = validate_route(&route) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    let expected = headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok());
+    let actor = audit_actor(&state, &headers);
+    match state
+        .mutate_and_persist(|data| {
+            let existing = data.routes.iter().find(|item| item.id == route_id);
+            let existed = existing.is_some();
+            match existing {
+                Some(_) if expected.is_none() => Err((
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "If-Match is required when replacing an existing route".to_string(),
+                )),
+                Some(current) if expected != Some(route_etag(current).as_str()) => Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "route changed; GET the latest representation and retry".to_string(),
+                )),
+                _ => {
+                    let status = if existed {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    };
+                    let saved = upsert_route(&mut data.routes, route.clone());
+                    record_successful_audit_log(
+                        data,
+                        actor,
+                        "replace_route",
+                        "route",
+                        saved.id.clone(),
+                    );
+                    Ok((status, saved))
+                }
+            }
+        })
+        .await
+    {
+        Ok(Ok((status, saved))) => route_response(status, &saved),
+        Ok(Err((status, message))) => error(status, message),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn delete_route(
+    State(state): State<AppState>,
+    PathParam(route_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
+    }
+    let expected = headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok());
+    let actor = audit_actor(&state, &headers);
+    match state
+        .mutate_and_persist(|data| {
+            let Some(index) = data.routes.iter().position(|route| route.id == route_id) else {
+                return Err((StatusCode::NOT_FOUND, "route not found".to_string()));
+            };
+            if expected.is_none() {
+                return Err((
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "If-Match is required when deleting a route".to_string(),
+                ));
+            }
+            if expected != Some(route_etag(&data.routes[index]).as_str()) {
+                return Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "route changed; GET the latest representation and retry".to_string(),
+                ));
+            }
+            data.routes.remove(index);
+            record_successful_audit_log(data, actor, "delete_route", "route", route_id.clone());
+            Ok(())
+        })
+        .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err((status, message))) => error(status, message),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn route_response(status: StatusCode, route: &RouteConfig) -> Response {
+    let mut response = (status, Json(route.clone())).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&route_etag(route)).expect("route ETags contain only ASCII"),
+    );
+    response
+}
+
+fn route_etag(route: &RouteConfig) -> String {
+    let bytes = serde_json::to_vec(route).expect("RouteConfig is JSON-serializable");
+    let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("\"{hash:016x}\"")
 }
 
 async fn list_threats(State(state): State<AppState>) -> Json<Vec<ThreatIndicator>> {
@@ -2374,6 +2508,18 @@ fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     presented.is_some_and(|actual| actual == expected)
 }
 
+fn management_write_denied(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if admin_authorized(state, headers) {
+        return None;
+    }
+    let (status, message) = if admin_authenticated(state, headers) {
+        (StatusCode::FORBIDDEN, "admin principal is read-only")
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token")
+    };
+    Some(error(status, message))
+}
+
 fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
     // Prefer the actor bound to the presented RBAC token, then an explicit
     // actor header, then a generic label. The token itself is never logged.
@@ -3472,6 +3618,111 @@ mod tests {
         let mut named = HeaderMap::new();
         named.insert("x-admin-actor", "carol".parse().unwrap());
         assert_eq!(audit_actor(&state, &named), "carol");
+    }
+
+    #[tokio::test]
+    async fn route_item_api_enforces_etag_rbac_and_audits_delete() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("reader:r:readonly,writer:w:write"));
+        let app = build_app(state);
+
+        let get_response = app_request(&app, empty_request(Method::GET, "/api/routes/demo")).await;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let etag = get_response.headers().get(header::ETAG).unwrap().clone();
+        let missing = app_request(&app, empty_request(Method::GET, "/api/routes/missing")).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let replacement = serde_json::json!({
+            "id": "demo",
+            "path_prefix": "/demo-v2",
+            "upstream": "mock://demo-upstream",
+            "mode": "block",
+            "enabled": true
+        });
+        let readonly = app_request(
+            &app,
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/routes/demo")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "reader")
+                .header(header::IF_MATCH, etag.clone())
+                .body(Body::from(replacement.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(readonly.status(), StatusCode::FORBIDDEN);
+
+        let no_precondition = app_request(
+            &app,
+            json_request(
+                Method::PUT,
+                "/api/routes/demo",
+                Some("writer"),
+                &replacement,
+            ),
+        )
+        .await;
+        assert_eq!(no_precondition.status(), StatusCode::PRECONDITION_REQUIRED);
+
+        let replaced = app_request(
+            &app,
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/routes/demo")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "writer")
+                .header(header::IF_MATCH, etag)
+                .body(Body::from(replacement.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(replaced.status(), StatusCode::OK);
+        let replacement_etag = replaced.headers().get(header::ETAG).unwrap().clone();
+
+        let stale_delete = app_request(
+            &app,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/routes/demo")
+                .header("x-admin-token", "writer")
+                .header(header::IF_MATCH, "\"stale\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stale_delete.status(), StatusCode::PRECONDITION_FAILED);
+
+        let deleted = app_request(
+            &app,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/routes/demo")
+                .header("x-admin-token", "writer")
+                .header(header::IF_MATCH, replacement_etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            app_request(&app, empty_request(Method::GET, "/api/routes/demo"))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "delete_route" && entry.resource_id == "demo" && entry.actor == "w"
+        }));
     }
 
     #[tokio::test]
