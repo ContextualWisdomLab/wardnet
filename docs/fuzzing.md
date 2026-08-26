@@ -20,6 +20,7 @@ entry points for arbitrary input.
 | `fuzz_appdata_json`         | `serde_json::from_str::<AppData>` (state file) | no panic; parsed values round-trip through serde |
 | `fuzz_parse_admin_tokens`   | `waf_ids_ai_soc::parse_admin_tokens`        | no panic; no empty token key; no empty principal actor value |
 | `fuzz_dnsbl_zone`           | `waf_ids_core::export_dnsbl_zone` / `validate_dnsbl` | no panic; every TXT payload fully escaped (no zone break-out); every published A-record response code is an IPv4 loopback literal (127.0.0.0/8) |
+| `fuzz_siem_event_batch`     | `waf_ids_ai_soc::siem_event_input::read_events` | no panic on arbitrary bytes; parsing stays bounded and fails closed before returning a partial batch |
 
 ## Layout
 
