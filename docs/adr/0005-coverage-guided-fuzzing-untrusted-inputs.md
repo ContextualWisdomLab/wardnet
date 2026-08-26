@@ -18,8 +18,8 @@ generated, often malformed inputs, and treat coverage-guided fuzzing
 as a primary engineering method for finding crashes and invariant
 violations on those surfaces. This ADR cites that **published** IEEE
 Transactions on Software Engineering article as primary. The 2018
-arXiv posting is the **preprint** of the same work (Manes et al.,
-2018/2019) and is already vendored in-repo. No other fuzzing paper is
+arXiv posting is the **preprint** of the same work (Manès et al.,
+2018) and is already vendored in-repo. No other fuzzing paper is
 cited.
 
 ## Decision
@@ -62,7 +62,7 @@ fuzzing: A survey. *IEEE Transactions on Software Engineering,
 title, volume 47 issue 11, pages 2312–2331, date 2021-11-01. DOI
 resolver reached `https://ieeexplore.ieee.org/document/8863940/`.)*
 
-Manes, V. J. M., Han, H., Han, C., Cha, S. K., Egele, M., Schwartz,
+Manès, V. J. M., Han, H., Han, C., Cha, S. K., Egele, M., Schwartz,
 E. J., & Woo, M. (2018). The art, science, and engineering of
 fuzzing: A survey. *arXiv*.
 https://doi.org/10.48550/arXiv.1812.00140
