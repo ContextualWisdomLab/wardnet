@@ -10,7 +10,7 @@ Snapshot: 2026-08-26, `origin/main` at `107117634764c901dff540044585d64088fafedb
 | IDS | `POST /api/ids/suricata/eve` | No sensor registration, sensor health, or EVE cursor/checkpoint API. |
 | AI SOC | `GET /api/soc/llm-config`, `POST /api/soc/analyze` | No analysis job/history/feedback lifecycle. |
 | Events and KPIs | `GET /api/events`, `/api/events.ndjson`, `/api/kpis`, `/api/audit-logs` | Event and audit cursor pagination, time ranges, acknowledgement/case state, and retention controls remain absent. |
-| DNSBL | `GET/POST /api/dnsbl`, `GET /dnsbl/zone` | Individual lookup/update/delete and serial/conditional zone transfer contracts remain absent. |
+| DNSBL | `GET/POST /api/dnsbl`, `GET/PUT/DELETE /api/dnsbl/{address}`, `GET /dnsbl/zone` | Serial/conditional zone transfer contracts remain absent. |
 | Threat intelligence | `GET /api/threats`, `GET /api/threat-feeds`, `/freshness`; import endpoints for generic feeds, phishing-database, STIX, MISP, TAXII, and OpenCTI | Individual indicator/feed lifecycle and import idempotency keys remain absent. |
 | APIM and load balancing | Route CRUD and prefix-based upstream proxying | No upstream pool/member, health-check, retry/circuit-breaker, API consumer, quota, or API-key lifecycle. These need persisted models before endpoints. |
 | Credentials and config | Admin token RBAC; integration config status views | No credential registry CRUD/rotation metadata API. Secret values must never be returned. Operational config still lacks a durable KV model. |
@@ -30,3 +30,11 @@ New clients should use the item resource:
   persisted and audited.
 
 The machine-readable contract is [openapi.yaml](openapi.yaml).
+
+## DNSBL resource contract
+
+- `GET /api/dnsbl/{address}` returns one IPv4 or IPv6 entry and an `ETag` header.
+- `PUT /api/dnsbl/{address}` creates a missing entry. Replacing an existing entry requires
+  `If-Match`; the path and body addresses must match.
+- `DELETE /api/dnsbl/{address}` requires `If-Match` and returns `204`.
+- Writes use the same write-capable admin, persistence, rollback, and audit contract as routes.

@@ -473,6 +473,10 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/threats", get(list_threats).post(create_threat))
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
+        .route(
+            "/api/dnsbl/{address}",
+            get(get_dnsbl).put(replace_dnsbl).delete(delete_dnsbl),
+        )
         .route("/api/events", get(list_events))
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/events.ndjson", get(events_ndjson))
@@ -1083,6 +1087,149 @@ async fn create_threat(
 
 async fn list_dnsbl(State(state): State<AppState>) -> Json<Vec<DnsblEntry>> {
     Json(state.inner.read().await.dnsbl.clone())
+}
+
+async fn get_dnsbl(
+    State(state): State<AppState>,
+    PathParam(address): PathParam<IpAddr>,
+) -> Response {
+    let data = state.inner.read().await;
+    let Some(entry) = data.dnsbl.iter().find(|entry| entry.address == address) else {
+        return error(StatusCode::NOT_FOUND, "DNSBL entry not found");
+    };
+    dnsbl_response(StatusCode::OK, entry)
+}
+
+async fn replace_dnsbl(
+    State(state): State<AppState>,
+    PathParam(address): PathParam<IpAddr>,
+    headers: HeaderMap,
+    Json(entry): Json<DnsblEntry>,
+) -> Response {
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
+    }
+    if entry.address != address {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "path address must match body address",
+        );
+    }
+    if let Err(message) = validate_dnsbl(&entry) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let expected = headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok());
+    let actor = audit_actor(&state, &headers);
+    match state
+        .try_mutate_and_persist(|data| {
+            let existing = data.dnsbl.iter().find(|item| item.address == address);
+            let existed = existing.is_some();
+            match existing {
+                None if expected.is_some() => Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "If-Match requires an existing DNSBL entry".to_string(),
+                )),
+                Some(_) if expected.is_none() => Err((
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "If-Match is required when replacing an existing DNSBL entry".to_string(),
+                )),
+                Some(current) if !if_match_satisfied(expected, &dnsbl_etag(current)) => Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "DNSBL entry changed; GET the latest representation and retry".to_string(),
+                )),
+                _ => {
+                    let status = if existed {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CREATED
+                    };
+                    let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
+                    record_successful_audit_log(
+                        data,
+                        actor,
+                        "replace_dnsbl",
+                        "dnsbl_entry",
+                        saved.address.to_string(),
+                    );
+                    Ok((status, saved))
+                }
+            }
+        })
+        .await
+    {
+        Ok(Ok((status, saved))) => dnsbl_response(status, &saved),
+        Ok(Err((status, message))) => error(status, message),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn delete_dnsbl(
+    State(state): State<AppState>,
+    PathParam(address): PathParam<IpAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
+    }
+    let expected = headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok());
+    if expected.is_none() {
+        return error(
+            StatusCode::PRECONDITION_REQUIRED,
+            "If-Match is required when deleting a DNSBL entry",
+        );
+    }
+    let actor = audit_actor(&state, &headers);
+    match state
+        .try_mutate_and_persist(|data| {
+            let Some(index) = data.dnsbl.iter().position(|entry| entry.address == address) else {
+                return Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "If-Match requires an existing DNSBL entry".to_string(),
+                ));
+            };
+            if !if_match_satisfied(expected, &dnsbl_etag(&data.dnsbl[index])) {
+                return Err((
+                    StatusCode::PRECONDITION_FAILED,
+                    "DNSBL entry changed; GET the latest representation and retry".to_string(),
+                ));
+            }
+            data.dnsbl.remove(index);
+            record_successful_audit_log(
+                data,
+                actor,
+                "delete_dnsbl",
+                "dnsbl_entry",
+                address.to_string(),
+            );
+            Ok(())
+        })
+        .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err((status, message))) => error(status, message),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn dnsbl_response(status: StatusCode, entry: &DnsblEntry) -> Response {
+    let mut response = (status, Json(entry.clone())).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&dnsbl_etag(entry)).expect("DNSBL ETags contain only ASCII"),
+    );
+    response
+}
+
+fn dnsbl_etag(entry: &DnsblEntry) -> String {
+    let bytes = serde_json::to_vec(entry).expect("DnsblEntry is JSON-serializable");
+    let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("\"{hash:016x}\"")
 }
 
 async fn create_dnsbl(
@@ -3820,6 +3967,124 @@ mod tests {
         .await;
         assert!(audit.iter().any(|entry| {
             entry.action == "delete_route" && entry.resource_id == "demo" && entry.actor == "w"
+        }));
+    }
+
+    #[tokio::test]
+    async fn dnsbl_item_api_enforces_identity_etag_rbac_and_audits_delete() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("reader:r:readonly,writer:w:write"));
+        let app = build_app(state);
+        let uri = "/api/dnsbl/203.0.113.10";
+
+        let current = app_request(&app, empty_request(Method::GET, uri)).await;
+        assert_eq!(current.status(), StatusCode::OK);
+        let etag = current.headers().get(header::ETAG).unwrap().clone();
+        assert_eq!(
+            app_request(&app, empty_request(Method::GET, "/api/dnsbl/198.51.100.1"))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let replacement = serde_json::json!({
+            "address": "203.0.113.10",
+            "code": "127.0.0.3",
+            "reason": "updated scanner",
+            "source": "operator",
+            "ttl_seconds": 600
+        });
+        let readonly = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-admin-token", "reader")
+            .header(header::IF_MATCH, etag.clone())
+            .body(Body::from(replacement.to_string()))
+            .unwrap();
+        assert_eq!(
+            app_request(&app, readonly).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let mismatch = serde_json::json!({
+            "address": "198.51.100.1",
+            "code": "127.0.0.3",
+            "reason": "updated scanner",
+            "source": "operator",
+            "ttl_seconds": 600
+        });
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::PUT, uri, Some("writer"), &mismatch)
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::PUT, uri, Some("writer"), &replacement)
+            )
+            .await
+            .status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let replace = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-admin-token", "writer")
+            .header(header::IF_MATCH, etag)
+            .body(Body::from(replacement.to_string()))
+            .unwrap();
+        assert_eq!(app_request(&app, replace).await.status(), StatusCode::OK);
+        assert_eq!(
+            app_request(
+                &app,
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(uri)
+                    .header("x-admin-token", "writer")
+                    .header(header::IF_MATCH, "\"stale\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(uri)
+                    .header("x-admin-token", "writer")
+                    .header(header::IF_MATCH, "*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "delete_dnsbl"
+                && entry.resource_id == "203.0.113.10"
+                && entry.actor == "w"
         }));
     }
 
