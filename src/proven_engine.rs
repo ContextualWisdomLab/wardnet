@@ -186,8 +186,8 @@ pub const FORWARDED_HEADER_LIMIT: usize = 32;
 pub const FORWARDED_HEADERS_MAX_BYTES: usize = 8_192;
 
 /// Bounded allowlist of request headers forwarded to Coraza. `Authorization`
-/// is deliberately absent: credentials must not leave the gateway into sidecar
-/// logs, and CRS coverage for it does not justify the exposure.
+/// and `Cookie` are deliberately absent: bearer credentials must not leave the
+/// gateway into sidecar logs, and CRS coverage does not justify the exposure.
 pub fn engine_forwarded_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)> {
     let allowlist = [
         "host",
@@ -199,7 +199,6 @@ pub fn engine_forwarded_headers(headers: &axum::http::HeaderMap) -> Vec<(String,
         "x-requested-with",
         "x-forwarded-for",
         "x-real-ip",
-        "cookie",
     ];
     let mut forwarded: Vec<(String, String)> = Vec::new();
     let mut total = 0usize;
@@ -286,9 +285,14 @@ pub async fn evaluate_sidecar(
                         // page) fall back to the interrupted evidence so a
                         // real CRS block never downgrades to allow.
                         match outcome {
-                            ProvenEngineOutcome::Hit(hit) => ProvenEngineOutcome::Hit(hit),
+                            ProvenEngineOutcome::Hit(mut hit) => {
+                                hit.interrupted = true;
+                                hit.action = "block".to_string();
+                                ProvenEngineOutcome::Hit(hit)
+                            }
                             _ => ProvenEngineOutcome::Hit(CorazaIngestedHit {
                                 client_ip,
+                                interrupted: true,
                                 action: "block".to_string(),
                                 reason: "coraza/crs: transaction interrupted".to_string(),
                                 score: 50,
@@ -387,7 +391,7 @@ mod tests {
 
         let forwarded = engine_forwarded_headers(&headers);
         let names: Vec<&str> = forwarded.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, vec!["host", "user-agent", "cookie"]);
+        assert_eq!(names, vec!["host", "user-agent"]);
 
         let mut oversized = axum::http::HeaderMap::new();
         let big_value = "x".repeat(FORWARDED_HEADERS_MAX_BYTES + 1);
@@ -447,10 +451,33 @@ mod tests {
         {
             ProvenEngineOutcome::Hit(hit) => {
                 assert_eq!(hit.action, "block");
+                assert!(hit.interrupted);
                 assert!(hit.reason.contains("interrupted"), "{}", hit.reason);
                 assert_eq!(hit.path, "/app?q=crs-probe=1");
             }
             other => panic!("expected interruption hit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn severity_message_without_interruption_is_evidence_only() {
+        let raw = r#"{
+          "transaction": {
+            "is_interrupted": false,
+            "request": { "uri": "/allowed" },
+            "response": { "http_code": 200 }
+          },
+          "messages": [{
+            "message": "CRS match below anomaly threshold",
+            "data": { "id": 920001, "severity": 2 }
+          }]
+        }"#;
+        match outcome_from_sidecar_body(raw) {
+            ProvenEngineOutcome::Hit(hit) => {
+                assert!(!hit.interrupted);
+                assert_eq!(hit.action, "block", "audit classification is preserved");
+            }
+            other => panic!("expected evidence hit, got {other:?}"),
         }
     }
 

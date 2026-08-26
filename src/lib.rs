@@ -2970,9 +2970,8 @@ async fn gateway(
         .await;
     }
     if let ProvenEngineOutcome::Hit(hit) = &engine_outcome {
-        let enforcing_block = hit.action == "block" && route.mode == EnforcementMode::Block;
-        let threshold_hit = hit.score >= route.block_threshold.unwrap_or(BLOCK_SCORE);
-        if !(enforcing_block || (threshold_hit && route.mode == EnforcementMode::Block)) {
+        let enforcing_block = hit.interrupted && route.mode == EnforcementMode::Block;
+        if !enforcing_block {
             // Monitor-mode routes and sub-threshold hits keep the CRS
             // evidence in the event stream instead of dropping it, while
             // enforcement stays a Block-route decision.
@@ -2989,7 +2988,7 @@ async fn gateway(
         }
     }
     if let ProvenEngineOutcome::Hit(hit) = &engine_outcome
-        && (hit.action == "block" || hit.score >= route.block_threshold.unwrap_or(BLOCK_SCORE))
+        && hit.interrupted
         && route.mode == EnforcementMode::Block
     {
         record_event(
@@ -6243,6 +6242,19 @@ mod tests {
                         }]
                     }))
                     .into_response()
+                } else if uri.contains("matched-only=1") {
+                    Json(serde_json::json!({
+                        "transaction": {
+                            "is_interrupted": false,
+                            "request": { "uri": uri },
+                            "response": { "http_code": 200 }
+                        },
+                        "messages": [{
+                            "message": "CRS match below anomaly threshold",
+                            "data": { "id": 920001, "severity": 2 }
+                        }]
+                    }))
+                    .into_response()
                 } else {
                     Json(serde_json::json!({
                         "transaction": {
@@ -6307,6 +6319,17 @@ mod tests {
         )
         .await;
         assert_eq!(allowed.status(), StatusCode::OK);
+
+        let matched_but_not_interrupted = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?matched-only=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(
+            matched_but_not_interrupted.status(),
+            StatusCode::OK,
+            "a CRS message is evidence, not an engine interruption"
+        );
 
         let blocked = app_request(
             &app,
@@ -6527,6 +6550,7 @@ mod tests {
             .header("X-Forwarded-For", "198.51.100.9")
             .header("User-Agent", "sqlmap/1.8")
             .header("Authorization", "Bearer must-not-forward")
+            .header("Cookie", "session=must-not-forward")
             .body(Body::empty())
             .unwrap();
         let response = app_request(&app, request).await;
@@ -6544,6 +6568,10 @@ mod tests {
         assert!(
             !names.contains(&"authorization"),
             "credentials must not reach the engine: {names:?}"
+        );
+        assert!(
+            !names.contains(&"cookie"),
+            "cookie credentials must not reach the engine: {names:?}"
         );
         let ua = headers
             .as_array()

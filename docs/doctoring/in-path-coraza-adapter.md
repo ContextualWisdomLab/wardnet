@@ -23,10 +23,11 @@ https://coraza.io/docs/
   events. Review-hardening this pass: the evaluate request now carries a
   bounded allowlist of client headers (`host`, `user-agent`, `accept`,
   `content-type`, `referer`, `origin`, `x-requested-with`, `x-forwarded-for`,
-  `x-real-ip`, `cookie` — never `Authorization`, capped at 32 headers /
-  8 KiB); responses are streamed with a 1 MiB cap; any non-success status
-  other than 403 is `Unavailable`; monitor-mode routes and sub-threshold hits
-  keep CRS evidence as `engine_hit` events; fail-open outages are recorded.
+  `x-real-ip` — never bearer credentials such as `Authorization` or `Cookie`,
+  capped at 32 headers / 8 KiB); responses are streamed with a 1 MiB cap; any
+  non-success status other than 403 is `Unavailable`. Live blocking requires
+  the engine's explicit interruption signal; non-interrupting CRS messages
+  remain `engine_hit` evidence. Fail-open outages are recorded.
 
 Scarfone, K., & Mell, P. (2007). *Guide to intrusion detection and prevention
 systems (IDPS)* (NIST Special Publication 800-94). National Institute of

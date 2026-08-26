@@ -196,11 +196,12 @@ holes on untouched handlers stay listed for later loops.
 
 Issue **#86** slice review-hardening (PR #95): forwarded-header allowlist to
 the engine (`host`/`user-agent`/`accept`/`content-type`/`referer`/`origin`/
-`x-requested-with`/`x-forwarded-for`/`x-real-ip`/`cookie`; never
-`Authorization`; 32 headers / 8 KiB caps), 1 MiB streamed response cap,
+`x-requested-with`/`x-forwarded-for`/`x-real-ip`; never bearer credentials such
+as `Authorization` or `Cookie`; 32 headers / 8 KiB caps), 1 MiB streamed response cap,
 explicit status contract (2xx parse, 403 interruption fallback, everything
 else `Unavailable`), `engine_hit` evidence on monitor-mode routes and
-sub-threshold hits, and `engine_unavailable` events for fail-open outages.
+sub-threshold hits, explicit-interruption-only live blocking, and
+`engine_unavailable` events for fail-open outages.
 Redirects were already disabled on the shared outbound client. Redistributable
 NIST SP 800-94 PDF committed to `docs/papers/` and cited in doctoring.
 

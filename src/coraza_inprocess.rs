@@ -362,6 +362,7 @@ unsafe fn hit_from_intervention(
     if ptr.is_null() {
         return ProvenEngineOutcome::Hit(CorazaIngestedHit {
             client_ip,
+            interrupted: true,
             action: "block".to_string(),
             reason: "coraza/crs: transaction interrupted".to_string(),
             score: 50,
@@ -392,6 +393,7 @@ unsafe fn hit_from_intervention(
     }
     ProvenEngineOutcome::Hit(CorazaIngestedHit {
         client_ip,
+        interrupted: true,
         action: action.to_string(),
         reason,
         score,
