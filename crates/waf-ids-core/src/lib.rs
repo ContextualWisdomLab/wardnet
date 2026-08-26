@@ -22,6 +22,8 @@ pub struct AppData {
     pub commercial: CommercialProfile,
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
+    #[serde(default = "official_threat_feed_registry")]
+    pub official_threat_feeds: Vec<OfficialThreatFeed>,
 }
 
 impl AppData {
@@ -56,8 +58,103 @@ impl AppData {
             next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
+            official_threat_feeds: official_threat_feed_registry(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OfficialThreatFeed {
+    pub source_id: String,
+    pub official_url: String,
+    pub parser: String,
+    pub indicator_types: Vec<String>,
+    pub attribution: String,
+    pub license_url: String,
+    pub refresh_interval_seconds: u64,
+    pub ttl_seconds: u64,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub last_attempt_unix: Option<u64>,
+    #[serde(default)]
+    pub last_success_unix: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub source_notice: Option<String>,
+}
+
+pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
+    [
+        (
+            "spamhaus-drop-v4",
+            "https://www.spamhaus.org/drop/drop_v4.json",
+            "spamhaus_drop_json",
+            &["ipv4_cidr"][..],
+            "The Spamhaus Project",
+            "https://www.spamhaus.org/blocklists/drop-fair-use-policy/",
+        ),
+        (
+            "spamhaus-drop-v6",
+            "https://www.spamhaus.org/drop/drop_v6.json",
+            "spamhaus_drop_json",
+            &["ipv6_cidr"][..],
+            "The Spamhaus Project",
+            "https://www.spamhaus.org/blocklists/drop-fair-use-policy/",
+        ),
+        (
+            "urlhaus-online",
+            "https://urlhaus-api.abuse.ch/v2/files/exports/{AUTH_KEY}/recent.csv",
+            "urlhaus_recent_csv",
+            &["url", "domain"][..],
+            "URLhaus by abuse.ch",
+            "https://abuse.ch/terms-of-use/",
+        ),
+        (
+            "threatfox-recent",
+            "https://threatfox-api.abuse.ch/api/v1/",
+            "threatfox_json",
+            &["domain", "ipv4", "ipv6"][..],
+            "ThreatFox by abuse.ch",
+            "https://abuse.ch/terms-of-use/",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(source_id, official_url, parser, indicator_types, attribution, license_url)| {
+            OfficialThreatFeed {
+                source_id: source_id.to_string(),
+                official_url: official_url.to_string(),
+                parser: parser.to_string(),
+                indicator_types: indicator_types
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+                attribution: attribution.to_string(),
+                license_url: license_url.to_string(),
+                refresh_interval_seconds: if source_id.starts_with("spamhaus") {
+                    86_400
+                } else {
+                    3_600
+                },
+                ttl_seconds: if source_id.starts_with("spamhaus") {
+                    172_800
+                } else {
+                    7_200
+                },
+                etag: None,
+                last_modified: None,
+                last_attempt_unix: None,
+                last_success_unix: None,
+                last_error: None,
+                source_notice: None,
+            }
+        },
+    )
+    .collect()
 }
 
 fn initial_audit_log_id() -> u64 {

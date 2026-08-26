@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -29,20 +29,25 @@ use waf_ids_core::{
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
     CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
-    NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
-    SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
-    ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus,
-    ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
+    NewAuditLogEntry, OfficialThreatFeed, ProductEdition, ReadinessCheck, ReadinessStatus,
+    RouteConfig, ScoredRequest, SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot,
+    TARGET_SALE_VALUE_KRW, ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult,
+    ThreatFeedStatus, ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl,
+    score_request,
 };
 
 mod coraza_audit;
 mod credentials;
 mod misp_import;
+mod official_feeds;
 mod opencti_import;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_THREATFOX_AUTH_KEY, CRED_URLHAUS_AUTH_KEY,
+    CredentialRegistry, CredentialSource,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -56,6 +61,11 @@ pub struct AppState {
     admin_tokens: HashMap<String, AdminPrincipal>,
     /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
     credentials_source: CredentialSource,
+    credentials: CredentialRegistry,
+    // ponytail: one refresh lock; split per source if concurrent feed refresh throughput matters.
+    official_feed_refresh_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    official_feed_url_overrides: HashMap<String, String>,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
@@ -126,6 +136,10 @@ impl AppState {
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
+            credentials: CredentialRegistry::empty(),
+            official_feed_refresh_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            official_feed_url_overrides: HashMap::new(),
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
@@ -178,6 +192,19 @@ impl AppState {
     /// Record how admin secrets were bootstrapped into the process (never values).
     pub fn with_credentials_source(mut self, source: CredentialSource) -> Self {
         self.credentials_source = source;
+        self
+    }
+
+    pub fn with_credential_registry(mut self, credentials: CredentialRegistry) -> Self {
+        self.credentials_source = credentials.source();
+        self.credentials = credentials;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_official_feed_url(mut self, source_id: &str, url: String) -> Self {
+        self.official_feed_url_overrides
+            .insert(source_id.to_string(), url);
         self
     }
 
@@ -463,6 +490,14 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threat-feeds", get(list_threat_feeds))
         .route("/api/threat-feeds/freshness", get(threat_feed_freshness))
         .route("/api/threat-feeds/import", post(import_threat_feed))
+        .route(
+            "/api/official-threat-feeds",
+            get(list_official_threat_feeds),
+        )
+        .route(
+            "/api/official-threat-feeds/{source_id}/refresh",
+            post(refresh_official_threat_feed),
+        )
         .route(
             "/api/threat-feeds/import/phishing-database",
             post(import_phishing_database_feed),
@@ -1122,6 +1157,332 @@ async fn import_threat_feed(
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
+}
+
+async fn list_official_threat_feeds(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !official_feed_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    Json(state.inner.read().await.official_threat_feeds.clone()).into_response()
+}
+
+#[derive(Debug, Serialize)]
+struct OfficialFeedRefreshResult {
+    source_id: String,
+    not_modified: bool,
+    threat_count: usize,
+    dnsbl_count: usize,
+    refreshed_at_unix: u64,
+}
+
+async fn refresh_official_threat_feed(
+    State(state): State<AppState>,
+    PathParam(source_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !official_feed_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::FORBIDDEN, "admin principal is read-only");
+    }
+    let _refresh_guard = state.official_feed_refresh_lock.lock().await;
+    let now = now_unix();
+    let feed = {
+        let data = state.inner.read().await;
+        data.official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == source_id)
+            .cloned()
+    };
+    let Some(feed) = feed else {
+        return error(StatusCode::NOT_FOUND, "unknown official threat feed source");
+    };
+    let Some(canonical) = waf_ids_core::official_threat_feed_registry()
+        .into_iter()
+        .find(|item| item.source_id == feed.source_id)
+    else {
+        return error(StatusCode::NOT_FOUND, "unknown official threat feed source");
+    };
+    if feed.official_url != canonical.official_url || feed.parser != canonical.parser {
+        return error(
+            StatusCode::CONFLICT,
+            "official feed registry metadata does not match the built-in source",
+        );
+    }
+    if let Some(last_attempt) = feed.last_attempt_unix
+        && now.saturating_sub(last_attempt) < feed.refresh_interval_seconds
+    {
+        let retry_after = feed
+            .refresh_interval_seconds
+            .saturating_sub(now.saturating_sub(last_attempt));
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after.to_string())],
+            Json(ErrorBody {
+                error: "official feed refresh interval has not elapsed".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let configured_url = {
+        #[cfg(test)]
+        {
+            state
+                .official_feed_url_overrides
+                .get(&source_id)
+                .cloned()
+                .unwrap_or_else(|| feed.official_url.clone())
+        }
+        #[cfg(not(test))]
+        {
+            feed.official_url.clone()
+        }
+    };
+    let (url, auth_header, request_body) = match feed.source_id.as_str() {
+        "urlhaus-online" => {
+            let Some(key) = state.credentials.get_credential(CRED_URLHAUS_AUTH_KEY) else {
+                return official_feed_failure(
+                    &state,
+                    &source_id,
+                    now,
+                    "URLhaus credential is unavailable",
+                )
+                .await;
+            };
+            (configured_url.replace("{AUTH_KEY}", key), None, None)
+        }
+        "threatfox-recent" => {
+            let Some(key) = state.credentials.get_credential(CRED_THREATFOX_AUTH_KEY) else {
+                return official_feed_failure(
+                    &state,
+                    &source_id,
+                    now,
+                    "ThreatFox credential is unavailable",
+                )
+                .await;
+            };
+            (
+                configured_url,
+                Some(key.to_string()),
+                Some(serde_json::json!({"query": "get_iocs", "days": 1})),
+            )
+        }
+        _ => (configured_url, None, None),
+    };
+
+    let mut request = if let Some(body) = request_body {
+        state.feed_http.post(&url).json(&body)
+    } else {
+        state.feed_http.get(&url)
+    };
+    if let Some(key) = auth_header {
+        request = request.header("Auth-Key", key);
+    }
+    if let Some(etag) = &feed.etag {
+        request = request.header(header::IF_NONE_MATCH, etag);
+    }
+    if let Some(last_modified) = &feed.last_modified {
+        request = request.header(header::IF_MODIFIED_SINCE, last_modified);
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(_) => {
+            return official_feed_failure(&state, &source_id, now, "official feed request failed")
+                .await;
+        }
+    };
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let last_modified = response
+        .headers()
+        .get(header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return finish_official_feed_not_modified(
+            &state,
+            &source_id,
+            now,
+            etag,
+            last_modified,
+            audit_actor(&state, &headers),
+        )
+        .await;
+    }
+    if !response.status().is_success() {
+        let message = format!("official feed returned HTTP {}", response.status().as_u16());
+        return official_feed_failure(&state, &source_id, now, &message).await;
+    }
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(_) => {
+            return official_feed_failure(
+                &state,
+                &source_id,
+                now,
+                "official feed body read failed",
+            )
+            .await;
+        }
+    };
+    let parsed = match official_feeds::parse(&feed.parser, &source_id, feed.ttl_seconds, &body) {
+        Ok(parsed) => parsed,
+        Err(message) => return official_feed_failure(&state, &source_id, now, &message).await,
+    };
+    let import = ThreatFeedImport {
+        feed_id: source_id.clone(),
+        source: feed.attribution.clone(),
+        ttl_seconds: feed.ttl_seconds,
+        threats: parsed.threats,
+        dnsbl: parsed.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&import) {
+        return official_feed_failure(&state, &source_id, now, message).await;
+    }
+    let actor = audit_actor(&state, &headers);
+    match state
+        .mutate_and_persist(|data| {
+            data.threats.retain(|item| item.source != source_id);
+            data.dnsbl.retain(|item| item.source != source_id);
+            let threat_count = import.threats.len();
+            let dnsbl_count = import.dnsbl.len();
+            for threat in import.threats {
+                upsert_threat(&mut data.threats, threat);
+            }
+            for entry in import.dnsbl {
+                upsert_dnsbl(&mut data.dnsbl, entry);
+            }
+            upsert_threat_feed(
+                &mut data.threat_feeds,
+                ThreatFeedStatus {
+                    feed_id: source_id.clone(),
+                    source: feed.attribution.clone(),
+                    last_updated_unix: now,
+                    threat_count,
+                    dnsbl_count,
+                    ttl_seconds: feed.ttl_seconds,
+                },
+            );
+            if let Some(status) = data
+                .official_threat_feeds
+                .iter_mut()
+                .find(|item| item.source_id == source_id)
+            {
+                status.etag = etag;
+                status.last_modified = last_modified;
+                status.last_attempt_unix = Some(now);
+                status.last_success_unix = Some(now);
+                status.last_error = None;
+                status.source_notice = parsed.source_notice;
+            }
+            record_successful_audit_log(
+                data,
+                actor,
+                "refresh_official_threat_feed",
+                "official_threat_feed",
+                source_id.clone(),
+            );
+            OfficialFeedRefreshResult {
+                source_id,
+                not_modified: false,
+                threat_count,
+                dnsbl_count,
+                refreshed_at_unix: now,
+            }
+        })
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn finish_official_feed_not_modified(
+    state: &AppState,
+    source_id: &str,
+    now: u64,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    actor: String,
+) -> Response {
+    match state
+        .mutate_and_persist(|data| {
+            let feed_status = data
+                .threat_feeds
+                .iter_mut()
+                .find(|item| item.feed_id == source_id);
+            let (threat_count, dnsbl_count) = feed_status
+                .map(|status| {
+                    status.last_updated_unix = now;
+                    (status.threat_count, status.dnsbl_count)
+                })
+                .unwrap_or((0, 0));
+            if let Some(status) = data
+                .official_threat_feeds
+                .iter_mut()
+                .find(|item| item.source_id == source_id)
+            {
+                status.etag = etag.or_else(|| status.etag.clone());
+                status.last_modified = last_modified.or_else(|| status.last_modified.clone());
+                status.last_attempt_unix = Some(now);
+                status.last_success_unix = Some(now);
+                status.last_error = None;
+            }
+            record_successful_audit_log(
+                data,
+                actor,
+                "refresh_official_threat_feed_not_modified",
+                "official_threat_feed",
+                source_id.to_string(),
+            );
+            OfficialFeedRefreshResult {
+                source_id: source_id.to_string(),
+                not_modified: true,
+                threat_count,
+                dnsbl_count,
+                refreshed_at_unix: now,
+            }
+        })
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn official_feed_failure(
+    state: &AppState,
+    source_id: &str,
+    now: u64,
+    message: &str,
+) -> Response {
+    let sanitized = message.replace('\n', " ");
+    let persisted = state
+        .mutate_and_persist(|data| {
+            if let Some(status) = data
+                .official_threat_feeds
+                .iter_mut()
+                .find(|item| item.source_id == source_id)
+            {
+                status.last_attempt_unix = Some(now);
+                status.last_error = Some(sanitized.clone());
+            }
+        })
+        .await;
+    match persisted {
+        Ok(()) => error(StatusCode::BAD_GATEWAY, sanitized),
+        Err(error_message) => error(StatusCode::INTERNAL_SERVER_ERROR, error_message),
+    }
+}
+
+fn official_feed_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
+    (state.admin_token.is_some() || !state.admin_tokens.is_empty())
+        && admin_authenticated(state, headers)
 }
 
 /// Optional STIX import metadata via query string.
@@ -3044,7 +3405,7 @@ pub async fn run_from_env(
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
-        .with_credentials_source(credentials.source())
+        .with_credential_registry(credentials)
         .with_max_body_size(max_body_bytes);
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
@@ -3065,6 +3426,10 @@ mod tests {
         future::IntoFuture,
         io::{Read, Write},
         net::TcpListener as StdTcpListener,
+        sync::{
+            Arc as StdArc,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -3134,6 +3499,124 @@ mod tests {
         assert_eq!(ips.len(), 2);
         assert_eq!(ips[0], "198.51.100.8".parse::<IpAddr>().unwrap());
         assert_eq!(ips[1], "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn official_feed_refresh_atomically_keeps_last_known_good() {
+        let unconfigured = build_app(AppState::seeded(None));
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                empty_request(Method::GET, "/api/official-threat-feeds")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let mock_calls = calls.clone();
+        let upstream = Router::new().route(
+            "/drop.json",
+            get(move || {
+                let call = mock_calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if call == 0 {
+                        (
+                            StatusCode::OK,
+                            [(header::ETAG, "\"drop-v1\"")],
+                            "{\"cidr\":\"198.51.100.0/24\",\"sblid\":\"SBL1\"}\n{\"type\":\"metadata\",\"copyright\":\"Copyright Spamhaus\"}\n",
+                        )
+                            .into_response()
+                    } else {
+                        (StatusCode::OK, "not-json").into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream).into_future());
+
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_official_feed_url("spamhaus-drop-v4", format!("http://{address}/drop.json"));
+        let inspect = state.clone();
+        let app = build_app(state);
+        assert_eq!(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/official-threat-feeds")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/official-threat-feeds", "secret")
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
+        let refreshed = app_request(
+            &app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/spamhaus-drop-v4/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::OK);
+        let first = inspect.inner.read().await.clone();
+        assert!(
+            first.dnsbl.iter().any(|entry| {
+                entry.source == "spamhaus-drop-v4" && entry.prefix_len == Some(24)
+            })
+        );
+        let source = first
+            .official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == "spamhaus-drop-v4")
+            .unwrap();
+        assert_eq!(source.etag.as_deref(), Some("\"drop-v1\""));
+        assert_eq!(source.source_notice.as_deref(), Some("Copyright Spamhaus"));
+
+        inspect
+            .inner
+            .write()
+            .await
+            .official_threat_feeds
+            .iter_mut()
+            .find(|feed| feed.source_id == "spamhaus-drop-v4")
+            .unwrap()
+            .last_attempt_unix = None;
+        let failed = app_request(
+            &app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/spamhaus-drop-v4/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        let after = inspect.inner.read().await;
+        assert_eq!(
+            after.dnsbl, first.dnsbl,
+            "failed parse must preserve LKG data"
+        );
+        assert!(
+            after
+                .official_threat_feeds
+                .iter()
+                .find(|feed| feed.source_id == "spamhaus-drop-v4")
+                .unwrap()
+                .last_error
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -5553,6 +6036,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                official_threat_feeds: waf_ids_core::official_threat_feed_registry(),
             },
             AppConfig {
                 admin_token: None,
@@ -6428,6 +6912,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                official_threat_feeds: waf_ids_core::official_threat_feed_registry(),
             },
             AppConfig {
                 admin_token: None,

@@ -11,6 +11,8 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 /// Well-known secret keys loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+pub const CRED_THREATFOX_AUTH_KEY: &str = "threatfox_auth_key";
+pub const CRED_URLHAUS_AUTH_KEY: &str = "urlhaus_auth_key";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -88,7 +90,12 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_THREATFOX_AUTH_KEY,
+                        CRED_URLHAUS_AUTH_KEY,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
@@ -193,7 +200,7 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         write!(
             file,
-            r#"{{"admin_token":"from-file","admin_tokens":"filetok:operator"}}"#
+            r#"{{"admin_token":"from-file","admin_tokens":"filetok:operator","urlhaus_auth_key":"urlhaus-secret","threatfox_auth_key":"threatfox-secret"}}"#
         )
         .unwrap();
         drop(file);
@@ -209,6 +216,14 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("filetok:operator")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_URLHAUS_AUTH_KEY),
+            Some("urlhaus-secret")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_THREATFOX_AUTH_KEY),
+            Some("threatfox-secret")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
