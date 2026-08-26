@@ -8,12 +8,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(all(not(test), unix))]
-async fn shutdown_signal() {
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     // Shut down gracefully on SIGTERM (what container runtimes and the e2e test
     // harness send) so in-flight requests drain and the process exits cleanly.
+    // Register eagerly before run_from_env publishes listener readiness; an
+    // async fn would not install the handler until its future was first polled.
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
-    term.recv().await;
+    async move {
+        term.recv().await;
+    }
 }
 
 #[cfg(all(not(test), not(unix)))]
