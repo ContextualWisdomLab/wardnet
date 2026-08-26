@@ -40,6 +40,7 @@ pub use waf_ids_core::{
 
 const EGRESS_DNS_TTL: Duration = Duration::from_secs(30);
 const EGRESS_DNS_MAX_ENTRIES: usize = 1024;
+const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 
 #[derive(Default)]
 struct EgressDnsCache {
@@ -792,11 +793,181 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/soc/llm-config", get(soc_llm_config))
         .route("/api/soc/analyze", post(soc_analyze))
         .route("/api/support-bundle", get(support_bundle))
+        .route("/mcp", post(mcp_post))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
         .fallback(connect_proxy)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+/// Serve one authenticated, stateless MCP 2026-07-28 JSON-RPC message.
+async fn mcp_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(message): Json<serde_json::Value>,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if !mcp_origin_allowed(&headers) {
+        return error(StatusCode::FORBIDDEN, "MCP Origin does not match Host");
+    }
+    let accepts = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !(accepts.contains("application/json") && accepts.contains("text/event-stream")) {
+        return error(
+            StatusCode::NOT_ACCEPTABLE,
+            "MCP requires application/json and text/event-stream",
+        );
+    }
+
+    let method = message.get("method").and_then(|value| value.as_str());
+    let protocol_header = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok());
+    let protocol_meta = message
+        .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(|value| value.as_str());
+    if protocol_header != Some(MCP_PROTOCOL_VERSION) || protocol_meta != Some(MCP_PROTOCOL_VERSION)
+    {
+        return error(StatusCode::BAD_REQUEST, "unsupported MCP protocol version");
+    }
+    if headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+        != method
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Mcp-Method does not match request body",
+        );
+    }
+    let expected_name = match method {
+        Some("tools/call") => message
+            .pointer("/params/name")
+            .and_then(|value| value.as_str()),
+        _ => None,
+    };
+    if headers
+        .get("mcp-name")
+        .and_then(|value| value.to_str().ok())
+        != expected_name
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Mcp-Name does not match request body",
+        );
+    }
+    let id = message
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if message.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
+        return mcp_error(id, -32600, "Invalid Request");
+    }
+    if id.is_null() {
+        return if method.is_some_and(|value| value.starts_with("notifications/")) {
+            StatusCode::ACCEPTED.into_response()
+        } else {
+            mcp_error(id, -32600, "Invalid Request")
+        };
+    }
+    if !(id.is_string() || id.as_i64().is_some() || id.as_u64().is_some()) {
+        return mcp_error(serde_json::Value::Null, -32600, "Invalid Request");
+    }
+    match method {
+        Some("server/discover") => Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "resultType": "complete",
+                "supportedVersions": [MCP_PROTOCOL_VERSION],
+                "capabilities": {"tools": {}},
+                "instructions": "Use wardnet_status to inspect current gateway and SOC readiness.",
+                "ttlMs": 300_000,
+                "cacheScope": "private",
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "wardnet",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }
+            }
+        }))
+        .into_response(),
+        Some("tools/list") => Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "resultType": "complete",
+                "tools": [{
+                    "name": "wardnet_status",
+                    "title": "Wardnet operational status",
+                    "description": "Return current gateway health, security KPIs, readiness, and inventory counts.",
+                    "inputSchema": {"type": "object"},
+                    "annotations": {
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    }
+                }],
+                "ttlMs": 300_000,
+                "cacheScope": "private"
+            }
+        }))
+        .into_response(),
+        Some("tools/call") => {
+            if message.pointer("/params/name").and_then(|value| value.as_str())
+                != Some("wardnet_status")
+            {
+                return mcp_error(id, -32602, "Unknown tool");
+            }
+            let structured = serde_json::to_value(build_support_bundle(&state).await)
+                .expect("SupportBundle is JSON-serializable");
+            let text = serde_json::to_string(&structured)
+                .expect("SupportBundle JSON value is serializable");
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resultType": "complete",
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": structured,
+                    "isError": false
+                }
+            }))
+            .into_response()
+        }
+        Some("ping") => Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        }))
+        .into_response(),
+        _ => mcp_error(id, -32601, "Method not found"),
+    }
+}
+
+/// Reject browser-originated MCP traffic until an explicit origin registry exists.
+fn mcp_origin_allowed(headers: &HeaderMap) -> bool {
+    // Browser clients are not part of the first MCP trust boundary. Rejecting
+    // every Origin-bearing request prevents a rebinding domain from validating
+    // itself through the attacker-controlled Host header.
+    !headers.contains_key(header::ORIGIN)
+}
+
+/// Build a protocol-level JSON-RPC error that preserves a valid request id.
+fn mcp_error(id: serde_json::Value, code: i64, message: &'static str) -> Response {
+    Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": code, "message": message}
+    }))
+    .into_response()
 }
 
 fn proxy_authenticate() -> Response {
@@ -3156,9 +3327,14 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
+    Json(build_support_bundle(&state).await)
+}
+
+/// Build the shared read-only operational snapshot used by HTTP and MCP.
+async fn build_support_bundle(state: &AppState) -> SupportBundle {
     let data = state.inner.read().await;
     let generated_at_unix = now_unix();
-    Json(SupportBundle {
+    SupportBundle {
         generated_at_unix,
         health: state.health_status_live().await,
         kpis: kpi_snapshot_at(&data, generated_at_unix),
@@ -3175,7 +3351,7 @@ async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
         threat_feed_count: data.threat_feeds.len(),
         event_count: data.events.len(),
         audit_log_count: data.audit_logs.len(),
-    })
+    }
 }
 
 async fn events_ndjson(State(state): State<AppState>) -> Response {
@@ -5317,12 +5493,300 @@ mod tests {
         app.clone().oneshot(request).await.unwrap()
     }
 
+    fn mcp_request(
+        token: Option<&str>,
+        origin: &str,
+        mut payload: serde_json::Value,
+    ) -> Request<Body> {
+        let method = payload["method"].as_str().unwrap().to_string();
+        let name = payload
+            .pointer("/params/name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let params = payload
+            .as_object_mut()
+            .unwrap()
+            .entry("params")
+            .or_insert_with(|| serde_json::json!({}));
+        params.as_object_mut().unwrap().insert(
+            "_meta".to_string(),
+            serde_json::json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28"}),
+        );
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "wardnet.local")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", method)
+            .header("content-type", "application/json");
+        if !origin.is_empty() {
+            builder = builder.header("origin", origin);
+        }
+        if let Some(name) = name {
+            builder = builder.header("mcp-name", name);
+        }
+        if let Some(token) = token {
+            builder = builder.header("x-admin-token", token);
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap()
+    }
+
     fn empty_request(method: Method, uri: &str) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(uri)
             .body(Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mcp_discovers_the_stateless_server_contract() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["id"], 1);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(
+            body["result"]["supportedVersions"],
+            serde_json::json!(["2026-07-28"])
+        );
+        assert_eq!(
+            body["result"]["capabilities"]["tools"],
+            serde_json::json!({})
+        );
+        assert_eq!(body["result"]["ttlMs"], 300_000);
+        assert_eq!(body["result"]["cacheScope"], "private");
+        assert_eq!(
+            body["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "wardnet"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_missing_admin_credentials() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                None,
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_browser_origin_requests() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "https://wardnet.local",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_both_streamable_http_response_types() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let mut request = mcp_request(
+            Some("secret"),
+            "",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover"
+            }),
+        );
+        request
+            .headers_mut()
+            .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[tokio::test]
+    async fn mcp_lists_the_read_only_wardnet_status_tool() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        let tools = body["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "wardnet_status");
+        assert_eq!(
+            tools[0]["inputSchema"],
+            serde_json::json!({"type": "object"})
+        );
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[0]["annotations"]["destructiveHint"], false);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(body["result"]["ttlMs"], 300_000);
+        assert_eq!(body["result"]["cacheScope"], "private");
+    }
+
+    #[tokio::test]
+    async fn mcp_calls_wardnet_status_with_structured_and_text_content() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "wardnet_status", "arguments": {}}
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(body["result"]["structuredContent"]["route_count"], 1);
+        let text: serde_json::Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, body["result"]["structuredContent"]);
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_an_unsupported_protocol_header() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let mut request = mcp_request(
+            Some("secret"),
+            "",
+            serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+        );
+        request.headers_mut().insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2099-01-01"),
+        );
+
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_unknown_tools_as_protocol_errors() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "delete_everything", "arguments": {}}
+                }),
+            ),
+        )
+        .await;
+
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert_eq!(body["error"]["message"], "Unknown tool");
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_non_string_or_integer_request_ids() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({"jsonrpc": "2.0", "id": true, "method": "tools/list"}),
+            ),
+        )
+        .await;
+
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
+    async fn mcp_ping_confirms_the_server_is_reachable() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({"jsonrpc": "2.0", "id": "ping-1", "method": "ping"}),
+            ),
+        )
+        .await;
+
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["id"], "ping-1");
+        assert_eq!(body["result"], serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_a_method_header_that_disagrees_with_the_body() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let mut request = mcp_request(
+            Some("secret"),
+            "",
+            serde_json::json!({"jsonrpc": "2.0", "id": 6, "method": "tools/list"}),
+        );
+        request
+            .headers_mut()
+            .insert("mcp-method", HeaderValue::from_static("tools/call"));
+
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     fn authed_empty_request(method: Method, uri: &str, token: &str) -> Request<Body> {

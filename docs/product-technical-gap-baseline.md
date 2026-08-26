@@ -14,12 +14,13 @@ delivery evidence.
 
 | PR | Exact head | Base | Current evidence / blocker |
 | --- | --- | --- | --- |
+| #117 stateless MCP status tool | pre-evidence `ca7367e992d8e31b44e34a7b7798ab94153e89c0` | `#95` | this documentation commit necessarily advances the live head; PR API is authoritative; local fmt/clippy/full tests and focused k6 passed; hosted checks, review, and base integration required |
 | #115 official threat feeds | `2c3f06f49e699430abd4c493ea363f69aad4fdd6` | `main` | blocked; three unresolved threads and Strix failure |
 | #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
 | #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
 | #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
 | #105 optimistic concurrency | `f92f3aa0ed209e9818c29205fd12c6f2fad60e4a` | `#95` | stacked only; three unresolved threads |
-| #95 in-path Coraza and accumulated production stack | `9001f6fe86e8548c50f127f84751b74f44a8f6c9` | `main` | Hickory CVEs, Clippy, DNS family cap, 406 interruption, and four threads repaired at this head; hosted checks and independent approval required |
+| #95 in-path Coraza and accumulated production stack | `f6eabf3523d25198e7fc3ff450d53e90f325dccf` | `main` | optimistic concurrency/release evidence and prior DNS/engine repairs accumulated; refreshed exact-head checks and independent approval required |
 | #94 fail-closed public admin auth | `7c6dc3d091915d19ce1d67a81cf6a9759a101cd4` | `main` | five unresolved threads; Strix failure |
 | #93 deterministic persistence fault seam | `1d3c13cab6dcd474ccc6d497f8d9f1c1efa848e4` | `main` | one unresolved thread, stale change request, Strix failure |
 | #90 SIEM/OpenTelemetry export | `8e4484d13499d99c9ae31e1a3b6ccd419d6ed934` | `main` | two unresolved threads; Strix failure |
@@ -37,7 +38,7 @@ is the acceptance evidence.
 | Requested surface | Protected `main` | Active evidence | Acceptance gap |
 | --- | --- | --- | --- |
 | Web API | implemented | Axum management/SOC APIs and live binary tests | route lifecycle completion remains #112 |
-| MCP | absent | no transport, tool schema, or test | define a narrow Wardnet operations tool contract and authenticated transport |
+| MCP | absent | stacked #117: authenticated stateless `2026-07-28` Streamable HTTP discovery plus read-only `wardnet_status` tool and protocol/security tests | protected merge plus authenticated deployed-client evidence |
 | DNSBL publishing | HTTP zone export only | `/dnsbl/zone` plus fuzzed escaping | live DNS serving exists only in unmerged #95 stack |
 | DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
 | Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
@@ -246,6 +247,17 @@ holes on untouched handlers stay listed for later loops.
    not on the gateway data path; no connector this pass.
 
 ## This loop’s shipped gap
+
+MCP surface ([#117](https://github.com/ContextualWisdomLab/wardnet/pull/117), stacked on PR #95): `POST /mcp` implements the stable stateless
+MCP `2026-07-28` contract with `server/discover`, deterministic cacheable
+`tools/list`, `tools/call`, and `ping`. The read-only `wardnet_status` tool
+reuses the support-bundle read model rather than duplicating control-plane
+logic. Authentication, browser-Origin rejection, dual Accept negotiation,
+request-id validation, current protocol metadata, and `Mcp-Method`/`Mcp-Name`
+header-body agreement fail closed. Driving tests are the eleven `mcp_*` tests
+in `src/lib.rs`. Focused loopback k6 evidence: 10 VUs for 10 seconds, 4,992
+successful calls, 0 HTTP failures, 495.9 requests/s, 19.55 ms mean and 107.79 ms
+p95. Protected-main and deployed-client evidence remain open.
 
 Issue **#86** slice review-hardening (PR #95): forwarded-header allowlist to
 the engine (`host`/`user-agent`/`accept`/`content-type`/`referer`/`origin`/
