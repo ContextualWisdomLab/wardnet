@@ -115,7 +115,7 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
             "urlhaus-online",
             "https://urlhaus-api.abuse.ch/v2/files/exports/{AUTH_KEY}/recent.csv",
             "urlhaus_recent_csv",
-            &["url", "domain"][..],
+            &["url", "domain", "client_ip"][..],
             "URLhaus by abuse.ch",
             "https://abuse.ch/terms-of-use/",
             3_600,
@@ -125,7 +125,7 @@ pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
             "threatfox-recent",
             "https://threatfox-api.abuse.ch/api/v1/",
             "threatfox_json",
-            &["domain", "ipv4", "ipv6"][..],
+            &["domain", "client_ip"][..],
             "ThreatFox by abuse.ch",
             "https://abuse.ch/terms-of-use/",
             3_600,
@@ -1525,6 +1525,21 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_feed_metadata_names_the_emitted_indicator_types() {
+        let feeds = official_threat_feed_registry();
+        let urlhaus = feeds
+            .iter()
+            .find(|feed| feed.source_id == "urlhaus-online")
+            .unwrap();
+        assert_eq!(urlhaus.indicator_types, ["url", "domain", "client_ip"]);
+        let threatfox = feeds
+            .iter()
+            .find(|feed| feed.source_id == "threatfox-recent")
+            .unwrap();
+        assert_eq!(threatfox.indicator_types, ["domain", "client_ip"]);
+    }
 
     #[test]
     fn score_request_matches_client_ip_threat_indicators() {

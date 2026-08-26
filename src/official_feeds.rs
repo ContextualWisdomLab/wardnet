@@ -70,7 +70,14 @@ fn parse_urlhaus(
     let mut parsed = ParsedOfficialFeed::default();
     let csv_body = body
         .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let header = trimmed
+                .strip_prefix('#')
+                .map(str::trim_start)
+                .filter(|candidate| candidate.starts_with("id,dateadded,url,"));
+            header.or_else(|| (!trimmed.starts_with('#')).then_some(line))
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let mut reader = csv::ReaderBuilder::new()
@@ -257,7 +264,7 @@ mod tests {
             "urlhaus_recent_csv",
             "urlhaus-online",
             7200,
-            "# attribution\nid,dateadded,url,url_status,reporter\n1,2026-01-01,https://evil.example/a,online,\"analyst\nteam\"\n",
+            "# attribution\n# id,dateadded,url,url_status,reporter\n1,2026-01-01,https://evil.example/a,online,\"analyst\nteam\"\n",
         )
         .unwrap();
         assert!(
