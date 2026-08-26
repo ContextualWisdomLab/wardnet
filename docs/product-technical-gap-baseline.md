@@ -1,9 +1,9 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-23T20:06Z (exact-head inventory of then-open GitHub PRs
+Snapshot date: 2026-08-27T03:59+09:00 (exact-head inventory of open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
-## Current delivery evidence — 2026-08-27T03:42+09:00
+## Current delivery evidence — 2026-08-27T03:59+09:00
 
 Protected `main` is `107117634764c901dff540044585d64088fafedb`. The active
 organization ruleset `18156473` requires one independent approval, resolved
@@ -14,11 +14,11 @@ delivery evidence.
 
 | PR | Exact head | Base | Current evidence / blocker |
 | --- | --- | --- | --- |
-| #115 official threat feeds | `3625e07d1f21c30026d9c1086935186e55f654fa` | `main` | blocked; review required and exact-head checks required |
+| #115 official threat feeds | `1db1b96952eddde29ec9b54ac502d33c345636be` | `main` | blocked; review required and exact-head checks required |
 | #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
-| #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
+| #112 route lifecycle API | `4fc314a1011f3d15ae9cd8fa32db190621ee36fa` | `main` | review required; exact-head checks required |
 | #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
-| #95 in-path Coraza and accumulated production stack | `9cdd2d70efb00fda5814405594193650b28c3dd7` | `main` | #105, MCP #117, and DNSBL #118 merged; explicit interruptions now win over advisory severity hits; all review threads resolved; exact-head checks and independent approval required |
+| #95 in-path Coraza and accumulated production stack | `6aa8e237cc6b9556ea0ddd0796803e8d69db0096` | `main` | #105, MCP #117, DNSBL #118, and k6 #119 merged; explicit interruptions win over advisory severity hits; exact-head checks and independent approval required |
 | #94 fail-closed public admin auth | `094f653a0545436384762adf585e912373425de7` | `main` | blocked; exact-head review/check evidence required |
 | #93 deterministic persistence fault seam | `3663c57373df4f3edcd0c1cfdf1deb18f461b91c` | `main` | stale change request and exact-head checks required |
 | #90 SIEM/OpenTelemetry export | `d451eb408d4c5e833ad0156334eb87b44476f625` | `main` | exact-head review/check evidence required |
@@ -27,8 +27,10 @@ delivery evidence.
 | #72 external admin secret | `892f9277ba86831a449fa6808a63b44eacab793f` | `main` | stale change request; Strix failure |
 
 The central Strix live-model repair remains unmerged: prerequisite
-`ContextualWisdomLab/.github#1356` updates the protected smoke contract, then
-`#1297` resolves current NVIDIA catalog models with direct-OpenAI fallback.
+`ContextualWisdomLab/.github#1356` at `418413d6b8f859036564ac8a66aa77f108282472`
+updates the protected smoke contract, then `#1297` at
+`9e7dbcaf7dba88affaf823f1829ad757453cbae0` resolves current NVIDIA catalog
+models with direct-OpenAI fallback.
 Only passing exact-head reruns after those protected merges are acceptance
 evidence.
 
@@ -59,7 +61,7 @@ authentication, RBAC, audit log, credential registry (no secrets in health/suppo
 bundle), encryption-at-rest when PostgreSQL lands, purpose limitation in runbooks.
 CSAP/SOC 2 remain uncertified; see `docs/security/compliance-mapping.md`.
 
-## Then-open pull requests
+## Historical 2026-08-23 pull-request evidence
 
 Org ruleset `CWL Central required workflows` (id `18156473`) requires
 **two** approving reviews, `require_last_push_approval=true`, and
