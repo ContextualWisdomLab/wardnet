@@ -385,8 +385,15 @@ fn ip_is_denied_class(ip: IpAddr) -> bool {
                     ip,
                 )
                 || v6
-                    .to_ipv4_mapped()
+                    .to_ipv4()
                     .is_some_and(|v4| ip_is_denied_class(IpAddr::V4(v4)))
+                || (v6.segments()[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
+                    && ip_is_denied_class(IpAddr::V4(Ipv4Addr::new(
+                        v6.octets()[12],
+                        v6.octets()[13],
+                        v6.octets()[14],
+                        v6.octets()[15],
+                    ))))
         }
     }
 }
@@ -539,6 +546,18 @@ mod tests {
         deny(
             &policy,
             "http://[::ffff:127.0.0.1]/",
+            &dns,
+            "denied address class",
+        );
+        deny(
+            &policy,
+            "http://[::127.0.0.1]/",
+            &dns,
+            "denied address class",
+        );
+        deny(
+            &policy,
+            "http://[64:ff9b::127.0.0.1]/",
             &dns,
             "denied address class",
         );

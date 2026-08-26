@@ -17,6 +17,8 @@ const CORAZA_OK: c_int = 0;
 const CORAZA_INTERRUPTION: c_int = 1;
 
 #[repr(C)]
+// Fields are retained even when unread to mirror the external libcoraza ABI.
+#[allow(dead_code)]
 pub struct CorazaIntervention {
     action: *mut c_char,
     status: c_int,

@@ -265,8 +265,8 @@ addresses so a rebinding answer cannot reach loopback/private/metadata.
 Operator-visible: `/healthz.destination_mode` plus pin tests
 `proxy_request_connects_to_pinned_policy_addresses` (real `proxy_request` to
 `pin-test.invalid` mapped to a local listener) and
-`outbound_http_fails_closed_without_a_preauthorized_pin`. #78 remains on PR
-#94. #86 sidecar remains on PR #95 — do not re-implement those slices.
+`outbound_http_fails_closed_without_a_preauthorized_pin`. Issue #78 remains on
+PR #94. #86 sidecar remains on PR #95 — do not re-implement those slices.
 
 Issue **#86** in-process libcoraza remainder ([#97](https://github.com/ContextualWisdomLab/wardnet/pull/97), stacked on #96).
 Operator-visible: `CORAZA_LIB_PATH` + `CORAZA_RULES_PATH`/`CORAZA_DIRECTIVES`;
@@ -286,7 +286,7 @@ tests: `run_from_env_fail_closes_public_bind_without_postgres`,
 `binary_fail_closes_when_control_plane_url_is_not_postgres`,
 `postgres_roundtrip_seeded_snapshot_when_database_url_is_set` (CI postgres
 service). Do not re-implement #78, the #86 sidecar/libcoraza slices, or the
-#79 pin.
+issue #79 pin.
 
 Issue **#80** remaining: HASH-partition `security_event` by `tenant_id` (8
 children) stacked on #103. Still-valid #103 Devin finding: `verify()` now

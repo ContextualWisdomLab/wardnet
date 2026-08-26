@@ -306,6 +306,17 @@ pub async fn evaluate_sidecar(
                         outcome
                     }
                 }
+                Err(reason) if matches!(status.as_u16(), 403 | 406) => {
+                    ProvenEngineOutcome::Hit(CorazaIngestedHit {
+                        client_ip,
+                        interrupted: true,
+                        action: "block".to_string(),
+                        reason: format!("coraza/crs: transaction interrupted ({status}); {reason}"),
+                        score: 50,
+                        path: uri.to_string(),
+                        timestamp_unix: None,
+                    })
+                }
                 Err(reason) => ProvenEngineOutcome::Unavailable { reason },
             }
         }
@@ -470,6 +481,35 @@ mod tests {
         let app = axum::Router::new().route(
             "/",
             post(|| async { (StatusCode::NOT_ACCEPTABLE, "<html>blocked</html>") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        assert!(matches!(
+            evaluate_sidecar(
+                &reqwest::Client::new(),
+                &format!("http://{addr}/"),
+                "GET",
+                "/app",
+                "",
+                None,
+                &[],
+            )
+            .await,
+            ProvenEngineOutcome::Hit(CorazaIngestedHit {
+                interrupted: true,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn sidecar_403_with_oversized_body_remains_an_interruption_hit() {
+        let body = "x".repeat(SIDECAR_MAX_BODY_BYTES + 1);
+        let app = axum::Router::new().route(
+            "/",
+            post(move || async move { (StatusCode::FORBIDDEN, body) }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
