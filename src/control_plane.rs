@@ -381,7 +381,7 @@ $hash$;
     ))
 }
 
-/// Fail closed when a non-loopback bind has no control-plane URL.
+/// Fail closed when a non-loopback bind lacks a TLS-verified control plane.
 pub fn require_postgres_for_bind(
     bind_addr: &str,
     database_url: Option<&str>,
@@ -389,10 +389,20 @@ pub fn require_postgres_for_bind(
     if crate::bind_is_loopback(bind_addr) {
         return Ok(());
     }
-    match database_url.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(_) => Ok(()),
-        None => Err(
+    let Some(raw) = database_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(
             "production bind requires CONTROL_PLANE_DATABASE_URL; JSON file state is not production authority"
+                .to_string(),
+        );
+    };
+    let url = parse_database_url(raw)?;
+    match ssl_mode(&url)? {
+        SslMode::Require => Ok(()),
+        SslMode::Disable => Err(
+            "production bind requires CONTROL_PLANE_DATABASE_URL with sslmode=require, verify-ca, or verify-full"
                 .to_string(),
         ),
     }
@@ -2456,10 +2466,25 @@ mod tests {
     #[test]
     fn production_bind_requires_control_plane_url() {
         require_postgres_for_bind("0.0.0.0:8080", None).unwrap_err();
-        require_postgres_for_bind("0.0.0.0:8080", Some("postgres://wardnet@127.0.0.1/wardnet"))
-            .unwrap();
+        require_postgres_for_bind("0.0.0.0:8080", Some("postgres://wardnet@db/wardnet"))
+            .unwrap_err();
+        require_postgres_for_bind(
+            "0.0.0.0:8080",
+            Some("postgres://wardnet@db/wardnet?sslmode=disable"),
+        )
+        .unwrap_err();
+        require_postgres_for_bind(
+            "0.0.0.0:8080",
+            Some("postgres://wardnet@db/wardnet?sslmode=verify-full"),
+        )
+        .unwrap();
         require_postgres_for_bind("127.0.0.1:8080", None).unwrap();
         require_postgres_for_bind("[::1]:8080", None).unwrap();
+        require_postgres_for_bind(
+            "127.0.0.1:8080",
+            Some("postgres://wardnet@127.0.0.1/wardnet?sslmode=disable"),
+        )
+        .unwrap();
     }
 
     #[test]
