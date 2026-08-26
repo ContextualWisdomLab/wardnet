@@ -50,7 +50,7 @@ WAF_IDS_STATE_PATH=./waf-ids-state.local.json \
 cargo run
 ```
 
-Health reports `credentials_source` (`file` / `env` / `none`) and
+Health reports `credentials_source` (`file` / `env` / `mixed` / `none`) and
 `admin_auth_configured` (boolean) without exposing secret values.
 
 ## Health Check
@@ -65,7 +65,7 @@ Expected fields:
 - `persistence`: `memory` or `file`
 - `dnsbl_origin`: configured DNSBL origin without a trailing dot
 - `event_limit`: retained security event count
-- `credentials_source`: `file`, `env`, or `none`
+- `credentials_source`: `file`, `env`, `mixed`, or `none`
 - `admin_auth_configured`: whether any admin write token is configured
 - `backup`: `ready` on PostgreSQL (logical export/restore available) or `disabled` on file/memory
 - `event_partitions`: HASH child count for `security_event` (8 on PostgreSQL, 0 on file/memory)
