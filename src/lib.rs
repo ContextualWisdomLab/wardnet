@@ -1089,10 +1089,23 @@ async fn list_dnsbl(State(state): State<AppState>) -> Json<Vec<DnsblEntry>> {
     Json(state.inner.read().await.dnsbl.clone())
 }
 
+fn parse_dnsbl_path_address(address: &str) -> Result<IpAddr, Response> {
+    address.parse().map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "DNSBL address must be an IP address",
+        )
+    })
+}
+
 async fn get_dnsbl(
     State(state): State<AppState>,
-    PathParam(address): PathParam<IpAddr>,
+    PathParam(address): PathParam<String>,
 ) -> Response {
+    let address = match parse_dnsbl_path_address(&address) {
+        Ok(address) => address,
+        Err(response) => return response,
+    };
     let data = state.inner.read().await;
     let Some(entry) = data.dnsbl.iter().find(|entry| entry.address == address) else {
         return error(StatusCode::NOT_FOUND, "DNSBL entry not found");
@@ -1102,13 +1115,17 @@ async fn get_dnsbl(
 
 async fn replace_dnsbl(
     State(state): State<AppState>,
-    PathParam(address): PathParam<IpAddr>,
+    PathParam(address): PathParam<String>,
     headers: HeaderMap,
     Json(entry): Json<DnsblEntry>,
 ) -> Response {
     if let Some(response) = management_write_denied(&state, &headers) {
         return response;
     }
+    let address = match parse_dnsbl_path_address(&address) {
+        Ok(address) => address,
+        Err(response) => return response,
+    };
     if entry.address != address {
         return error(
             StatusCode::BAD_REQUEST,
@@ -1167,12 +1184,16 @@ async fn replace_dnsbl(
 
 async fn delete_dnsbl(
     State(state): State<AppState>,
-    PathParam(address): PathParam<IpAddr>,
+    PathParam(address): PathParam<String>,
     headers: HeaderMap,
 ) -> Response {
     if let Some(response) = management_write_denied(&state, &headers) {
         return response;
     }
+    let address = match parse_dnsbl_path_address(&address) {
+        Ok(address) => address,
+        Err(response) => return response,
+    };
     let expected = headers
         .get(header::IF_MATCH)
         .and_then(|value| value.to_str().ok());
@@ -3976,6 +3997,26 @@ mod tests {
             .with_admin_tokens(parse_admin_tokens("reader:r:readonly,writer:w:write"));
         let app = build_app(state);
         let uri = "/api/dnsbl/203.0.113.10";
+
+        let malformed = app_request(
+            &app,
+            empty_request(Method::GET, "/api/dnsbl/not-an-address"),
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            malformed.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                empty_request(Method::DELETE, "/api/dnsbl/not-an-address")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
 
         let current = app_request(&app, empty_request(Method::GET, uri)).await;
         assert_eq!(current.status(), StatusCode::OK);
