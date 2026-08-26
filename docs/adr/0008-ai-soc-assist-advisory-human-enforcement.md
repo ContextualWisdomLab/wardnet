@@ -13,9 +13,11 @@ SOC operators benefit from a short triage note on a recorded event
 text is easy to mistake for an automated block.
 
 On current `main`, optional LLM assist posts one chat-completions
-request through a configured OpenAI-compatible base URL (commonly
-the contextual-orchestrator gateway) and returns **analysis text
-only**. It does not upsert routes, threats, or DNSBL entries.
+request through a configured OpenAI-compatible base URL. The request
+sets `orchestration_mode: "auto"`, delegating model topology and
+reasoning depth to contextual-orchestrator as recorded in ADR 0010,
+and returns **analysis text only**. It does not upsert routes, threats,
+or DNSBL entries.
 
 Nelson et al. (2025) place high-impact response actions (for example
 shutting down or rebuilding critical services) under leadership
@@ -31,16 +33,21 @@ not a product certification.
 2. **Enforcement-changing recommendations require a human.** No LLM
    output may by itself enable block mode, add a deny route, or
    publish a DNSBL listing.
-3. Leave the LLM backend **optional**. If `SOC_LLM_BASE_URL` is
+3. When enabled, delegate workflow depth and model selection through
+   the explicit adaptive orchestration contract in ADR 0010. Wardnet
+   retains authorization, evidence collection, and enforcement.
+4. Leave the LLM backend **optional**. If `SOC_LLM_BASE_URL` is
    unset, assist is unavailable; the gateway still enforces
    operator-written policy.
-4. Do not treat cancelled scanner runs, unmerged drafts, or coverage
+5. Do not treat cancelled scanner runs, unmerged drafts, or coverage
    stubs as evidence that assist is safe to auto-enforce.
 
 ## Consequences
 
 - Operators can wire contextual-orchestrator (or another compatible
   endpoint) without giving that hook control-plane write authority.
+- Adaptive orchestration changes inference execution, not Wardnet's
+  human enforcement boundary; see ADR 0010 for its accepted contract.
 - Human approval stays required until audit trails, rollback, and
   policy simulation exist for machine-proposed enforcement
   (`docs/security/threat-model.md`).

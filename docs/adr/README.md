@@ -31,6 +31,7 @@ Clearfolio) are optional HTTP or contract callers, not required checkouts.
 | [0006](0006-admin-token-threat-intel-document-ingest.md) | Admin-token threat-intel document ingest | Accepted |
 | [0007](0007-localhost-default-bind-remote-management.md) | Localhost default bind; remote management requires token plus external TLS/identity | Accepted |
 | [0008](0008-ai-soc-assist-advisory-human-enforcement.md) | AI SOC assist is advisory; enforcement changes require a human | Accepted |
+| [0010](0010-adaptive-contextual-orchestrator-default.md) | SOC analysis delegates default execution to contextual-orchestrator auto | Accepted |
 
 ## Citation policy
 
