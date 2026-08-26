@@ -35,6 +35,7 @@ flowchart LR
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
+- `.github/workflows/release.yml`: annotated `vX.Y.Z` tags only (lightweight tags are refused). Builds a locked binary, basename SHA-256 checksums, SPDX SBOMs, keyless Sigstore signatures, SLSA provenance, and a GHCR image signed by digest. Kubernetes pin is `IMAGE-DIGEST.txt` (`docs/runbooks/release.md`).
 - `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
 - `/api/commercial/license`: tenant/license metadata for commercial packaging.
 - `/api/commercial/readiness`: computed 2B KRW sale-readiness checks and blockers.

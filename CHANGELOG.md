@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Release admission refuses lightweight/unsigned `vX.Y.Z` tags (`scripts/admit-release-tag.sh`). Kubernetes pin is the GHCR content digest (`scripts/pin-k8s-digest.sh`); tag aliases are rejected.
+- Tagged releases (`vX.Y.Z`) build a locked binary, basename SHA-256 checksums, SPDX SBOMs (binary and image), keyless Sigstore signatures (OIDC, no stored Cosign key), GitHub SLSA provenance, and a GHCR image signed **by digest**. The GitHub Release is created only after signatures succeed. Promotion authority is the digest in `IMAGE-DIGEST.txt`, not the tag alias. No moving `latest` tag (`docs/runbooks/release.md`).
 - PostgreSQL outbox consumers for TAXII poll, Clearfolio document submit, and contextual-orchestrator SOC analysis (issue #81 remainder). Operator-triggered HTTP leaves through `taxii.collection_polled`, `clearfolio.document_submitted`, and `soc.analysis_requested` with leased-worker retries and unique receipts. Request path returns HTTP 202 and `GET /api/outbox/{message_id}` exposes receipt evidence. Secrets never enter outbox payloads (TAXII bearer lives in the credential registry). File/memory adapters keep the previous synchronous path. Client IPs, paths, indicator values, and actor names stay unmasked. LLM analysis remains advisory and never auto-enforces.
 
 

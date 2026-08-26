@@ -578,7 +578,8 @@ async fn event_partition_count(client: &Client) -> Result<i64, String> {
     Ok(row.get(0))
 }
 
-/// Serializes schema application across connections (DROP/CREATE POLICY is not concurrent-safe).
+/// Serializes schema application and runtime GRANTs across connections
+/// (DROP/CREATE POLICY and ACL updates are not concurrent-safe).
 static MIGRATION_GATE: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
 /// Live PostgreSQL snapshot store for one tenant.
@@ -630,7 +631,6 @@ impl PostgresPlane {
             event_limit: LIST_LIMIT,
         };
         plane.migrate().await?;
-        plane.assume_runtime_role().await?;
         Ok(plane)
     }
 
@@ -647,16 +647,18 @@ impl PostgresPlane {
             .execute("SELECT pg_advisory_lock($1)", &[&MIGRATION_LOCK_KEY])
             .await
             .map_err(|error| format!("control plane migration lock failed: {error}"))?;
-        let result = apply_schema(&client).await;
+        // HASH convert GRANT and SET ROLE GRANT both mutate pg_class ACL
+        // tuples. Hold the lock across both so parallel connects cannot
+        // `tuple concurrently updated`.
+        let result = async {
+            apply_schema(&client).await?;
+            assume_runtime_role(&client).await
+        }
+        .await;
         let _ = client
             .execute("SELECT pg_advisory_unlock($1)", &[&MIGRATION_LOCK_KEY])
             .await;
         result
-    }
-
-    async fn assume_runtime_role(&self) -> Result<(), String> {
-        let client = self.client.lock().await;
-        assume_runtime_role(&client).await
     }
 
     #[cfg(test)]
@@ -2801,6 +2803,20 @@ mod tests {
             .await
             .expect("expired/next-available reclaim");
         assert_eq!(reclaimed, 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_parallel_connect_does_not_race_grants() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("parallel-grant");
+        let (first, second) = tokio::join!(
+            PostgresPlane::connect_tenant(&url, &tenant),
+            PostgresPlane::connect_tenant(&url, &tenant),
+        );
+        first.expect("first parallel connect");
+        second.expect("second parallel connect");
     }
 
     #[tokio::test]

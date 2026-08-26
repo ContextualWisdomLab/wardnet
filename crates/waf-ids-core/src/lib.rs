@@ -1127,12 +1127,16 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
             "Dockerfile".to_string(),
             "deploy/docker-compose.yml".to_string(),
             "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string(),
+            ".github/workflows/release.yml".to_string(),
         ],
         buyer_evidence: vec![
             "docs/commercial/20b-krw-sale-readiness.md".to_string(),
             "docs/commercial/buyer-due-diligence.md".to_string(),
             "docs/security/threat-model.md".to_string(),
             "docs/security/compliance-mapping.md".to_string(),
+            "docs/runbooks/release.md".to_string(),
+            "docs/doctoring/signed-release.md".to_string(),
+            "docs/papers/nist-sp-800-218-ssdf.pdf".to_string(),
         ],
     }
 }
@@ -1169,6 +1173,9 @@ pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenc
             "docs/product-design/enterprise-operator-workflows.md".to_string(),
             "docs/figma/enterprise-product-architecture.md".to_string(),
             "docs/ponytail/2026-07-02-complexity-audit.md".to_string(),
+            "docs/runbooks/release.md".to_string(),
+            "docs/doctoring/signed-release.md".to_string(),
+            "docs/papers/nist-sp-800-218-ssdf.pdf".to_string(),
         ],
         deployment_assets: readiness.deployment_assets,
     }

