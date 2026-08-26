@@ -83,6 +83,53 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '412': { description: ETag does not match }
         '428': { description: If-Match required }
+  /api/dnsbl/{address}:
+    parameters:
+      - name: address
+        in: path
+        required: true
+        schema:
+          oneOf:
+            - { type: string, format: ipv4 }
+            - { type: string, format: ipv6 }
+    get:
+      summary: Get one DNSBL entry and its concurrency token
+      responses:
+        '200':
+          description: DNSBL entry
+          headers:
+            ETag: { schema: { type: string } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Create or conditionally replace one DNSBL entry
+      security: [{ AdminToken: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: DNSBL entry replaced }
+        '201': { description: DNSBL entry created }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { description: ETag does not match }
+        '428': { description: If-Match required for an existing entry }
+    delete:
+      summary: Conditionally delete one DNSBL entry
+      security: [{ AdminToken: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: DNSBL entry deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { description: ETag does not match or entry does not exist }
+        '428': { description: If-Match required }
 components:
   securitySchemes:
     AdminToken:
