@@ -110,7 +110,7 @@ pub struct AppState {
     admin_tokens: HashMap<String, AdminPrincipal>,
     /// Dedicated browser-proxy password loaded from the credential registry.
     egress_proxy_token: Option<String>,
-    /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
+    /// Where secrets were bootstrapped from (file/env/mixed/none). Never holds values.
     credentials_source: CredentialSource,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
