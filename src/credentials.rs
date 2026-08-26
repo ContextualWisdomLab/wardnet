@@ -26,6 +26,8 @@ pub enum CredentialSource {
     File,
     /// Secrets came only from env bootstrap (`ADMIN_TOKEN` / `ADMIN_TOKENS`).
     Env,
+    /// Secrets came from both the credentials file and env bootstrap.
+    Mixed,
     /// No admin secrets configured.
     #[default]
     None,
@@ -36,6 +38,7 @@ impl CredentialSource {
         match self {
             Self::File => "file",
             Self::Env => "env",
+            Self::Mixed => "mixed",
             Self::None => "none",
         }
     }
@@ -163,12 +166,11 @@ impl CredentialRegistry {
             }
         }
 
-        let source = if from_file {
-            CredentialSource::File
-        } else if from_env {
-            CredentialSource::Env
-        } else {
-            CredentialSource::None
+        let source = match (from_file, from_env) {
+            (true, true) => CredentialSource::Mixed,
+            (true, false) => CredentialSource::File,
+            (false, true) => CredentialSource::Env,
+            (false, false) => CredentialSource::None,
         };
 
         Ok(Self { values, source })
@@ -184,9 +186,11 @@ impl CredentialRegistry {
             return;
         };
         self.values.insert(name.to_string(), value);
-        if self.source == CredentialSource::None {
-            self.source = CredentialSource::Env;
-        }
+        self.source = match self.source {
+            CredentialSource::File => CredentialSource::Mixed,
+            CredentialSource::None => CredentialSource::Env,
+            source => source,
+        };
     }
 }
 
@@ -283,6 +287,16 @@ mod tests {
     }
 
     #[test]
+    fn optional_env_secret_marks_file_registry_mixed() {
+        let mut registry = CredentialRegistry {
+            values: HashMap::from([(CRED_ADMIN_TOKEN.to_string(), "file-secret".into())]),
+            source: CredentialSource::File,
+        };
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("env-secret".into()));
+        assert_eq!(registry.source(), CredentialSource::Mixed);
+    }
+
+    #[test]
     fn file_overrides_env_per_key() {
         let dir = std::env::temp_dir().join(format!(
             "wardnet-creds-{}-{}",
@@ -346,7 +360,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(registry.source(), CredentialSource::File);
+        assert_eq!(registry.source(), CredentialSource::Mixed);
         assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("file-only"));
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
