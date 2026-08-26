@@ -33,6 +33,27 @@ pub struct DestinationDecision {
     pub ips: Vec<IpAddr>,
 }
 
+/// Stable failure class for outbound destination evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestinationError {
+    /// The URL is structurally invalid.
+    Invalid(String),
+    /// DNS resolution could not produce a trustworthy answer.
+    Unavailable(String),
+    /// Policy rejected an otherwise evaluable destination.
+    Denied(String),
+}
+
+impl std::fmt::Display for DestinationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) | Self::Unavailable(message) | Self::Denied(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
 /// Hostname, suffix, or CIDR entry parsed from an operator allow/deny list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ListEntry {
@@ -92,17 +113,18 @@ impl DestinationPolicy {
         &self,
         raw: &str,
         resolver: &dyn HostResolver,
-    ) -> Result<DestinationDecision, String> {
-        let parsed = parse_outbound_url(raw)?;
-        let ips = resolve_host_ips(&parsed.host, resolver)?;
+    ) -> Result<DestinationDecision, DestinationError> {
+        let parsed = parse_outbound_url(raw).map_err(DestinationError::Invalid)?;
+        let ips =
+            resolve_host_ips(&parsed.host, resolver).map_err(DestinationError::Unavailable)?;
         let host_allowlisted = host_allowlisted(&self.allow, &parsed.host);
 
         if let Some(entry) = self.matching_entry(&self.deny, &parsed.host, &ips) {
-            return Err(format!(
+            return Err(DestinationError::Denied(format!(
                 "destination {} denied by denylist ({})",
                 parsed.host,
                 entry_label(entry)
-            ));
+            )));
         }
 
         let every_ip_cidr_allowlisted =
@@ -115,10 +137,10 @@ impl DestinationPolicy {
             && !every_ip_cidr_allowlisted
             && !loopback_ok
         {
-            return Err(format!(
+            return Err(DestinationError::Denied(format!(
                 "destination port {} is not a default http/https port",
                 parsed.port
-            ));
+            )));
         }
 
         for ip in &ips {
@@ -127,10 +149,10 @@ impl DestinationPolicy {
                 if this_cidr || (self.allow_loopback_class && ip.is_loopback()) {
                     continue;
                 }
-                return Err(format!(
+                return Err(DestinationError::Denied(format!(
                     "destination {} resolved to denied address class {ip}",
                     parsed.host
-                ));
+                )));
             }
         }
 
@@ -510,7 +532,7 @@ mod tests {
     }
 
     fn deny(policy: &DestinationPolicy, url: &str, resolver: &MapResolver, needle: &str) {
-        let err = policy.evaluate(url, resolver).unwrap_err();
+        let err = policy.evaluate(url, resolver).unwrap_err().to_string();
         assert!(
             err.contains(needle),
             "expected {needle:?} in {err:?} for {url}"
@@ -614,6 +636,14 @@ mod tests {
             &dns,
             "denied address class 10.1.1.1",
         );
+    }
+
+    #[test]
+    fn resolver_failure_has_a_stable_unavailable_class() {
+        let error = DestinationPolicy::production()
+            .evaluate("https://offline.example/", &resolver(&[]))
+            .unwrap_err();
+        assert!(matches!(error, DestinationError::Unavailable(_)));
     }
 
     #[test]

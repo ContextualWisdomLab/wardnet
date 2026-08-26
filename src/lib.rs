@@ -323,23 +323,30 @@ impl AppState {
     async fn resolve_outbound(
         &self,
         url: &str,
-    ) -> Result<destination::DestinationDecision, String> {
+    ) -> Result<destination::DestinationDecision, OutboundResolutionError> {
         let policy = self.destination.clone();
-        let parsed =
-            reqwest::Url::parse(url).map_err(|_| "destination URL is invalid".to_string())?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| "destination URL has no host".to_string())?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| {
+            OutboundResolutionError::Destination(destination::DestinationError::Invalid(
+                "destination URL is invalid".to_string(),
+            ))
+        })?;
+        let host = parsed.host_str().ok_or_else(|| {
+            OutboundResolutionError::Destination(destination::DestinationError::Invalid(
+                "destination URL has no host".to_string(),
+            ))
+        })?;
         if let Some(ips) = self.egress_dns.lookup(host).await {
-            return policy.evaluate(url, &CachedHostResolver(ips));
+            return policy
+                .evaluate(url, &CachedHostResolver(ips))
+                .map_err(OutboundResolutionError::Destination);
         }
         let permit = tokio::time::timeout(
             DESTINATION_RESOLVE_TIMEOUT,
             Arc::clone(&self.destination_resolve_permits).acquire_owned(),
         )
         .await
-        .map_err(|_| "destination DNS capacity timed out".to_string())?
-        .map_err(|_| "destination DNS capacity closed".to_string())?;
+        .map_err(|_| OutboundResolutionError::Timeout)?
+        .map_err(|_| OutboundResolutionError::Unavailable)?;
         let resolver = Arc::clone(&self.resolver);
         let url = url.to_string();
         let decision = tokio::time::timeout(
@@ -350,14 +357,18 @@ impl AppState {
             }),
         )
         .await
-        .map_err(|_| "destination DNS timed out".to_string())?
-        .map_err(|_| "destination evaluation cancelled".to_string())??;
+        .map_err(|_| OutboundResolutionError::Timeout)?
+        .map_err(|_| OutboundResolutionError::Unavailable)?
+        .map_err(OutboundResolutionError::Destination)?;
         self.egress_dns.record(&decision.host, &decision.ips).await;
         Ok(decision)
     }
 
     async fn outbound_client(&self, url: &str) -> Result<reqwest::Client, String> {
-        let decision = self.resolve_outbound(url).await?;
+        let decision = self
+            .resolve_outbound(url)
+            .await
+            .map_err(|error| error.to_string())?;
         let pins = Arc::new(destination::DestinationPins::default());
         pins.record(&decision.host, &decision.ips);
         Ok(outbound_http_client(pins))
@@ -685,6 +696,23 @@ const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const OUTBOUND_FETCH_DEFAULT_BYTES: usize = 2 * 1024 * 1024;
 const OUTBOUND_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 const OUTBOUND_FETCH_MAX_REDIRECTS: usize = 3;
+
+#[derive(Debug)]
+enum OutboundResolutionError {
+    Destination(destination::DestinationError),
+    Timeout,
+    Unavailable,
+}
+
+impl std::fmt::Display for OutboundResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Destination(error) => error.fmt(formatter),
+            Self::Timeout => formatter.write_str("destination DNS evaluation timed out"),
+            Self::Unavailable => formatter.write_str("destination DNS evaluation is unavailable"),
+        }
+    }
+}
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
@@ -876,26 +904,27 @@ async fn evaluate_egress_destination(
     }
     let decision = match state.resolve_outbound(request.url.trim()).await {
         Ok(decision) => decision,
-        Err(message)
-            if message.contains("DNS timed out") || message.contains("DNS capacity timed out") =>
-        {
+        Err(OutboundResolutionError::Timeout) => {
             return error(
                 StatusCode::GATEWAY_TIMEOUT,
                 "destination DNS evaluation timed out",
             );
         }
-        Err(message)
-            if message.contains("DNS failed")
-                || message.contains("resolved to no addresses")
-                || message.contains("DNS capacity closed")
-                || message.contains("evaluation cancelled") =>
-        {
+        Err(OutboundResolutionError::Unavailable)
+        | Err(OutboundResolutionError::Destination(destination::DestinationError::Unavailable(
+            _,
+        ))) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "destination DNS evaluation is unavailable",
             );
         }
-        Err(_) => return error(StatusCode::FORBIDDEN, "destination policy denied the URL"),
+        Err(OutboundResolutionError::Destination(destination::DestinationError::Invalid(_))) => {
+            return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
+        }
+        Err(OutboundResolutionError::Destination(destination::DestinationError::Denied(_))) => {
+            return error(StatusCode::FORBIDDEN, "destination policy denied the URL");
+        }
     };
     let actor = audit_actor(&state, &headers);
     let host = decision.host.clone();
@@ -911,7 +940,7 @@ async fn evaluate_egress_destination(
         })
         .await
     {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
+        return persist_error(message);
     }
     Json(EgressEvaluationResponse {
         allowed: decision.allowed,
