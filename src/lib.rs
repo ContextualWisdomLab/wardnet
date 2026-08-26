@@ -914,14 +914,19 @@ async fn outbound_fetch_inner(
     url.set_fragment(None);
 
     for redirects in 0..=OUTBOUND_FETCH_MAX_REDIRECTS {
-        state.assert_outbound(url.as_str()).await.map_err(|_| {
+        let decision = state.resolve_outbound(url.as_str()).await.map_err(|_| {
             (
                 StatusCode::BAD_REQUEST,
                 "destination_denied",
                 "destination policy denied the URL",
             )
         })?;
-        let response = state.http.get(url.clone()).send().await.map_err(|_| {
+        // A request-local pin board prevents a concurrent evaluation of the same
+        // hostname from replacing the addresses between policy and connect.
+        let request_pins = Arc::new(destination::DestinationPins::default());
+        request_pins.record(&decision.host, &decision.ips);
+        let request_http = outbound_http_client(request_pins);
+        let response = request_http.get(url.clone()).send().await.map_err(|_| {
             (
                 StatusCode::BAD_GATEWAY,
                 "upstream_request_failed",
