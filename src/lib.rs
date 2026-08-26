@@ -70,6 +70,14 @@ impl EgressDnsCache {
     }
 }
 
+struct CachedHostResolver(Vec<IpAddr>);
+
+impl HostResolver for CachedHostResolver {
+    fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, String> {
+        Ok(self.0.clone())
+    }
+}
+
 mod control_plane;
 mod coraza_audit;
 mod coraza_inprocess;
@@ -84,8 +92,8 @@ mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{
-    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_EGRESS_PROXY_TOKEN,
-    CredentialRegistry, CredentialSource,
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_DESTINATION_ALLOWLIST,
+    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CredentialRegistry, CredentialSource,
 };
 pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
@@ -94,8 +102,6 @@ pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
 pub struct AppState {
     inner: Arc<RwLock<AppData>>,
     persist_lock: Arc<Mutex<()>>,
-    http: reqwest::Client,
-    feed_http: reqwest::Client,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
@@ -124,10 +130,8 @@ pub struct AppState {
     /// Fail-closed destination policy for every outbound http/https call.
     destination: DestinationPolicy,
     resolver: Arc<dyn HostResolver + Send + Sync>,
-    /// Addresses that already passed policy; the HTTP clients resolve through
-    /// this pin board instead of a second OS DNS lookup.
-    pins: Arc<destination::DestinationPins>,
     egress_dns: Arc<EgressDnsCache>,
+    destination_resolve_permits: Arc<tokio::sync::Semaphore>,
     /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
     control_plane: Option<Arc<control_plane::PostgresPlane>>,
 }
@@ -195,12 +199,9 @@ impl AppState {
     }
 
     fn new(data: AppData, config: AppConfig) -> Self {
-        let pins = Arc::new(destination::DestinationPins::default());
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: outbound_http_client(Arc::clone(&pins)),
-            feed_http: outbound_http_client(Arc::clone(&pins)),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             egress_proxy_token: None,
@@ -217,8 +218,8 @@ impl AppState {
             proven_engine: ProvenEngineConfig::disabled(),
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
-            pins,
             egress_dns: Arc::new(EgressDnsCache::default()),
+            destination_resolve_permits: Arc::new(tokio::sync::Semaphore::new(64)),
             control_plane: None,
         }
     }
@@ -275,21 +276,42 @@ impl AppState {
         url: &str,
     ) -> Result<destination::DestinationDecision, String> {
         let policy = self.destination.clone();
+        let parsed =
+            reqwest::Url::parse(url).map_err(|_| "destination URL is invalid".to_string())?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "destination URL has no host".to_string())?;
+        if let Some(ips) = self.egress_dns.lookup(host).await {
+            return policy.evaluate(url, &CachedHostResolver(ips));
+        }
+        let permit = tokio::time::timeout(
+            DESTINATION_RESOLVE_TIMEOUT,
+            Arc::clone(&self.destination_resolve_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| "destination DNS capacity timed out".to_string())?
+        .map_err(|_| "destination DNS capacity closed".to_string())?;
         let resolver = Arc::clone(&self.resolver);
         let url = url.to_string();
         let decision = tokio::time::timeout(
             DESTINATION_RESOLVE_TIMEOUT,
-            tokio::task::spawn_blocking(move || policy.evaluate(&url, resolver.as_ref())),
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                policy.evaluate(&url, resolver.as_ref())
+            }),
         )
         .await
         .map_err(|_| "destination DNS timed out".to_string())?
         .map_err(|_| "destination evaluation cancelled".to_string())??;
-        self.pins.record(&decision.host, &decision.ips);
+        self.egress_dns.record(&decision.host, &decision.ips).await;
         Ok(decision)
     }
 
-    async fn assert_outbound(&self, url: &str) -> Result<(), String> {
-        self.resolve_outbound(url).await.map(|_| ())
+    async fn outbound_client(&self, url: &str) -> Result<reqwest::Client, String> {
+        let decision = self.resolve_outbound(url).await?;
+        let pins = Arc::new(destination::DestinationPins::default());
+        pins.record(&decision.host, &decision.ips);
+        Ok(outbound_http_client(pins))
     }
 
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
@@ -914,18 +936,13 @@ async fn outbound_fetch_inner(
     url.set_fragment(None);
 
     for redirects in 0..=OUTBOUND_FETCH_MAX_REDIRECTS {
-        let decision = state.resolve_outbound(url.as_str()).await.map_err(|_| {
+        let request_http = state.outbound_client(url.as_str()).await.map_err(|_| {
             (
                 StatusCode::BAD_REQUEST,
                 "destination_denied",
                 "destination policy denied the URL",
             )
         })?;
-        // A request-local pin board prevents a concurrent evaluation of the same
-        // hostname from replacing the addresses between policy and connect.
-        let request_pins = Arc::new(destination::DestinationPins::default());
-        request_pins.record(&decision.host, &decision.ips);
-        let request_http = outbound_http_client(request_pins);
         let response = request_http.get(url.clone()).send().await.map_err(|_| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -1138,10 +1155,11 @@ async fn clearfolio_submit(
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
     let submit_url = clearfolio_submit_url(&config.base_url);
-    if let Err(message) = state.assert_outbound(&submit_url).await {
-        return error(StatusCode::BAD_REQUEST, message);
-    }
-    let mut request = state.http.post(submit_url).multipart(form);
+    let http = match state.outbound_client(&submit_url).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let mut request = http.post(submit_url).multipart(form);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -1171,10 +1189,11 @@ async fn clearfolio_status(
         );
     };
     let status_url = clearfolio_status_url(&config.base_url, &job_id);
-    if let Err(message) = state.assert_outbound(&status_url).await {
-        return error(StatusCode::BAD_REQUEST, message);
-    }
-    let mut request = state.http.get(status_url);
+    let http = match state.outbound_client(&status_url).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let mut request = http.get(status_url);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -1313,11 +1332,11 @@ async fn soc_analyze(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
-    if let Err(message) = state.assert_outbound(&endpoint).await {
-        return error(StatusCode::BAD_REQUEST, message);
-    }
-    let response = state
-        .http
+    let http = match state.outbound_client(&endpoint).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let response = http
         .post(endpoint)
         .bearer_auth(&config.token)
         .json(&body)
@@ -1403,12 +1422,6 @@ async fn create_route(
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
     }
-    if (route.upstream.starts_with("http://") || route.upstream.starts_with("https://"))
-        && let Err(message) = state.assert_outbound(&route.upstream).await
-    {
-        return error(StatusCode::BAD_REQUEST, message);
-    }
-
     let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
@@ -2333,9 +2346,8 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    state.assert_outbound(url).await?;
-    let mut request = state
-        .feed_http
+    let http = state.outbound_client(url).await?;
+    let mut request = http
         .get(url)
         .header(
             "Accept",
@@ -3104,11 +3116,12 @@ async fn consult_proven_engine(
     else {
         return ProvenEngineOutcome::NotConfigured;
     };
-    if let Err(reason) = state.assert_outbound(&url).await {
-        return ProvenEngineOutcome::Unavailable { reason };
-    }
+    let http = match state.outbound_client(&url).await {
+        Ok(http) => http,
+        Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
+    };
     proven_engine::evaluate_sidecar(
-        &state.http,
+        &http,
         &url,
         method,
         request_uri,
@@ -3159,11 +3172,10 @@ async fn proxy_request(
     body: Bytes,
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
-    state.assert_outbound(&target).await?;
+    let http = state.outbound_client(&target).await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
-    let response = state
-        .http
+    let response = http
         .request(method, target)
         .body(body)
         .send()
@@ -3430,9 +3442,8 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
 
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    state.assert_outbound(url).await?;
-    let response = state
-        .feed_http
+    let http = state.outbound_client(url).await?;
+    let response = http
         .get(url)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
@@ -4005,17 +4016,39 @@ pub(crate) fn bind_is_loopback(bind_addr: &str) -> bool {
 
 fn startup_destination_policy(
     bind_addr: &str,
+    registry: &CredentialRegistry,
 ) -> Result<DestinationPolicy, Box<dyn std::error::Error>> {
     let base = if bind_is_loopback(bind_addr) {
         DestinationPolicy::development()
     } else {
         DestinationPolicy::production()
     };
-    let allow = std::env::var("DESTINATION_ALLOWLIST").unwrap_or_default();
-    let deny = std::env::var("DESTINATION_DENYLIST").unwrap_or_default();
+    let allow = registry
+        .get_credential(CRED_DESTINATION_ALLOWLIST)
+        .unwrap_or_default();
+    let deny = registry
+        .get_credential(CRED_DESTINATION_DENYLIST)
+        .unwrap_or_default();
     Ok(base
         .with_lists(&allow, &deny)
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?)
+}
+
+async fn validate_sidecar_destination(state: &AppState) -> Result<(), std::io::Error> {
+    if state.proven_engine.in_process.is_none()
+        && let Some(sidecar_url) = state.proven_engine.sidecar_url.as_deref()
+    {
+        state
+            .outbound_client(sidecar_url)
+            .await
+            .map_err(|message| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("CORAZA_WAF_URL is denied or unavailable: {message}"),
+                )
+            })?;
+    }
+    Ok(())
 }
 
 /// Read gateway configuration from the process environment, bind the listener,
@@ -4038,6 +4071,8 @@ pub async fn run_from_env(
         std::env::var("ADMIN_TOKENS").ok(),
         std::env::var("CONTROL_PLANE_DATABASE_URL").ok(),
         std::env::var("EGRESS_PROXY_TOKEN").ok(),
+        std::env::var("DESTINATION_ALLOWLIST").ok(),
+        std::env::var("DESTINATION_DENYLIST").ok(),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -4101,7 +4136,7 @@ pub async fn run_from_env(
         fail_closed: proven_engine_fail_closed,
         in_process,
     };
-    let destination_policy = startup_destination_policy(&bind_addr)?;
+    let destination_policy = startup_destination_policy(&bind_addr, &credentials)?;
     let control_plane_url = credentials
         .get_credential(CRED_CONTROL_PLANE_URL)
         .map(str::to_owned);
@@ -4124,6 +4159,7 @@ pub async fn run_from_env(
         .with_proven_engine(proven_engine)
         .with_destination_policy(destination_policy)
         .with_max_body_size(max_body_bytes);
+    validate_sidecar_destination(&state).await?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     let egress_dns = match std::env::var("EGRESS_DNS_BIND_ADDR")
@@ -7276,9 +7312,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_route_fail_closes_metadata_upstream() {
+    async fn create_route_accepts_metadata_upstream_but_runtime_fails_closed() {
         let app = build_app(AppState::seeded(None));
-        let denied = app_request(
+        let created = app_request(
             &app,
             json_request(
                 Method::POST,
@@ -7294,12 +7330,26 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-        let body = body_text(denied).await;
-        assert!(
-            body.contains("denied address class"),
-            "operator must see the denied class: {body}"
-        );
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let error = proxy_request(
+            &AppState::seeded(None),
+            &RouteConfig {
+                id: "pivot".to_string(),
+                path_prefix: "/pivot".to_string(),
+                upstream: "http://169.254.169.254/".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/pivot",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect_err("runtime egress must reject metadata addresses before sending");
+        assert!(error.contains("denied address class"), "{error}");
     }
 
     fn temp_state_path(name: &str) -> PathBuf {
@@ -8377,12 +8427,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_route_fail_closes_private_upstream_unless_cidr_allowlisted() {
+    async fn create_route_does_not_require_live_dns_but_runtime_policy_still_applies() {
         let denied_app = build_app(
             AppState::seeded(Some("secret".to_string()))
                 .with_destination_policy(DestinationPolicy::production()),
         );
-        let denied = app_request(
+        let created_without_lookup = app_request(
             &denied_app,
             json_request(
                 Method::POST,
@@ -8398,12 +8448,29 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-        let denied_body = body_text(denied).await;
+        assert_eq!(created_without_lookup.status(), StatusCode::CREATED);
+
+        let error = proxy_request(
+            &AppState::seeded(None).with_destination_policy(DestinationPolicy::production()),
+            &RouteConfig {
+                id: "internal-svc".to_string(),
+                path_prefix: "/internal".to_string(),
+                upstream: "http://10.1.2.3:8080/".to_string(),
+                mode: EnforcementMode::Block,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/internal",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect_err("runtime egress must enforce destination policy");
         assert!(
-            denied_body.contains("not a default http/https port")
-                || denied_body.contains("denied address class"),
-            "production policy must reject a private non-default-port upstream: {denied_body}"
+            error.contains("not a default http/https port")
+                || error.contains("denied address class"),
+            "{error}"
         );
 
         let allowlisted = DestinationPolicy::production()
@@ -8446,6 +8513,51 @@ mod tests {
         }
     }
 
+    struct CountingResolver {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        ips: Vec<IpAddr>,
+    }
+
+    impl HostResolver for CountingResolver {
+        fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.ips.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_clients_reuse_the_bounded_approved_dns_cache() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = AppState::seeded(None).with_resolver(Arc::new(CountingResolver {
+            calls: Arc::clone(&calls),
+            ips: vec!["93.184.216.34".parse().unwrap()],
+        }));
+
+        state
+            .outbound_client("https://cache-test.invalid/")
+            .await
+            .unwrap();
+        state
+            .outbound_client("https://cache-test.invalid/next")
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sidecar_destination_is_preflighted_before_listener_bind() {
+        let state = AppState::seeded(None)
+            .with_destination_policy(DestinationPolicy::production())
+            .with_proven_engine(ProvenEngineConfig::sidecar(
+                "http://169.254.169.254/".to_string(),
+                true,
+            ));
+        let error = validate_sidecar_destination(&state).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("CORAZA_WAF_URL"));
+        assert!(error.to_string().contains("denied address class"));
+    }
+
     #[tokio::test]
     async fn proxy_request_connects_to_pinned_policy_addresses() {
         let upstream_app = Router::new().route("/", get(|| async { (StatusCode::OK, "pinned") }));
@@ -8484,9 +8596,7 @@ mod tests {
 
     #[tokio::test]
     async fn outbound_http_fails_closed_without_a_preauthorized_pin() {
-        let state = AppState::seeded(None);
-        let error = state
-            .http
+        let error = outbound_http_client(Arc::new(destination::DestinationPins::default()))
             .get("http://pin-test.invalid/")
             .send()
             .await

@@ -49,6 +49,12 @@ https://doi.org/10.1109/PROC.1975.9939
   degradations now record `engine_unavailable` events so operators can alert
   on silent protection loss.
 
+Wardnet validates `CORAZA_WAF_URL` before binding. A loopback, private, or
+ClusterIP sidecar must be covered by a narrow `destination_allowlist` CIDR in
+the credential registry; a hostname-only entry cannot exempt private DNS
+answers. Invalid or unavailable sidecar policy now fails startup instead of
+silently degrading the first live transaction.
+
 National Institute of Standards and Technology. (2022). *Secure Software
 Development Framework (SSDF) version 1.1* (NIST SP 800-218).
 https://doi.org/10.6028/NIST.SP.800-218

@@ -71,13 +71,23 @@ Useful environment variables:
 - `EGRESS_DNS_BIND_ADDR`: optional internal UDP+TCP DNS listener address, for
   example `0.0.0.0:5353`. Only public A/AAAA answers are returned and cached
   for 30 seconds.
-- `DESTINATION_ALLOWLIST` / `DESTINATION_DENYLIST`: comma-separated hosts, `*.suffix`, or CIDRs for outbound `http`/`https`. Denylist wins. CIDR matches apply per resolved address and also authorize non-default ports. Loopback/private/metadata/site-local destinations are denied unless allowlisted (loopback development still permits loopback-class destinations). After a host is allowed, outbound HTTP connects only to those evaluated addresses (original Host/SNI). `/healthz.destination_mode` reports `production` or `development`.
+- `DESTINATION_ALLOWLIST` / `DESTINATION_DENYLIST`: bootstrap transport for
+  credential-registry keys `destination_allowlist` / `destination_denylist`.
+  Values are comma-separated hosts, `*.suffix`, or CIDRs; denylist wins.
+  Host/suffix entries authorize names and non-default ports but never exempt a
+  private, loopback, link-local, metadata, or site-local answer. Use a narrow
+  CIDR entry to authorize an internal address; every answer must match a CIDR
+  before CIDR authorization opens a non-default port. Approved DNS answers are
+  cached for 30 seconds and each request receives an isolated pinned client, so
+  no second DNS lookup or cross-request pin eviction occurs.
 - `WAF_IDS_STATE_PATH`: optional JSON state path for loopback/community. When omitted, the service runs with seeded in-memory state. Production (non-loopback) binds require `CONTROL_PLANE_DATABASE_URL` instead.
 - `CONTROL_PLANE_DATABASE_URL`: PostgreSQL URL for the production control plane (`postgres://…`). Secret; prefer `WAF_IDS_CREDENTIALS_PATH` key `control_plane_url`. `sslmode=require` / `verify-full` uses rustls with Mozilla roots (certificates always verified). `sslmode=disable` or omitted is plaintext. `allow`/`prefer` are rejected. After migrate, the session runs as `wardnet_runtime` (NOSUPERUSER, NOBYPASSRLS). `security_event` is HASH-partitioned by `tenant_id`. `/healthz.persistence` reports `postgres` when connected; `/healthz.event_partitions` reports the child count.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero. Also caps `GET /api/outbox` and processed outbox-row retention.
 - `CORAZA_LIB_PATH` / `CORAZA_RULES_PATH` / `CORAZA_DIRECTIVES`: optional in-process libcoraza. A missing library or empty ruleset fails startup. `/healthz.proven_engine` reports `coraza_in_process`.
-- `CORAZA_WAF_URL`: optional Coraza sidecar URL used when libcoraza is not loaded
+- `CORAZA_WAF_URL`: optional Coraza sidecar URL used when libcoraza is not
+  loaded. Startup resolves and validates it before binding; internal sidecars
+  require a narrow `destination_allowlist` CIDR or startup fails explicitly.
 - `PROVEN_ENGINE_FAIL_CLOSED`: when true, a configured engine outage returns 503 instead of degrading to builtin scoring
 
 Example with persistent local state:
@@ -151,6 +161,12 @@ Management writes are upserts:
 - routes are keyed by `id`
 - threat indicators are keyed by `indicator_type`, `value`, and `source`
 - DNSBL entries are keyed by `address`
+
+Route writes validate structure without requiring live DNS. Every gateway
+execution revalidates destination policy and fails closed if resolution or
+authorization is unavailable. General outbound clients do not follow redirects;
+the bounded document-fetch API is the sole manual redirect path and revalidates
+each hop.
 
 DNSBL response codes must be IPv4 loopback-style values in `127.0.0.0/8`.
 

@@ -26,6 +26,11 @@ Transaction isolation*. https://www.postgresql.org/docs/current/transaction-iso.
   commits in one transaction so a policy mutation cannot land without its audit
   records.
 
+The current control plane intentionally owns one mutex-protected PostgreSQL
+connection, so handlers, health checks, and the outbox worker serialize database
+work. This is a bounded correctness-first ceiling, not a pool; adopt a role-aware
+pool when measured queue latency requires concurrent database operations.
+
 PostgreSQL Global Development Group. (2026). *PostgreSQL documentation: Table
 partitioning*. https://www.postgresql.org/docs/current/ddl-partitioning.html
 

@@ -105,13 +105,14 @@ impl DestinationPolicy {
             ));
         }
 
-        let cidr_allowlisted = ips.iter().any(|ip| cidr_allows(&self.allow, *ip));
+        let every_ip_cidr_allowlisted =
+            !ips.is_empty() && ips.iter().all(|ip| cidr_allows(&self.allow, *ip));
         let loopback_ok = self.allow_loopback_class
             && (parsed.host == "localhost" || ips.iter().any(|ip| ip.is_loopback()));
         if parsed.port != 80
             && parsed.port != 443
             && !host_allowlisted
-            && !cidr_allowlisted
+            && !every_ip_cidr_allowlisted
             && !loopback_ok
         {
             return Err(format!(
@@ -123,8 +124,7 @@ impl DestinationPolicy {
         for ip in &ips {
             if ip_is_denied_class(*ip) {
                 let this_cidr = cidr_allows(&self.allow, *ip);
-                if host_allowlisted || this_cidr || (self.allow_loopback_class && ip.is_loopback())
-                {
+                if this_cidr || (self.allow_loopback_class && ip.is_loopback()) {
                     continue;
                 }
                 return Err(format!(
@@ -615,6 +615,24 @@ mod tests {
     }
 
     #[test]
+    fn hostname_allowlist_never_exempts_denied_or_mixed_answers() {
+        let policy = DestinationPolicy::production()
+            .with_lists("*.internal.example", "")
+            .unwrap();
+        let mut map = HashMap::new();
+        map.insert(
+            "svc.internal.example".to_string(),
+            vec!["8.8.8.8".parse().unwrap(), "10.2.3.4".parse().unwrap()],
+        );
+        deny(
+            &policy,
+            "https://svc.internal.example/",
+            &MapResolver(map),
+            "denied address class 10.2.3.4",
+        );
+    }
+
+    #[test]
     fn development_allows_loopback_but_still_denies_rfc1918() {
         let policy = DestinationPolicy::development();
         let dns = resolver(&[("app.local", "127.0.0.1")]);
@@ -683,6 +701,24 @@ mod tests {
             "https://split.internal/",
             &dns,
             "denied address class 169.254.169.254",
+        );
+    }
+
+    #[test]
+    fn cidr_non_default_port_requires_every_answer_to_match() {
+        let policy = DestinationPolicy::production()
+            .with_lists("10.0.0.0/8", "")
+            .unwrap();
+        let mut map = HashMap::new();
+        map.insert(
+            "mixed.example".to_string(),
+            vec!["10.1.1.1".parse().unwrap(), "8.8.8.8".parse().unwrap()],
+        );
+        deny(
+            &policy,
+            "https://mixed.example:8443/",
+            &MapResolver(map),
+            "not a default http/https port",
         );
     }
 

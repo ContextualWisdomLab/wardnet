@@ -143,8 +143,10 @@ Shipped on `fix/issue-78-fail-closed-credentials`. Do not re-implement.
 
 Shipped in `src/destination.rs` including the TCP-peer pin. Do not re-implement
 the pin. Remaining: Kubernetes NetworkPolicy examples as defense in depth.
-Production sidecar URLs on loopback/private still need `DESTINATION_ALLOWLIST`
-(in-process libcoraza does not).
+Production sidecar URLs on loopback/private require a narrow
+`destination_allowlist` CIDR (hostname entries do not exempt denied address
+classes) and are validated before bind. In-process libcoraza does not need an
+outbound exception.
 
 ### SIEM / OpenTelemetry (issue #85 / PR #90)
 
@@ -211,7 +213,7 @@ matching ingest hints). #78 remains on PR #94; #79 destination policy was
 unscoped from #94 and was not re-implemented here.
 
 Issue **#79** TCP-peer pin on PR #96 (still unmerged; policy blocks). After
-`assert_outbound` allows a host, reqwest DNS returns only those evaluated
+`outbound_client` allows a host, reqwest DNS returns only those evaluated
 addresses so a rebinding answer cannot reach loopback/private/metadata.
 Operator-visible: `/healthz.destination_mode` plus pin tests
 `proxy_request_connects_to_pinned_policy_addresses` (real `proxy_request` to
