@@ -986,25 +986,21 @@ async fn delete_route(
     let expected = headers
         .get(header::IF_MATCH)
         .and_then(|value| value.to_str().ok());
+    if expected.is_none() {
+        return error(
+            StatusCode::PRECONDITION_REQUIRED,
+            "If-Match is required when deleting a route",
+        );
+    }
     let actor = audit_actor(&state, &headers);
     match state
         .try_mutate_and_persist(|data| {
             let Some(index) = data.routes.iter().position(|route| route.id == route_id) else {
-                return Err(if expected.is_some() {
-                    (
-                        StatusCode::PRECONDITION_FAILED,
-                        "If-Match requires an existing route".to_string(),
-                    )
-                } else {
-                    (StatusCode::NOT_FOUND, "route not found".to_string())
-                });
-            };
-            if expected.is_none() {
                 return Err((
-                    StatusCode::PRECONDITION_REQUIRED,
-                    "If-Match is required when deleting a route".to_string(),
+                    StatusCode::PRECONDITION_FAILED,
+                    "If-Match requires an existing route".to_string(),
                 ));
-            }
+            };
             if !if_match_satisfied(expected, &route_etag(&data.routes[index])) {
                 return Err((
                     StatusCode::PRECONDITION_FAILED,
@@ -3764,6 +3760,21 @@ mod tests {
         )
         .await;
         assert_eq!(stale_delete.status(), StatusCode::PRECONDITION_FAILED);
+
+        let missing_delete_without_precondition = app_request(
+            &app,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/routes/missing")
+                .header("x-admin-token", "writer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            missing_delete_without_precondition.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
 
         let deleted = app_request(
             &app,
