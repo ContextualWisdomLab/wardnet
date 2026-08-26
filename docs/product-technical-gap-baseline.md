@@ -43,7 +43,7 @@ evidence.
 | DNSBL publishing | HTTP zone export only | `/dnsbl/zone`; this branch adds authoritative IPv4 A/TXT and NXDOMAIN over the existing UDP/TCP listener | protected merge, deployed port-53 evidence, and IPv6 nibble-reversed support |
 | DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
 | Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
-| Ingress reverse proxy | partial | `/gateway/{*path}` decision loop; stacked k6 harness proves zero-failure monitored decisions at 32/64 concurrent local users and removes no-op in-memory state clones | headers, streaming/upgrades, trusted client attribution, TLS, durable/deployed k6 evidence |
+| Ingress reverse proxy | partial | `/gateway/{*path}` decision loop; stacked k6 harness records zero-failure monitored decisions at 32/64 concurrent local users and removes no-op in-memory state clones | headers, streaming/upgrades, trusted client attribution, TLS, arrival-rate capacity and durable/deployed k6 evidence |
 | Wardnet naming | incomplete | #114 exact-head rename | protected merge and image/deployment/runtime smoke evidence |
 
 There is no verified Wardnet hourly maintenance scheduler execution. Nightly

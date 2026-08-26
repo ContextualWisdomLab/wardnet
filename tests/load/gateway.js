@@ -10,6 +10,7 @@ if (!baseUrl) {
 export const options = {
   vus: Number(__ENV.K6_VUS || 32),
   duration: __ENV.K6_DURATION || "30s",
+  noConnectionReuse: __ENV.K6_CLOSE_CONNECTIONS === "true",
   thresholds: {
     checks: ["rate==1"],
     http_req_failed: ["rate==0"],

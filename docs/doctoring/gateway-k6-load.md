@@ -8,10 +8,11 @@ route. The check fails on any HTTP error or response that did not traverse the
 expected route. k6 reports request rate and latency percentiles without turning
 an unapproved latency target into a release claim.
 
-The default scenario holds 32 concurrent virtual users for 30 seconds. Operators
-can set `K6_VUS` and `K6_DURATION` to reproduce a deployment-specific capacity
-test. A protected release still needs the same test against the deployed data
-plane, with a latency objective agreed for that deployment.
+The default closed-model scenario holds 32 concurrent virtual users for 30
+seconds. Operators can set `K6_VUS` and `K6_DURATION` to reproduce a
+deployment-specific concurrency profile. This does not establish saturation
+capacity: that requires an arrival-rate profile and an agreed latency objective
+against the deployed data plane.
 
 ```mermaid
 sequenceDiagram
@@ -31,11 +32,16 @@ sequenceDiagram
 ```bash
 scripts/k6-gateway.sh
 K6_VUS=64 K6_DURATION=60s scripts/k6-gateway.sh
+K6_CLOSE_CONNECTIONS=true scripts/k6-gateway.sh
 ```
 
-The harness uses in-memory state so this scenario measures the asynchronous
-gateway decision path rather than local state-file durability. PostgreSQL and
-real-upstream load profiles remain separate deployment acceptance tests.
+The default reuses HTTP connections, matching HTTP/1.1's usual behavior.
+`K6_CLOSE_CONNECTIONS=true` opens a new connection for every request so accept
+and connection teardown costs can be measured separately. The harness uses
+in-memory state and a seeded mock upstream, so it measures the asynchronous
+gateway decision path rather than proxy I/O or local state-file durability.
+PostgreSQL and real-upstream profiles remain separate deployment acceptance
+tests.
 
 ## Local evidence — 2026-08-27T03:42+09:00
 
@@ -66,6 +72,11 @@ it does not establish a Wardnet latency target, which remains deployment-specifi
 
 Dean, J., & Barroso, L. A. (2013). The tail at scale. *Communications of the
 ACM, 56*(2), 74–80. https://doi.org/10.1145/2408776.2408794
+
+Aron, M., Sanders, D., Druschel, P., & Zwaenepoel, W. (1999). *Scalable
+content-aware request distribution in cluster-based network servers*. USENIX
+Annual Technical Conference.
+https://www.usenix.org/legacy/event/usenix99/full_papers/aron/aron.pdf
 
 Grafana Labs. (n.d.). *Grafana k6 documentation*. Retrieved August 27, 2026,
 from https://grafana.com/docs/k6/latest/
