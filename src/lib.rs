@@ -873,8 +873,7 @@ async fn evaluate_egress_destination(
     let decision = match state.resolve_outbound(request.url.trim()).await {
         Ok(decision) => decision,
         Err(message)
-            if message.contains("DNS timed out")
-                || message.contains("DNS capacity timed out") =>
+            if message.contains("DNS timed out") || message.contains("DNS capacity timed out") =>
         {
             return error(
                 StatusCode::GATEWAY_TIMEOUT,
