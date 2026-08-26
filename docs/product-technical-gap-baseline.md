@@ -230,10 +230,15 @@ future encryption-at-rest.
 
 ### Coverage / docstring bar
 
-Org 100% line/branch/docstring applies to **changed** surfaces this loop
-(HASH convert SQL, restorable schema window, `/healthz.event_partitions`,
-admin KPI tile, probe upgrade preserving unmasked IPs/paths). Remaining
-holes on untouched handlers stay listed for later loops.
+The 100% line/branch/docstring requirement is **not achieved**. An exact local
+`cargo llvm-cov --locked --workspace --all-features --summary-only
+--fail-under-lines 100` run on 2026-08-27 measured 76.30% lines and 71.18%
+functions; LLVM emitted no branch metric. The largest measured gap is
+`src/control_plane.rs` at 15.91% lines. Current hosted `coverage-source-tree`
+and `coverage-evidence` successes therefore do not prove source coverage.
+Acceptance requires a real CI `cargo llvm-cov` gate, measured branch coverage,
+and a separate public-item documentation coverage audit; adding a failing 100%
+gate before closing the existing gaps would only make every PR permanently red.
 
 ### Ecosystem connectors (leverage order)
 
