@@ -843,6 +843,7 @@ async fn egress_status(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EgressEvaluationRequest {
     url: String,
 }
@@ -10014,6 +10015,19 @@ mod tests {
             .await
             .status(),
             StatusCode::FORBIDDEN
+        );
+        let unknown_field = serde_json::json!({
+            "url": "https://camoufox.example.test/",
+            "bypass_policy": true
+        });
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("writer"), &unknown_field,),
+            )
+            .await
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
         );
         let evaluated: serde_json::Value = json_body(
             app_request(
