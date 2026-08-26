@@ -6456,18 +6456,29 @@ mod tests {
     async fn load_surfaces_injected_write_temp_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
         let state_dir = temp_state_path("write-temp-fault");
+        let state_path = state_dir.join("state.json");
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(state_dir.join("state.json")),
+            state_path: Some(state_path),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
         .await;
+        let error = result
+            .err()
+            .expect("injected write fault must fail loading");
+        let prefix = format!(
+            "failed to write temporary state file {}/.state.json.tmp-{}-",
+            state_dir.display(),
+            std::process::id()
+        );
+        let unique = error
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(": injected fault"))
+            .expect("write fault must report the exact temporary sibling path and cause");
         assert!(
-            result
-                .err()
-                .unwrap()
-                .contains("failed to write temporary state file")
+            !unique.is_empty() && unique.bytes().all(|byte| byte.is_ascii_digit()),
+            "temporary sibling suffix must be a nanosecond timestamp: {error}"
         );
         let _ = fs::remove_dir_all(state_dir).await;
     }
@@ -6476,18 +6487,22 @@ mod tests {
     async fn load_surfaces_injected_rename_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::Rename);
         let state_dir = temp_state_path("rename-fault");
+        let state_path = state_dir.join("state.json");
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(state_dir.join("state.json")),
+            state_path: Some(state_path.clone()),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
         .await;
-        assert!(
+        assert_eq!(
             result
                 .err()
-                .unwrap()
-                .contains("failed to replace state file")
+                .expect("injected rename fault must fail loading"),
+            format!(
+                "failed to replace state file {}: injected fault",
+                state_path.display()
+            )
         );
         let _ = fs::remove_dir_all(state_dir).await;
     }
