@@ -256,6 +256,16 @@ mod tests {
             spamhaus.source_notice.as_deref(),
             Some("Copyright Spamhaus")
         );
+        assert!(
+            parse(
+                "spamhaus_drop_json",
+                "spamhaus-drop-v4",
+                7200,
+                "{not-json}\n"
+            )
+            .is_err(),
+            "malformed upstream records fail closed before the LKG swap"
+        );
 
         let urlhaus = parse(
             "urlhaus_recent_csv",

@@ -55,7 +55,9 @@ On a successful `200`, Wardnet parses and validates the entire response before o
 persistent mutation replaces only rows owned by that source, updates the existing
 `ThreatFeedStatus` freshness record, stores validators/status, and writes an audit entry.
 Network, HTTP, body, parsing, or validation failure records `last_error` but retains the
-last-known-good threat/DNSBL rows unchanged.
+last-known-good threat/DNSBL rows unchanged. Requests have a 15-second total timeout and
+responses are streamed with an 8 MiB hard limit. Credential preflight failures do not consume
+the source refresh interval, so adding a missing key permits an immediate corrective retry.
 
 These are threat-intelligence feeds consumed by gateway scoring and the authoritative
 DNSBL zone export. They are not recursive DNS resolvers and do not configure an upstream

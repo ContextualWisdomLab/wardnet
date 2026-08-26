@@ -22,6 +22,8 @@ pub enum CredentialSource {
     File,
     /// Secrets came only from env bootstrap (`ADMIN_TOKEN` / `ADMIN_TOKENS`).
     Env,
+    /// Secrets were combined from file and environment bootstrap transports.
+    Mixed,
     /// No admin secrets configured.
     #[default]
     None,
@@ -32,6 +34,7 @@ impl CredentialSource {
         match self {
             Self::File => "file",
             Self::Env => "env",
+            Self::Mixed => "mixed",
             Self::None => "none",
         }
     }
@@ -128,7 +131,9 @@ impl CredentialRegistry {
             from_env = true;
         }
 
-        let source = if from_file {
+        let source = if from_file && from_env {
+            CredentialSource::Mixed
+        } else if from_file {
             CredentialSource::File
         } else if from_env {
             CredentialSource::Env
@@ -249,11 +254,38 @@ mod tests {
             Some("envtok:bob".to_string()),
         )
         .unwrap();
-        assert_eq!(registry.source(), CredentialSource::File);
+        assert_eq!(registry.source(), CredentialSource::Mixed);
         assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("file-only"));
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("envtok:bob")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reports_mixed_when_feed_keys_are_file_and_admin_auth_is_env() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-mixed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"threatfox_auth_key":"feed-key"}"#).unwrap();
+
+        let registry =
+            CredentialRegistry::bootstrap_secrets(Some(&path), Some("env-admin".to_string()), None)
+                .unwrap();
+        assert_eq!(registry.source(), CredentialSource::Mixed);
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("env-admin"));
+        assert_eq!(
+            registry.get_credential(CRED_THREATFOX_AUTH_KEY),
+            Some("feed-key")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

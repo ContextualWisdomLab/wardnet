@@ -417,6 +417,10 @@ const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
 const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
 const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
 const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(test))]
+const OFFICIAL_FEED_FETCH_TIMEOUT_SECS: u64 = PHISHING_DATABASE_FETCH_TIMEOUT_SECS;
+#[cfg(test)]
+const OFFICIAL_FEED_FETCH_TIMEOUT_SECS: u64 = 1;
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
@@ -1248,6 +1252,7 @@ async fn refresh_official_threat_feed(
                     &source_id,
                     now,
                     "URLhaus credential is unavailable",
+                    false,
                 )
                 .await;
             };
@@ -1260,6 +1265,7 @@ async fn refresh_official_threat_feed(
                     &source_id,
                     now,
                     "ThreatFox credential is unavailable",
+                    false,
                 )
                 .await;
             };
@@ -1286,11 +1292,20 @@ async fn refresh_official_threat_feed(
     if let Some(last_modified) = &feed.last_modified {
         request = request.header(header::IF_MODIFIED_SINCE, last_modified);
     }
+    request = request.timeout(std::time::Duration::from_secs(
+        OFFICIAL_FEED_FETCH_TIMEOUT_SECS,
+    ));
     let response = match request.send().await {
         Ok(response) => response,
         Err(_) => {
-            return official_feed_failure(&state, &source_id, now, "official feed request failed")
-                .await;
+            return official_feed_failure(
+                &state,
+                &source_id,
+                now,
+                "official feed request failed",
+                true,
+            )
+            .await;
         }
     };
     let etag = response
@@ -1316,23 +1331,19 @@ async fn refresh_official_threat_feed(
     }
     if !response.status().is_success() {
         let message = format!("official feed returned HTTP {}", response.status().as_u16());
-        return official_feed_failure(&state, &source_id, now, &message).await;
+        return official_feed_failure(&state, &source_id, now, &message, true).await;
     }
-    let body = match response.text().await {
+    let body = match read_official_feed_body(response).await {
         Ok(body) => body,
-        Err(_) => {
-            return official_feed_failure(
-                &state,
-                &source_id,
-                now,
-                "official feed body read failed",
-            )
-            .await;
+        Err(message) => {
+            return official_feed_failure(&state, &source_id, now, &message, true).await;
         }
     };
     let parsed = match official_feeds::parse(&feed.parser, &source_id, feed.ttl_seconds, &body) {
         Ok(parsed) => parsed,
-        Err(message) => return official_feed_failure(&state, &source_id, now, &message).await,
+        Err(message) => {
+            return official_feed_failure(&state, &source_id, now, &message, true).await;
+        }
     };
     let import = ThreatFeedImport {
         feed_id: source_id.clone(),
@@ -1342,7 +1353,7 @@ async fn refresh_official_threat_feed(
         dnsbl: parsed.dnsbl,
     };
     if let Err(message) = validate_threat_feed_import(&import) {
-        return official_feed_failure(&state, &source_id, now, message).await;
+        return official_feed_failure(&state, &source_id, now, message, true).await;
     }
     let actor = audit_actor(&state, &headers);
     match state
@@ -1460,6 +1471,7 @@ async fn official_feed_failure(
     source_id: &str,
     now: u64,
     message: &str,
+    attempted_upstream: bool,
 ) -> Response {
     let sanitized = message.replace('\n', " ");
     let persisted = state
@@ -1469,7 +1481,9 @@ async fn official_feed_failure(
                 .iter_mut()
                 .find(|item| item.source_id == source_id)
             {
-                status.last_attempt_unix = Some(now);
+                if attempted_upstream {
+                    status.last_attempt_unix = Some(now);
+                }
                 status.last_error = Some(sanitized.clone());
             }
         })
@@ -1478,6 +1492,30 @@ async fn official_feed_failure(
         Ok(()) => error(StatusCode::BAD_GATEWAY, sanitized),
         Err(error_message) => error(StatusCode::INTERNAL_SERVER_ERROR, error_message),
     }
+}
+
+async fn read_official_feed_body(response: reqwest::Response) -> Result<String, String> {
+    use futures_util::StreamExt;
+
+    if let Some(length) = response.content_length()
+        && length as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "official feed body too large: {length} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| "official feed body read failed".to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "official feed body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| "official feed body is not valid UTF-8".to_string())
 }
 
 fn official_feed_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
@@ -3513,6 +3551,55 @@ mod tests {
             .status(),
             StatusCode::UNAUTHORIZED
         );
+        let missing_credentials_state = AppState::seeded(Some("secret".to_string()));
+        let missing_credentials_inspect = missing_credentials_state.clone();
+        let missing_credentials_app = build_app(missing_credentials_state);
+        let missing_credentials = app_request(
+            &missing_credentials_app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/threatfox-recent/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(missing_credentials.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            missing_credentials_inspect
+                .inner
+                .read()
+                .await
+                .official_threat_feeds
+                .iter()
+                .find(|feed| feed.source_id == "threatfox-recent")
+                .unwrap()
+                .last_attempt_unix
+                .is_none(),
+            "preflight failures must not throttle the corrective retry"
+        );
+        let stalled_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let stalled_address = stalled_listener.local_addr().unwrap();
+        let stalled_thread = thread::spawn(move || {
+            let (_stream, _) = stalled_listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+        let stalled_state = AppState::seeded(Some("secret".to_string())).with_official_feed_url(
+            "spamhaus-drop-v6",
+            format!("http://{stalled_address}/drop.json"),
+        );
+        let stalled_app = build_app(stalled_state);
+        let timed_out = app_request(
+            &stalled_app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/spamhaus-drop-v6/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(timed_out.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_text(timed_out).await.contains("request failed"));
+        stalled_thread.join().unwrap();
         let calls = StdArc::new(AtomicUsize::new(0));
         let mock_calls = calls.clone();
         let upstream = Router::new().route(
@@ -3528,7 +3615,11 @@ mod tests {
                         )
                             .into_response()
                     } else {
-                        (StatusCode::OK, "not-json").into_response()
+                        (
+                            StatusCode::OK,
+                            Body::from(vec![b'x'; PHISHING_DATABASE_MAX_BODY_BYTES + 1]),
+                        )
+                            .into_response()
                     }
                 }
             }),
@@ -3603,10 +3694,11 @@ mod tests {
         )
         .await;
         assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_text(failed).await.contains("body too large"));
         let after = inspect.inner.read().await;
         assert_eq!(
             after.dnsbl, first.dnsbl,
-            "failed parse must preserve LKG data"
+            "failed refresh must preserve LKG data"
         );
         assert!(
             after
