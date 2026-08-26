@@ -1,0 +1,36 @@
+openapi: 3.1.0
+info:
+  title: Wardnet egress boundary API
+  version: 0.1.0
+paths:
+  /api/egress:
+    get:
+      summary: Read non-secret egress proxy and DNS resolver status
+      security: [{ AdminToken: [] }]
+      responses:
+        '200': { description: Egress boundary status }
+        '401': { description: Missing or invalid admin credential }
+    post:
+      summary: Evaluate and pin a destination under the active policy
+      security: [{ AdminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+      responses:
+        '200': { description: Destination allowed, DNS-pinned, persisted and audited }
+        '401': { description: Missing or invalid admin credential }
+        '403': { description: Read-only principal or destination denied }
+        '500': { description: Audit persistence failed and was rolled back }
+components:
+  securitySchemes:
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token

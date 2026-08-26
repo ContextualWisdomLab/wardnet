@@ -47,3 +47,19 @@ to Wardnet port 8080. In
 particular, deny direct TCP 80/443 and all other DNS servers. Wardnet separately
 needs upstream DNS and TCP 443. This network policy is what prevents a browser,
 extension, subprocess, or IP-literal URL from bypassing the proxy contract.
+
+## Operator API
+
+`GET /api/egress` requires any authenticated admin principal and reports only
+non-secret status: destination mode, whether proxy authentication and the DNS
+listener are configured, and the live bounded DNS-cache count. It never returns
+the proxy password or allow/deny-list contents.
+
+`POST /api/egress` with `{"url":"https://example.test/"}` requires a
+write-capable principal. It applies the exact runtime destination policy and DNS
+pinning path used by CONNECT and outbound HTTP, returns `403` without resolution
+details when denied, and persistently audits successful evaluations by hostname.
+This is an operator preflight and diagnostic; Camoufox must still use Wardnet DNS,
+the authenticated CONNECT proxy, and a default-deny workload network policy.
+
+The machine-readable contract is in `docs/egress-api-openapi.yaml`.

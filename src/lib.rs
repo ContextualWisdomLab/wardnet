@@ -48,6 +48,13 @@ struct EgressDnsCache {
 }
 
 impl EgressDnsCache {
+    async fn live_entry_count(&self) -> usize {
+        let mut cache = self.inner.lock().await;
+        let now = Instant::now();
+        cache.retain(|_, (expires, _)| *expires > now);
+        cache.len()
+    }
+
     async fn lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         let mut cache = self.inner.lock().await;
@@ -137,6 +144,7 @@ pub struct AppState {
     destination: DestinationPolicy,
     resolver: Arc<dyn HostResolver + Send + Sync>,
     egress_dns: Arc<EgressDnsCache>,
+    egress_dns_listener_enabled: bool,
     destination_resolve_permits: Arc<tokio::sync::Semaphore>,
     /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
     control_plane: Option<Arc<control_plane::PostgresPlane>>,
@@ -252,6 +260,7 @@ impl AppState {
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
             egress_dns: Arc::new(EgressDnsCache::default()),
+            egress_dns_listener_enabled: false,
             destination_resolve_permits: Arc::new(tokio::sync::Semaphore::new(64)),
             control_plane: None,
         }
@@ -372,6 +381,11 @@ impl AppState {
 
     pub fn with_egress_proxy_token(mut self, token: Option<String>) -> Self {
         self.egress_proxy_token = token.filter(|value| !value.is_empty());
+        self
+    }
+
+    fn with_egress_dns_listener_enabled(mut self, enabled: bool) -> Self {
+        self.egress_dns_listener_enabled = enabled;
         self
     }
 
@@ -763,6 +777,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/signatures", get(list_signatures))
         .route("/api/evaluate", post(evaluate_request))
         .route("/api/outbound/fetch", post(outbound_fetch))
+        .route(
+            "/api/egress",
+            get(egress_status).post(evaluate_egress_destination),
+        )
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -799,6 +817,82 @@ pub fn build_app(state: AppState) -> Router {
         .fallback(connect_proxy)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+#[derive(Debug, Serialize)]
+struct EgressStatus {
+    destination_mode: String,
+    proxy_auth_configured: bool,
+    dns_listener_enabled: bool,
+    cached_host_count: usize,
+    dns_cache_ttl_seconds: u64,
+}
+
+async fn egress_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    Json(EgressStatus {
+        destination_mode: state.destination.mode().to_string(),
+        proxy_auth_configured: state.egress_proxy_token.is_some(),
+        dns_listener_enabled: state.egress_dns_listener_enabled,
+        cached_host_count: state.egress_dns.live_entry_count().await,
+        dns_cache_ttl_seconds: EGRESS_DNS_TTL.as_secs(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct EgressEvaluationRequest {
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EgressEvaluationResponse {
+    allowed: bool,
+    host: String,
+    addresses: Vec<IpAddr>,
+    reason: String,
+}
+
+async fn evaluate_egress_destination(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EgressEvaluationRequest>,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::FORBIDDEN, "admin principal is read-only");
+    }
+    let decision = match state.resolve_outbound(request.url.trim()).await {
+        Ok(decision) => decision,
+        Err(_) => return error(StatusCode::FORBIDDEN, "destination policy denied the URL"),
+    };
+    let actor = audit_actor(&state, &headers);
+    let host = decision.host.clone();
+    if let Err(message) = state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "evaluate_egress_destination",
+                "egress_destination",
+                host,
+            );
+        })
+        .await
+    {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
+    }
+    Json(EgressEvaluationResponse {
+        allowed: decision.allowed,
+        host: decision.host,
+        addresses: decision.ips,
+        reason: decision.reason,
+    })
+    .into_response()
 }
 
 /// Serve one authenticated, stateless MCP 2026-07-28 JSON-RPC message.
@@ -4816,6 +4910,7 @@ pub async fn run_from_env(
         }
         None => None,
     };
+    let state = state.with_egress_dns_listener_enabled(egress_dns.is_some());
     println!("waf-ids-ai-soc listening on http://{local_addr}");
     if let Some((_, _, dns_addr)) = &egress_dns {
         println!("wardnet egress DNS listening on udp+tcp://{dns_addr}");
@@ -9876,6 +9971,85 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.ips.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn egress_operator_api_enforces_rbac_reports_status_and_audits_evaluation() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("reader:r:readonly,writer:w:write"))
+            .with_egress_proxy_token(Some("proxy-secret".to_string()))
+            .with_egress_dns_listener_enabled(true)
+            .with_resolver(Arc::new(CountingResolver {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                ips: vec!["93.184.216.34".parse().unwrap()],
+            }));
+        let app = build_app(state);
+
+        assert_eq!(
+            app_request(&app, empty_request(Method::GET, "/api/egress"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let status: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/egress", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["destination_mode"], "development");
+        assert_eq!(status["proxy_auth_configured"], true);
+        assert_eq!(status["dns_listener_enabled"], true);
+        assert_eq!(status["cached_host_count"], 0);
+        assert!(status.get("proxy_token").is_none());
+
+        let request = serde_json::json!({"url": "https://camoufox.example.test/"});
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("reader"), &request)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let evaluated: serde_json::Value = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("writer"), &request),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(evaluated["allowed"], true);
+        assert_eq!(evaluated["host"], "camoufox.example.test");
+        assert_eq!(evaluated["addresses"], serde_json::json!(["93.184.216.34"]));
+
+        let status: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/egress", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["cached_host_count"], 1);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "evaluate_egress_destination"
+                && entry.resource_id == "camoufox.example.test"
+                && entry.actor == "w"
+        }));
     }
 
     #[tokio::test]
