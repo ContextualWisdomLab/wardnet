@@ -6,13 +6,15 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   release:
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -48,9 +50,11 @@ jobs:
           ref="${image}@${digest}"
           printf '%s\n' "$ref" > dist/IMAGE-DIGEST.txt
           scripts/release-sbom.sh --output dist/image.sbom.spdx.json "$ref"
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          {
+            echo "ref=${ref}"
+            echo "digest=${digest}"
+            echo "image=${image}"
+          } >> "$GITHUB_OUTPUT"
       - name: Checksums and keyless blob signatures
         run: |
           set -euo pipefail

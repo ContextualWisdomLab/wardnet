@@ -398,6 +398,14 @@ fn release_workflow_is_keyless_and_signs_by_digest() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
     )
     .expect("read release.yml");
+    let (workflow_scope, jobs) = workflow.split_once("\njobs:\n").expect("jobs section");
+    assert!(workflow_scope.contains("permissions:\n  contents: read"));
+    assert!(
+        !workflow_scope.contains(": write"),
+        "workflow-wide write permissions are too broad"
+    );
+    assert!(jobs.contains("release:\n    permissions:\n      contents: write"));
+    assert!(jobs.contains("packages: write"));
     assert!(workflow.contains("id-token: write"));
     assert!(workflow.contains("attestations: write"));
     assert!(workflow.contains("cosign sign --yes"));
