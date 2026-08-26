@@ -44,7 +44,7 @@ mod suricata_eve;
 mod taxii;
 pub use credentials::{
     CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource,
-    listen_is_loopback_only, require_write_auth_for_bind,
+    listen_is_loopback_only, parse_credentials_json, require_write_auth_for_bind,
 };
 
 #[derive(Clone)]

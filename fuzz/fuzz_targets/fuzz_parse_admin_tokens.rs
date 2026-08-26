@@ -15,7 +15,7 @@
 //! crashes.
 
 use libfuzzer_sys::fuzz_target;
-use waf_ids_ai_soc::{parse_admin_tokens, parse_admin_tokens_strict};
+use waf_ids_ai_soc::{parse_admin_tokens, parse_admin_tokens_strict, parse_credentials_json};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(raw) = std::str::from_utf8(data) else {
@@ -38,6 +38,12 @@ fuzz_target!(|data: &[u8]| {
                 !principal.actor.is_empty(),
                 "strict actor value must never be empty"
             );
+        }
+    }
+
+    if let Ok(credentials) = parse_credentials_json(raw) {
+        for value in credentials.values() {
+            assert!(!value.trim().is_empty(), "credential value must never be blank");
         }
     }
 });

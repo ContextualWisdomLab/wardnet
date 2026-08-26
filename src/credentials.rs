@@ -81,22 +81,11 @@ impl CredentialRegistry {
         if let Some(path) = credentials_path.and_then(nonempty_credentials_path) {
             match std::fs::read_to_string(path) {
                 Ok(content) => {
-                    let file_map: HashMap<String, serde_json::Value> =
-                        serde_json::from_str(&content).map_err(|error| {
-                            format!(
-                                "credentials file {} is not valid JSON: {error}",
-                                path.display()
-                            )
-                        })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
-                        if let Some(raw) = file_map.get(key) {
-                            let text = json_value_as_nonempty_string(raw);
-                            if let Some(text) = text {
-                                values.insert(key.to_string(), text);
-                                from_file = true;
-                            }
-                        }
-                    }
+                    let file_values = parse_credentials_json(&content).map_err(|error| {
+                        format!("credentials file {} is invalid: {error}", path.display())
+                    })?;
+                    from_file = !file_values.is_empty();
+                    values.extend(file_values);
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => {
@@ -131,6 +120,24 @@ impl CredentialRegistry {
 
         Ok(Self { values, source })
     }
+}
+
+/// Parse the secret-bearing keys from credentials JSON.
+///
+/// Missing keys may use bootstrap transport fallback, but an explicitly null
+/// or blank key is invalid and cannot be silently replaced by another source.
+pub fn parse_credentials_json(content: &str) -> Result<HashMap<String, String>, String> {
+    let file_map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(content).map_err(|error| format!("not valid JSON: {error}"))?;
+    let mut values = HashMap::new();
+    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+        if let Some(raw) = file_map.get(key) {
+            let text = json_value_as_nonempty_string(raw)
+                .ok_or_else(|| format!("{key} must not be blank or null"))?;
+            values.insert(key.to_string(), text);
+        }
+    }
+    Ok(values)
 }
 
 /// Return a credentials path only when it contains a non-whitespace path value.
@@ -269,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_file_admin_token_does_not_authorize_public_bind() {
+    fn whitespace_file_admin_token_cannot_fall_back_to_env() {
         let dir = std::env::temp_dir().join(format!(
             "wardnet-creds-whitespace-{}-{}",
             std::process::id(),
@@ -282,15 +289,26 @@ mod tests {
         let path = dir.join("credentials.json");
         std::fs::write(&path, r#"{"admin_token":"   \t"}"#).unwrap();
 
-        let registry = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap();
-        let has_write_capable_admin = registry
-            .get_credential(CRED_ADMIN_TOKEN)
-            .is_some_and(|token| !token.is_empty());
-        assert_eq!(registry.source(), CredentialSource::None);
-        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), None);
-        assert!(require_write_auth_for_bind("0.0.0.0:0", has_write_capable_admin).is_err());
+        let error = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            Some("must-not-replace-file-value".to_string()),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("admin_token must not be blank or null"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_null_file_admin_token_is_invalid() {
+        assert!(parse_credentials_json(r#"{"admin_token":null}"#).is_err());
+    }
+
+    #[test]
+    fn non_string_file_value_preserves_existing_serialization_policy() {
+        let values = parse_credentials_json(r#"{"admin_token":42}"#).unwrap();
+        assert_eq!(values.get(CRED_ADMIN_TOKEN).map(String::as_str), Some("42"));
     }
 
     #[test]

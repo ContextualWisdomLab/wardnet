@@ -18,7 +18,7 @@ entry points for arbitrary input.
 | --------------------------- | ------------------------------------------- | ---------- |
 | `fuzz_score_request`        | `waf_ids_core::score_request`               | no panic on arbitrary path/query/body/IP; `reason` never empty; scoring deterministic |
 | `fuzz_appdata_json`         | `serde_json::from_str::<AppData>` (state file) | no panic; parsed values round-trip through serde |
-| `fuzz_parse_admin_tokens`   | `waf_ids_ai_soc::parse_admin_tokens`        | no panic; no empty token key; no empty principal actor value |
+| `fuzz_parse_admin_tokens`   | `waf_ids_ai_soc::parse_admin_tokens` / `parse_credentials_json` | no panic; no empty token key or actor; present blank/null file credentials are rejected instead of falling back to environment transport |
 | `fuzz_dnsbl_zone`           | `waf_ids_core::export_dnsbl_zone` / `validate_dnsbl` | no panic; every TXT payload fully escaped (no zone break-out); every published A-record response code is an IPv4 loopback literal (127.0.0.0/8) |
 
 ## Layout
