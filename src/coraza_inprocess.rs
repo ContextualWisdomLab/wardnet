@@ -24,6 +24,8 @@ const CORAZA_ERROR: c_int = -1;
 const CORAZA_INTERRUPTION: c_int = 1;
 
 #[repr(C)]
+// Fields are retained even when unread to mirror the external libcoraza ABI.
+#[allow(dead_code)]
 struct CorazaIntervention {
     action: *mut c_char,
     status: c_int,
@@ -324,6 +326,9 @@ unsafe fn construct_waf(
     let waf = unsafe { (api.new_waf)(config.config, &mut err_ptr) };
     if !err_ptr.is_null() {
         let reason = unsafe { take_c_string(api, err_ptr) };
+        if waf != 0 {
+            unsafe { (api.free_waf)(waf) };
+        }
         return Err(format!("libcoraza failed to build WAF: {reason}"));
     }
     if waf == 0 {

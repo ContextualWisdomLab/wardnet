@@ -421,7 +421,7 @@ enum SslMode {
 /// because they can silently drop to plaintext.
 fn ssl_mode(raw: &str) -> Result<SslMode, String> {
     let lower = raw.to_ascii_lowercase();
-    let Some((_, query)) = lower.split_once('?') else {
+    let Some((_, query)) = lower.rsplit_once('?') else {
         return Ok(SslMode::Disable);
     };
     for part in query.split('&').flat_map(|chunk| chunk.split('#')) {
@@ -446,7 +446,7 @@ fn ssl_mode(raw: &str) -> Result<SslMode, String> {
 /// libpq verification modes we already treat as `Require` so rustls can
 /// still verify certificates.
 fn rewrite_sslmode_for_tokio(raw: &str) -> String {
-    let Some((head, query)) = raw.split_once('?') else {
+    let Some((head, query)) = raw.rsplit_once('?') else {
         return raw.to_string();
     };
     let rewritten = query
@@ -2281,6 +2281,10 @@ mod tests {
         );
         assert_eq!(
             ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full").unwrap(),
+            SslMode::Require
+        );
+        assert_eq!(
+            ssl_mode("postgres://wardnet:p?ss@127.0.0.1/wardnet?sslmode=require").unwrap(),
             SslMode::Require
         );
         assert_eq!(

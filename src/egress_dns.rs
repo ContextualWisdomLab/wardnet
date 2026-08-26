@@ -22,6 +22,11 @@ const DNS_MAX_ANSWERS: usize = 16;
 
 async fn answer(state: &AppState, packet: &[u8]) -> Option<Vec<u8>> {
     let request = Message::from_bytes(packet).ok()?;
+    if request.metadata.message_type != MessageType::Query
+        || request.metadata.op_code != OpCode::Query
+    {
+        return None;
+    }
     let mut response = Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
     response.metadata.recursion_desired = request.metadata.recursion_desired;
     response.metadata.recursion_available = true;
@@ -212,6 +217,16 @@ mod tests {
         let response =
             Message::from_bytes(&answer(&state, &encode(request).unwrap()).await.unwrap()).unwrap();
         assert_eq!(response.metadata.response_code, ResponseCode::NotImp);
+    }
+
+    #[tokio::test]
+    async fn ignores_non_query_messages() {
+        let state = AppState::seeded(None);
+        let response = Message::new(7, MessageType::Response, OpCode::Query);
+        assert!(answer(&state, &encode(response).unwrap()).await.is_none());
+
+        let status = Message::new(7, MessageType::Query, OpCode::Status);
+        assert!(answer(&state, &encode(status).unwrap()).await.is_none());
     }
 
     #[tokio::test]
