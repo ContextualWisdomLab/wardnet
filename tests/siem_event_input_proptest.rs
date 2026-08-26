@@ -97,3 +97,23 @@ fn normalization_redacts_colon_and_equals_credentials() {
     assert!(reason.contains("[REDACTED]"));
     assert_eq!(events[0].path, "/pay");
 }
+
+#[test]
+fn oversized_reason_is_bounded_without_poisoning_the_batch() {
+    let oversized = "signal ".repeat(400);
+    let input = format!(
+        "{}{}",
+        event(10, 1_723_456_789, "block", &oversized, "/first"),
+        event(11, 1_723_456_790, "monitor", "rule match", "/second")
+    );
+
+    let events = read_events(Cursor::new(input)).expect("oversized reason stays exportable");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].reason.chars().count(), 2_048);
+    assert!(
+        events[0]
+            .reason
+            .ends_with("[TRUNCATED; original_chars=2800]")
+    );
+    assert_eq!(events[1].reason, "rule match");
+}

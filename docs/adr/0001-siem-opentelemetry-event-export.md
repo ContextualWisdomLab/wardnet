@@ -43,7 +43,10 @@ The exporter is a deterministic protocol boundary rather than a network daemon. 
 ## Security and privacy contract
 
 - Read the complete bounded batch before writing output.
-- Reject malformed JSON, duplicate IDs, invalid timestamps, oversized records, and incomplete or invalid trace context.
+- Reject malformed JSON, duplicate IDs, invalid timestamps, oversized records,
+  and incomplete or invalid trace context. Bound an oversized detection reason
+  to 2,048 characters with an explicit original-length marker so one retained
+  event cannot poison the complete export batch.
 - Produce no partial output if any input line is invalid.
 - Ignore unknown source fields rather than forwarding them.
 - Strip query strings and fragments from paths.

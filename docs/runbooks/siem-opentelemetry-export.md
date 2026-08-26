@@ -122,7 +122,10 @@ The exporter exits non-zero and writes no output when any of the following occur
 - any non-empty line is malformed JSON;
 - an event ID is zero or duplicated;
 - a timestamp cannot be represented at nanosecond precision;
-- required fields are empty or oversized;
+- required fields other than `reason` are empty or oversized;
+- an oversized `reason` is exported at a 2,048-character bound with an explicit
+  `[TRUNCATED; original_chars=N]` marker, so one retained security event cannot
+  block later records while operators can still detect the bounded evidence;
 - trace and span identifiers are incomplete, malformed, or all zero;
 - rendered output exceeds 64 MiB.
 

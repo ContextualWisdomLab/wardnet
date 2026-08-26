@@ -135,7 +135,7 @@ fn normalize_event(source: SourceEvent, line_number: usize) -> Result<Normalized
     }
     checked_time(source.timestamp_unix, 1_000_000_000, line_number)?;
     let action = required_sanitized("action", &source.action, MAX_ACTION_CHARS, line_number)?;
-    let reason = required_sanitized("reason", &source.reason, MAX_REASON_CHARS, line_number)?;
+    let reason = bounded_reason(&source.reason, line_number)?;
     let path = sanitize_path(&source.path, line_number)?;
     let route_id = source
         .route_id
@@ -183,6 +183,30 @@ fn required_sanitized(
         ));
     }
     Ok(sanitized)
+}
+
+fn bounded_reason(value: &str, line_number: usize) -> Result<String, String> {
+    if value.is_empty() {
+        return Err(format!("line {line_number}: reason must not be empty"));
+    }
+    let original_chars = value.chars().count();
+    let sanitized = sanitize_text(value, usize::MAX);
+    if sanitized.is_empty() {
+        return Err(format!(
+            "line {line_number}: reason contains no exportable text"
+        ));
+    }
+    if sanitized.chars().count() <= MAX_REASON_CHARS {
+        return Ok(sanitized);
+    }
+
+    let marker = format!(" [TRUNCATED; original_chars={original_chars}]");
+    let prefix_chars = MAX_REASON_CHARS.saturating_sub(marker.chars().count());
+    Ok(format!(
+        "{}{}",
+        truncate_chars(&sanitized, prefix_chars),
+        marker
+    ))
 }
 
 fn sanitize_path(value: &str, line_number: usize) -> Result<String, String> {
