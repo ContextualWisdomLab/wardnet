@@ -29,6 +29,8 @@ flowchart LR
 
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
 - `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests. Persistence, destination-list, and sidecar settings validate before the readiness line is printed.
+- `src/control_plane.rs`: PostgreSQL production authority (issue #80). Non-loopback binds require `CONTROL_PLANE_DATABASE_URL`. Tenant isolation is default-deny RLS under `wardnet_runtime` (not superuser/owner). `sslmode=require` uses rustls. `security_event` is HASH-partitioned by `tenant_id` (`/healthz.event_partitions`). The JSON file adapter remains loopback/community only.
+- `src/outbox.rs`: transactional outbox + leased workers (issue #81). Security events append incrementally with an outbox row in the same transaction. Workers claim with `SKIP LOCKED`. `GET /api/outbox` is bounded to `EVENT_LIMIT` (processed rows pruned; receipts kept). `/healthz.outbox` is operator-visible.
 - `src/destination.rs`: fail-closed outbound URL policy (issue #79) for every `http`/`https` send. CIDR allowlist exceptions are per resolved address; blocking DNS is offloaded from Tokio workers. The outbound HTTP client DNS resolver returns only addresses that already passed policy (TCP peer pin / DNS-rebinding TOCTOU close).
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
 - `/admin`: embedded web console.
@@ -54,10 +56,10 @@ flowchart LR
 
 - Default bind address is localhost.
 - Remote management requires `ADMIN_TOKEN` plus external TLS and identity controls.
-- `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone operation. Without it, the service uses seeded in-memory state.
+- `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone/loopback operation. Without it, the service uses seeded in-memory state. Production binds require PostgreSQL (`CONTROL_PLANE_DATABASE_URL`).
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
-- JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
+- JSON persistence is a baseline durability mechanism, not a substitute for a production database. PostgreSQL mode exports a hashed logical snapshot (`GET /api/backup`) and runs an isolated restore drill (`POST /api/backup/drill`).
 - Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.
 - The reusable core remains in-repo as a workspace crate. A git submodule is intentionally deferred until an independently versioned engine, SDK, or adapter needs a separate release lifecycle.
 

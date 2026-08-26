@@ -1177,7 +1177,7 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "GET",
             "/healthz",
             "application/json",
-            "runtime health, persistence mode, DNSBL origin, and event retention limit",
+            "runtime health, persistence mode, DNSBL origin, event retention, and HASH event partitions",
             true,
         ),
         buyer_evidence_endpoint(

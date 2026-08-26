@@ -34,6 +34,7 @@ start_server() {
       WAF_IDS_STATE_PATH="$STATE_FILE" \
       DNSBL_ORIGIN="dnsbl.test" \
       EVENT_LIMIT="5" \
+      CONTROL_PLANE_DATABASE_URL="" \
       cargo run --quiet
   ) >"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"
@@ -81,6 +82,9 @@ assert_json_field "$health" 'data["event_limit"] == 5'
 assert_json_field "$health" 'data["proven_engine"] == "ingest_hints_only"'
 assert_json_field "$health" 'data["proven_engine_fail_closed"] is False'
 assert_json_field "$health" 'data["destination_mode"] == "development"'
+assert_json_field "$health" 'data["outbox"] == "disabled"'
+assert_json_field "$health" 'data["outbox_pending"] == 0'
+assert_json_field "$health" 'data["event_partitions"] == 0'
 
 engine_status="$(curl -fsS "$BASE_URL/api/waf/engine-status")"
 assert_json_field "$engine_status" 'data["mode"] == "ingest_hints_only"'
