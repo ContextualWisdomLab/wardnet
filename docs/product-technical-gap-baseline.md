@@ -3,7 +3,7 @@
 Snapshot date: 2026-08-23T20:06Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
-## Current delivery evidence — 2026-08-27T02:53+09:00
+## Current delivery evidence — 2026-08-27T03:11+09:00
 
 Protected `main` is `107117634764c901dff540044585d64088fafedb`. The active
 organization ruleset `18156473` requires one independent approval, resolved
@@ -19,7 +19,7 @@ delivery evidence.
 | #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
 | #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
 | #105 optimistic concurrency | `f92f3aa0ed209e9818c29205fd12c6f2fad60e4a` | `#95` | stacked only; three unresolved threads |
-| #95 in-path Coraza and accumulated production stack | `33c692d10cecccd217dea0da451b954a81ddcd1f` | `main` | MCP #117 merged into this stack; exact-head checks and independent approval required |
+| #95 in-path Coraza and accumulated production stack | `723aed03b8f06d30df1fc56991d1148be18fb760` | `main` | MCP #117 merged; release write permissions narrowed to the publishing job after Scorecard findings; exact-head checks and independent approval required |
 | #94 fail-closed public admin auth | `094f653a0545436384762adf585e912373425de7` | `main` | blocked; exact-head review/check evidence required |
 | #93 deterministic persistence fault seam | `3663c57373df4f3edcd0c1cfdf1deb18f461b91c` | `main` | stale change request and exact-head checks required |
 | #90 SIEM/OpenTelemetry export | `8e4484d13499d99c9ae31e1a3b6ccd419d6ed934` | `main` | two unresolved threads; Strix failure |
