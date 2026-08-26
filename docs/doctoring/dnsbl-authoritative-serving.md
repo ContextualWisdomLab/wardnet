@@ -2,10 +2,11 @@
 
 ## Decision
 
-Wardnet's existing bounded UDP/TCP DNS listener answers IPv4 DNSBL queries
+Wardnet's existing bounded UDP/TCP DNS listener answers IPv4 and IPv6 DNSBL queries
 inside `DNSBL_ORIGIN` before entering recursive egress resolution. A query name
-uses RFC 5782 reversed-octet form, for example
-`99.2.0.192.dnsbl.example`. Listed addresses receive authoritative A and TXT
+uses RFC 5782 reversed-octet form for IPv4, for example
+`99.2.0.192.dnsbl.example`, or RFC 3596's 32 reversed hexadecimal nibbles for
+IPv6. Listed addresses receive authoritative A and TXT
 records; unlisted, malformed, and zone-apex names receive authoritative
 `NXDOMAIN` with an RFC 2308 SOA for negative caching and are never forwarded
 upstream. Listed names queried for unsupported types return the same SOA with
@@ -24,7 +25,7 @@ sequenceDiagram
     participant S as Validated DNSBL state
     participant R as Egress resolver
     C->>D: A or TXT 99.2.0.192.dnsbl.example
-    D->>D: Match exact DNSBL origin and decode IPv4
+    D->>D: Match exact DNSBL origin and decode IPv4 octets or IPv6 nibbles
     D->>S: Validate entries and match address/CIDR
     alt listed
         S-->>D: code, reason, source, TTL
@@ -48,14 +49,15 @@ sequenceDiagram
 - Unsupported types for a listed name return authoritative empty `NOERROR`;
   both NODATA and NXDOMAIN include the zone SOA for bounded negative caching.
   Non-DNSBL names retain the existing A/AAAA resolver contract.
-- IPv6 nibble-reversed DNSBL publication remains a documented gap; the existing
-  zone exporter and this runtime slice intentionally cover the current IPv4
-  publication contract.
+- IPv6 names require exactly 32 single hexadecimal labels. Compressed or
+  malformed representations fail authoritatively instead of entering recursive
+  resolution.
 
 ## Verification
 
 `src/egress_dns.rs` tests cover A/TXT content, CIDR membership, TTL propagation,
-authoritative `NXDOMAIN`/NODATA SOA records, malformed names, and real loopback
+IPv4 octet and IPv6 nibble decoding, authoritative `NXDOMAIN`/NODATA SOA
+records, malformed names, and real loopback
 UDP/TCP exchanges through the production server loop. Repository readiness still requires
 protected-branch checks and deployed port-53 evidence.
 
@@ -63,6 +65,10 @@ protected-branch checks and deployed port-53 evidence.
 
 Levine, J. (2010). *DNS blacklists and whitelists* (RFC 5782). Internet
 Research Task Force. https://doi.org/10.17487/RFC5782
+
+Thomson, S., Huitema, C., Ksinant, V., & Souissi, M. (2003). *DNS extensions
+to support IP version 6* (RFC 3596). Internet Engineering Task Force.
+https://doi.org/10.17487/RFC3596
 
 Vixie, P., Andrews, M., Lindqvist, M., & Wassenaar, E. (1998). *Negative
 caching of DNS queries (DNS NCACHE)* (RFC 2308). Internet Engineering Task

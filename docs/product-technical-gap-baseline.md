@@ -40,7 +40,7 @@ evidence.
 | --- | --- | --- | --- |
 | Web API | implemented | Axum management/SOC APIs and live binary tests | route lifecycle completion remains #112 |
 | MCP | absent | #117 merged into #95: authenticated stateless `2026-07-28` Streamable HTTP discovery plus read-only `wardnet_status` tool and protocol/security tests | protected merge plus authenticated deployed-client evidence |
-| DNSBL publishing | HTTP zone export only | `/dnsbl/zone`; this branch adds authoritative IPv4 A/TXT and NXDOMAIN over the existing UDP/TCP listener | protected merge, deployed port-53 evidence, and IPv6 nibble-reversed support |
+| DNSBL publishing | HTTP zone export only | `/dnsbl/zone`; this stack adds authoritative IPv4 and IPv6 A/TXT and NXDOMAIN over the existing UDP/TCP listener | protected merge and deployed port-53 evidence |
 | DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
 | Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
 | Ingress reverse proxy | partial | `/gateway/{*path}` decision loop; stacked k6 harness records zero-failure monitored decisions at 32/64 concurrent local users and removes no-op in-memory state clones | headers, streaming/upgrades, trusted client attribution, TLS, arrival-rate capacity and durable/deployed k6 evidence |
@@ -256,13 +256,13 @@ gate before closing the existing gaps would only make every PR permanently red.
 
 Authoritative DNSBL serving (stacked on PR #95): the existing bounded UDP/TCP
 listener now intercepts names under `DNSBL_ORIGIN`, decodes RFC 5782 reversed
-IPv4 octets, validates persisted entries, applies exact/CIDR matching, and
+IPv4 octets and RFC 3596 reversed IPv6 nibbles, validates persisted entries,
+applies exact/CIDR matching, and
 returns authoritative A/TXT records with per-entry TTLs. Unlisted, malformed,
 and apex names return authoritative `NXDOMAIN` without recursive leakage;
 NXDOMAIN and NODATA carry an RFC 2308 SOA for negative caching.
 Focused tests exercise content, range membership, malformed inputs, and real
-UDP/TCP server exchanges. IPv6 DNSBL publication and deployed port-53 evidence
-remain open.
+UDP/TCP server exchanges. Deployed port-53 evidence remains open.
 
 MCP surface ([#117](https://github.com/ContextualWisdomLab/wardnet/pull/117), merged into PR #95): `POST /mcp` implements the stable stateless
 MCP `2026-07-28` contract with `server/discover`, deterministic cacheable
