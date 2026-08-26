@@ -3,7 +3,7 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
     rr::{
         RData, Record, RecordType,
-        rdata::{A, AAAA},
+        rdata::{A, AAAA, TXT},
     },
     serialize::binary::{BinDecodable, BinEncodable, BinEncoder},
 };
@@ -38,6 +38,9 @@ async fn answer(state: &AppState, packet: &[u8]) -> Option<Vec<u8>> {
         return encode(response);
     }
     let query = &request.queries[0];
+    if let Some(response) = answer_dnsbl(state, &request, query).await {
+        return encode(response);
+    }
     if !matches!(query.query_type(), RecordType::A | RecordType::AAAA) {
         response.metadata.response_code = ResponseCode::NotImp;
         return encode(response);
@@ -74,6 +77,94 @@ async fn answer(state: &AppState, packet: &[u8]) -> Option<Vec<u8>> {
         ));
     }
     encode(response)
+}
+
+async fn answer_dnsbl(
+    state: &AppState,
+    request: &Message,
+    query: &hickory_proto::op::Query,
+) -> Option<Message> {
+    let host = query.name().to_utf8();
+    let address = dnsbl_query_address(&host, &state.dnsbl_origin)?;
+    let mut response = Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+    response.metadata.authoritative = true;
+    response.metadata.recursion_desired = request.metadata.recursion_desired;
+    response.add_query(query.clone());
+    let Some(address) = address else {
+        response.metadata.response_code = ResponseCode::NXDomain;
+        return Some(response);
+    };
+    let entries = state.inner.read().await.dnsbl.clone();
+    let matches: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            waf_ids_core::validate_dnsbl(entry).is_ok()
+                && waf_ids_core::dnsbl_matches(entry, address.into())
+        })
+        .take(DNS_MAX_ANSWERS)
+        .collect();
+    if matches.is_empty() {
+        response.metadata.response_code = ResponseCode::NXDomain;
+        return Some(response);
+    }
+    match query.query_type() {
+        RecordType::A => {
+            for entry in matches {
+                let Ok(code) = entry.code.parse() else {
+                    continue;
+                };
+                response.add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    u32::try_from(entry.ttl_seconds).unwrap_or(u32::MAX),
+                    RData::A(A(code)),
+                ));
+            }
+        }
+        RecordType::TXT => {
+            for entry in matches {
+                let text = format!("{} source={}", entry.reason, entry.source);
+                response.add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    u32::try_from(entry.ttl_seconds).unwrap_or(u32::MAX),
+                    RData::TXT(TXT::new(vec![bounded_txt(&text)])),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Some(response)
+}
+
+fn dnsbl_query_address(host: &str, origin: &str) -> Option<Option<std::net::Ipv4Addr>> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let origin = origin.trim_matches('.').to_ascii_lowercase();
+    if host == origin {
+        return Some(None);
+    }
+    let relative = host.strip_suffix(&format!(".{origin}"))?;
+    let octets = relative
+        .split('.')
+        .map(str::parse::<u8>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok();
+    Some(octets.and_then(|octets| {
+        (octets.len() == 4)
+            .then(|| std::net::Ipv4Addr::new(octets[3], octets[2], octets[1], octets[0]))
+    }))
+}
+
+fn bounded_txt(value: &str) -> String {
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= 255)
+        .last()
+        .unwrap_or(0);
+    if value.len() <= 255 {
+        value.to_string()
+    } else {
+        value[..end].to_string()
+    }
 }
 
 fn encode(message: Message) -> Option<Vec<u8>> {
@@ -187,12 +278,121 @@ mod tests {
     }
 
     fn query_packet(id: u16, host: &str) -> Vec<u8> {
+        typed_query_packet(id, host, RecordType::A)
+    }
+
+    fn typed_query_packet(id: u16, host: &str, record_type: RecordType) -> Vec<u8> {
         let mut request = Message::new(id, MessageType::Query, OpCode::Query);
         request.add_query(Query::query(
             Name::from_ascii(format!("{host}.")).unwrap(),
-            RecordType::A,
+            record_type,
         ));
         encode(request).unwrap()
+    }
+
+    async fn dnsbl_state() -> AppState {
+        let state = AppState::seeded(None);
+        state.inner.write().await.dnsbl = vec![waf_ids_core::DnsblEntry {
+            address: "192.0.2.0".parse().unwrap(),
+            prefix_len: Some(24),
+            code: "127.0.0.7".to_string(),
+            reason: "credential abuse".to_string(),
+            source: "test:feed".to_string(),
+            ttl_seconds: 600,
+        }];
+        state
+    }
+
+    #[tokio::test]
+    async fn serves_authoritative_dnsbl_a_and_txt_records() {
+        let state = dnsbl_state().await;
+
+        let name = "99.2.0.192.dnsbl.local";
+        let a = Message::from_bytes(
+            &answer(&state, &typed_query_packet(11, name, RecordType::A))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(a.metadata.authoritative);
+        assert!(!a.metadata.recursion_available);
+        assert_eq!(a.answers.len(), 1);
+        assert_eq!(a.answers[0].ttl, 600);
+        assert!(
+            matches!(a.answers[0].data, RData::A(A(address)) if address.to_string() == "127.0.0.7")
+        );
+
+        let txt = Message::from_bytes(
+            &answer(&state, &typed_query_packet(12, name, RecordType::TXT))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(txt.metadata.authoritative);
+        assert_eq!(txt.answers.len(), 1);
+        assert!(
+            matches!(&txt.answers[0].data, RData::TXT(value) if value.to_string().contains("credential abuse source=test:feed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn serves_dnsbl_queries_over_udp_and_tcp() {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = udp.local_addr().unwrap();
+        let tcp = TcpListener::bind(address).await.unwrap();
+        let (stop, stop_rx) = watch::channel(false);
+        let server = tokio::spawn(serve(dnsbl_state().await, udp, tcp, stop_rx));
+        let name = "99.2.0.192.dnsbl.local";
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client
+            .send_to(&query_packet(21, name), address)
+            .await
+            .unwrap();
+        let mut packet = [0_u8; DNS_PACKET_MAX_BYTES];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut packet))
+                .await
+                .unwrap()
+                .unwrap();
+        let response = Message::from_bytes(&packet[..length]).unwrap();
+        assert!(response.metadata.authoritative);
+        assert!(matches!(response.answers[0].data, RData::A(_)));
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let query = typed_query_packet(22, name, RecordType::TXT);
+        stream.write_u16(query.len() as u16).await.unwrap();
+        stream.write_all(&query).await.unwrap();
+        let length = tokio::time::timeout(Duration::from_secs(1), stream.read_u16())
+            .await
+            .unwrap()
+            .unwrap() as usize;
+        let mut packet = vec![0; length];
+        stream.read_exact(&mut packet).await.unwrap();
+        let response = Message::from_bytes(&packet).unwrap();
+        assert!(response.metadata.authoritative);
+        assert!(matches!(response.answers[0].data, RData::TXT(_)));
+
+        stop.send(true).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dnsbl_unlisted_and_malformed_names_are_authoritative_nxdomain() {
+        let state = AppState::seeded(None)
+            .with_resolver(Arc::new(StaticResolver(vec!["8.8.8.8".parse().unwrap()])));
+        for name in [
+            "100.2.0.192.dnsbl.local",
+            "999.2.0.192.dnsbl.local",
+            "dnsbl.local",
+        ] {
+            let response =
+                Message::from_bytes(&answer(&state, &query_packet(13, name)).await.unwrap())
+                    .unwrap();
+            assert!(response.metadata.authoritative);
+            assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
+            assert!(response.answers.is_empty());
+        }
     }
 
     #[tokio::test]
