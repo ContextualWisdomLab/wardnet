@@ -580,6 +580,8 @@ static MIGRATION_GATE: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new
 
 /// Live PostgreSQL snapshot store for one tenant.
 pub struct PostgresPlane {
+    // ponytail: one serialized connection favors correctness; use a bounded pool when measured
+    // concurrent control-plane latency requires it.
     client: Mutex<Client>,
     tenant_id: String,
     /// Processed-outbox retention; mirrors operator `EVENT_LIMIT`.

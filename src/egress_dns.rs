@@ -22,23 +22,19 @@ const DNS_MAX_ANSWERS: usize = 16;
 
 async fn answer(state: &AppState, packet: &[u8]) -> Option<Vec<u8>> {
     let request = Message::from_bytes(packet).ok()?;
-    let mut response = Message::new();
-    response
-        .set_id(request.id())
-        .set_message_type(MessageType::Response)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(request.recursion_desired())
-        .set_recursion_available(true);
-    for query in request.queries() {
+    let mut response = Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+    response.metadata.recursion_desired = request.metadata.recursion_desired;
+    response.metadata.recursion_available = true;
+    for query in &request.queries {
         response.add_query(query.clone());
     }
-    if request.queries().len() != 1 {
-        response.set_response_code(ResponseCode::FormErr);
+    if request.queries.len() != 1 {
+        response.metadata.response_code = ResponseCode::FormErr;
         return encode(response);
     }
-    let query = &request.queries()[0];
+    let query = &request.queries[0];
     if !matches!(query.query_type(), RecordType::A | RecordType::AAAA) {
-        response.set_response_code(ResponseCode::NotImp);
+        response.metadata.response_code = ResponseCode::NotImp;
         return encode(response);
     }
     let host = query.name().to_utf8().trim_end_matches('.').to_string();
@@ -50,19 +46,22 @@ async fn answer(state: &AppState, packet: &[u8]) -> Option<Vec<u8>> {
                 .await
                 .ok();
             let Some(decision) = decision else {
-                response.set_response_code(ResponseCode::Refused);
+                response.metadata.response_code = ResponseCode::Refused;
                 return encode(response);
             };
             state.egress_dns.record(&host, &decision.ips).await;
             decision.ips
         }
     };
-    for address in addresses.into_iter().take(DNS_MAX_ANSWERS) {
-        let data = match (query.query_type(), address) {
-            (RecordType::A, std::net::IpAddr::V4(address)) => RData::A(A(address)),
-            (RecordType::AAAA, std::net::IpAddr::V6(address)) => RData::AAAA(AAAA(address)),
-            _ => continue,
-        };
+    for data in addresses
+        .into_iter()
+        .filter_map(|address| match (query.query_type(), address) {
+            (RecordType::A, std::net::IpAddr::V4(address)) => Some(RData::A(A(address))),
+            (RecordType::AAAA, std::net::IpAddr::V6(address)) => Some(RData::AAAA(AAAA(address))),
+            _ => None,
+        })
+        .take(DNS_MAX_ANSWERS)
+    {
         response.add_answer(Record::from_rdata(
             query.name().clone(),
             DNS_TTL_SECONDS,
@@ -83,10 +82,8 @@ fn udp_response(bytes: Vec<u8>) -> Option<Vec<u8>> {
     if bytes.len() <= DNS_UDP_MAX_BYTES {
         return Some(bytes);
     }
-    let mut message = Message::from_bytes(&bytes).ok()?;
-    message.set_truncated(true);
-    message.answers_mut().clear();
-    let truncated = encode(message)?;
+    let message = Message::from_bytes(&bytes).ok()?;
+    let truncated = encode(message.truncate())?;
     (truncated.len() <= DNS_UDP_MAX_BYTES).then_some(truncated)
 }
 
@@ -185,8 +182,8 @@ mod tests {
     }
 
     fn query_packet(id: u16, host: &str) -> Vec<u8> {
-        let mut request = Message::new();
-        request.set_id(id).add_query(Query::query(
+        let mut request = Message::new(id, MessageType::Query, OpCode::Query);
+        request.add_query(Query::query(
             Name::from_ascii(format!("{host}.")).unwrap(),
             RecordType::A,
         ));
@@ -198,23 +195,23 @@ mod tests {
         let state = AppState::seeded(None)
             .with_destination_policy(crate::DestinationPolicy::production())
             .with_resolver(Arc::new(StaticResolver(vec!["127.0.0.1".parse().unwrap()])));
-        let mut request = Message::new();
-        request.set_id(7).add_query(Query::query(
+        let mut request = Message::new(7, MessageType::Query, OpCode::Query);
+        request.add_query(Query::query(
             Name::from_ascii("localhost.").unwrap(),
             RecordType::A,
         ));
         let response =
             Message::from_bytes(&answer(&state, &encode(request).unwrap()).await.unwrap()).unwrap();
-        assert_eq!(response.response_code(), ResponseCode::Refused);
+        assert_eq!(response.metadata.response_code, ResponseCode::Refused);
 
-        let mut request = Message::new();
+        let mut request = Message::new(0, MessageType::Query, OpCode::Query);
         request.add_query(Query::query(
             Name::from_ascii("example.com.").unwrap(),
             RecordType::MX,
         ));
         let response =
             Message::from_bytes(&answer(&state, &encode(request).unwrap()).await.unwrap()).unwrap();
-        assert_eq!(response.response_code(), ResponseCode::NotImp);
+        assert_eq!(response.metadata.response_code, ResponseCode::NotImp);
     }
 
     #[tokio::test]
@@ -225,16 +222,16 @@ mod tests {
                 "8.8.8.8".parse().unwrap(),
                 "2001:4860:4860::8888".parse().unwrap(),
             ])));
-        let mut request = Message::new();
+        let mut request = Message::new(0, MessageType::Query, OpCode::Query);
         request.add_query(Query::query(
             Name::from_ascii("public.example.").unwrap(),
             RecordType::A,
         ));
         let response =
             Message::from_bytes(&answer(&state, &encode(request).unwrap()).await.unwrap()).unwrap();
-        assert_eq!(response.response_code(), ResponseCode::NoError);
-        assert_eq!(response.answers().len(), 1);
-        assert_eq!(response.answers()[0].ttl(), DNS_TTL_SECONDS);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(response.answers.len(), 1);
+        assert_eq!(response.answers[0].ttl, DNS_TTL_SECONDS);
         assert_eq!(
             state.egress_dns.lookup("PUBLIC.EXAMPLE.").await,
             Some(vec![
@@ -242,6 +239,25 @@ mod tests {
                 "2001:4860:4860::8888".parse().unwrap()
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn answer_limit_is_applied_after_address_family_filter() {
+        let mut addresses = vec!["2001:4860:4860::8888".parse().unwrap(); DNS_MAX_ANSWERS];
+        addresses.push("8.8.8.8".parse().unwrap());
+        let state = AppState::seeded(None)
+            .with_destination_policy(crate::DestinationPolicy::production())
+            .with_resolver(Arc::new(StaticResolver(addresses)));
+
+        let response = Message::from_bytes(
+            &answer(&state, &query_packet(9, "public.example"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(response.answers.len(), 1);
+        assert!(matches!(response.answers[0].data, RData::A(_)));
     }
 
     #[tokio::test]
@@ -264,7 +280,13 @@ mod tests {
             .await
             .expect("fast query must not wait for slow DNS")
             .unwrap();
-        assert_eq!(Message::from_bytes(&response[..length]).unwrap().id(), 2);
+        assert_eq!(
+            Message::from_bytes(&response[..length])
+                .unwrap()
+                .metadata
+                .id,
+            2
+        );
         stop.send(true).unwrap();
         server.await.unwrap();
     }
@@ -283,8 +305,7 @@ mod tests {
 
     #[test]
     fn oversized_udp_response_sets_tc_and_stays_within_classic_limit() {
-        let mut message = Message::new();
-        message.set_id(7).set_message_type(MessageType::Response);
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
         let name = Name::from_ascii("large.example.").unwrap();
         message.add_query(Query::query(name.clone(), RecordType::AAAA));
         for index in 0..32_u16 {
@@ -298,7 +319,7 @@ mod tests {
         let response = udp_response(encode(message).unwrap()).unwrap();
         assert!(response.len() <= DNS_UDP_MAX_BYTES);
         let decoded = Message::from_bytes(&response).unwrap();
-        assert!(decoded.truncated());
-        assert!(decoded.answers().is_empty());
+        assert!(decoded.metadata.truncation);
+        assert!(decoded.answers.is_empty());
     }
 }

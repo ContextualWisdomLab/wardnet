@@ -4030,7 +4030,7 @@ fn startup_destination_policy(
         .get_credential(CRED_DESTINATION_DENYLIST)
         .unwrap_or_default();
     Ok(base
-        .with_lists(&allow, &deny)
+        .with_lists(allow, deny)
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?)
 }
 

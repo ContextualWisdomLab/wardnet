@@ -249,8 +249,8 @@ async fn bounded_sidecar_text(response: reqwest::Response) -> Result<String, Str
 
 /// POST one transaction to the Coraza sidecar and parse the audit response.
 ///
-/// Status contract: 2xx carries audit JSON (an empty body stays clean), 403
-/// without parseable audit JSON is still an interruption, and every other
+/// Status contract: 2xx carries audit JSON; 403 or 406 without parseable audit
+/// JSON is still an interruption, and every other
 /// status is `Unavailable` so fail-closed deployments never treat a confused
 /// sidecar answer as allow.
 pub async fn evaluate_sidecar(
@@ -272,7 +272,7 @@ pub async fn evaluate_sidecar(
     {
         Ok(response) => {
             let status = response.status();
-            if !status.is_success() && status.as_u16() != 403 {
+            if !status.is_success() && !matches!(status.as_u16(), 403 | 406) {
                 return ProvenEngineOutcome::Unavailable {
                     reason: format!("coraza sidecar HTTP {status}"),
                 };
@@ -280,8 +280,8 @@ pub async fn evaluate_sidecar(
             match bounded_sidecar_text(response).await {
                 Ok(text) => {
                     let outcome = outcome_from_sidecar_body(&text);
-                    if status.as_u16() == 403 {
-                        // A 403 is an interruption decision regardless of
+                    if matches!(status.as_u16(), 403 | 406) {
+                        // A 403/406 is an interruption decision regardless of
                         // body shape: audit JSON keeps its parsed hit, while
                         // empty or non-JSON bodies (e.g. a CRS default block
                         // page) fall back to the interrupted evidence so a
@@ -296,7 +296,7 @@ pub async fn evaluate_sidecar(
                                 client_ip,
                                 interrupted: true,
                                 action: "block".to_string(),
-                                reason: "coraza/crs: transaction interrupted".to_string(),
+                                reason: format!("coraza/crs: transaction interrupted ({status})"),
                                 score: 50,
                                 path: uri.to_string(),
                                 timestamp_unix: None,
@@ -463,6 +463,34 @@ mod tests {
             }
             other => panic!("expected interruption hit, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sidecar_406_with_non_json_body_is_an_interruption_hit() {
+        let app = axum::Router::new().route(
+            "/",
+            post(|| async { (StatusCode::NOT_ACCEPTABLE, "<html>blocked</html>") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        assert!(matches!(
+            evaluate_sidecar(
+                &reqwest::Client::new(),
+                &format!("http://{addr}/"),
+                "GET",
+                "/app",
+                "",
+                None,
+                &[],
+            )
+            .await,
+            ProvenEngineOutcome::Hit(CorazaIngestedHit {
+                interrupted: true,
+                ..
+            })
+        ));
     }
 
     #[test]
