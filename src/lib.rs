@@ -295,6 +295,7 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
             .iter_mut()
             .find(|existing| existing.source_id == feed.source_id)
         {
+            let url_changed = existing.official_url != feed.official_url;
             existing.official_url = feed.official_url;
             existing.parser = feed.parser;
             existing.indicator_types = feed.indicator_types;
@@ -302,6 +303,10 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
             existing.license_url = feed.license_url;
             existing.refresh_interval_seconds = feed.refresh_interval_seconds;
             existing.ttl_seconds = feed.ttl_seconds;
+            if url_changed {
+                existing.etag = None;
+                existing.last_modified = None;
+            }
         } else {
             data.official_threat_feeds.push(feed);
         }
@@ -4473,12 +4478,12 @@ mod tests {
     }
 
     #[test]
-    fn backfill_reconciles_registry_metadata_but_preserves_refresh_state() {
+    fn backfill_preserves_validators_only_while_registry_url_is_unchanged() {
         let mut data = AppData::seeded();
         let feed = &mut data.official_threat_feeds[0];
-        feed.official_url = "https://stale.invalid/feed".to_string();
         feed.parser = "stale".to_string();
         feed.etag = Some("preserved".to_string());
+        feed.last_modified = Some("preserved-date".to_string());
         let source_id = feed.source_id.clone();
 
         backfill_official_threat_feeds(&mut data);
@@ -4495,6 +4500,21 @@ mod tests {
         assert_eq!(feed.official_url, canonical.official_url);
         assert_eq!(feed.parser, canonical.parser);
         assert_eq!(feed.etag.as_deref(), Some("preserved"));
+
+        let feed = data
+            .official_threat_feeds
+            .iter_mut()
+            .find(|feed| feed.source_id == source_id)
+            .unwrap();
+        feed.official_url = "https://stale.invalid/feed".to_string();
+        backfill_official_threat_feeds(&mut data);
+        let feed = data
+            .official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == source_id)
+            .unwrap();
+        assert!(feed.etag.is_none());
+        assert!(feed.last_modified.is_none());
     }
 
     #[test]
