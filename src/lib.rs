@@ -1,22 +1,25 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    extract::{DefaultBodyLimit, Path as PathParam, Query, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs,
+    io::copy_bidirectional,
+    net::TcpStream,
     sync::{Mutex, RwLock},
 };
 use waf_ids_core::{
@@ -35,27 +38,76 @@ pub use waf_ids_core::{
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
+const EGRESS_DNS_TTL: Duration = Duration::from_secs(30);
+const EGRESS_DNS_MAX_ENTRIES: usize = 1024;
+
+#[derive(Default)]
+struct EgressDnsCache {
+    inner: Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
+}
+
+impl EgressDnsCache {
+    async fn lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let mut cache = self.inner.lock().await;
+        let (expires, addresses) = cache.get(&host)?;
+        if *expires <= Instant::now() {
+            cache.remove(&host);
+            return None;
+        }
+        Some(addresses.clone())
+    }
+
+    async fn record(&self, host: &str, addresses: &[IpAddr]) {
+        let mut cache = self.inner.lock().await;
+        if cache.len() >= EGRESS_DNS_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            host.trim_end_matches('.').to_ascii_lowercase(),
+            (Instant::now() + EGRESS_DNS_TTL, addresses.to_vec()),
+        );
+    }
+}
+
+struct CachedHostResolver(Vec<IpAddr>);
+
+impl HostResolver for CachedHostResolver {
+    fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+mod control_plane;
 mod coraza_audit;
+mod coraza_inprocess;
 mod credentials;
+mod destination;
+mod egress_dns;
 mod misp_import;
 mod opencti_import;
+mod outbox;
 mod proven_engine;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_DESTINATION_ALLOWLIST,
+    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CredentialRegistry, CredentialSource,
+};
+pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
 
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppData>>,
     persist_lock: Arc<Mutex<()>>,
-    http: reqwest::Client,
-    feed_http: reqwest::Client,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
     admin_tokens: HashMap<String, AdminPrincipal>,
+    /// Dedicated browser-proxy password loaded from the credential registry.
+    egress_proxy_token: Option<String>,
     /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
     credentials_source: CredentialSource,
     state_path: Option<PathBuf>,
@@ -73,8 +125,15 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
-    /// In-path Coraza sidecar consult. Disabled unless `CORAZA_WAF_URL` is set.
+    /// In-path Coraza consult (in-process libcoraza and/or sidecar).
     proven_engine: ProvenEngineConfig,
+    /// Fail-closed destination policy for every outbound http/https call.
+    destination: DestinationPolicy,
+    resolver: Arc<dyn HostResolver + Send + Sync>,
+    egress_dns: Arc<EgressDnsCache>,
+    destination_resolve_permits: Arc<tokio::sync::Semaphore>,
+    /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
+    control_plane: Option<Arc<control_plane::PostgresPlane>>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -103,6 +162,7 @@ pub struct ClearfolioConfig {
 impl AppState {
     pub fn seeded(admin_token: Option<String>) -> Self {
         Self::new(AppData::seeded(), AppConfig::memory(admin_token))
+            .with_destination_policy(DestinationPolicy::development())
     }
 
     pub async fn load(config: AppConfig) -> Result<Self, String> {
@@ -118,17 +178,33 @@ impl AppState {
         Ok(Self::new(data, config))
     }
 
+    /// Load from PostgreSQL, seeding the tenant snapshot when empty.
+    pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
+        let plane = control_plane::PostgresPlane::connect(database_url)
+            .await?
+            .with_event_limit(config.event_limit);
+        let mut data = match plane.load().await? {
+            Some(loaded) => loaded,
+            None => AppData::seeded(),
+        };
+        let event_limit = config.event_limit.max(1);
+        enforce_event_limit(&mut data, event_limit);
+        plane.save(&data).await?;
+        Ok(Self::new(data, config).with_control_plane(Arc::new(plane)))
+    }
+
+    fn with_control_plane(mut self, plane: Arc<control_plane::PostgresPlane>) -> Self {
+        self.control_plane = Some(plane);
+        self
+    }
+
     fn new(data: AppData, config: AppConfig) -> Self {
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: reqwest::Client::new(),
-            feed_http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("failed to build no-redirect feed client"),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
+            egress_proxy_token: None,
             credentials_source: CredentialSource::None,
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
@@ -140,6 +216,11 @@ impl AppState {
             clearfolio: None,
             soc_llm: None,
             proven_engine: ProvenEngineConfig::disabled(),
+            destination: DestinationPolicy::production(),
+            resolver: Arc::new(SystemHostResolver),
+            egress_dns: Arc::new(EgressDnsCache::default()),
+            destination_resolve_permits: Arc::new(tokio::sync::Semaphore::new(64)),
+            control_plane: None,
         }
     }
 
@@ -164,10 +245,73 @@ impl AppState {
         self
     }
 
-    /// Configure the in-path Coraza sidecar adapter. Builder-style.
+    /// Configure the in-path Coraza adapter (sidecar and/or libcoraza).
+    /// Builder-style.
     pub fn with_proven_engine(mut self, config: ProvenEngineConfig) -> Self {
         self.proven_engine = config;
         self
+    }
+
+    /// Replace the outbound destination policy. Builder-style.
+    pub fn with_destination_policy(mut self, policy: DestinationPolicy) -> Self {
+        self.destination = policy;
+        self
+    }
+
+    /// Replace the destination DNS resolver. Tests inject a static map so a
+    /// hostname that is not in OS DNS can still be evaluated and pinned.
+    #[cfg(test)]
+    fn with_resolver(mut self, resolver: Arc<dyn HostResolver + Send + Sync>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// Fail closed before any outbound http/https send.
+    ///
+    /// Blocking OS DNS runs on `spawn_blocking` with a bounded timeout so a
+    /// hung resolver cannot starve Tokio workers. Successful evaluations are
+    /// recorded on the pin board the HTTP clients use for connect-time DNS.
+    async fn resolve_outbound(
+        &self,
+        url: &str,
+    ) -> Result<destination::DestinationDecision, String> {
+        let policy = self.destination.clone();
+        let parsed =
+            reqwest::Url::parse(url).map_err(|_| "destination URL is invalid".to_string())?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "destination URL has no host".to_string())?;
+        if let Some(ips) = self.egress_dns.lookup(host).await {
+            return policy.evaluate(url, &CachedHostResolver(ips));
+        }
+        let permit = tokio::time::timeout(
+            DESTINATION_RESOLVE_TIMEOUT,
+            Arc::clone(&self.destination_resolve_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| "destination DNS capacity timed out".to_string())?
+        .map_err(|_| "destination DNS capacity closed".to_string())?;
+        let resolver = Arc::clone(&self.resolver);
+        let url = url.to_string();
+        let decision = tokio::time::timeout(
+            DESTINATION_RESOLVE_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                policy.evaluate(&url, resolver.as_ref())
+            }),
+        )
+        .await
+        .map_err(|_| "destination DNS timed out".to_string())?
+        .map_err(|_| "destination evaluation cancelled".to_string())??;
+        self.egress_dns.record(&decision.host, &decision.ips).await;
+        Ok(decision)
+    }
+
+    async fn outbound_client(&self, url: &str) -> Result<reqwest::Client, String> {
+        let decision = self.resolve_outbound(url).await?;
+        let pins = Arc::new(destination::DestinationPins::default());
+        pins.record(&decision.host, &decision.ips);
+        Ok(outbound_http_client(pins))
     }
 
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
@@ -183,6 +327,11 @@ impl AppState {
     /// precedence over the single `admin_token`. Builder-style.
     pub fn with_admin_tokens(mut self, tokens: HashMap<String, AdminPrincipal>) -> Self {
         self.admin_tokens = tokens;
+        self
+    }
+
+    pub fn with_egress_proxy_token(mut self, token: Option<String>) -> Self {
+        self.egress_proxy_token = token.filter(|value| !value.is_empty());
         self
     }
 
@@ -248,6 +397,9 @@ impl AppState {
     }
 
     async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
+        if let Some(plane) = &self.control_plane {
+            return plane.save(data).await;
+        }
         let Some(path) = self.state_path.as_deref() else {
             return Ok(());
         };
@@ -257,7 +409,9 @@ impl AppState {
     fn health_status(&self) -> HealthStatus {
         HealthStatus {
             status: "ok".to_string(),
-            persistence: if self.state_path.is_some() {
+            persistence: if self.control_plane.is_some() {
+                "postgres".to_string()
+            } else if self.state_path.is_some() {
                 "file".to_string()
             } else {
                 "memory".to_string()
@@ -268,7 +422,44 @@ impl AppState {
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
             proven_engine: self.proven_engine.mode().to_string(),
             proven_engine_fail_closed: self.proven_engine.fail_closed,
+            destination_mode: self.destination.mode().to_string(),
+            outbox: if self.control_plane.is_some() {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            outbox_pending: 0,
+            outbox_leased: 0,
+            outbox_dead_letter: 0,
+            outbox_oldest_age_seconds: None,
+            backup: if self.control_plane.is_some() {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            event_partitions: 0,
         }
+    }
+
+    async fn health_status_live(&self) -> HealthStatus {
+        let mut health = self.health_status();
+        let Some(plane) = &self.control_plane else {
+            return health;
+        };
+        match plane.outbox_health(now_unix() as i64).await {
+            Ok(stats) => {
+                health.outbox = stats.status;
+                health.outbox_pending = stats.pending;
+                health.outbox_leased = stats.leased;
+                health.outbox_dead_letter = stats.dead_letter;
+                health.outbox_oldest_age_seconds = stats.oldest_age_seconds;
+            }
+            Err(_) => health.outbox = "error".to_string(),
+        }
+        if let Ok(count) = plane.event_partition_count().await {
+            health.event_partitions = count;
+        }
+        health
     }
 }
 
@@ -382,6 +573,7 @@ pub struct SupportBundle {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthStatus {
     pub status: String,
+    /// `postgres` (production authority), `file` (loopback/community), or `memory`.
     pub persistence: String,
     pub dnsbl_origin: String,
     pub event_limit: usize,
@@ -389,10 +581,22 @@ pub struct HealthStatus {
     pub credentials_source: String,
     /// True when at least one admin write token is configured.
     pub admin_auth_configured: bool,
-    /// `coraza_sidecar` when `CORAZA_WAF_URL` is set; otherwise `ingest_hints_only`.
+    /// `coraza_in_process`, `coraza_sidecar`, or `ingest_hints_only`.
     pub proven_engine: String,
-    /// True when a configured sidecar outage fails the live transaction closed.
+    /// True when a configured engine outage fails the live transaction closed.
     pub proven_engine_fail_closed: bool,
+    /// `production` (fail-closed classes) or `development` (loopback class permitted).
+    pub destination_mode: String,
+    /// `ready` when the PostgreSQL outbox is the authority; `disabled` on file/memory.
+    pub outbox: String,
+    pub outbox_pending: i64,
+    pub outbox_leased: i64,
+    pub outbox_dead_letter: i64,
+    pub outbox_oldest_age_seconds: Option<i64>,
+    /// `ready` when PostgreSQL logical backup/restore is the authority; `disabled` on file/memory.
+    pub backup: String,
+    /// HASH child count for `security_event` (0 on file/memory).
+    pub event_partitions: i64,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -406,7 +610,12 @@ const PHISHING_DATABASE_DEFAULT_IP_LIMIT: usize = 5_000;
 const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
 const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
 const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
+/// Bounded wait for blocking OS DNS inside destination-policy evaluation.
+const DESTINATION_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const OUTBOUND_FETCH_DEFAULT_BYTES: usize = 2 * 1024 * 1024;
+const OUTBOUND_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+const OUTBOUND_FETCH_MAX_REDIRECTS: usize = 3;
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
@@ -450,6 +659,32 @@ struct ErrorBody {
     error: String,
 }
 
+#[derive(Deserialize)]
+struct OutboundFetchRequest {
+    url: String,
+    #[serde(default = "outbound_fetch_default_bytes")]
+    max_bytes: usize,
+}
+
+#[derive(Serialize)]
+struct OutboundFetchResponse {
+    status: u16,
+    content_type: String,
+    final_url: String,
+    body_base64: String,
+    redirects: usize,
+}
+
+#[derive(Serialize)]
+struct OutboundFetchError {
+    code: &'static str,
+    error: &'static str,
+}
+
+fn outbound_fetch_default_bytes() -> usize {
+    OUTBOUND_FETCH_DEFAULT_BYTES
+}
+
 pub fn build_app(state: AppState) -> Router {
     let max_body_bytes = state.max_body_bytes;
     Router::new()
@@ -463,10 +698,15 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
         .route("/api/audit-logs", get(list_audit_logs))
+        .route("/api/outbox", get(list_outbox))
+        .route("/api/outbox/{message_id}/replay", post(replay_outbox))
+        .route("/api/backup", get(get_backup).post(restore_backup))
+        .route("/api/backup/drill", post(backup_drill))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
         .route("/api/signatures", get(list_signatures))
         .route("/api/evaluate", post(evaluate_request))
+        .route("/api/outbound/fetch", post(outbound_fetch))
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -499,8 +739,310 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
+        .fallback(connect_proxy)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+fn proxy_authenticate() -> Response {
+    let mut response = (
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        "proxy authentication required",
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::PROXY_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"wardnet\""),
+    );
+    response
+}
+
+fn proxy_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.egress_proxy_token.as_deref() else {
+        return false;
+    };
+    let Some(encoded) = headers
+        .get(header::PROXY_AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = BASE64.decode(encoded) else {
+        return false;
+    };
+    let Ok(credentials) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    let Some((username, token)) = credentials.split_once(':') else {
+        return false;
+    };
+    if username != "wardnet" || token.is_empty() {
+        return false;
+    }
+    token == expected
+}
+
+async fn connect_proxy(State(state): State<AppState>, mut request: Request) -> Response {
+    if request.method() != Method::CONNECT {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !proxy_authorized(&state, request.headers()) {
+        return proxy_authenticate();
+    }
+    let Some(authority) = request.uri().authority() else {
+        return (StatusCode::BAD_REQUEST, "CONNECT authority is required").into_response();
+    };
+    if authority.port_u16() != Some(443) {
+        return (StatusCode::FORBIDDEN, "CONNECT permits port 443 only").into_response();
+    }
+    let host = authority.host().trim_end_matches('.');
+    if host.is_empty() {
+        return (StatusCode::BAD_REQUEST, "CONNECT host is invalid").into_response();
+    }
+
+    let addresses = match state.egress_dns.lookup(host).await {
+        Some(addresses) => addresses,
+        None => {
+            let policy_url = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+                format!("https://[{host}]/")
+            } else {
+                format!("https://{host}/")
+            };
+            match state.resolve_outbound(&policy_url).await {
+                Ok(decision) => {
+                    state.egress_dns.record(host, &decision.ips).await;
+                    decision.ips
+                }
+                Err(_) => {
+                    return (StatusCode::FORBIDDEN, "destination policy denied CONNECT")
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    let mut upstream = None;
+    for address in addresses.into_iter().take(16) {
+        if let Ok(Ok(stream)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(SocketAddr::new(address, 443)),
+        )
+        .await
+        {
+            upstream = Some(stream);
+            break;
+        }
+    }
+    let Some(mut upstream) = upstream else {
+        return (StatusCode::BAD_GATEWAY, "upstream connection failed").into_response();
+    };
+
+    let upgrade = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+        if let Ok(upgraded) = upgrade.await {
+            let mut client = hyper_util::rt::TokioIo::new(upgraded);
+            let _ = copy_bidirectional(&mut client, &mut upstream).await;
+        }
+    });
+    StatusCode::OK.into_response()
+}
+
+fn outbound_fetch_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    (
+        status,
+        Json(OutboundFetchError {
+            code,
+            error: message,
+        }),
+    )
+        .into_response()
+}
+
+fn outbound_content_type_allowed(value: &str) -> bool {
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence.starts_with("text/")
+        || matches!(
+            essence.as_str(),
+            "application/json" | "application/xml" | "application/xhtml+xml" | "application/pdf"
+        )
+}
+
+async fn outbound_fetch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OutboundFetchRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return outbound_fetch_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid X-Admin-Token",
+        );
+    }
+    if request.max_bytes == 0 || request.max_bytes > OUTBOUND_FETCH_MAX_BYTES {
+        return outbound_fetch_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_max_bytes",
+            "max_bytes is outside the supported range",
+        );
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(20),
+        outbound_fetch_inner(&state, request.url, request.max_bytes),
+    )
+    .await
+    {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err((status, code, message))) => outbound_fetch_error(status, code, message),
+        Err(_) => outbound_fetch_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "fetch_timeout",
+            "upstream fetch timed out",
+        ),
+    }
+}
+
+async fn outbound_fetch_inner(
+    state: &AppState,
+    initial_url: String,
+    max_bytes: usize,
+) -> Result<OutboundFetchResponse, (StatusCode, &'static str, &'static str)> {
+    use futures_util::StreamExt;
+
+    let mut url = reqwest::Url::parse(&initial_url).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            "url must be an absolute HTTPS URL",
+        )
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            "url must be an absolute HTTPS URL without credentials",
+        ));
+    }
+    url.set_fragment(None);
+
+    for redirects in 0..=OUTBOUND_FETCH_MAX_REDIRECTS {
+        let request_http = state.outbound_client(url.as_str()).await.map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "destination_denied",
+                "destination policy denied the URL",
+            )
+        })?;
+        let response = request_http.get(url.clone()).send().await.map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "upstream_request_failed",
+                "upstream request failed",
+            )
+        })?;
+
+        if response.status().is_redirection() {
+            if redirects == OUTBOUND_FETCH_MAX_REDIRECTS {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "too_many_redirects",
+                    "upstream redirect limit exceeded",
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or((
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_redirect",
+                    "upstream redirect is missing a valid Location header",
+                ))?;
+            url = url.join(location).map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_redirect",
+                    "upstream redirect Location is invalid",
+                )
+            })?;
+            if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "unsafe_redirect",
+                    "upstream redirect target is not permitted",
+                ));
+            }
+            url.set_fragment(None);
+            continue;
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= 256)
+            .ok_or((
+                StatusCode::BAD_GATEWAY,
+                "unsupported_content_type",
+                "upstream Content-Type is missing or unsupported",
+            ))?
+            .to_string();
+        if !outbound_content_type_allowed(&content_type) {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_content_type",
+                "upstream Content-Type is missing or unsupported",
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "response_too_large",
+                "upstream response exceeds max_bytes",
+            ));
+        }
+        let status = response.status().as_u16();
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_body_failed",
+                    "upstream response body failed",
+                )
+            })?;
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "response_too_large",
+                    "upstream response exceeds max_bytes",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok(OutboundFetchResponse {
+            status,
+            content_type,
+            final_url: url.to_string(),
+            body_base64: BASE64.encode(body),
+            redirects,
+        });
+    }
+    unreachable!("redirect loop exits at the configured bound")
 }
 
 pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_json::Error> {
@@ -612,10 +1154,12 @@ async fn clearfolio_submit(
         .mime_str("text/plain")
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
-    let mut request = state
-        .http
-        .post(clearfolio_submit_url(&config.base_url))
-        .multipart(form);
+    let submit_url = clearfolio_submit_url(&config.base_url);
+    let http = match state.outbound_client(&submit_url).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let mut request = http.post(submit_url).multipart(form);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -644,9 +1188,12 @@ async fn clearfolio_status(
             "Clearfolio integration is not configured",
         );
     };
-    let mut request = state
-        .http
-        .get(clearfolio_status_url(&config.base_url, &job_id));
+    let status_url = clearfolio_status_url(&config.base_url, &job_id);
+    let http = match state.outbound_client(&status_url).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let mut request = http.get(status_url);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -786,8 +1333,11 @@ async fn soc_analyze(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
-    let response = state
-        .http
+    let http = match state.outbound_client(&endpoint).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let response = http
         .post(endpoint)
         .bearer_auth(&config.token)
         .json(&body)
@@ -820,7 +1370,7 @@ async fn soc_analyze(
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
-    Json(state.health_status())
+    Json(state.health_status_live().await)
 }
 
 /// Build/version metadata for deployment verification.
@@ -873,7 +1423,6 @@ async fn create_route(
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
     }
-
     let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
@@ -998,6 +1547,208 @@ async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> R
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
     Json(state.inner.read().await.audit_logs.clone()).into_response()
+}
+
+#[derive(Serialize)]
+struct OutboxListView {
+    status: String,
+    limit: usize,
+    messages: Vec<outbox::OutboxMessage>,
+}
+
+async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let limit = state.event_limit.max(1);
+    let Some(plane) = &state.control_plane else {
+        return Json(OutboxListView {
+            status: "disabled".to_string(),
+            limit,
+            messages: Vec::new(),
+        })
+        .into_response();
+    };
+    match plane.list_outbox_limited(limit as i64).await {
+        Ok(messages) => Json(OutboxListView {
+            status: "ready".to_string(),
+            limit,
+            messages,
+        })
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn replay_outbox(
+    State(state): State<AppState>,
+    PathParam(message_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox replay requires the PostgreSQL control plane",
+        );
+    };
+    let actor = audit_actor(&state, &headers);
+    if let Err(message) = plane
+        .replay_dead_letter(&message_id, now_unix() as i64)
+        .await
+    {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    match state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "replay_outbox",
+                "outbox_message",
+                message_id.clone(),
+            );
+        })
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "pending",
+            "message_id": message_id
+        }))
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+#[derive(Serialize)]
+struct BackupView {
+    status: String,
+    rpo: String,
+    rto_budget_ms: u64,
+    artifact: Option<control_plane::ControlPlaneBackup>,
+}
+
+async fn get_backup(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return Json(BackupView {
+            status: "disabled".to_string(),
+            rpo: control_plane::BACKUP_RPO.to_string(),
+            rto_budget_ms: control_plane::BACKUP_RTO_BUDGET_MS,
+            artifact: None,
+        })
+        .into_response();
+    };
+    match plane.logical_backup().await {
+        Ok(artifact) => Json(BackupView {
+            status: "ready".to_string(),
+            rpo: control_plane::BACKUP_RPO.to_string(),
+            rto_budget_ms: control_plane::BACKUP_RTO_BUDGET_MS,
+            artifact: Some(artifact),
+        })
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn restore_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(backup): Json<control_plane::ControlPlaneBackup>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backup restore requires the PostgreSQL control plane",
+        );
+    };
+    if let Err(message) = backup.verify() {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    if let Err(message) = plane.restore_logical_backup(&backup).await {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    match plane.load().await {
+        Ok(Some(loaded)) => {
+            *state.inner.write().await = loaded;
+        }
+        Ok(None) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "restore committed but tenant snapshot is empty",
+            );
+        }
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+    let actor = audit_actor(&state, &headers);
+    match state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "restore_backup",
+                "control_plane_backup",
+                backup.payload_hash.clone(),
+            );
+        })
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({
+            "status": "restored",
+            "schema_version": backup.schema_version,
+            "payload_hash": backup.payload_hash,
+        }))
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn backup_drill(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backup drill requires the PostgreSQL control plane",
+        );
+    };
+    let report = match plane.restore_drill().await {
+        Ok(report) => report,
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
+    let actor = audit_actor(&state, &headers);
+    let outcome = if report.passed {
+        "backup_drill"
+    } else {
+        "backup_drill_failed"
+    };
+    if let Err(message) = state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                outcome,
+                "control_plane_backup",
+                report.source_hash.clone(),
+            );
+        })
+        .await
+    {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
+    }
+    if report.passed {
+        (StatusCode::OK, Json(report)).into_response()
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(report)).into_response()
+    }
 }
 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
@@ -1596,8 +2347,8 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    let mut request = state
-        .feed_http
+    let http = state.outbound_client(url).await?;
+    let mut request = http
         .get(url)
         .header(
             "Accept",
@@ -2068,7 +2819,7 @@ async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
     let generated_at_unix = now_unix();
     Json(SupportBundle {
         generated_at_unix,
-        health: state.health_status(),
+        health: state.health_status_live().await,
         kpis: kpi_snapshot_at(&data, generated_at_unix),
         commercial: data.commercial.clone(),
         readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
@@ -2331,7 +3082,7 @@ async fn gateway(
     }
 }
 
-/// Consult the configured Coraza sidecar for this live transaction.
+/// Consult in-process libcoraza first; otherwise the Coraza sidecar.
 async fn consult_proven_engine(
     state: &AppState,
     method: &str,
@@ -2340,6 +3091,22 @@ async fn consult_proven_engine(
     client_ip: Option<IpAddr>,
     forwarded_headers: &[(String, String)],
 ) -> ProvenEngineOutcome {
+    if let Some(engine) = state.proven_engine.in_process.clone() {
+        let method = method.to_owned();
+        let request_uri = request_uri.to_owned();
+        let body_text = body_text.to_owned();
+        let headers_owned = forwarded_headers.to_vec();
+        return match tokio::task::spawn_blocking(move || {
+            engine.evaluate(&method, &request_uri, &body_text, client_ip, &headers_owned)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => ProvenEngineOutcome::Unavailable {
+                reason: "coraza in-process task failed".to_string(),
+            },
+        };
+    }
     let Some(url) = state
         .proven_engine
         .sidecar_url
@@ -2350,8 +3117,12 @@ async fn consult_proven_engine(
     else {
         return ProvenEngineOutcome::NotConfigured;
     };
+    let http = match state.outbound_client(&url).await {
+        Ok(http) => http,
+        Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
+    };
     proven_engine::evaluate_sidecar(
-        &state.http,
+        &http,
         &url,
         method,
         request_uri,
@@ -2362,14 +3133,20 @@ async fn consult_proven_engine(
     .await
 }
 
-/// Operator-visible proven-engine status (no sidecar URL; that may identify
-/// an internal host).
+/// Operator-visible proven-engine status (no sidecar URL or library path;
+/// those may identify an internal host).
 async fn waf_engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "mode": state.proven_engine.mode(),
         "in_path": state.proven_engine.in_path(),
         "fail_closed": state.proven_engine.fail_closed,
-        "sidecar_configured": state.proven_engine.in_path(),
+        "sidecar_configured": state.proven_engine.sidecar_configured(),
+        "in_process_configured": state.proven_engine.in_process.is_some(),
+        "in_process_rules": state
+            .proven_engine
+            .in_process
+            .as_ref()
+            .map(|engine| engine.rules()),
     }))
 }
 
@@ -2396,10 +3173,10 @@ async fn proxy_request(
     body: Bytes,
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
+    let http = state.outbound_client(&target).await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
-    let response = state
-        .http
+    let response = http
         .request(method, target)
         .body(body)
         .send()
@@ -2450,29 +3227,37 @@ async fn record_event(
     let action = action.to_string();
     let path = path.to_string();
     let event_limit = state.event_limit;
-    if let Err(error) = state
-        .mutate_and_persist(|data| {
-            let id = data.next_event_id;
-            data.next_event_id += 1;
-            let event = SecurityEvent {
-                id,
-                timestamp_unix: now_unix(),
-                client_ip,
-                route_id,
-                action,
-                reason,
-                score,
-                path,
-            };
-            // Structured stdout log line for SIEM / log-collector ingestion.
-            // ponytail: one println per recorded event — fine at gateway volumes;
-            // add async batching if event throughput ever becomes a bottleneck.
-            println!("{}", security_event_log_line(&event));
-            data.events.push(event);
-            enforce_event_limit(data, event_limit);
-        })
-        .await
-    {
+    let _guard = state.persist_lock.lock().await;
+    let (event, previous) = {
+        let mut data = state.inner.write().await;
+        let previous = data.clone();
+        let id = data.next_event_id;
+        data.next_event_id += 1;
+        let event = SecurityEvent {
+            id,
+            timestamp_unix: now_unix(),
+            client_ip,
+            route_id,
+            action,
+            reason,
+            score,
+            path,
+        };
+        data.events.push(event.clone());
+        enforce_event_limit(&mut data, event_limit);
+        (event, previous)
+    };
+    let persist = if let Some(plane) = &state.control_plane {
+        plane.append_security_event(&event, event_limit).await
+    } else {
+        // File/memory has no leased worker; emit the SIEM line on the request path.
+        println!("{}", security_event_log_line(&event));
+        let snapshot = state.inner.read().await.clone();
+        state.persist_snapshot(&snapshot).await
+    };
+    if let Err(error) = persist {
+        let mut data = state.inner.write().await;
+        *data = previous;
         eprintln!("failed to persist security event: {error}");
     }
 }
@@ -2658,8 +3443,8 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
 
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    let response = state
-        .feed_http
+    let http = state.outbound_client(url).await?;
+    let response = http
         .get(url)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
@@ -2929,7 +3714,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
     </section>
     <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
-      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests. Set <code>CORAZA_WAF_URL</code> so each live <code>/gateway</code> transaction is evaluated by a Coraza sidecar (do not invent WAF rules here). See <code>GET /api/waf/engine-status</code>.</p>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests. Set <code>CORAZA_LIB_PATH</code> plus <code>CORAZA_RULES_PATH</code> (or <code>CORAZA_DIRECTIVES</code>) for in-process libcoraza, or <code>CORAZA_WAF_URL</code> for a sidecar. Do not invent WAF rules here. See <code>GET /api/waf/engine-status</code>.</p>
     </section>
     <section class="card"><h2>STIX threat intelligence</h2>
       <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p>
@@ -2952,6 +3737,15 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre>
     </section>
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Outbox</h2><p class="muted">PostgreSQL leased workers for external effects. File/memory adapters report disabled. Client IPs and paths are not masked.</p><div id="outboxBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Control-plane backup</h2>
+      <p class="muted">On-demand PostgreSQL logical snapshot. Restore drill uses an isolated tenant and does not mask client IPs, paths, or actors. File/memory adapters report disabled. Declared RPO is last successful export; declared RTO is 60s.</p>
+      <div id="backupBody" class="muted">Loading…</div>
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="backupDrillBtn" class="btn-secondary">Run restore drill</button>
+      </div>
+      <pre class="raw" id="backupDrill" style="margin-top:8px;white-space:pre-wrap"></pre>
+    </section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
     <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
@@ -2986,8 +3780,8 @@ function table(capt,cols,rows){
 }
 function toast(msg,ok){const d=document.createElement('div');d.className='toast '+(ok?'ok':'bad');d.textContent=msg;$('toast').appendChild(d);setTimeout(()=>d.remove(),4500);}
 async function guard(id,fn){try{await fn();}catch(e){$(id).innerHTML='<p class="err">Error: '+esc(e.message)+'</p>';}}
-async function loadKpis(){const k=await getJSON('/api/kpis');
-  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)]];
+async function loadKpis(){const k=await getJSON('/api/kpis');const h=await getJSON('/healthz');
+  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)],['Event partitions',h.event_partitions??0]];
   $('kpis').innerHTML=t.map(([l,v])=>'<div class="tile"><div class="label">'+esc(l)+'</div><div class="metric">'+esc(v)+'</div></div>').join('');}
 async function loadRoutes(){const d=await getJSON('/api/routes');
   $('routesBody').innerHTML=table('Configured routes',['Path prefix','Upstream','Mode','State'],d.map(r=>[esc(r.path_prefix),esc(r.upstream),modeBadge(r.mode),stateBadge(r.enabled)]));}
@@ -3015,11 +3809,32 @@ async function loadAudit(){
   const a=await r.json();
   $('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));
 }
+async function loadOutbox(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/outbox',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const o=await r.json();
+  const head='<div class="row" style="margin-bottom:10px">'+badge(o.status||'disabled',o.status==='ready'?'b-pass':'b-neutral')+'</div>';
+  const rows=(o.messages||[]).slice(0,25).map(x=>[esc(x.event_type),esc(x.message_status),esc(x.attempt_count),esc(x.aggregate_id),esc(x.terminal_reason??'—')]);
+  $('outboxBody').innerHTML=head+table('Outbox messages',['Type','Status','Attempts','Aggregate','Terminal reason'],rows);
+}
+async function loadBackup(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/backup',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const b=await r.json();
+  const head='<div class="row" style="margin-bottom:10px">'+badge(b.status||'disabled',b.status==='ready'?'b-pass':'b-neutral')+'<span class="muted">RPO '+esc(b.rpo||'—')+' · RTO '+esc(b.rto_budget_ms)+'ms</span></div>';
+  const art=b.artifact||{};
+  const rows=[[esc(art.schema_version??'—'),esc(art.tenant_id??'—'),esc(art.payload_hash?String(art.payload_hash).slice(0,16)+'…':'—'),esc((art.snapshot&&art.snapshot.events||[]).length),esc((art.outbox||[]).length)]];
+  $('backupBody').innerHTML=head+table('Logical backup artifact',['Schema','Tenant','Hash','Events','Outbox'],rows);
+}
 async function loadRaw(id,url,json){try{const t=json?JSON.stringify(await getJSON(url),null,2):await getText(url);$(id).textContent=t&&t.trim()?t:'(empty)';}catch(e){$(id).textContent='Error: '+e.message;}}
 async function refresh(){await Promise.allSettled([
   guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),
   guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),
-  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),
+  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),guard('outboxBody',loadOutbox),guard('backupBody',loadBackup),
   loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
 function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;
   f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}
@@ -3039,6 +3854,16 @@ function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==
 syncHc();
 $('hcToggle').addEventListener('click',()=>{const on=root.dataset.theme==='hc';if(on){delete root.dataset.theme;}else{root.dataset.theme='hc';}localStorage.setItem('waf-theme',on?'':'hc');syncHc();});
 $('refreshBtn').addEventListener('click',refresh);
+$('backupDrillBtn').addEventListener('click',async()=>{
+  const out=$('backupDrill');out.textContent='Running isolated restore drill…';
+  try{
+    const r=await fetch('/api/backup/drill',{method:'POST',headers:cfHeaders()});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.error||r.statusText);
+    out.textContent=JSON.stringify(j,null,2);
+    toast(j.passed?'Restore drill passed':'Restore drill failed',!!j.passed);
+    guard('backupBody',loadBackup);guard('auditBody',loadAudit);
+  }catch(e){out.innerHTML='<span class="err">Drill error: '+esc(e.message)+'</span>';toast('Restore drill failed: '+e.message,false);}});
 function cfHeaders(){const t=($('adminToken').value||'').trim();return t?{'x-admin-token':t}:{};}
 async function pollClearfolio(id){
   for(let i=0;i<40;i++){
@@ -3165,6 +3990,68 @@ pub fn parse_u64_env(
     }
 }
 
+fn outbound_http_client(pins: Arc<destination::DestinationPins>) -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(Arc::new(destination::PinnedDns::new(pins)))
+        .build()
+        .expect("failed to build fail-closed outbound HTTP client")
+}
+
+pub(crate) fn bind_is_loopback(bind_addr: &str) -> bool {
+    let trimmed = bind_addr.trim();
+    if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    let host = trimmed
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_start_matches('[').trim_end_matches(']'))
+        .unwrap_or(trimmed);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn startup_destination_policy(
+    bind_addr: &str,
+    registry: &CredentialRegistry,
+) -> Result<DestinationPolicy, Box<dyn std::error::Error>> {
+    let base = if bind_is_loopback(bind_addr) {
+        DestinationPolicy::development()
+    } else {
+        DestinationPolicy::production()
+    };
+    let allow = registry
+        .get_credential(CRED_DESTINATION_ALLOWLIST)
+        .unwrap_or_default();
+    let deny = registry
+        .get_credential(CRED_DESTINATION_DENYLIST)
+        .unwrap_or_default();
+    Ok(base
+        .with_lists(&allow, &deny)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?)
+}
+
+async fn validate_sidecar_destination(state: &AppState) -> Result<(), std::io::Error> {
+    if state.proven_engine.in_process.is_none()
+        && let Some(sidecar_url) = state.proven_engine.sidecar_url.as_deref()
+    {
+        state
+            .outbound_client(sidecar_url)
+            .await
+            .map_err(|message| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("CORAZA_WAF_URL is denied or unavailable: {message}"),
+                )
+            })?;
+    }
+    Ok(())
+}
+
 /// Read gateway configuration from the process environment, bind the listener,
 /// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
 /// over this function so every branch is reachable from tests (the parse/error
@@ -3183,6 +4070,10 @@ pub async fn run_from_env(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
+        std::env::var("CONTROL_PLANE_DATABASE_URL").ok(),
+        std::env::var("EGRESS_PROXY_TOKEN").ok(),
+        std::env::var("DESTINATION_ALLOWLIST").ok(),
+        std::env::var("DESTINATION_DENYLIST").ok(),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -3209,12 +4100,6 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    let local_addr = listener.local_addr()?;
-    println!("waf-ids-ai-soc listening on http://{local_addr}");
-    // Flush so a supervising parent process (the e2e test) sees the readiness
-    // line immediately even though stdout is block-buffered when piped.
-    std::io::Write::flush(&mut std::io::stdout())?;
     let coraza_waf_url = std::env::var("CORAZA_WAF_URL")
         .ok()
         .map(|value| value.trim().to_string())
@@ -3224,26 +4109,121 @@ pub async fn run_from_env(
         std::env::var("PROVEN_ENGINE_FAIL_CLOSED").ok().as_deref(),
         false,
     )?;
-    let proven_engine = match coraza_waf_url {
-        Some(url) => ProvenEngineConfig::sidecar(url, proven_engine_fail_closed),
-        None => ProvenEngineConfig {
-            sidecar_url: None,
-            fail_closed: proven_engine_fail_closed,
-        },
+    let coraza_lib_path = std::env::var("CORAZA_LIB_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let coraza_rules_path = std::env::var("CORAZA_RULES_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let coraza_directives = std::env::var("CORAZA_DIRECTIVES")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let in_process = match coraza_lib_path {
+        Some(path) => Some(Arc::new(
+            crate::coraza_inprocess::InProcessCoraza::load(
+                Path::new(&path),
+                coraza_rules_path.as_deref().map(Path::new),
+                coraza_directives.as_deref(),
+            )
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
+        )),
+        None => None,
     };
-    let state = AppState::load(config)
-        .await
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+    let proven_engine = ProvenEngineConfig {
+        sidecar_url: coraza_waf_url,
+        fail_closed: proven_engine_fail_closed,
+        in_process,
+    };
+    let destination_policy = startup_destination_policy(&bind_addr, &credentials)?;
+    let control_plane_url = credentials
+        .get_credential(CRED_CONTROL_PLANE_URL)
+        .map(str::to_owned);
+    control_plane::require_postgres_for_bind(&bind_addr, control_plane_url.as_deref())
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let state = match control_plane_url.as_deref() {
+        Some(url) => AppState::load_postgres(config, url).await,
+        None => AppState::load(config).await,
+    }
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    let state = state
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
+        .with_egress_proxy_token(
+            credentials
+                .get_credential(CRED_EGRESS_PROXY_TOKEN)
+                .map(str::to_owned),
+        )
         .with_credentials_source(credentials.source())
         .with_proven_engine(proven_engine)
+        .with_destination_policy(destination_policy)
         .with_max_body_size(max_body_bytes);
+    validate_sidecar_destination(&state).await?;
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+    let egress_dns = match std::env::var("EGRESS_DNS_BIND_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(bind) => {
+            let udp = tokio::net::UdpSocket::bind(&bind).await?;
+            let dns_addr = udp.local_addr()?;
+            let tcp = tokio::net::TcpListener::bind(dns_addr).await?;
+            Some((udp, tcp, dns_addr))
+        }
+        None => None,
+    };
+    println!("waf-ids-ai-soc listening on http://{local_addr}");
+    if let Some((_, _, dns_addr)) = &egress_dns {
+        println!("wardnet egress DNS listening on udp+tcp://{dns_addr}");
+    }
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let (stop_workers, stop_rx) = tokio::sync::watch::channel(false);
+    if let Some((udp, tcp, _)) = egress_dns {
+        let dns_state = state.clone();
+        let stop = stop_rx.clone();
+        tokio::spawn(async move {
+            egress_dns::serve(dns_state, udp, tcp, stop).await;
+        });
+    }
+    if state.control_plane.is_some() {
+        let worker_state = state.clone();
+        let stop = stop_rx;
+        tokio::spawn(async move {
+            run_outbox_worker(worker_state, stop).await;
+        });
+    }
     let served = axum::serve(listener, build_app(state))
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stop_workers.send(true);
+        })
         .await;
     served?;
     Ok(())
+}
+
+async fn run_outbox_worker(state: AppState, mut stop: tokio::sync::watch::Receiver<bool>) {
+    let owner = format!("wardnet:{}", std::process::id());
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() { break; }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Some(plane) = &state.control_plane {
+                    let _ = plane
+                        .drain_once(&owner, now_unix() as i64, outbox::dispatch_stdout)
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3283,7 +4263,13 @@ mod tests {
             "RATE_LIMIT_WINDOW",
             "MAX_BODY_BYTES",
             "CORAZA_WAF_URL",
+            "CORAZA_LIB_PATH",
+            "CORAZA_RULES_PATH",
+            "CORAZA_DIRECTIVES",
             "PROVEN_ENGINE_FAIL_CLOSED",
+            "DESTINATION_ALLOWLIST",
+            "DESTINATION_DENYLIST",
+            "CONTROL_PLANE_DATABASE_URL",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -3385,6 +4371,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_from_env_rejects_malformed_destination_allowlist() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("DESTINATION_ALLOWLIST", "10.0.0.0/33");
+        }
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_fail_closes_public_bind_without_postgres() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::remove_var("CONTROL_PLANE_DATABASE_URL");
+        }
+        let error = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .expect_err("production bind must require postgres");
+        let message = error.to_string();
+        assert!(
+            message.contains("CONTROL_PLANE_DATABASE_URL"),
+            "operator must see the production authority requirement: {message}"
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
     async fn run_from_env_rejects_malformed_max_body_bytes() {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
@@ -3414,7 +4435,7 @@ mod tests {
             std::env::set_var("BIND_ADDR", "127.0.0.1:0");
             std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
         }
-        // Bind succeeds, but loading corrupt persisted state maps to an error.
+        // Corrupt persisted state is a hard error before the listener binds.
         assert!(
             run_from_env(Box::pin(std::future::ready(())))
                 .await
@@ -3554,6 +4575,78 @@ mod tests {
         assert_eq!(rate_limit_step(100, 100, 2, 2, 60), (false, 100, 2));
         // Once the window elapses the counter resets.
         assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
+    }
+
+    #[test]
+    fn outbound_fetch_accepts_only_document_content_types() {
+        assert!(outbound_content_type_allowed("text/html; charset=utf-8"));
+        assert!(outbound_content_type_allowed("application/xhtml+xml"));
+        assert!(outbound_content_type_allowed("application/pdf"));
+        assert!(!outbound_content_type_allowed("application/octet-stream"));
+        assert!(!outbound_content_type_allowed("image/svg+xml"));
+    }
+
+    #[tokio::test]
+    async fn outbound_fetch_requires_auth_and_https_before_dns() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = serde_json::json!({"url": "http://example.com/privacy"});
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/outbound/fetch", None, &payload),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let unauthorized_body: serde_json::Value = json_body(unauthorized).await;
+        assert_eq!(unauthorized_body["code"], "unauthorized");
+
+        let insecure = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/outbound/fetch",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(insecure.status(), StatusCode::BAD_REQUEST);
+        let insecure_body: serde_json::Value = json_body(insecure).await;
+        assert_eq!(insecure_body["code"], "invalid_url");
+    }
+
+    #[tokio::test]
+    async fn connect_proxy_requires_basic_auth_and_denies_private_destination() {
+        let state = AppState::seeded(None)
+            .with_egress_proxy_token(Some("secret".to_string()))
+            .with_destination_policy(DestinationPolicy::production());
+        let app = build_app(state);
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .body(Body::empty())
+            .unwrap();
+        let unauthorized = app_request(&app, request).await;
+        assert_eq!(
+            unauthorized.status(),
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED
+        );
+        assert_eq!(
+            unauthorized.headers()[header::PROXY_AUTHENTICATE],
+            "Basic realm=\"wardnet\""
+        );
+
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .header(
+                header::PROXY_AUTHORIZATION,
+                format!("Basic {}", BASE64.encode("wardnet:secret")),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let denied = app_request(&app, request).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -3956,6 +5049,18 @@ mod tests {
         );
         assert!(html.contains("Skip to content"), "skip link missing");
         assert!(
+            html.contains("id=\"backupBody\""),
+            "backup card container missing"
+        );
+        assert!(
+            html.contains("id=\"backupDrillBtn\""),
+            "restore drill button missing"
+        );
+        assert!(
+            html.contains("Event partitions"),
+            "HASH event-partition KPI tile missing"
+        );
+        assert!(
             html.contains(":focus-visible"),
             "focus-visible styling missing"
         );
@@ -4239,6 +5344,7 @@ mod tests {
             json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
         assert_eq!(health.persistence, "file");
         assert_eq!(health.dnsbl_origin, "dnsbl.example");
+        assert_eq!(health.destination_mode, "production");
 
         let block_route = RouteConfig {
             id: "secure".to_string(),
@@ -5169,6 +6275,8 @@ mod tests {
         assert_eq!(status["mode"], "coraza_sidecar");
         assert_eq!(status["in_path"], true);
         assert_eq!(status["fail_closed"], true);
+        assert_eq!(status["sidecar_configured"], true);
+        assert_eq!(status["in_process_configured"], false);
 
         let health: HealthStatus =
             json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
@@ -5212,6 +6320,68 @@ mod tests {
         assert!(
             body["reason"].as_str().unwrap_or("").contains("942100"),
             "block reason must cite the CRS rule from the sidecar: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_blocks_live_request_from_in_process_libcoraza() {
+        let engine = crate::coraza_inprocess::load_stub_engine();
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::in_process(engine, true));
+        let app = build_app(state);
+
+        let status = json_body::<serde_json::Value>(
+            app_request(&app, empty_request(Method::GET, "/api/waf/engine-status")).await,
+        )
+        .await;
+        assert_eq!(status["mode"], "coraza_in_process");
+        assert_eq!(status["in_path"], true);
+        assert_eq!(status["in_process_configured"], true);
+        assert_eq!(status["sidecar_configured"], false);
+        assert!(status["in_process_rules"].as_i64().unwrap_or(0) >= 1);
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.proven_engine, "coraza_in_process");
+        assert!(health.proven_engine_fail_closed);
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "libcoraza-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = json_body(blocked).await;
+        assert_eq!(body["action"], "blocked");
+        assert_eq!(body["engine"], "coraza");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("942100"),
+            "block reason must cite the CRS rule from libcoraza: {body}"
         );
     }
 
@@ -6081,7 +7251,8 @@ mod tests {
                 dnsbl_origin: "dnsbl.local".to_string(),
                 event_limit: 20,
             },
-        );
+        )
+        .with_destination_policy(DestinationPolicy::development());
         let app = build_app(state);
 
         let no_route = app_request(&app, empty_request(Method::GET, "/gateway/none")).await;
@@ -6141,6 +7312,47 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("upstream must use http://"));
+    }
+
+    #[tokio::test]
+    async fn create_route_accepts_metadata_upstream_but_runtime_fails_closed() {
+        let app = build_app(AppState::seeded(None));
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                None,
+                &serde_json::json!({
+                    "id": "pivot",
+                    "path_prefix": "/pivot",
+                    "upstream": "http://169.254.169.254/",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let error = proxy_request(
+            &AppState::seeded(None),
+            &RouteConfig {
+                id: "pivot".to_string(),
+                path_prefix: "/pivot".to_string(),
+                upstream: "http://169.254.169.254/".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/pivot",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect_err("runtime egress must reject metadata addresses before sending");
+        assert!(error.contains("denied address class"), "{error}");
     }
 
     fn temp_state_path(name: &str) -> PathBuf {
@@ -7138,6 +8350,14 @@ mod tests {
                 admin_auth_configured: false,
                 proven_engine: "ingest_hints_only".to_string(),
                 proven_engine_fail_closed: false,
+                destination_mode: "production".to_string(),
+                outbox: "disabled".to_string(),
+                outbox_pending: 0,
+                outbox_leased: 0,
+                outbox_dead_letter: 0,
+                outbox_oldest_age_seconds: None,
+                backup: "disabled".to_string(),
+                event_partitions: 0,
             }
         );
 
@@ -7148,6 +8368,253 @@ mod tests {
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
+        assert_eq!(
+            AppState::seeded(None).health_status().destination_mode,
+            "development"
+        );
+        assert_eq!(state.health_status().outbox, "disabled");
+    }
+
+    #[tokio::test]
+    async fn outbox_api_is_admin_authenticated_and_disabled_without_postgres() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let denied = app_request(&app, empty_request(Method::GET, "/api/outbox")).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/outbox", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["status"], "disabled");
+        assert_eq!(
+            body["limit"].as_u64(),
+            Some(AppConfig::DEFAULT_EVENT_LIMIT as u64)
+        );
+        assert_eq!(body["messages"], serde_json::json!([]));
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.outbox, "disabled");
+        assert_eq!(health.outbox_pending, 0);
+
+        let replayed = app_request(
+            &app,
+            authed_empty_request(Method::POST, "/api/outbox/missing/replay", "secret"),
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let denied_backup = app_request(&app, empty_request(Method::GET, "/api/backup")).await;
+        assert_eq!(denied_backup.status(), StatusCode::UNAUTHORIZED);
+        let backup: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/backup", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(backup["status"], "disabled");
+        assert_eq!(backup["artifact"], serde_json::Value::Null);
+        assert_eq!(health.backup, "disabled");
+        let drill = app_request(
+            &app,
+            authed_empty_request(Method::POST, "/api/backup/drill", "secret"),
+        )
+        .await;
+        assert_eq!(drill.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn create_route_does_not_require_live_dns_but_runtime_policy_still_applies() {
+        let denied_app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_destination_policy(DestinationPolicy::production()),
+        );
+        let created_without_lookup = app_request(
+            &denied_app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "internal-svc",
+                    "path_prefix": "/internal",
+                    "upstream": "http://10.1.2.3:8080/",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created_without_lookup.status(), StatusCode::CREATED);
+
+        let error = proxy_request(
+            &AppState::seeded(None).with_destination_policy(DestinationPolicy::production()),
+            &RouteConfig {
+                id: "internal-svc".to_string(),
+                path_prefix: "/internal".to_string(),
+                upstream: "http://10.1.2.3:8080/".to_string(),
+                mode: EnforcementMode::Block,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/internal",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect_err("runtime egress must enforce destination policy");
+        assert!(
+            error.contains("not a default http/https port")
+                || error.contains("denied address class"),
+            "{error}"
+        );
+
+        let allowlisted = DestinationPolicy::production()
+            .with_lists("10.0.0.0/8", "")
+            .expect("valid CIDR allowlist");
+        let allowed_app = build_app(
+            AppState::seeded(Some("secret".to_string())).with_destination_policy(allowlisted),
+        );
+        let created = app_request(
+            &allowed_app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "internal-svc",
+                    "path_prefix": "/internal",
+                    "upstream": "http://10.1.2.3:8080/",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let health: HealthStatus =
+            json_body(app_request(&allowed_app, empty_request(Method::GET, "/healthz")).await)
+                .await;
+        assert_eq!(health.destination_mode, "production");
+    }
+
+    struct PinMapResolver(HashMap<String, Vec<IpAddr>>);
+
+    impl HostResolver for PinMapResolver {
+        fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+            self.0
+                .get(host)
+                .cloned()
+                .ok_or_else(|| format!("no fixture for {host}"))
+        }
+    }
+
+    struct CountingResolver {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        ips: Vec<IpAddr>,
+    }
+
+    impl HostResolver for CountingResolver {
+        fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.ips.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_clients_reuse_the_bounded_approved_dns_cache() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = AppState::seeded(None).with_resolver(Arc::new(CountingResolver {
+            calls: Arc::clone(&calls),
+            ips: vec!["93.184.216.34".parse().unwrap()],
+        }));
+
+        state
+            .outbound_client("https://cache-test.invalid/")
+            .await
+            .unwrap();
+        state
+            .outbound_client("https://cache-test.invalid/next")
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sidecar_destination_is_preflighted_before_listener_bind() {
+        let state = AppState::seeded(None)
+            .with_destination_policy(DestinationPolicy::production())
+            .with_proven_engine(ProvenEngineConfig::sidecar(
+                "http://169.254.169.254/".to_string(),
+                true,
+            ));
+        let error = validate_sidecar_destination(&state).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("CORAZA_WAF_URL"));
+        assert!(error.to_string().contains("denied address class"));
+    }
+
+    #[tokio::test]
+    async fn proxy_request_connects_to_pinned_policy_addresses() {
+        let upstream_app = Router::new().route("/", get(|| async { (StatusCode::OK, "pinned") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream_app).into_future());
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "pin-test.invalid".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        );
+        let state = AppState::seeded(None).with_resolver(Arc::new(PinMapResolver(answers)));
+
+        let response = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "pin".to_string(),
+                path_prefix: "/pin".to_string(),
+                upstream: format!("http://pin-test.invalid:{}", addr.port()),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/pin",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect("pinned hostname must connect to the evaluated loopback address");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64).await.unwrap();
+        assert_eq!(&bytes[..], b"pinned");
+    }
+
+    #[tokio::test]
+    async fn outbound_http_fails_closed_without_a_preauthorized_pin() {
+        let error = outbound_http_client(Arc::new(destination::DestinationPins::default()))
+            .get("http://pin-test.invalid/")
+            .send()
+            .await
+            .expect_err("unpinned hostname must not hit OS DNS");
+        let mut message = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(err) = source {
+            message.push(' ');
+            message.push_str(&err.to_string());
+            source = err.source();
+        }
+        assert!(
+            message.contains("not pre-authorized"),
+            "fail-closed pin resolver must surface in the reqwest error: {message}"
+        );
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
@@ -7360,11 +8827,13 @@ mod tests {
     fn state_with_event_and_llm(base_url: &str) -> AppState {
         let mut data = AppData::seeded();
         data.events.push(soc_test_event());
-        AppState::new(data, AppConfig::memory(None)).with_soc_llm(Some(SocLlmConfig {
-            base_url: base_url.to_string(),
-            token: "test-token".to_string(),
-            model: "contextual-orchestrator".to_string(),
-        }))
+        AppState::new(data, AppConfig::memory(None))
+            .with_destination_policy(DestinationPolicy::development())
+            .with_soc_llm(Some(SocLlmConfig {
+                base_url: base_url.to_string(),
+                token: "test-token".to_string(),
+                model: "contextual-orchestrator".to_string(),
+            }))
     }
 
     async fn spawn_chat_mock(response: &'static str) -> std::net::SocketAddr {

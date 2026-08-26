@@ -24,8 +24,8 @@
 | --- | --- | --- | --- |
 | Unauthorized management write | Route takeover or false blocking | `X-Admin-Token` write gate; multi-token RBAC with actor labels and readonly role; audit log for successful writes | SSO/OIDC, mTLS or identity proxy, SCIM |
 | Malicious threat feed import | False positives or broad blocks | Validation, route-scoped enforcement | Source signing, feed confidence, staged promotion |
-| State file corruption | Startup failure or stale policy | JSON parse failure surfaces startup error | Database, backup, schema migration |
-| Upstream SSRF through routes | Internal network exposure | Upstream scheme validation | Upstream allowlists, egress policy |
+| State file corruption | Startup failure or stale policy | JSON parse failure surfaces startup error; production binds require PostgreSQL (`src/control_plane.rs`) with RLS; runtime is `wardnet_runtime` (not superuser/owner); `sslmode=require` uses rustls; hashed logical backup plus isolated restore drill (`GET /api/backup`, `POST /api/backup/drill`) | Physical/PITR backups owned by the DBA |
+| Upstream SSRF through routes | Internal network exposure | Scheme validation plus fail-closed destination policy (`src/destination.rs`): deny loopback/private/link-local/metadata unless allowlisted; denylist wins; no ambient HTTP proxy; no redirects. After evaluation, HTTP connects only to those IPs (Host/SNI preserved). Coraza sidecar URLs use the same policy. | Kubernetes NetworkPolicy egress as defense in depth |
 | Gateway DoS | Availability loss | Rust memory safety, event retention limit | Rate limits, body limits, async event sink |
 | DNSBL abuse | Reputation damage | Loopback response-code validation | Authoritative DNS service, signing, publisher workflow |
 | Secret disclosure | Admin compromise | Support bundle excludes admin token; secrets bootstrapped into credential registry (`WAF_IDS_CREDENTIALS_PATH` preferred over long-lived env); health exposes source label only | External secret manager / SSO, rotation, access review |
