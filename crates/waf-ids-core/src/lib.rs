@@ -607,11 +607,10 @@ pub fn upsert_threat(
 }
 
 pub fn upsert_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) -> DnsblEntry {
-    if let Some(existing) = entries.iter_mut().find(|item| {
-        item.address == entry.address
-            && item.prefix_len == entry.prefix_len
-            && item.source == entry.source
-    }) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|item| item.address == entry.address)
+    {
         *existing = entry.clone();
     } else {
         entries.push(entry.clone());

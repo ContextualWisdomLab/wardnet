@@ -1373,14 +1373,22 @@ async fn refresh_official_threat_feed(
         .mutate_and_persist(|data| {
             data.threats.retain(|item| item.source != source_id);
             data.dnsbl.retain(|item| item.source != source_id);
-            let threat_count = import.threats.len();
-            let dnsbl_count = import.dnsbl.len();
             for threat in import.threats {
                 upsert_threat(&mut data.threats, threat);
             }
             for entry in import.dnsbl {
                 upsert_dnsbl(&mut data.dnsbl, entry);
             }
+            let threat_count = data
+                .threats
+                .iter()
+                .filter(|item| item.source == source_id)
+                .count();
+            let dnsbl_count = data
+                .dnsbl
+                .iter()
+                .filter(|item| item.source == source_id)
+                .count();
             upsert_threat_feed(
                 &mut data.threat_feeds,
                 ThreatFeedStatus {
@@ -1402,7 +1410,9 @@ async fn refresh_official_threat_feed(
                 status.last_attempt_unix = Some(now);
                 status.last_success_unix = Some(now);
                 status.last_error = None;
-                status.source_notice = parsed.source_notice;
+                status.source_notice = parsed
+                    .source_notice
+                    .or_else(|| status.source_notice.clone());
             }
             record_successful_audit_log(
                 data,
@@ -3630,7 +3640,7 @@ mod tests {
                     } else if call == 1 {
                         (
                             StatusCode::OK,
-                            "{\"cidr\":\"198.51.101.0/24\",\"sblid\":\"SBL2\"}\n",
+                            "{\"cidr\":\"198.51.101.0/24\",\"sblid\":\"SBL2\"}\n{\"cidr\":\"198.51.101.0/24\",\"sblid\":\"SBL2\"}\n",
                         )
                             .into_response()
                     } else {
@@ -3713,16 +3723,24 @@ mod tests {
         )
         .await;
         assert_eq!(refreshed_without_validator.status(), StatusCode::OK);
+        let refresh_body: serde_json::Value = json_body(refreshed_without_validator).await;
+        assert_eq!(refresh_body["dnsbl_count"], 1);
         let second = inspect.inner.read().await.clone();
+        let source = second
+            .official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == "spamhaus-drop-v4")
+            .unwrap();
+        assert_eq!(source.etag.as_deref(), Some("\"drop-v1\""));
+        assert_eq!(source.source_notice.as_deref(), Some("Copyright Spamhaus"));
         assert_eq!(
             second
-                .official_threat_feeds
+                .threat_feeds
                 .iter()
-                .find(|feed| feed.source_id == "spamhaus-drop-v4")
+                .find(|feed| feed.feed_id == "spamhaus-drop-v4")
                 .unwrap()
-                .etag
-                .as_deref(),
-            Some("\"drop-v1\"")
+                .dnsbl_count,
+            1
         );
 
         inspect
@@ -6408,7 +6426,8 @@ mod tests {
         let mut second_source = dnsbl[0].clone();
         second_source.source = "second-feed".to_string();
         upsert_dnsbl(&mut dnsbl, second_source);
-        assert_eq!(dnsbl.len(), 2);
+        assert_eq!(dnsbl.len(), 1);
+        assert_eq!(dnsbl[0].source, "second-feed");
 
         let mut feeds = vec![ThreatFeedStatus {
             feed_id: "feed-a".to_string(),
