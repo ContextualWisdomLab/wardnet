@@ -44,6 +44,7 @@ fn spawn_ready_gateway() -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_wardnet"))
         .env("BIND_ADDR", "127.0.0.1:0")
         .env_remove("WARDNET_STATE_PATH")
+        .env_remove("WAF_IDS_STATE_PATH")
         .env_remove("EVENT_LIMIT")
         .env_remove("RATE_LIMIT")
         .env_remove("RATE_LIMIT_WINDOW")
