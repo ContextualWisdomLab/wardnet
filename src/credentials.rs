@@ -261,9 +261,16 @@ mod tests {
 
     #[test]
     fn load_optional_secret_fills_missing_keys_only() {
-        let mut registry =
-            CredentialRegistry::bootstrap_secrets(None, Some("secret".to_string()), None, None)
-                .unwrap();
+        let mut registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            Some("secret".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("llm-token".into()));
         registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("ignored".into()));
         registry.load_optional_secret(CRED_TAXII_BEARER, Some(String::new()));

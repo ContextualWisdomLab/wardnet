@@ -23,7 +23,7 @@ pub struct AppData {
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
     /// Postgres optimistic-concurrency token. File/memory ignore it.
-    #[serde(default)]
+    #[serde(default, skip)]
     pub snapshot_version: u64,
 }
 
@@ -1741,5 +1741,15 @@ mod tests {
         assert_eq!(data.audit_logs.len(), 2);
         assert_eq!(data.next_audit_log_id, 3);
         assert_eq!(data.audit_logs[0].resource_id, "edge");
+    }
+
+    #[test]
+    fn snapshot_version_is_runtime_only_in_serialized_state() {
+        let mut data = AppData::seeded();
+        data.snapshot_version = 42;
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(!json.contains("snapshot_version"));
+        let restored: AppData = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.snapshot_version, 0);
     }
 }

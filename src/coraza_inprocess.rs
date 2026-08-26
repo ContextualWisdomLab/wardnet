@@ -507,7 +507,7 @@ mod tests {
             ("/app?x=%24%7BJNDI%3Aldap%3A//evil.example/a%7D", 944120),
         ];
         for (uri, expected_rule) in cases {
-            match engine.evaluate("GET", uri, "", None) {
+            match engine.evaluate("GET", uri, "", None, &[]) {
                 ProvenEngineOutcome::Hit(hit) => {
                     assert_eq!(hit.action, "block", "{uri}");
                     assert!(
@@ -520,7 +520,13 @@ mod tests {
             }
         }
         // POST bodies flow through the same engine surface.
-        match engine.evaluate("POST", "/app/comment", "comment=<script>x</script>", None) {
+        match engine.evaluate(
+            "POST",
+            "/app/comment",
+            "comment=<script>x</script>",
+            None,
+            &[],
+        ) {
             ProvenEngineOutcome::Hit(hit) => {
                 assert!(hit.reason.contains("941100"), "{}", hit.reason);
             }
@@ -529,7 +535,7 @@ mod tests {
         // Benign traffic stays clean.
         for uri in ["/app?q=hello", "/healthz", "/api/events"] {
             assert_eq!(
-                engine.evaluate("GET", uri, "", None),
+                engine.evaluate("GET", uri, "", None, &[]),
                 ProvenEngineOutcome::Clean,
                 "benign {uri} must stay clean"
             );

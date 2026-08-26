@@ -93,8 +93,8 @@ mod suricata_eve;
 mod taxii;
 pub use credentials::{
     CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_DESTINATION_ALLOWLIST,
-    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CRED_SOC_LLM_TOKEN,
-    CRED_TAXII_BEARER, CredentialRegistry, CredentialSource,
+    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CRED_SOC_LLM_TOKEN, CRED_TAXII_BEARER,
+    CredentialRegistry, CredentialSource,
 };
 pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
 pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
@@ -128,6 +128,8 @@ pub struct AppState {
     soc_llm: Option<SocLlmConfig>,
     /// Optional TAXII Bearer for durable polls. Never logged or written to outbox.
     taxii_bearer: Option<String>,
+    /// Exact URL origin authorized to receive the registry TAXII bearer.
+    taxii_bearer_origin: Option<String>,
     /// In-path Coraza consult (in-process libcoraza and/or sidecar).
     proven_engine: ProvenEngineConfig,
     /// Fail-closed destination policy for every outbound http/https call.
@@ -210,14 +212,14 @@ impl AppState {
         plane: control_plane::PostgresPlane,
     ) -> Result<Self, String> {
         let plane = plane.with_event_limit(config.event_limit);
-        let mut data = match plane.load().await? {
-            Some(loaded) => loaded,
-            None => AppData::seeded(),
-        };
+        let loaded = plane.load().await?;
+        let mut data = loaded.clone().unwrap_or_else(AppData::seeded);
         let event_limit = config.event_limit.max(1);
         enforce_event_limit(&mut data, event_limit);
-        plane.save(&data).await?;
-        data.snapshot_version = data.snapshot_version.saturating_add(1);
+        if loaded.is_none() {
+            plane.save(&data).await?;
+            data.snapshot_version = data.snapshot_version.saturating_add(1);
+        }
         Ok(Self::new(data, config).with_control_plane(Arc::new(plane)))
     }
 
@@ -244,6 +246,7 @@ impl AppState {
             clearfolio: None,
             soc_llm: None,
             taxii_bearer: None,
+            taxii_bearer_origin: None,
             proven_engine: ProvenEngineConfig::disabled(),
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
@@ -275,8 +278,9 @@ impl AppState {
     }
 
     /// Optional TAXII Bearer from the credential registry. Never written to outbox payloads.
-    pub fn with_taxii_bearer(mut self, token: Option<String>) -> Self {
+    pub fn with_taxii_bearer(mut self, token: Option<String>, origin: Option<String>) -> Self {
         self.taxii_bearer = token.filter(|value| !value.is_empty());
+        self.taxii_bearer_origin = origin;
         self
     }
 
@@ -424,8 +428,20 @@ impl AppState {
             (result, data.clone(), previous)
         };
         if let Err(error) = self.persist_snapshot(&snapshot).await {
+            let latest = if error.contains("snapshot conflict") {
+                match &self.control_plane {
+                    Some(plane) => plane.load().await.ok().flatten(),
+                    None => None,
+                }
+            } else {
+                None
+            };
             let mut data = self.inner.write().await;
-            *data = previous;
+            if let Some(latest) = latest {
+                *data = latest;
+            } else {
+                *data = previous;
+            }
             return Err(error);
         }
         Ok(result)
@@ -1255,7 +1271,7 @@ async fn execute_clearfolio_submit(
         .await
         .map_err(outbox::DispatchError::Permanent)?;
     let mut request = http.post(submit_url).multipart(form);
-    for (name, value) in clearfolio_tenant_headers(&config) {
+    for (name, value) in clearfolio_tenant_headers(config) {
         request = request.header(name, value);
     }
     let response = request.send().await.map_err(|err| {
@@ -2610,6 +2626,18 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let inline_bearer = bearer_token.map(str::trim).filter(|s| !s.is_empty());
+    let bearer = if inline_bearer.is_some() {
+        inline_bearer
+    } else if let Some(token) = state.taxii_bearer.as_deref() {
+        let request_origin = url_origin(url)?;
+        if state.taxii_bearer_origin.as_deref() != Some(request_origin.as_str()) {
+            return Err("TAXII URL is outside the configured bearer origin".to_string());
+        }
+        Some(token)
+    } else {
+        None
+    };
     let http = state.outbound_client(url).await?;
     let mut request = http
         .get(url)
@@ -2620,15 +2648,6 @@ async fn fetch_taxii_objects(
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ));
-
-    let bearer = bearer_token
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or(state
-            .taxii_bearer
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty()));
     if let Some(token) = bearer {
         request = request.bearer_auth(token);
     } else if let Some(user) = username.map(str::trim).filter(|s| !s.is_empty()) {
@@ -2704,13 +2723,7 @@ async fn execute_taxii_poll(
     let result =
         apply_threat_feed_import(state, intent.actor.clone(), "poll_taxii_collection", feed)
             .await
-            .map_err(|message| {
-                if message.contains("snapshot conflict") {
-                    outbox::DispatchError::Transient(message)
-                } else {
-                    outbox::DispatchError::Permanent(message)
-                }
-            })?;
+            .map_err(outbox::DispatchError::Transient)?;
     Ok(TaxiiPollResult {
         feed_id: result.feed_id,
         objects_url: intent.objects_url.clone(),
@@ -4423,6 +4436,19 @@ fn startup_soc_llm(credentials: &CredentialRegistry) -> Option<SocLlmConfig> {
     })
 }
 
+fn url_origin(raw: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| "URL origin is invalid".to_string())?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL origin has no host".to_string())?;
+    let mut origin = format!("{}://{}", url.scheme(), host.to_ascii_lowercase());
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(origin)
+}
+
 fn startup_destination_policy(
     bind_addr: &str,
     registry: &CredentialRegistry,
@@ -4439,7 +4465,7 @@ fn startup_destination_policy(
         .get_credential(CRED_DESTINATION_DENYLIST)
         .unwrap_or_default();
     Ok(base
-        .with_lists(&allow, &deny)
+        .with_lists(allow, deny)
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?)
 }
 
@@ -4551,6 +4577,22 @@ pub async fn run_from_env(
     let control_plane_url = credentials
         .get_credential(CRED_CONTROL_PLANE_URL)
         .map(str::to_owned);
+    let taxii_bearer = credentials
+        .get_credential(CRED_TAXII_BEARER)
+        .map(str::to_owned);
+    let taxii_bearer_origin = std::env::var("TAXII_BEARER_ORIGIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| url_origin(&value))
+        .transpose()?;
+    if taxii_bearer.is_some() && taxii_bearer_origin.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "taxii_bearer requires TAXII_BEARER_ORIGIN",
+        )
+        .into());
+    }
     control_plane::require_postgres_for_bind(&bind_addr, control_plane_url.as_deref())
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let state = match control_plane_url.as_deref() {
@@ -4572,11 +4614,7 @@ pub async fn run_from_env(
         .with_max_body_size(max_body_bytes)
         .with_clearfolio(startup_clearfolio())
         .with_soc_llm(startup_soc_llm(&credentials))
-        .with_taxii_bearer(
-            credentials
-                .get_credential(CRED_TAXII_BEARER)
-                .map(str::to_owned),
-        );
+        .with_taxii_bearer(taxii_bearer, taxii_bearer_origin);
     validate_sidecar_destination(&state).await?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -4898,7 +4936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_load_advances_snapshot_version_so_first_write_does_not_conflict() {
+    async fn postgres_first_management_write_does_not_conflict() {
         let Some(url) = control_plane_test_database_url() else {
             return;
         };
@@ -4915,6 +4953,38 @@ mod tests {
         let inner = state.inner.read().await;
         assert_eq!(inner.routes[0].path_prefix, "/after-start");
         assert!(inner.snapshot_version >= 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_conflict_refreshes_replica_for_a_later_retry() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("occ-refresh");
+        let seed = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("seed tenant");
+        drop(seed);
+        let winner = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("winner load");
+        let loser = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("loser load");
+        winner
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/winner".into())
+            .await
+            .expect("winner save");
+        let conflict = loser
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/loser-stale".into())
+            .await
+            .expect_err("stale replica must conflict once");
+        assert!(conflict.contains("snapshot conflict"));
+        assert_eq!(loser.inner.read().await.routes[0].path_prefix, "/winner");
+        loser
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/loser-retry".into())
+            .await
+            .expect("refreshed replica must be able to retry");
     }
 
     #[tokio::test]
@@ -7806,6 +7876,24 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/threat-intel/taxii/poll")
         );
+    }
+
+    #[tokio::test]
+    async fn registry_taxii_bearer_is_bound_to_one_origin_before_dns() {
+        let state = AppState::seeded(None).with_taxii_bearer(
+            Some("synthetic-taxii-token".to_string()),
+            Some("https://taxii.example".to_string()),
+        );
+        let error = fetch_taxii_objects(
+            &state,
+            "https://attacker.invalid/collections/c/objects/",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("registry bearer must not cross its configured origin");
+        assert!(error.contains("outside the configured bearer origin"));
     }
 
     #[tokio::test]

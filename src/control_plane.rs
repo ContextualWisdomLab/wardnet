@@ -1190,7 +1190,7 @@ async fn write_snapshot_rows(
             "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (tenant_id) DO UPDATE SET
-               event_sequence = EXCLUDED.event_sequence,
+               event_sequence = GREATEST(tenant_account.event_sequence, EXCLUDED.event_sequence),
                audit_sequence = EXCLUDED.audit_sequence,
                snapshot_version = EXCLUDED.snapshot_version
              WHERE tenant_account.snapshot_version = $5",
@@ -1230,7 +1230,6 @@ async fn write_snapshot_rows(
         "route_config",
         "threat_indicator",
         "dnsbl_entry",
-        "security_event",
         "audit_record",
         "threat_feed",
         "tenant_profile",
@@ -1241,6 +1240,14 @@ async fn write_snapshot_rows(
         )
         .await
         .map_err(|error| format!("control plane delete {table} failed: {error}"))?;
+    }
+    if !enforce_snapshot_version {
+        tx.execute(
+            "DELETE FROM security_event WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane delete security_event failed: {error}"))?;
     }
 
     let features = serde_json::to_string(&data.commercial.features)
@@ -1334,7 +1341,8 @@ async fn write_snapshot_rows(
             "INSERT INTO security_event (
                 tenant_id, event_id, timestamp_unix, client_address, route_id,
                 action_name, event_reason, event_score, request_path
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (tenant_id, event_id) DO NOTHING",
             &[
                 &tenant_id,
                 &(event.id as i64),
