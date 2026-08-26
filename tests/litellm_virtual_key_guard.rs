@@ -198,6 +198,7 @@ async fn proxy_rejects_wrong_credentials_and_preserves_safe_streaming_semantics(
         format!("http://{upstream_address}"),
         1024 * 1024,
         Duration::from_secs(3),
+        Duration::from_secs(3),
     )
     .expect("proxy config");
     let app = build_router(ProxyState::new(&config).expect("proxy state"));

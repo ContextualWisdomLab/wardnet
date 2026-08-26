@@ -22,10 +22,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use futures_util::{Stream, StreamExt, stream};
 use reqwest::{Client, Url, redirect::Policy};
 use runtime_config::{
     CONFIGURATION_VERSION, LITELLM_PROXY_BIND_ADDRESS, LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
-    LITELLM_PROXY_MAX_BODY_BYTES, LITELLM_PROXY_UPSTREAM_URL,
+    LITELLM_PROXY_IDLE_TIMEOUT_SECONDS, LITELLM_PROXY_MAX_BODY_BYTES, LITELLM_PROXY_UPSTREAM_URL,
 };
 use serde::Serialize;
 use std::{
@@ -37,14 +38,16 @@ use std::{
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8090";
 const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_IDLE_TIMEOUT_SECONDS: u64 = 60;
 const SUPPORTED_CONFIGURATION_VERSION: &str = "1";
 const ALLOWED_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS";
-const ALLOWED_CONFIG_KEYS: [&str; 5] = [
+const ALLOWED_CONFIG_KEYS: [&str; 6] = [
     CONFIGURATION_VERSION,
     LITELLM_PROXY_UPSTREAM_URL,
     LITELLM_PROXY_BIND_ADDRESS,
     LITELLM_PROXY_MAX_BODY_BYTES,
     LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
+    LITELLM_PROXY_IDLE_TIMEOUT_SECONDS,
 ];
 
 /// Runtime configuration for the dedicated LiteLLM ingress proxy.
@@ -58,6 +61,8 @@ pub struct ProxyConfig {
     pub max_body_bytes: usize,
     /// Maximum duration allowed to establish the upstream connection.
     pub connect_timeout: Duration,
+    /// Maximum silence allowed while waiting for each upstream response chunk.
+    pub idle_timeout: Duration,
 }
 
 impl ProxyConfig {
@@ -81,11 +86,16 @@ impl ProxyConfig {
             LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS,
             DEFAULT_CONNECT_TIMEOUT_SECONDS,
         )?;
+        let idle_timeout_seconds = registry.u64_or(
+            LITELLM_PROXY_IDLE_TIMEOUT_SECONDS,
+            DEFAULT_IDLE_TIMEOUT_SECONDS,
+        )?;
         Self::new(
             bind_address,
             upstream,
             max_body_bytes,
             Duration::from_secs(connect_timeout_seconds),
+            Duration::from_secs(idle_timeout_seconds),
         )
     }
 
@@ -95,6 +105,7 @@ impl ProxyConfig {
         upstream_url: impl AsRef<str>,
         max_body_bytes: usize,
         connect_timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<Self, String> {
         if max_body_bytes == 0 {
             return Err("max_body_bytes must be greater than 0".to_string());
@@ -102,12 +113,16 @@ impl ProxyConfig {
         if connect_timeout.is_zero() {
             return Err("connect_timeout must be greater than 0".to_string());
         }
+        if idle_timeout.is_zero() {
+            return Err("idle_timeout must be greater than 0".to_string());
+        }
         let upstream_url = validate_upstream_url(upstream_url.as_ref())?;
         Ok(Self {
             bind_address,
             upstream_url,
             max_body_bytes,
             connect_timeout,
+            idle_timeout,
         })
     }
 }
@@ -118,6 +133,7 @@ pub struct ProxyState {
     client: Client,
     upstream_url: Url,
     max_body_bytes: usize,
+    idle_timeout: Duration,
 }
 
 impl ProxyState {
@@ -136,6 +152,7 @@ impl ProxyState {
             client,
             upstream_url: config.upstream_url.clone(),
             max_body_bytes: config.max_body_bytes,
+            idle_timeout: config.idle_timeout,
         })
     }
 
@@ -249,10 +266,43 @@ async fn proxy_request(
     let status = StatusCode::from_u16(upstream.status().as_u16())
         .expect("reqwest upstream status codes are valid HTTP status codes");
     let upstream_headers = upstream.headers().clone();
-    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+    let mut response = Response::new(Body::from_stream(with_idle_timeout(
+        upstream.bytes_stream(),
+        state.idle_timeout,
+    )));
     *response.status_mut() = status;
     credential_guard::copy_response_headers(&upstream_headers, response.headers_mut());
     response
+}
+
+fn with_idle_timeout<S, E>(
+    source: S,
+    idle_timeout: Duration,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Error + Send + Sync + 'static,
+{
+    stream::unfold(
+        (Box::pin(source), false),
+        move |(mut source, done)| async move {
+            if done {
+                return None;
+            }
+            match tokio::time::timeout(idle_timeout, source.next()).await {
+                Ok(Some(Ok(chunk))) => Some((Ok(chunk), (source, false))),
+                Ok(Some(Err(error))) => Some((Err(std::io::Error::other(error)), (source, true))),
+                Ok(None) => None,
+                Err(_) => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "upstream response idle timeout",
+                    )),
+                    (source, true),
+                )),
+            }
+        },
+    )
 }
 
 fn method_allowed(method: &Method) -> bool {
@@ -397,6 +447,10 @@ mod tests {
             config.connect_timeout,
             Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECONDS)
         );
+        assert_eq!(
+            config.idle_timeout,
+            Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECONDS)
+        );
 
         assert!(
             ProxyConfig::from_registry(&registry(
@@ -437,6 +491,7 @@ mod tests {
             "https://llm.example",
             1024,
             Duration::from_secs(1),
+            Duration::from_secs(1),
         )
         .unwrap();
         let state = ProxyState::new(&config).unwrap();
@@ -453,6 +508,7 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 "https://llm.example",
                 0,
+                Duration::from_secs(1),
                 Duration::from_secs(1)
             )
             .is_err()
@@ -462,6 +518,17 @@ mod tests {
                 "127.0.0.1:0".parse().unwrap(),
                 "https://llm.example",
                 1,
+                Duration::ZERO,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(
+            ProxyConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                "https://llm.example",
+                1,
+                Duration::from_secs(1),
                 Duration::ZERO
             )
             .is_err()
@@ -479,5 +546,18 @@ mod tests {
         }
         assert!(!method_allowed(&Method::CONNECT));
         assert!(!method_allowed(&Method::TRACE));
+    }
+
+    #[tokio::test]
+    async fn response_stream_fails_after_upstream_idle_timeout() {
+        let source = stream::pending::<Result<Bytes, std::io::Error>>();
+        let timed = with_idle_timeout(source, Duration::from_millis(10));
+        futures_util::pin_mut!(timed);
+        let error = timed
+            .next()
+            .await
+            .expect("timeout stream item")
+            .expect_err("stalled upstream must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 }

@@ -10,6 +10,7 @@ pub(crate) const LITELLM_PROXY_BIND_ADDRESS: &str = "litellm_proxy_bind_address"
 pub(crate) const LITELLM_PROXY_MAX_BODY_BYTES: &str = "litellm_proxy_max_body_bytes";
 pub(crate) const LITELLM_PROXY_CONNECT_TIMEOUT_SECONDS: &str =
     "litellm_proxy_connect_timeout_seconds";
+pub(crate) const LITELLM_PROXY_IDLE_TIMEOUT_SECONDS: &str = "litellm_proxy_idle_timeout_seconds";
 
 /// Immutable process-local registry bootstrapped from a versioned JSON KV file.
 ///

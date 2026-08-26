@@ -32,6 +32,14 @@ fuzz_target!(|input: HeaderInput| {
 
     let count = headers.get_all(AUTHORIZATION).iter().count();
     let result = validate_litellm_virtual_key(&headers);
+    for padding_only in ["Bearer sk-=", "Bearer sk-===="] {
+        let mut invariant_headers = HeaderMap::new();
+        invariant_headers.insert(AUTHORIZATION, HeaderValue::from_static(padding_only));
+        assert_eq!(
+            validate_litellm_virtual_key(&invariant_headers),
+            Err(CredentialRejection::InvalidShape)
+        );
+    }
     if count > 1 {
         assert_eq!(result, Err(CredentialRejection::Ambiguous));
     }

@@ -53,7 +53,8 @@ Example registry document:
   "litellm_proxy_upstream_url": "https://gateway.example.invalid",
   "litellm_proxy_bind_address": "127.0.0.1:8090",
   "litellm_proxy_max_body_bytes": 16777216,
-  "litellm_proxy_connect_timeout_seconds": 10
+  "litellm_proxy_connect_timeout_seconds": 10,
+  "litellm_proxy_idle_timeout_seconds": 60
 }
 ```
 
@@ -65,6 +66,8 @@ cargo run --locked --bin litellm-virtual-key-proxy -- \
 ```
 
 The registry rejects unknown keys, wrong JSON types, unsupported `configuration_version` values, zero limits, and missing required values. A durable external KV can later materialize the same versioned JSON contract without changing the proxy's runtime lookup path.
+
+The idle timeout applies independently while waiting for each upstream response chunk. It bounds stalled responses without imposing a total lifetime on active SSE streams.
 
 ## Upstream and request contract
 
