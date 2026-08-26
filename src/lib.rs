@@ -599,8 +599,8 @@ async fn clearfolio_submit(
     PathParam(kind): PathParam<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     let Some(config) = state.clearfolio.clone() else {
         return error(
@@ -646,8 +646,8 @@ async fn clearfolio_status(
     PathParam(job_id): PathParam<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     let Some(config) = state.clearfolio.clone() else {
         return error(
@@ -770,8 +770,8 @@ async fn soc_analyze(
     headers: HeaderMap,
     Json(request): Json<SocAnalyzeRequest>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     let Some(config) = state.soc_llm.clone() else {
         return error(
@@ -1053,8 +1053,8 @@ async fn create_threat(
     headers: HeaderMap,
     Json(indicator): Json<ThreatIndicator>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if let Err(message) = validate_threat(&indicator) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1089,8 +1089,8 @@ async fn create_dnsbl(
     headers: HeaderMap,
     Json(entry): Json<DnsblEntry>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if let Err(message) = validate_dnsbl(&entry) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1228,8 +1228,8 @@ async fn update_commercial_license(
     headers: HeaderMap,
     Json(profile): Json<CommercialProfile>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if let Err(message) = validate_commercial_profile(&profile) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1284,8 +1284,8 @@ async fn import_threat_feed(
     headers: HeaderMap,
     Json(feed): Json<ThreatFeedImport>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if let Err(message) = validate_threat_feed_import(&feed) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1336,8 +1336,8 @@ async fn import_stix_document(
     Query(query): Query<StixImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
         return error(
@@ -1427,8 +1427,8 @@ async fn import_misp_document(
     Query(query): Query<MispImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
         return error(
@@ -1518,8 +1518,8 @@ async fn import_opencti_document(
     Query(query): Query<OpenCtiImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
         return error(
@@ -1630,8 +1630,8 @@ async fn poll_taxii_collection(
     headers: HeaderMap,
     Json(request): Json<TaxiiPollRequest>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if request.feed_id.trim().is_empty() || request.source.trim().is_empty() {
         return error(
@@ -1814,8 +1814,8 @@ async fn import_suricata_eve(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     let body_text = match std::str::from_utf8(&body) {
         Ok(text) => text,
@@ -1917,8 +1917,8 @@ async fn import_coraza_audit(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     let body_text = match std::str::from_utf8(&body) {
         Ok(text) => text,
@@ -2083,8 +2083,8 @@ async fn import_phishing_database_feed(
     headers: HeaderMap,
     Json(request): Json<PhishingDatabaseImportRequest>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(response) = management_write_denied(&state, &headers) {
+        return response;
     }
     if let Err(message) = validate_phishing_database_import_request(&request) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -3826,6 +3826,43 @@ mod tests {
         )
         .await;
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let denied_threat = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("read"),
+                &ThreatIndicator {
+                    value: "example.invalid".to_string(),
+                    indicator_type: "domain".to_string(),
+                    severity: Severity::High,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(denied_threat.status(), StatusCode::FORBIDDEN);
+
+        let denied_dnsbl = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/dnsbl",
+                Some("read"),
+                &DnsblEntry {
+                    address: "192.0.2.1".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "test".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                    prefix_len: None,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(denied_dnsbl.status(), StatusCode::FORBIDDEN);
 
         let created = app_request(
             &app,
