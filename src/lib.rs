@@ -6,6 +6,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -229,7 +230,10 @@ impl AppState {
     /// Blocking OS DNS runs on `spawn_blocking` with a bounded timeout so a
     /// hung resolver cannot starve Tokio workers. Successful evaluations are
     /// recorded on the pin board the HTTP clients use for connect-time DNS.
-    async fn assert_outbound(&self, url: &str) -> Result<(), String> {
+    async fn resolve_outbound(
+        &self,
+        url: &str,
+    ) -> Result<destination::DestinationDecision, String> {
         let policy = self.destination.clone();
         let resolver = Arc::clone(&self.resolver);
         let url = url.to_string();
@@ -241,7 +245,11 @@ impl AppState {
         .map_err(|_| "destination DNS timed out".to_string())?
         .map_err(|_| "destination evaluation cancelled".to_string())??;
         self.pins.record(&decision.host, &decision.ips);
-        Ok(())
+        Ok(decision)
+    }
+
+    async fn assert_outbound(&self, url: &str) -> Result<(), String> {
+        self.resolve_outbound(url).await.map(|_| ())
     }
 
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
@@ -538,6 +546,9 @@ const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
 /// Bounded wait for blocking OS DNS inside destination-policy evaluation.
 const DESTINATION_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const OUTBOUND_FETCH_DEFAULT_BYTES: usize = 2 * 1024 * 1024;
+const OUTBOUND_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+const OUTBOUND_FETCH_MAX_REDIRECTS: usize = 3;
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
@@ -581,6 +592,32 @@ struct ErrorBody {
     error: String,
 }
 
+#[derive(Deserialize)]
+struct OutboundFetchRequest {
+    url: String,
+    #[serde(default = "outbound_fetch_default_bytes")]
+    max_bytes: usize,
+}
+
+#[derive(Serialize)]
+struct OutboundFetchResponse {
+    status: u16,
+    content_type: String,
+    final_url: String,
+    body_base64: String,
+    redirects: usize,
+}
+
+#[derive(Serialize)]
+struct OutboundFetchError {
+    code: &'static str,
+    error: &'static str,
+}
+
+fn outbound_fetch_default_bytes() -> usize {
+    OUTBOUND_FETCH_DEFAULT_BYTES
+}
+
 pub fn build_app(state: AppState) -> Router {
     let max_body_bytes = state.max_body_bytes;
     Router::new()
@@ -602,6 +639,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/kpis", get(kpis))
         .route("/api/signatures", get(list_signatures))
         .route("/api/evaluate", post(evaluate_request))
+        .route("/api/outbound/fetch", post(outbound_fetch))
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -636,6 +674,208 @@ pub fn build_app(state: AppState) -> Router {
         .route("/gateway/{*path}", any(gateway))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+fn outbound_fetch_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    (
+        status,
+        Json(OutboundFetchError {
+            code,
+            error: message,
+        }),
+    )
+        .into_response()
+}
+
+fn outbound_content_type_allowed(value: &str) -> bool {
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence.starts_with("text/")
+        || matches!(
+            essence.as_str(),
+            "application/json" | "application/xml" | "application/xhtml+xml" | "application/pdf"
+        )
+}
+
+async fn outbound_fetch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OutboundFetchRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return outbound_fetch_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid X-Admin-Token",
+        );
+    }
+    if request.max_bytes == 0 || request.max_bytes > OUTBOUND_FETCH_MAX_BYTES {
+        return outbound_fetch_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_max_bytes",
+            "max_bytes is outside the supported range",
+        );
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(20),
+        outbound_fetch_inner(&state, request.url, request.max_bytes),
+    )
+    .await
+    {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err((status, code, message))) => outbound_fetch_error(status, code, message),
+        Err(_) => outbound_fetch_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "fetch_timeout",
+            "upstream fetch timed out",
+        ),
+    }
+}
+
+async fn outbound_fetch_inner(
+    state: &AppState,
+    initial_url: String,
+    max_bytes: usize,
+) -> Result<OutboundFetchResponse, (StatusCode, &'static str, &'static str)> {
+    use futures_util::StreamExt;
+
+    let mut url = reqwest::Url::parse(&initial_url).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            "url must be an absolute HTTPS URL",
+        )
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            "url must be an absolute HTTPS URL without credentials",
+        ));
+    }
+    url.set_fragment(None);
+
+    for redirects in 0..=OUTBOUND_FETCH_MAX_REDIRECTS {
+        let decision = state.resolve_outbound(url.as_str()).await.map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "destination_denied",
+                "destination policy denied the URL",
+            )
+        })?;
+        // A request-local pin board prevents a concurrent evaluation of the same
+        // hostname from replacing the addresses between policy and connect.
+        let request_pins = Arc::new(destination::DestinationPins::default());
+        request_pins.record(&decision.host, &decision.ips);
+        let request_http = outbound_http_client(request_pins);
+        let response = request_http.get(url.clone()).send().await.map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "upstream_request_failed",
+                "upstream request failed",
+            )
+        })?;
+
+        if response.status().is_redirection() {
+            if redirects == OUTBOUND_FETCH_MAX_REDIRECTS {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "too_many_redirects",
+                    "upstream redirect limit exceeded",
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or((
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_redirect",
+                    "upstream redirect is missing a valid Location header",
+                ))?;
+            url = url.join(location).map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_redirect",
+                    "upstream redirect Location is invalid",
+                )
+            })?;
+            if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "unsafe_redirect",
+                    "upstream redirect target is not permitted",
+                ));
+            }
+            url.set_fragment(None);
+            continue;
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= 256)
+            .ok_or((
+                StatusCode::BAD_GATEWAY,
+                "unsupported_content_type",
+                "upstream Content-Type is missing or unsupported",
+            ))?
+            .to_string();
+        if !outbound_content_type_allowed(&content_type) {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_content_type",
+                "upstream Content-Type is missing or unsupported",
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "response_too_large",
+                "upstream response exceeds max_bytes",
+            ));
+        }
+        let status = response.status().as_u16();
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_body_failed",
+                    "upstream response body failed",
+                )
+            })?;
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "response_too_large",
+                    "upstream response exceeds max_bytes",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok(OutboundFetchResponse {
+            status,
+            content_type,
+            final_url: url.to_string(),
+            body_base64: BASE64.encode(body),
+            redirects,
+        });
+    }
+    unreachable!("redirect loop exits at the configured bound")
 }
 
 pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_json::Error> {
@@ -4117,6 +4357,44 @@ mod tests {
         assert_eq!(rate_limit_step(100, 100, 2, 2, 60), (false, 100, 2));
         // Once the window elapses the counter resets.
         assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
+    }
+
+    #[test]
+    fn outbound_fetch_accepts_only_document_content_types() {
+        assert!(outbound_content_type_allowed("text/html; charset=utf-8"));
+        assert!(outbound_content_type_allowed("application/xhtml+xml"));
+        assert!(outbound_content_type_allowed("application/pdf"));
+        assert!(!outbound_content_type_allowed("application/octet-stream"));
+        assert!(!outbound_content_type_allowed("image/svg+xml"));
+    }
+
+    #[tokio::test]
+    async fn outbound_fetch_requires_auth_and_https_before_dns() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = serde_json::json!({"url": "http://example.com/privacy"});
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/outbound/fetch", None, &payload),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let unauthorized_body: serde_json::Value = json_body(unauthorized).await;
+        assert_eq!(unauthorized_body["code"], "unauthorized");
+
+        let insecure = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/outbound/fetch",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(insecure.status(), StatusCode::BAD_REQUEST);
+        let insecure_body: serde_json::Value = json_body(insecure).await;
+        assert_eq!(insecure_body["code"], "invalid_url");
     }
 
     #[tokio::test]

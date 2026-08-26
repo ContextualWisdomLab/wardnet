@@ -106,6 +106,23 @@ curl http://127.0.0.1:8080/dnsbl/zone
 curl http://127.0.0.1:8080/gateway/demo?q=union%20select
 ```
 
+Fetch a public HTTPS document through Wardnet's destination policy and pinned DNS:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/outbound/fetch \
+  -H 'content-type: application/json' \
+  -H 'x-admin-token: dev-secret' \
+  -d '{"url":"https://example.com/privacy","max_bytes":524288}'
+```
+
+The JSON response contains `status`, `content_type`, `final_url`, `body_base64`,
+and `redirects`. Wardnet follows at most three HTTPS redirects, revalidates and
+pins DNS at every hop, disables ambient proxies, accepts document content types,
+and caps `max_bytes` at 8 MiB. A missing, malformed, or unsupported
+`Content-Type` is rejected rather than inferred from bytes. Errors return stable
+`code` and safe `error` fields. Security research grounding is recorded in
+[`docs/research/outbound-egress-security.md`](docs/research/outbound-egress-security.md).
+
 Add a blocking route:
 
 ```bash
