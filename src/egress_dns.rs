@@ -82,15 +82,24 @@ pub async fn serve(state: AppState, udp: UdpSocket, tcp: TcpListener, stop: Arc<
     let state_udp = state.clone();
     let stop_udp = Arc::clone(&stop);
     let udp_task = tokio::spawn(async move {
+        let udp = Arc::new(udp);
+        let permits = Arc::new(Semaphore::new(DNS_MAX_IN_FLIGHT));
         let mut packet = [0_u8; DNS_PACKET_MAX_BYTES];
         loop {
             tokio::select! {
                 _ = stop_udp.notified() => break,
                 received = udp.recv_from(&mut packet) => {
                     let Ok((length, peer)) = received else { continue };
-                    if let Some(response) = answer(&state_udp, &packet[..length]).await {
-                        let _ = udp.send_to(&response, peer).await;
-                    }
+                    let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else { continue };
+                    let packet = packet[..length].to_vec();
+                    let state = state_udp.clone();
+                    let udp = Arc::clone(&udp);
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        if let Some(response) = answer(&state, &packet).await {
+                            let _ = udp.send_to(&response, peer).await;
+                        }
+                    });
                 }
             }
         }
@@ -142,6 +151,26 @@ mod tests {
         }
     }
 
+    struct SlowResolver;
+
+    impl crate::HostResolver for SlowResolver {
+        fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+            if host == "slow.example" {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            Ok(vec!["8.8.8.8".parse().unwrap()])
+        }
+    }
+
+    fn query_packet(id: u16, host: &str) -> Vec<u8> {
+        let mut request = Message::new();
+        request.set_id(id).add_query(Query::query(
+            Name::from_ascii(format!("{host}.")).unwrap(),
+            RecordType::A,
+        ));
+        encode(request).unwrap()
+    }
+
     #[tokio::test]
     async fn refuses_private_answers_and_unsupported_types() {
         let state = AppState::seeded(None)
@@ -191,5 +220,30 @@ mod tests {
                 "2001:4860:4860::8888".parse().unwrap()
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn udp_fast_query_is_not_blocked_by_slow_resolution() {
+        let state = AppState::seeded(None)
+            .with_destination_policy(crate::DestinationPolicy::production())
+            .with_resolver(Arc::new(SlowResolver));
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = udp.local_addr().unwrap();
+        let tcp = TcpListener::bind(address).await.unwrap();
+        let stop = Arc::new(Notify::new());
+        let server = tokio::spawn(serve(state, udp, tcp, Arc::clone(&stop)));
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(address).await.unwrap();
+        client.send(&query_packet(1, "slow.example")).await.unwrap();
+        client.send(&query_packet(2, "fast.example")).await.unwrap();
+
+        let mut response = [0_u8; DNS_PACKET_MAX_BYTES];
+        let length = tokio::time::timeout(Duration::from_millis(200), client.recv(&mut response))
+            .await
+            .expect("fast query must not wait for slow DNS")
+            .unwrap();
+        assert_eq!(Message::from_bytes(&response[..length]).unwrap().id(), 2);
+        stop.notify_waiters();
+        server.await.unwrap();
     }
 }
