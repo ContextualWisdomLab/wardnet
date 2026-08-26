@@ -57,7 +57,15 @@ retain serialization, snapshots, and rollback. The remaining throughput drop
 between 32 and 64 users should be profiled against the deployed persistence and
 upstream path before setting a service-level objective.
 
+Dean and Barroso (2013) show why the scenario records p95 under concurrent
+load: as utilization and system scale increase, uncommon slow responses can
+dominate end-to-end service latency. That evidence supports measuring the tail;
+it does not establish a Wardnet latency target, which remains deployment-specific.
+
 ## References
+
+Dean, J., & Barroso, L. A. (2013). The tail at scale. *Communications of the
+ACM, 56*(2), 74–80. https://doi.org/10.1145/2408776.2408794
 
 Grafana Labs. (n.d.). *Grafana k6 documentation*. Retrieved August 27, 2026,
 from https://grafana.com/docs/k6/latest/
