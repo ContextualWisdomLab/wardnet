@@ -88,3 +88,11 @@ unpartitioned tables convert under `pg_advisory_lock`; rows keep unmasked
 client IPs and paths. `/healthz.event_partitions` reports the child count.
 
 Remaining: optimistic concurrency.
+
+Management mutations currently persist one transactionally consistent tenant
+snapshot: they replace the tenant's management rows and retained
+`security_event` rows, then enqueue one snapshot outbox message. Event ingest
+itself remains incremental. This makes an administrative write O(retained
+events); operators should keep `EVENT_LIMIT` bounded and monitor transaction
+latency. A future measured scaling step is table-specific management upserts
+that preserve the same atomic outbox contract.

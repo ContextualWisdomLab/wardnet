@@ -4182,17 +4182,17 @@ pub async fn run_from_env(
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let stop_workers = Arc::new(tokio::sync::Notify::new());
+    let (stop_workers, stop_rx) = tokio::sync::watch::channel(false);
     if let Some((udp, tcp, _)) = egress_dns {
         let dns_state = state.clone();
-        let stop = Arc::clone(&stop_workers);
+        let stop = stop_rx.clone();
         tokio::spawn(async move {
             egress_dns::serve(dns_state, udp, tcp, stop).await;
         });
     }
     if state.control_plane.is_some() {
         let worker_state = state.clone();
-        let stop = Arc::clone(&stop_workers);
+        let stop = stop_rx;
         tokio::spawn(async move {
             run_outbox_worker(worker_state, stop).await;
         });
@@ -4200,18 +4200,20 @@ pub async fn run_from_env(
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(async move {
             shutdown.await;
-            stop_workers.notify_waiters();
+            let _ = stop_workers.send(true);
         })
         .await;
     served?;
     Ok(())
 }
 
-async fn run_outbox_worker(state: AppState, stop: Arc<tokio::sync::Notify>) {
+async fn run_outbox_worker(state: AppState, mut stop: tokio::sync::watch::Receiver<bool>) {
     let owner = format!("wardnet:{}", std::process::id());
     loop {
         tokio::select! {
-            _ = stop.notified() => break,
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() { break; }
+            },
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if let Some(plane) = &state.control_plane {
                     let _ = plane

@@ -11,7 +11,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::{Notify, Semaphore},
+    sync::{Semaphore, watch},
 };
 
 const DNS_PACKET_MAX_BYTES: usize = 4096;
@@ -78,16 +78,23 @@ fn encode(message: Message) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-pub async fn serve(state: AppState, udp: UdpSocket, tcp: TcpListener, stop: Arc<Notify>) {
+pub async fn serve(
+    state: AppState,
+    udp: UdpSocket,
+    tcp: TcpListener,
+    mut stop: watch::Receiver<bool>,
+) {
     let state_udp = state.clone();
-    let stop_udp = Arc::clone(&stop);
+    let mut stop_udp = stop.clone();
     let udp_task = tokio::spawn(async move {
         let udp = Arc::new(udp);
         let permits = Arc::new(Semaphore::new(DNS_MAX_IN_FLIGHT));
         let mut packet = [0_u8; DNS_PACKET_MAX_BYTES];
         loop {
             tokio::select! {
-                _ = stop_udp.notified() => break,
+                changed = stop_udp.changed() => {
+                    if changed.is_err() || *stop_udp.borrow() { break; }
+                },
                 received = udp.recv_from(&mut packet) => {
                     let Ok((length, peer)) = received else { continue };
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else { continue };
@@ -108,7 +115,9 @@ pub async fn serve(state: AppState, udp: UdpSocket, tcp: TcpListener, stop: Arc<
     let permits = Arc::new(Semaphore::new(DNS_MAX_IN_FLIGHT));
     loop {
         tokio::select! {
-            _ = stop.notified() => break,
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() { break; }
+            },
             accepted = tcp.accept() => {
                 let Ok((stream, _)) = accepted else { continue };
                 let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else { continue };
@@ -230,8 +239,8 @@ mod tests {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = udp.local_addr().unwrap();
         let tcp = TcpListener::bind(address).await.unwrap();
-        let stop = Arc::new(Notify::new());
-        let server = tokio::spawn(serve(state, udp, tcp, Arc::clone(&stop)));
+        let (stop, stop_rx) = watch::channel(false);
+        let server = tokio::spawn(serve(state, udp, tcp, stop_rx));
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.connect(address).await.unwrap();
         client.send(&query_packet(1, "slow.example")).await.unwrap();
@@ -243,7 +252,19 @@ mod tests {
             .expect("fast query must not wait for slow DNS")
             .unwrap();
         assert_eq!(Message::from_bytes(&response[..length]).unwrap().id(), 2);
-        stop.notify_waiters();
+        stop.send(true).unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_is_not_lost_before_waiters_park() {
+        let state = AppState::seeded(None);
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpListener::bind(udp.local_addr().unwrap()).await.unwrap();
+        let (stop, stop_rx) = watch::channel(false);
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), serve(state, udp, tcp, stop_rx))
+            .await
+            .expect("a pre-delivered shutdown must terminate both DNS loops");
     }
 }
