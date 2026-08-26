@@ -3,6 +3,52 @@
 Snapshot date: 2026-08-23T19:00Z (exact-head inventory of then-open GitHub PRs
 and Issues plus operator-perceptible gaps). Update this file on every hourly loop.
 
+## Current delivery evidence — 2026-08-27T01:13+09:00
+
+Protected `main` is `107117634764c901dff540044585d64088fafedb`. The active
+organization ruleset `18156473` requires one independent approval, resolved
+threads, and its required workflows; repository branch protection additionally
+requires strict exact-head `rust`. Code-owner review remains disabled. Git
+mergeability, local tests, and stacked-branch success are not protected-main
+delivery evidence.
+
+| PR | Exact head | Base | Current evidence / blocker |
+| --- | --- | --- | --- |
+| #115 official threat feeds | `2c3f06f49e699430abd4c493ea363f69aad4fdd6` | `main` | blocked; three unresolved threads and Strix failure |
+| #114 complete Wardnet rename | `95da92339f21236326cdf4fb4aec5c7d0f909406` | `main` | code/security checks green; independent approval and refreshed Strix required |
+| #112 route lifecycle API | `28927631014eb7d0975b51b1bd02cccb1061d08b` | `main` | review required; Strix failure |
+| #111 accepted ADR set | `2eabad4f8f3ece76990f88e94909f9c48e104a59` | `main` | draft and behind; checks green |
+| #105 optimistic concurrency | `f92f3aa0ed209e9818c29205fd12c6f2fad60e4a` | `#95` | stacked only; three unresolved threads |
+| #95 in-path Coraza and accumulated production stack | `9001f6fe86e8548c50f127f84751b74f44a8f6c9` | `main` | Hickory CVEs, Clippy, DNS family cap, 406 interruption, and four threads repaired at this head; hosted checks and independent approval required |
+| #94 fail-closed public admin auth | `7c6dc3d091915d19ce1d67a81cf6a9759a101cd4` | `main` | five unresolved threads; Strix failure |
+| #93 deterministic persistence fault seam | `1d3c13cab6dcd474ccc6d497f8d9f1c1efa848e4` | `main` | one unresolved thread, stale change request, Strix failure |
+| #90 SIEM/OpenTelemetry export | `8e4484d13499d99c9ae31e1a3b6ccd419d6ed934` | `main` | two unresolved threads; Strix failure |
+| #88 LiteLLM virtual-key ingress guard | `608d51f1d4f7422aa2e036030f3586ee6e066530` | `main` | three unresolved threads; Strix failure |
+| #77 Rust toolchain refresh | `b87e3ec4bd96731f0d0c55232dd702c12a1442c8` | `main` | stale change request; Strix failure |
+| #72 external admin secret | `892f9277ba86831a449fa6808a63b44eacab793f` | `main` | stale change request; Strix failure |
+
+The shared GPT-5.4 function-tools/reasoning-effort Strix defect was fixed on
+`ContextualWisdomLab/.github` protected `main` at `f655a901`; exact-head reruns
+were dispatched for #95 and #114. A passing rerun, not that central merge alone,
+is the acceptance evidence.
+
+### Surface completion matrix
+
+| Requested surface | Protected `main` | Active evidence | Acceptance gap |
+| --- | --- | --- | --- |
+| Web API | implemented | Axum management/SOC APIs and live binary tests | route lifecycle completion remains #112 |
+| MCP | absent | no transport, tool schema, or test | define a narrow Wardnet operations tool contract and authenticated transport |
+| DNSBL publishing | HTTP zone export only | `/dnsbl/zone` plus fuzzed escaping | live DNS serving exists only in unmerged #95 stack |
+| DNS resolver | absent | unmerged bounded UDP/TCP resolver in #95 | protected merge plus real DNS query evidence |
+| Egress proxy | absent | unmerged authenticated CONNECT and destination policy in #95 | protected merge plus end-to-end load/security evidence |
+| Ingress reverse proxy | partial | `/gateway/{*path}` decision loop | headers, streaming/upgrades, trusted client attribution, TLS and k6 evidence |
+| Wardnet naming | incomplete | #114 exact-head rename | protected merge and image/deployment/runtime smoke evidence |
+
+There is no verified Wardnet hourly maintenance scheduler execution. Nightly
+fuzz and weekly scorecard runs do not prove the requested hourly PR/review/gap
+loop. Acceptance requires a durable caller that rereads live PR and issue state,
+plus at least one recorded successful scheduled run.
+
 Commercial contract and `/api/commercial/readiness` remain **2B KRW**. The
 **$20 billion USD** figure is the long-loop quality bar for this program, not a
 number to rewrite into the readiness API this pass.
