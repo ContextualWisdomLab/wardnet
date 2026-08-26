@@ -198,8 +198,8 @@ Issue **#86** slice review-hardening (PR #95): forwarded-header allowlist to
 the engine (`host`/`user-agent`/`accept`/`content-type`/`referer`/`origin`/
 `x-requested-with`/`x-forwarded-for`/`x-real-ip`; never bearer credentials such
 as `Authorization` or `Cookie`; 32 headers / 8 KiB caps), 1 MiB streamed response cap,
-explicit status contract (2xx parse, 403 interruption fallback, everything
-else `Unavailable`), `engine_hit` evidence on monitor-mode routes and
+explicit status contract (non-empty 2xx audit parse, 403 interruption fallback,
+empty/malformed or every other status `Unavailable`), `engine_hit` evidence on monitor-mode routes and
 sub-threshold hits, explicit-interruption-only live blocking, and
 `engine_unavailable` events for fail-open outages.
 Redirects were already disabled on the shared outbound client. Redistributable

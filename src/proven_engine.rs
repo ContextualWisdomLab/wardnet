@@ -48,8 +48,8 @@ impl ProvenEngineConfig {
 
     /// Live sidecar consult for `url`. Empty/whitespace URLs are treated as unset.
     pub fn sidecar(url: impl Into<String>, fail_closed: bool) -> Self {
-        let trimmed = url.into();
-        let sidecar_url = if trimmed.trim().is_empty() {
+        let trimmed = url.into().trim().to_string();
+        let sidecar_url = if trimmed.is_empty() {
             None
         } else {
             Some(trimmed)
@@ -139,12 +139,14 @@ pub fn sidecar_request_body(
 
 /// Map a sidecar response body onto a proven-engine outcome.
 ///
-/// Empty bodies are clean (sidecar had nothing to add). Invalid JSON is
-/// unavailable so fail-closed deployments do not treat parser failure as allow.
+/// Empty bodies and invalid JSON are unavailable so fail-closed deployments do
+/// not treat an unevaluated or malformed response as allow.
 pub fn outcome_from_sidecar_body(body: &str) -> ProvenEngineOutcome {
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return ProvenEngineOutcome::Clean;
+        return ProvenEngineOutcome::Unavailable {
+            reason: "coraza sidecar returned an empty response".to_string(),
+        };
     }
     match parse_coraza_audit_body(trimmed) {
         Ok(mut parsed) => {
@@ -332,8 +334,12 @@ mod tests {
 
     #[test]
     fn sidecar_config_is_in_path() {
-        let config = ProvenEngineConfig::sidecar("http://127.0.0.1:9000/waf", true);
+        let config = ProvenEngineConfig::sidecar("  http://127.0.0.1:9000/waf  ", true);
         assert!(config.in_path());
+        assert_eq!(
+            config.sidecar_url.as_deref(),
+            Some("http://127.0.0.1:9000/waf")
+        );
         assert!(config.sidecar_configured());
         assert_eq!(config.mode(), "coraza_sidecar");
         assert!(config.fail_closed);
@@ -514,11 +520,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_sidecar_body_is_clean() {
-        assert_eq!(
-            outcome_from_sidecar_body("  \n"),
-            ProvenEngineOutcome::Clean
-        );
+    fn empty_sidecar_body_is_unavailable() {
+        match outcome_from_sidecar_body("  \n") {
+            ProvenEngineOutcome::Unavailable { reason } => assert!(reason.contains("empty")),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
     }
 
     #[test]

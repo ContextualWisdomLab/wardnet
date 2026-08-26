@@ -15,6 +15,7 @@ use tokio::{
 };
 
 const DNS_PACKET_MAX_BYTES: usize = 4096;
+const DNS_UDP_MAX_BYTES: usize = 512;
 const DNS_TTL_SECONDS: u32 = 30;
 const DNS_MAX_IN_FLIGHT: usize = 64;
 const DNS_MAX_ANSWERS: usize = 16;
@@ -78,6 +79,17 @@ fn encode(message: Message) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+fn udp_response(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    if bytes.len() <= DNS_UDP_MAX_BYTES {
+        return Some(bytes);
+    }
+    let mut message = Message::from_bytes(&bytes).ok()?;
+    message.set_truncated(true);
+    message.answers_mut().clear();
+    let truncated = encode(message)?;
+    (truncated.len() <= DNS_UDP_MAX_BYTES).then_some(truncated)
+}
+
 pub async fn serve(
     state: AppState,
     udp: UdpSocket,
@@ -89,7 +101,7 @@ pub async fn serve(
     let udp_task = tokio::spawn(async move {
         let udp = Arc::new(udp);
         let permits = Arc::new(Semaphore::new(DNS_MAX_IN_FLIGHT));
-        let mut packet = [0_u8; DNS_PACKET_MAX_BYTES];
+        let mut packet = [0_u8; DNS_UDP_MAX_BYTES + 1];
         loop {
             tokio::select! {
                 changed = stop_udp.changed() => {
@@ -97,13 +109,14 @@ pub async fn serve(
                 },
                 received = udp.recv_from(&mut packet) => {
                     let Ok((length, peer)) = received else { continue };
+                    if length > DNS_UDP_MAX_BYTES { continue; }
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else { continue };
                     let packet = packet[..length].to_vec();
                     let state = state_udp.clone();
                     let udp = Arc::clone(&udp);
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Some(response) = answer(&state, &packet).await {
+                        if let Some(response) = answer(&state, &packet).await.and_then(udp_response) {
                             let _ = udp.send_to(&response, peer).await;
                         }
                     });
@@ -266,5 +279,26 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(200), serve(state, udp, tcp, stop_rx))
             .await
             .expect("a pre-delivered shutdown must terminate both DNS loops");
+    }
+
+    #[test]
+    fn oversized_udp_response_sets_tc_and_stays_within_classic_limit() {
+        let mut message = Message::new();
+        message.set_id(7).set_message_type(MessageType::Response);
+        let name = Name::from_ascii("large.example.").unwrap();
+        message.add_query(Query::query(name.clone(), RecordType::AAAA));
+        for index in 0..32_u16 {
+            let address = format!("2001:db8::{index}").parse().unwrap();
+            message.add_answer(Record::from_rdata(
+                name.clone(),
+                DNS_TTL_SECONDS,
+                RData::AAAA(AAAA(address)),
+            ));
+        }
+        let response = udp_response(encode(message).unwrap()).unwrap();
+        assert!(response.len() <= DNS_UDP_MAX_BYTES);
+        let decoded = Message::from_bytes(&response).unwrap();
+        assert!(decoded.truncated());
+        assert!(decoded.answers().is_empty());
     }
 }

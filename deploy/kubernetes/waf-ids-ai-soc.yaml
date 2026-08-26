@@ -12,18 +12,8 @@ type: Opaque
 stringData:
   ADMIN_TOKEN: replace-with-secret-manager-sync
   EGRESS_PROXY_TOKEN: replace-with-separate-secret-manager-sync
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: waf-ids-ai-soc-state
-  namespace: waf-ids-ai-soc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 2Gi
+  # Provision this TLS PostgreSQL service and wardnet_runtime role before rollout.
+  CONTROL_PLANE_DATABASE_URL: postgres://wardnet:replace-with-secret-manager-sync@wardnet-postgres.database.svc.cluster.local:5432/wardnet?sslmode=require
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -69,8 +59,11 @@ spec:
               value: 0.0.0.0:5353
             - name: EVENT_LIMIT
               value: "1000"
-            - name: WAF_IDS_STATE_PATH
-              value: /var/lib/waf-ids-ai-soc/state.json
+            - name: CONTROL_PLANE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: CONTROL_PLANE_DATABASE_URL
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -81,9 +74,6 @@ spec:
                 secretKeyRef:
                   name: waf-ids-ai-soc-admin
                   key: EGRESS_PROXY_TOKEN
-          volumeMounts:
-            - name: state
-              mountPath: /var/lib/waf-ids-ai-soc
           readinessProbe:
             httpGet:
               path: /healthz
@@ -109,10 +99,6 @@ spec:
               drop:
                 - ALL
             readOnlyRootFilesystem: true
-      volumes:
-        - name: state
-          persistentVolumeClaim:
-            claimName: waf-ids-ai-soc-state
 ---
 apiVersion: v1
 kind: Service

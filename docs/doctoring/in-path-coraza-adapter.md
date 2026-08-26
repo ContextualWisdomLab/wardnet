@@ -25,7 +25,8 @@ https://coraza.io/docs/
   `content-type`, `referer`, `origin`, `x-requested-with`, `x-forwarded-for`,
   `x-real-ip` — never bearer credentials such as `Authorization` or `Cookie`,
   capped at 32 headers / 8 KiB); responses are streamed with a 1 MiB cap; any
-  non-success status other than 403 is `Unavailable`. Live blocking requires
+  empty or malformed 2xx bodies and every non-success status other than 403
+  are `Unavailable`. Live blocking requires
   the engine's explicit interruption signal; non-interrupting CRS messages
   remain `engine_hit` evidence. Fail-open outages are recorded.
 
