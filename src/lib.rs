@@ -859,7 +859,7 @@ struct EgressEvaluationResponse {
 async fn evaluate_egress_destination(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<EgressEvaluationRequest>,
+    body: Bytes,
 ) -> Response {
     if !admin_authenticated(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
@@ -867,6 +867,10 @@ async fn evaluate_egress_destination(
     if !admin_authorized(&state, &headers) {
         return error(StatusCode::FORBIDDEN, "admin principal is read-only");
     }
+    let request: EgressEvaluationRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid egress evaluation request"),
+    };
     if destination::validate_outbound_url(request.url.trim()).is_err() {
         return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
     }
@@ -10045,11 +10049,20 @@ mod tests {
         assert_eq!(
             app_request(
                 &app,
+                json_request(Method::POST, "/api/egress", None, &unknown_field)
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app_request(
+                &app,
                 json_request(Method::POST, "/api/egress", Some("writer"), &unknown_field,),
             )
             .await
             .status(),
-            StatusCode::UNPROCESSABLE_ENTITY
+            StatusCode::BAD_REQUEST
         );
         assert_eq!(
             app_request(
