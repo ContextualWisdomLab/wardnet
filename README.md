@@ -118,7 +118,10 @@ curl -X POST http://127.0.0.1:8080/api/outbound/fetch \
 The JSON response contains `status`, `content_type`, `final_url`, `body_base64`,
 and `redirects`. Wardnet follows at most three HTTPS redirects, revalidates and
 pins DNS at every hop, disables ambient proxies, accepts document content types,
-and caps `max_bytes` at 8 MiB. Errors return stable `code` and safe `error` fields.
+and caps `max_bytes` at 8 MiB. A missing, malformed, or unsupported
+`Content-Type` is rejected rather than inferred from bytes. Errors return stable
+`code` and safe `error` fields. Security research grounding is recorded in
+[`docs/research/outbound-egress-security.md`](docs/research/outbound-egress-security.md).
 
 Add a blocking route:
 
