@@ -1243,14 +1243,12 @@ async fn write_snapshot_rows(
         .await
         .map_err(|error| format!("control plane delete {table} failed: {error}"))?;
     }
-    if !enforce_snapshot_version {
-        tx.execute(
-            "DELETE FROM security_event WHERE tenant_id = $1",
-            &[&tenant_id],
-        )
-        .await
-        .map_err(|error| format!("control plane delete security_event failed: {error}"))?;
-    }
+    tx.execute(
+        "DELETE FROM security_event WHERE tenant_id = $1",
+        &[&tenant_id],
+    )
+    .await
+    .map_err(|error| format!("control plane delete security_event failed: {error}"))?;
 
     let features = serde_json::to_string(&data.commercial.features)
         .expect("feature list is JSON-serializable");
@@ -2703,6 +2701,50 @@ mod tests {
                 .count(),
             1,
             "duplicate event id must not enqueue a second outbox row"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_save_replaces_only_the_selected_tenants_events() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant_a = unique_tenant("snapshot-events-a");
+        let tenant_b = unique_tenant("snapshot-events-b");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant_a)
+            .await
+            .expect("tenant A database");
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant_b)
+            .await
+            .expect("tenant B database");
+        plane_a.save(&AppData::seeded()).await.expect("seed A");
+        plane_b.save(&AppData::seeded()).await.expect("seed B");
+        plane_a
+            .append_security_event(&sample_event(1, "/stale"), 100)
+            .await
+            .expect("append stale A event");
+        plane_a
+            .append_security_event(&sample_event(2, "/retained"), 100)
+            .await
+            .expect("append retained A event");
+        plane_b
+            .append_security_event(&sample_event(1, "/other-tenant"), 100)
+            .await
+            .expect("append B event");
+
+        let mut snapshot = plane_a.load().await.expect("load A").expect("A exists");
+        snapshot.events.retain(|event| event.id == 2);
+        plane_a.save(&snapshot).await.expect("replace A snapshot");
+
+        let loaded_a = plane_a.load().await.expect("reload A").expect("A exists");
+        assert_eq!(loaded_a.events.len(), 1);
+        assert_eq!(loaded_a.events[0].path, "/retained");
+        let loaded_b = plane_b.load().await.expect("reload B").expect("B exists");
+        assert!(
+            loaded_b
+                .events
+                .iter()
+                .any(|event| event.path == "/other-tenant")
         );
     }
 
