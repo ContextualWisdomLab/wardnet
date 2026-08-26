@@ -607,10 +607,11 @@ pub fn upsert_threat(
 }
 
 pub fn upsert_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) -> DnsblEntry {
-    if let Some(existing) = entries
-        .iter_mut()
-        .find(|item| item.address == entry.address)
-    {
+    if let Some(existing) = entries.iter_mut().find(|item| {
+        item.address == entry.address
+            && item.prefix_len == entry.prefix_len
+            && item.source == entry.source
+    }) {
         *existing = entry.clone();
     } else {
         entries.push(entry.clone());
@@ -1432,6 +1433,9 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
+        if entry.prefix_len.is_some() {
+            continue;
+        }
         if let IpAddr::V4(address) = entry.address {
             // The response code is emitted as a bare, unquoted A-record token, so
             // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers

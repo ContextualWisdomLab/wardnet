@@ -116,6 +116,7 @@ impl AppState {
             Some(path) => load_or_seed_state(path).await?,
             None => AppData::seeded(),
         };
+        backfill_official_threat_feeds(&mut data);
         let event_limit = config.event_limit.max(1);
         enforce_event_limit(&mut data, event_limit);
         if let Some(path) = config.state_path.as_deref() {
@@ -282,6 +283,18 @@ impl AppState {
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+        }
+    }
+}
+
+fn backfill_official_threat_feeds(data: &mut AppData) {
+    for feed in waf_ids_core::official_threat_feed_registry() {
+        if !data
+            .official_threat_feeds
+            .iter()
+            .any(|existing| existing.source_id == feed.source_id)
+        {
+            data.official_threat_feeds.push(feed);
         }
     }
 }
@@ -1384,8 +1397,8 @@ async fn refresh_official_threat_feed(
                 .iter_mut()
                 .find(|item| item.source_id == source_id)
             {
-                status.etag = etag;
-                status.last_modified = last_modified;
+                status.etag = etag.or_else(|| status.etag.clone());
+                status.last_modified = last_modified.or_else(|| status.last_modified.clone());
                 status.last_attempt_unix = Some(now);
                 status.last_success_unix = Some(now);
                 status.last_error = None;
@@ -3614,6 +3627,12 @@ mod tests {
                             "{\"cidr\":\"198.51.100.0/24\",\"sblid\":\"SBL1\"}\n{\"type\":\"metadata\",\"copyright\":\"Copyright Spamhaus\"}\n",
                         )
                             .into_response()
+                    } else if call == 1 {
+                        (
+                            StatusCode::OK,
+                            "{\"cidr\":\"198.51.101.0/24\",\"sblid\":\"SBL2\"}\n",
+                        )
+                            .into_response()
                     } else {
                         (
                             StatusCode::OK,
@@ -3684,6 +3703,37 @@ mod tests {
             .find(|feed| feed.source_id == "spamhaus-drop-v4")
             .unwrap()
             .last_attempt_unix = None;
+        let refreshed_without_validator = app_request(
+            &app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/spamhaus-drop-v4/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(refreshed_without_validator.status(), StatusCode::OK);
+        let second = inspect.inner.read().await.clone();
+        assert_eq!(
+            second
+                .official_threat_feeds
+                .iter()
+                .find(|feed| feed.source_id == "spamhaus-drop-v4")
+                .unwrap()
+                .etag
+                .as_deref(),
+            Some("\"drop-v1\"")
+        );
+
+        inspect
+            .inner
+            .write()
+            .await
+            .official_threat_feeds
+            .iter_mut()
+            .find(|feed| feed.source_id == "spamhaus-drop-v4")
+            .unwrap()
+            .last_attempt_unix = None;
         let failed = app_request(
             &app,
             authed_empty_request(
@@ -3697,7 +3747,7 @@ mod tests {
         assert!(body_text(failed).await.contains("body too large"));
         let after = inspect.inner.read().await;
         assert_eq!(
-            after.dnsbl, first.dnsbl,
+            after.dnsbl, second.dnsbl,
             "failed refresh must preserve LKG data"
         );
         assert!(
@@ -4359,6 +4409,14 @@ mod tests {
                     ttl_seconds: 300,
                     prefix_len: None,
                 },
+                DnsblEntry {
+                    address: "198.51.100.0".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "cidr inline only".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: Some(24),
+                },
             ],
         );
 
@@ -4366,6 +4424,21 @@ mod tests {
         assert!(zone.contains("10.2.0.192 IN A 127.0.0.2"));
         assert!(zone.contains("10.2.0.192 IN TXT \"scanner source=unit\""));
         assert!(!zone.contains("ipv6 skip"));
+        assert!(!zone.contains("cidr inline only"));
+    }
+
+    #[test]
+    fn backfills_new_official_feed_sources() {
+        let mut data = AppData::seeded();
+        let missing = data.official_threat_feeds.pop().unwrap();
+
+        backfill_official_threat_feeds(&mut data);
+
+        assert!(
+            data.official_threat_feeds
+                .iter()
+                .any(|feed| feed.source_id == missing.source_id)
+        );
     }
 
     #[test]
@@ -6322,7 +6395,7 @@ mod tests {
                 address: "203.0.113.10".parse().unwrap(),
                 code: "127.0.0.3".to_string(),
                 reason: "botnet".to_string(),
-                source: "feed".to_string(),
+                source: "unit".to_string(),
                 ttl_seconds: 600,
                 prefix_len: None,
             },
@@ -6331,6 +6404,11 @@ mod tests {
         assert_eq!(dnsbl.len(), 1);
         assert_eq!(dnsbl[0].code, "127.0.0.3");
         assert_eq!(dnsbl[0].reason, "botnet");
+
+        let mut second_source = dnsbl[0].clone();
+        second_source.source = "second-feed".to_string();
+        upsert_dnsbl(&mut dnsbl, second_source);
+        assert_eq!(dnsbl.len(), 2);
 
         let mut feeds = vec![ThreatFeedStatus {
             feed_id: "feed-a".to_string(),

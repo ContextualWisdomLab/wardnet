@@ -16,7 +16,9 @@ notice when supplied.
 Spamhaus asks automated users not to fetch more often than hourly and documents daily
 refresh as sufficient; Wardnet therefore defaults DROP to daily. abuse.ch exports update
 more often, but Wardnet deliberately uses a one-hour floor. A request before the interval
-expires returns `429` with `Retry-After`.
+expires returns `429` with `Retry-After`. An upstream request that fails also consumes the
+interval, preventing operator retries from exceeding the source's fetch policy; credential
+preflight failures do not.
 
 The data is governed by source-specific terms, not by Wardnet's MIT license. Preserve
 attribution and review the [Spamhaus DROP fair-use policy](https://www.spamhaus.org/blocklists/drop-fair-use-policy/)
@@ -59,6 +61,7 @@ last-known-good threat/DNSBL rows unchanged. Requests have a 15-second total tim
 responses are streamed with an 8 MiB hard limit. Credential preflight failures do not consume
 the source refresh interval, so adding a missing key permits an immediate corrective retry.
 
-These are threat-intelligence feeds consumed by gateway scoring and the authoritative
-DNSBL zone export. They are not recursive DNS resolvers and do not configure an upstream
-DNS resolver.
+These are threat-intelligence feeds consumed by gateway scoring. The authoritative DNSBL
+zone exports exact IPv4 host entries only; CIDR ranges and IPv6 entries remain available to
+inline gateway scoring rather than being expanded into an unbounded zone. Wardnet is not a
+recursive DNS resolver and does not configure an upstream DNS resolver.
