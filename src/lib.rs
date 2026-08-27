@@ -48,6 +48,13 @@ struct EgressDnsCache {
 }
 
 impl EgressDnsCache {
+    async fn live_entry_count(&self) -> usize {
+        let mut cache = self.inner.lock().await;
+        let now = Instant::now();
+        cache.retain(|_, (expires, _)| *expires > now);
+        cache.len()
+    }
+
     async fn lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         let mut cache = self.inner.lock().await;
@@ -137,6 +144,7 @@ pub struct AppState {
     destination: DestinationPolicy,
     resolver: Arc<dyn HostResolver + Send + Sync>,
     egress_dns: Arc<EgressDnsCache>,
+    egress_dns_listener_enabled: bool,
     destination_resolve_permits: Arc<tokio::sync::Semaphore>,
     /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
     control_plane: Option<Arc<control_plane::PostgresPlane>>,
@@ -252,6 +260,7 @@ impl AppState {
             destination: DestinationPolicy::production(),
             resolver: Arc::new(SystemHostResolver),
             egress_dns: Arc::new(EgressDnsCache::default()),
+            egress_dns_listener_enabled: false,
             destination_resolve_permits: Arc::new(tokio::sync::Semaphore::new(64)),
             control_plane: None,
         }
@@ -314,23 +323,30 @@ impl AppState {
     async fn resolve_outbound(
         &self,
         url: &str,
-    ) -> Result<destination::DestinationDecision, String> {
+    ) -> Result<destination::DestinationDecision, OutboundResolutionError> {
         let policy = self.destination.clone();
-        let parsed =
-            reqwest::Url::parse(url).map_err(|_| "destination URL is invalid".to_string())?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| "destination URL has no host".to_string())?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| {
+            OutboundResolutionError::Destination(destination::DestinationError::Invalid(
+                "destination URL is invalid".to_string(),
+            ))
+        })?;
+        let host = parsed.host_str().ok_or_else(|| {
+            OutboundResolutionError::Destination(destination::DestinationError::Invalid(
+                "destination URL has no host".to_string(),
+            ))
+        })?;
         if let Some(ips) = self.egress_dns.lookup(host).await {
-            return policy.evaluate(url, &CachedHostResolver(ips));
+            return policy
+                .evaluate(url, &CachedHostResolver(ips))
+                .map_err(OutboundResolutionError::Destination);
         }
         let permit = tokio::time::timeout(
             DESTINATION_RESOLVE_TIMEOUT,
             Arc::clone(&self.destination_resolve_permits).acquire_owned(),
         )
         .await
-        .map_err(|_| "destination DNS capacity timed out".to_string())?
-        .map_err(|_| "destination DNS capacity closed".to_string())?;
+        .map_err(|_| OutboundResolutionError::Timeout)?
+        .map_err(|_| OutboundResolutionError::Unavailable)?;
         let resolver = Arc::clone(&self.resolver);
         let url = url.to_string();
         let decision = tokio::time::timeout(
@@ -341,14 +357,18 @@ impl AppState {
             }),
         )
         .await
-        .map_err(|_| "destination DNS timed out".to_string())?
-        .map_err(|_| "destination evaluation cancelled".to_string())??;
+        .map_err(|_| OutboundResolutionError::Timeout)?
+        .map_err(|_| OutboundResolutionError::Unavailable)?
+        .map_err(OutboundResolutionError::Destination)?;
         self.egress_dns.record(&decision.host, &decision.ips).await;
         Ok(decision)
     }
 
     async fn outbound_client(&self, url: &str) -> Result<reqwest::Client, String> {
-        let decision = self.resolve_outbound(url).await?;
+        let decision = self
+            .resolve_outbound(url)
+            .await
+            .map_err(|error| error.to_string())?;
         let pins = Arc::new(destination::DestinationPins::default());
         pins.record(&decision.host, &decision.ips);
         Ok(outbound_http_client(pins))
@@ -372,6 +392,11 @@ impl AppState {
 
     pub fn with_egress_proxy_token(mut self, token: Option<String>) -> Self {
         self.egress_proxy_token = token.filter(|value| !value.is_empty());
+        self
+    }
+
+    fn with_egress_dns_listener_enabled(mut self, enabled: bool) -> Self {
+        self.egress_dns_listener_enabled = enabled;
         self
     }
 
@@ -671,6 +696,23 @@ const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const OUTBOUND_FETCH_DEFAULT_BYTES: usize = 2 * 1024 * 1024;
 const OUTBOUND_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 const OUTBOUND_FETCH_MAX_REDIRECTS: usize = 3;
+
+#[derive(Debug)]
+enum OutboundResolutionError {
+    Destination(destination::DestinationError),
+    Timeout,
+    Unavailable,
+}
+
+impl std::fmt::Display for OutboundResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Destination(error) => error.fmt(formatter),
+            Self::Timeout => formatter.write_str("destination DNS evaluation timed out"),
+            Self::Unavailable => formatter.write_str("destination DNS evaluation is unavailable"),
+        }
+    }
+}
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
@@ -763,6 +805,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/signatures", get(list_signatures))
         .route("/api/evaluate", post(evaluate_request))
         .route("/api/outbound/fetch", post(outbound_fetch))
+        .route(
+            "/api/egress",
+            get(egress_status).post(evaluate_egress_destination),
+        )
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -799,6 +845,110 @@ pub fn build_app(state: AppState) -> Router {
         .fallback(connect_proxy)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+#[derive(Debug, Serialize)]
+struct EgressStatus {
+    destination_mode: String,
+    proxy_auth_configured: bool,
+    dns_listener_enabled: bool,
+    cached_host_count: usize,
+    dns_cache_ttl_seconds: u64,
+}
+
+async fn egress_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    Json(EgressStatus {
+        destination_mode: state.destination.mode().to_string(),
+        proxy_auth_configured: state.egress_proxy_token.is_some(),
+        dns_listener_enabled: state.egress_dns_listener_enabled,
+        cached_host_count: state.egress_dns.live_entry_count().await,
+        dns_cache_ttl_seconds: EGRESS_DNS_TTL.as_secs(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EgressEvaluationRequest {
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EgressEvaluationResponse {
+    allowed: bool,
+    host: String,
+    addresses: Vec<IpAddr>,
+    reason: String,
+}
+
+async fn evaluate_egress_destination(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::FORBIDDEN, "admin principal is read-only");
+    }
+    let request: EgressEvaluationRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid egress evaluation request"),
+    };
+    if destination::validate_outbound_url(request.url.trim()).is_err() {
+        return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
+    }
+    let decision = match state.resolve_outbound(request.url.trim()).await {
+        Ok(decision) => decision,
+        Err(OutboundResolutionError::Timeout) => {
+            return error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "destination DNS evaluation timed out",
+            );
+        }
+        Err(OutboundResolutionError::Unavailable)
+        | Err(OutboundResolutionError::Destination(destination::DestinationError::Unavailable(
+            _,
+        ))) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "destination DNS evaluation is unavailable",
+            );
+        }
+        Err(OutboundResolutionError::Destination(destination::DestinationError::Invalid(_))) => {
+            return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
+        }
+        Err(OutboundResolutionError::Destination(destination::DestinationError::Denied(_))) => {
+            return error(StatusCode::FORBIDDEN, "destination policy denied the URL");
+        }
+    };
+    let actor = audit_actor(&state, &headers);
+    let host = decision.host.clone();
+    if let Err(message) = state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "evaluate_egress_destination",
+                "egress_destination",
+                host,
+            );
+        })
+        .await
+    {
+        return persist_error(message);
+    }
+    Json(EgressEvaluationResponse {
+        allowed: decision.allowed,
+        host: decision.host,
+        addresses: decision.ips,
+        reason: decision.reason,
+    })
+    .into_response()
 }
 
 /// Serve one authenticated, stateless MCP 2026-07-28 JSON-RPC message.
@@ -4816,6 +4966,7 @@ pub async fn run_from_env(
         }
         None => None,
     };
+    let state = state.with_egress_dns_listener_enabled(egress_dns.is_some());
     println!("waf-ids-ai-soc listening on http://{local_addr}");
     if let Some((_, _, dns_addr)) = &egress_dns {
         println!("wardnet egress DNS listening on udp+tcp://{dns_addr}");
@@ -9876,6 +10027,141 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.ips.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn egress_operator_api_enforces_rbac_reports_status_and_audits_evaluation() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("reader:r:readonly,writer:w:write"))
+            .with_egress_proxy_token(Some("proxy-secret".to_string()))
+            .with_egress_dns_listener_enabled(true)
+            .with_resolver(Arc::new(CountingResolver {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                ips: vec!["93.184.216.34".parse().unwrap()],
+            }));
+        let app = build_app(state);
+
+        assert_eq!(
+            app_request(&app, empty_request(Method::GET, "/api/egress"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let status: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/egress", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["destination_mode"], "development");
+        assert_eq!(status["proxy_auth_configured"], true);
+        assert_eq!(status["dns_listener_enabled"], true);
+        assert_eq!(status["cached_host_count"], 0);
+        assert!(status.get("proxy_token").is_none());
+
+        let request = serde_json::json!({"url": "https://camoufox.example.test/"});
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("reader"), &request)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let unknown_field = serde_json::json!({
+            "url": "https://camoufox.example.test/",
+            "bypass_policy": true
+        });
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", None, &unknown_field)
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("writer"), &unknown_field,),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/egress",
+                    Some("writer"),
+                    &serde_json::json!({"url": "not-a-url"}),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let evaluated: serde_json::Value = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("writer"), &request),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(evaluated["allowed"], true);
+        assert_eq!(evaluated["host"], "camoufox.example.test");
+        assert_eq!(evaluated["addresses"], serde_json::json!(["93.184.216.34"]));
+
+        let status: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/egress", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["cached_host_count"], 1);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "evaluate_egress_destination"
+                && entry.resource_id == "camoufox.example.test"
+                && entry.actor == "w"
+        }));
+
+        let unavailable = build_app(
+            AppState::seeded(None)
+                .with_admin_tokens(parse_admin_tokens("writer:w:write"))
+                .with_resolver(Arc::new(PinMapResolver(HashMap::new()))),
+        );
+        assert_eq!(
+            app_request(
+                &unavailable,
+                json_request(
+                    Method::POST,
+                    "/api/egress",
+                    Some("writer"),
+                    &serde_json::json!({"url": "https://unavailable.example.test/"}),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
