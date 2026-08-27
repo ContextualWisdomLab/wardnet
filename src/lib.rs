@@ -2713,7 +2713,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
   <h1>ContextualWisdomLab WAF/IDS/AI SOC Gateway</h1>
   <div class="toolbar">
     <label class="sr-only" for="adminToken">Admin token</label>
-    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (write or readonly)" autocomplete="off" aria-describedby="adminTokenHelp" aria-label="Admin token for management writes and audit log reads">
+    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (write or readonly)" autocomplete="off" aria-describedby="adminTokenHelp">
     <span id="adminTokenHelp" class="sr-only">Required for management writes and audit log reads.</span>
     <button class="btn-ghost" id="hcToggle" aria-pressed="false">High contrast</button>
     <button class="btn-ghost" id="refreshBtn">Refresh</button>
