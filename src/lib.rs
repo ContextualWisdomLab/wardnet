@@ -1721,8 +1721,6 @@ struct PhishingDatabaseImportRequest {
     import_domains: bool,
     #[serde(default = "default_true")]
     import_ips: bool,
-    #[serde(default)]
-    allow_non_default_hosts: bool,
 }
 
 #[derive(Serialize)]
@@ -3438,15 +3436,34 @@ fn validate_phishing_database_import_request(
         if request.domain_limit == 0 {
             return Err("domain_limit must be greater than zero when import_domains is enabled");
         }
-        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
+        validate_curated_feed_url(&request.domain_url)?;
     }
     if request.import_ips {
         if request.ip_limit == 0 {
             return Err("ip_limit must be greater than zero when import_ips is enabled");
         }
-        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
+        validate_curated_feed_url(&request.ip_url)?;
     }
     Ok(())
+}
+
+fn validate_curated_feed_url(value: &str) -> Result<reqwest::Url, &'static str> {
+    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
+    let host = parsed.host_str().ok_or("feed URL host is required")?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => return Err("feed URL scheme must be https unless host is loopback"),
+        _ => return Err("feed URL scheme must be http or https"),
+    }
+    if !is_loopback_host(host)
+        && !PHISHING_DATABASE_ALLOWED_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err("feed URL host is not in the curated allowlist");
+    }
+    Ok(parsed)
 }
 
 fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
@@ -4116,11 +4133,11 @@ async fn apply_threat_feed_import(
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    validate_http_url(url, /* allow_non_default_hosts */ true)
+    let validated = validate_curated_feed_url(url)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    let http = state.outbound_client(url).await?;
+    let http = state.outbound_client(validated.as_str()).await?;
     let response = http
-        .get(url)
+        .get(validated)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ))
@@ -5645,7 +5662,6 @@ mod tests {
             severity: Severity::Critical,
             import_domains: true,
             import_ips: true,
-            allow_non_default_hosts: true,
         }
     }
 

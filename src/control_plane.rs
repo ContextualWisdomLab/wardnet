@@ -858,7 +858,7 @@ impl PostgresPlane {
     ) -> Result<String, String> {
         let created_unix = unix_now_i64();
         let hash = outbox::payload_hash(&payload_json);
-        let unique = format!("{created_unix}:{hash}");
+        let unique = format!("{aggregate_id}:{hash}");
         let (message_id, idempotency_key) =
             outbox::effect_ids(event_type, &self.tenant_id, &unique);
         let mut client = self.client.lock().await;
@@ -1223,7 +1223,7 @@ async fn write_snapshot_rows(
              ON CONFLICT (tenant_id) DO UPDATE SET
                event_sequence = EXCLUDED.event_sequence,
                audit_sequence = EXCLUDED.audit_sequence,
-               snapshot_version = EXCLUDED.snapshot_version",
+               snapshot_version = GREATEST(tenant_account.snapshot_version, EXCLUDED.snapshot_version) + 1",
             &[
                 &tenant_id,
                 &(data.next_event_id as i64),
@@ -3417,6 +3417,55 @@ mod tests {
         let winner = plane_a.load().await.expect("reload").expect("tenant");
         assert_eq!(winner.routes[0].path_prefix, "/occ-a");
         assert!(winner.snapshot_version > loaded_a.snapshot_version);
+    }
+
+    #[tokio::test]
+    async fn postgres_restore_advances_snapshot_version_and_rejects_stale_save() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("restore-occ");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane a");
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane b");
+        plane_a.save(&AppData::seeded()).await.expect("first save");
+        let mut current = plane_a.load().await.expect("load").expect("tenant");
+        current.routes[0].path_prefix = "/before-restore".into();
+        plane_a.save(&current).await.expect("update");
+        let stale = plane_b
+            .load()
+            .await
+            .expect("stale load")
+            .expect("stale tenant");
+        let backup = plane_a.logical_backup().await.expect("backup");
+
+        let mut restored = backup.clone();
+        restored.snapshot.routes[0].path_prefix = "/after-restore".into();
+        plane_a
+            .restore_logical_backup(&restored)
+            .await
+            .expect("restore");
+
+        let reloaded = plane_a.load().await.expect("reload").expect("tenant");
+        assert_eq!(reloaded.routes[0].path_prefix, "/after-restore");
+        assert!(
+            reloaded.snapshot_version > stale.snapshot_version,
+            "restore must advance snapshot_version beyond stale replicas"
+        );
+
+        let mut stale_write = stale;
+        stale_write.routes[0].path_prefix = "/stale-overwrite".into();
+        let error = plane_b
+            .save(&stale_write)
+            .await
+            .expect_err("stale write after restore must conflict");
+        assert!(
+            error.contains("snapshot conflict"),
+            "restore must force stale writers to fail closed: {error}"
+        );
     }
 
     #[tokio::test]

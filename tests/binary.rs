@@ -445,9 +445,22 @@ fn admit_release_tag_rejects_lightweight_and_accepts_annotated() {
             .expect("git")
     };
     assert!(git(&["init", "-q"]).success());
+    assert!(git(&["branch", "-M", "main"]).success());
     std::fs::write(dir.join("README"), b"wardnet").expect("readme");
     assert!(git(&["add", "README"]).success());
     assert!(git(&["commit", "-qm", "seed"]).success());
+    let origin = dir.with_extension("origin.git");
+    let _ = std::fs::remove_dir_all(&origin);
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&origin)
+            .status()
+            .expect("init bare origin")
+            .success()
+    );
+    assert!(git(&["remote", "add", "origin", origin.to_str().unwrap()]).success());
+    assert!(git(&["push", "-q", "-u", "origin", "main"]).success());
     assert!(git(&["tag", "v0.0.1"]).success(), "lightweight tag");
     let light = Command::new("bash")
         .arg(&script)
@@ -460,7 +473,34 @@ fn admit_release_tag_rejects_lightweight_and_accepts_annotated() {
         "lightweight tag must be refused: {}",
         String::from_utf8_lossy(&light.stderr)
     );
-    assert!(git(&["tag", "-a", "v0.0.2", "-m", "annotated"]).success());
+    let signing_key = dir.join("signing");
+    let allowed_signers = dir.join("allowed_signers");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f"])
+            .arg(&signing_key)
+            .status()
+            .expect("generate ssh signing key")
+            .success()
+    );
+    let public_key = std::fs::read_to_string(signing_key.with_extension("pub"))
+        .expect("read public signing key");
+    std::fs::write(
+        &allowed_signers,
+        format!("release@wardnet.test {}\n", public_key.trim()),
+    )
+    .expect("write allowed signers");
+    assert!(git(&["config", "gpg.format", "ssh"]).success());
+    assert!(
+        git(&[
+            "config",
+            "gpg.ssh.allowedSignersFile",
+            allowed_signers.to_str().unwrap(),
+        ])
+        .success()
+    );
+    assert!(git(&["config", "user.signingkey", signing_key.to_str().unwrap()]).success());
+    assert!(git(&["tag", "-s", "v0.0.2", "-m", "annotated"]).success());
     let annotated = Command::new("bash")
         .arg(&script)
         .arg("v0.0.2")
@@ -480,6 +520,7 @@ fn admit_release_tag_rejects_lightweight_and_accepts_annotated() {
         .expect("admit bad name");
     assert!(!bad_name.status.success(), "non vX.Y.Z must be refused");
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&origin);
 }
 
 #[test]
