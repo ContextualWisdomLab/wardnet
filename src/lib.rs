@@ -2698,6 +2698,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
 .muted{color:var(--sub);font-size:13px}
 .empty{color:var(--sub);font-size:13px;padding:8px 0}
 .err{color:var(--fail);font-size:13px;padding:8px 0}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.section-nav{margin:0 auto 20px;max-width:1600px;padding:0 20px}
+.section-nav ul{display:flex;gap:8px;flex-wrap:wrap;list-style:none;padding:0;margin:0}
 #toast{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:40}
 .toast{background:var(--surface);border:1px solid var(--border);border-left-width:4px;border-radius:8px;padding:12px 16px;box-shadow:0 6px 20px rgba(20,33,61,.14);max-width:360px;font-size:13px}
 .toast.ok{border-left-color:var(--pass)}
@@ -2709,15 +2712,27 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
 <header class="app">
   <h1>ContextualWisdomLab WAF/IDS/AI SOC Gateway</h1>
   <div class="toolbar">
-    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (write or readonly)" autocomplete="off" aria-label="Admin token for management writes and audit log reads">
+    <label class="sr-only" for="adminToken">Admin token</label>
+    <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (write or readonly)" autocomplete="off" aria-describedby="adminTokenHelp" aria-label="Admin token for management writes and audit log reads">
+    <span id="adminTokenHelp" class="sr-only">Required for management writes and audit log reads.</span>
     <button class="btn-ghost" id="hcToggle" aria-pressed="false">High contrast</button>
     <button class="btn-ghost" id="refreshBtn">Refresh</button>
   </div>
 </header>
-<main id="main">
-  <div class="kpis" id="kpis" aria-live="polite"><div class="tile"><div class="label">Loading</div><div class="metric">…</div></div></div>
+<nav class="section-nav" aria-label="Console sections">
+  <ul>
+    <li><a href="#routesCard">Routes</a></li>
+    <li><a href="#threatsCard">Threat indicators</a></li>
+    <li><a href="#dnsblCard">DNSBL entries</a></li>
+    <li><a href="#readinessCard">Commercial readiness</a></li>
+    <li><a href="#eventsCard">Recent events</a></li>
+    <li><a href="#auditCard">Audit log</a></li>
+  </ul>
+</nav>
+<main id="main" tabindex="-1">
+  <div class="kpis" id="kpis" role="status" aria-live="polite" aria-atomic="true"><div class="tile"><div class="label">Loading</div><div class="metric">…</div></div></div>
   <div class="grid">
-    <section class="card"><h2>Routes</h2><div id="routesBody" class="muted">Loading…</div>
+    <section class="card" id="routesCard" aria-labelledby="routesHeading"><h2 id="routesHeading">Routes</h2><div id="routesBody" class="muted">Loading…</div>
       <details><summary>+ Add route</summary>
         <form class="stack" id="routeForm" data-url="/api/routes" data-ok="Route">
           <label class="field">Path prefix<input name="path_prefix" placeholder="/demo" required pattern="/.*"><span class="field-help">must start with /</span></label>
@@ -2728,7 +2743,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
         </form>
       </details>
     </section>
-    <section class="card"><h2>Threat indicators</h2><div id="threatsBody" class="muted">Loading…</div>
+    <section class="card" id="threatsCard" aria-labelledby="threatsHeading"><h2 id="threatsHeading">Threat indicators</h2><div id="threatsBody" class="muted">Loading…</div>
       <details><summary>+ Add threat indicator</summary>
         <form class="stack" id="threatForm" data-url="/api/threats" data-ok="Threat indicator">
           <label class="field">Value<input name="value" placeholder="union select" required></label>
@@ -2740,7 +2755,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
         </form>
       </details>
     </section>
-    <section class="card"><h2>DNSBL entries</h2><div id="dnsblBody" class="muted">Loading…</div>
+    <section class="card" id="dnsblCard" aria-labelledby="dnsblHeading"><h2 id="dnsblHeading">DNSBL entries</h2><div id="dnsblBody" class="muted">Loading…</div>
       <details><summary>+ Add DNSBL entry</summary>
         <form class="stack" id="dnsblForm" data-url="/api/dnsbl" data-ok="DNSBL entry">
           <label class="field">Address<input name="address" placeholder="203.0.113.10" required><span class="field-help">IP address</span></label>
@@ -2752,7 +2767,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
         </form>
       </details>
     </section>
-    <section class="card"><h2>Commercial readiness</h2><div id="readinessBody" class="muted">Loading…</div></section>
+    <section class="card" id="readinessCard" aria-labelledby="readinessHeading"><h2 id="readinessHeading">Commercial readiness</h2><div id="readinessBody" class="muted">Loading…</div></section>
     <section class="card"><h2>License</h2><div id="licenseBody" class="muted">Loading…</div>
       <details><summary>+ Update license</summary>
         <form class="stack" id="licenseForm" data-url="/api/commercial/license" data-ok="License">
@@ -2769,7 +2784,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       </details>
     </section>
     <section class="card"><h2>Threat feeds</h2><div id="feedsBody" class="muted">Loading…</div></section>
-    <section class="card"><h2>Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
+    <section class="card" id="eventsCard" aria-labelledby="eventsHeading"><h2 id="eventsHeading">Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Suricata IDS ingest</h2>
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
     </section>
@@ -2796,7 +2811,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       </div>
       <pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre>
     </section>
-    <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
+    <section class="card" id="auditCard" aria-labelledby="auditHeading"><h2 id="auditHeading">Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
     <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
@@ -3755,6 +3770,22 @@ mod tests {
         assert!(
             html.contains(":focus-visible"),
             "focus-visible styling missing"
+        );
+        assert!(
+            html.contains("aria-label=\"Console sections\""),
+            "section navigation landmark missing"
+        );
+        assert!(
+            html.contains("id=\"main\" tabindex=\"-1\""),
+            "skip-link target must be focusable"
+        );
+        assert!(
+            html.contains("aria-describedby=\"adminTokenHelp\""),
+            "admin token guidance missing"
+        );
+        assert!(
+            html.contains("role=\"status\" aria-live=\"polite\" aria-atomic=\"true\""),
+            "live KPI region should announce atomically"
         );
     }
 
