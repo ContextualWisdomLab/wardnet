@@ -307,6 +307,7 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
                 existing.etag = None;
                 existing.last_modified = None;
                 existing.content_sha256 = None;
+                existing.last_attempt_unix = None;
                 existing.last_success_unix = None;
             }
         } else {
@@ -4487,6 +4488,7 @@ mod tests {
         feed.etag = Some("preserved".to_string());
         feed.last_modified = Some("preserved-date".to_string());
         feed.content_sha256 = Some("preserved-sha".to_string());
+        feed.last_attempt_unix = Some(456);
         feed.last_success_unix = Some(123);
         let source_id = feed.source_id.clone();
 
@@ -4520,6 +4522,7 @@ mod tests {
         assert!(feed.etag.is_none());
         assert!(feed.last_modified.is_none());
         assert!(feed.content_sha256.is_none());
+        assert!(feed.last_attempt_unix.is_none());
         assert!(feed.last_success_unix.is_none());
     }
 
