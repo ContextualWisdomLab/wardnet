@@ -4,6 +4,10 @@ import { check } from "k6";
 const endpoint = `${__ENV.WARDNET_URL || "http://127.0.0.1:3000"}/mcp`;
 const token = __ENV.WARDNET_ADMIN_TOKEN;
 
+if (!token || !token.trim()) {
+  throw new Error("WARDNET_ADMIN_TOKEN is required");
+}
+
 export const options = {
   thresholds: {
     checks: ["rate==1"],

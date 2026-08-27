@@ -26,6 +26,8 @@ not the tag. There is no moving `latest` tag.
 Operators verify a binary with:
 
 ```bash
+expected_tag="vX.Y.Z"
+
 # SHA256SUMS records basenames only, so this works next to the download
 sha256sum -c SHA256SUMS
 # or: shasum -a 256 -c SHA256SUMS
@@ -33,25 +35,30 @@ sha256sum -c SHA256SUMS
 cosign verify-blob \
   --bundle waf-ids-ai-soc-linux-x86_64.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/ContextualWisdomLab/wardnet/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-identity-regexp "^https://github\\.com/ContextualWisdomLab/wardnet/\\.github/workflows/release\\.yml@refs/tags/${expected_tag}$" \
   waf-ids-ai-soc-linux-x86_64
 
 gh attestation verify waf-ids-ai-soc-linux-x86_64 \
-  --repo ContextualWisdomLab/wardnet
+  --repo ContextualWisdomLab/wardnet \
+  --source-ref "refs/tags/${expected_tag}"
 ```
 
 Operators verify the image with:
 
 ```bash
+expected_tag="vX.Y.Z"
 ref="$(cat IMAGE-DIGEST.txt)"   # ghcr.io/...@sha256:...
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/ContextualWisdomLab/wardnet/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-identity-regexp "^https://github\\.com/ContextualWisdomLab/wardnet/\\.github/workflows/release\\.yml@refs/tags/${expected_tag}$" \
   "$ref"
 cosign verify-attestation --type spdxjson \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github.com/ContextualWisdomLab/wardnet/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-identity-regexp "^https://github\\.com/ContextualWisdomLab/wardnet/\\.github/workflows/release\\.yml@refs/tags/${expected_tag}$" \
   "$ref"
+gh attestation verify "oci://${ref}" \
+  --repo ContextualWisdomLab/wardnet \
+  --source-ref "refs/tags/${expected_tag}"
 ```
 
 Tampered bytes, a substituted digest, or a tag that no longer matches

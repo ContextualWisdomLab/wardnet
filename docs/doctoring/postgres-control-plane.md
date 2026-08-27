@@ -98,4 +98,4 @@ that preserve the same atomic outbox contract.
 Snapshot persist compares `tenant_account.snapshot_version` and fails closed
 on a stale token (HTTP 409). Operator restores overwrite the token.
 
-Remaining: additional outbox consumers (TAXII / Clearfolio / orchestrator).
+Remaining: restore-path `snapshot_version` promotion and stale-replica CAS proof.
