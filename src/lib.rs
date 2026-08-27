@@ -306,6 +306,8 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
             if url_changed {
                 existing.etag = None;
                 existing.last_modified = None;
+                existing.content_sha256 = None;
+                existing.last_success_unix = None;
             }
         } else {
             data.official_threat_feeds.push(feed);
@@ -4484,6 +4486,8 @@ mod tests {
         feed.parser = "stale".to_string();
         feed.etag = Some("preserved".to_string());
         feed.last_modified = Some("preserved-date".to_string());
+        feed.content_sha256 = Some("preserved-sha".to_string());
+        feed.last_success_unix = Some(123);
         let source_id = feed.source_id.clone();
 
         backfill_official_threat_feeds(&mut data);
@@ -4515,6 +4519,8 @@ mod tests {
             .unwrap();
         assert!(feed.etag.is_none());
         assert!(feed.last_modified.is_none());
+        assert!(feed.content_sha256.is_none());
+        assert!(feed.last_success_unix.is_none());
     }
 
     #[test]
