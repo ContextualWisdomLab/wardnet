@@ -98,6 +98,7 @@ paths:
           description: DNSBL entry
           headers:
             ETag: { schema: { type: string } }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Create or conditionally replace one DNSBL entry
