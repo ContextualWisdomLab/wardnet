@@ -1089,9 +1089,9 @@ async fn list_dnsbl(State(state): State<AppState>) -> Json<Vec<DnsblEntry>> {
     Json(state.inner.read().await.dnsbl.clone())
 }
 
-fn parse_dnsbl_path_address(address: &str) -> Result<IpAddr, Response> {
+fn parse_dnsbl_path_address(address: &str) -> Result<IpAddr, (StatusCode, &'static str)> {
     address.parse().map_err(|_| {
-        error(
+        (
             StatusCode::BAD_REQUEST,
             "DNSBL address must be an IP address",
         )
@@ -1104,7 +1104,7 @@ async fn get_dnsbl(
 ) -> Response {
     let address = match parse_dnsbl_path_address(&address) {
         Ok(address) => address,
-        Err(response) => return response,
+        Err((status, message)) => return error(status, message),
     };
     let data = state.inner.read().await;
     let Some(entry) = data.dnsbl.iter().find(|entry| entry.address == address) else {
@@ -1124,7 +1124,7 @@ async fn replace_dnsbl(
     }
     let address = match parse_dnsbl_path_address(&address) {
         Ok(address) => address,
-        Err(response) => return response,
+        Err((status, message)) => return error(status, message),
     };
     if entry.address != address {
         return error(
@@ -1192,7 +1192,7 @@ async fn delete_dnsbl(
     }
     let address = match parse_dnsbl_path_address(&address) {
         Ok(address) => address,
-        Err(response) => return response,
+        Err((status, message)) => return error(status, message),
     };
     let expected = headers
         .get(header::IF_MATCH)
