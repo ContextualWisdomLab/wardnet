@@ -103,10 +103,14 @@ fn parse_urlhaus(
             .ok()
             .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
         if let Some(host) = host {
-            if let Ok(address) = host.parse::<IpAddr>() {
-                parsed
-                    .threats
-                    .push(threat(&host, "client_ip", source_id, ttl_seconds));
+            let ip_candidate = host.trim_start_matches('[').trim_end_matches(']');
+            if let Ok(address) = ip_candidate.parse::<IpAddr>() {
+                parsed.threats.push(threat(
+                    &address.to_string(),
+                    "client_ip",
+                    source_id,
+                    ttl_seconds,
+                ));
                 parsed.dnsbl.push(DnsblEntry {
                     address,
                     prefix_len: None,
@@ -273,6 +277,20 @@ mod tests {
                 .iter()
                 .any(|item| item.indicator_type == "domain")
         );
+        let urlhaus_ipv6 = parse(
+            "urlhaus_recent_csv",
+            "urlhaus-online",
+            7200,
+            "# attribution\n# id,dateadded,url,url_status,reporter\n1,2026-01-01,https://[2001:db8::7]/a,online,analyst\n",
+        )
+        .unwrap();
+        assert!(
+            urlhaus_ipv6
+                .threats
+                .iter()
+                .any(|item| item.indicator_type == "client_ip" && item.value == "2001:db8::7")
+        );
+        assert_eq!(urlhaus_ipv6.dnsbl[0].address.to_string(), "2001:db8::7");
 
         let threatfox = parse(
             "threatfox_json",
