@@ -99,8 +99,19 @@ fn parse_urlhaus(
         .iter()
         .position(|header| header.eq_ignore_ascii_case("url"))
         .ok_or_else(|| "URLhaus CSV is missing url header".to_string())?;
+    let url_status_index = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case("url_status"));
     for record in reader.records() {
         let record = record.map_err(|error| format!("invalid URLhaus CSV record: {error}"))?;
+        if let Some(status_index) = url_status_index {
+            let Some(status) = record.get(status_index) else {
+                continue;
+            };
+            if !status.eq_ignore_ascii_case("online") {
+                continue;
+            }
+        }
         let Some(url) = record.get(url_index).filter(|url| !url.is_empty()) else {
             continue;
         };
@@ -299,6 +310,22 @@ mod tests {
                 .any(|item| item.indicator_type == "client_ip" && item.value == "2001:db8::7")
         );
         assert_eq!(urlhaus_ipv6.dnsbl[0].address.to_string(), "2001:db8::7");
+        let urlhaus_mixed_status = parse(
+            "urlhaus_recent_csv",
+            "urlhaus-online",
+            7200,
+            "# attribution\n# id,dateadded,url,url_status,reporter\n1,2026-01-01,https://offline.example/a,offline,analyst\n2,2026-01-01,https://active.example/a,online,analyst\n",
+        )
+        .unwrap();
+        assert!(
+            urlhaus_mixed_status
+                .threats
+                .iter()
+                .any(|item| item.value == "active.example")
+        );
+        assert!(urlhaus_mixed_status.threats.iter().all(|item| item.value
+            != "https://offline.example/a"
+            && item.value != "offline.example"));
 
         let threatfox = parse(
             "threatfox_json",
