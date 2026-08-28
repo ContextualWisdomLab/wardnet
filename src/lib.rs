@@ -295,7 +295,8 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
             .iter_mut()
             .find(|existing| existing.source_id == feed.source_id)
         {
-            let url_changed = existing.official_url != feed.official_url;
+            let content_contract_changed =
+                existing.official_url != feed.official_url || existing.parser != feed.parser;
             existing.official_url = feed.official_url;
             existing.parser = feed.parser;
             existing.indicator_types = feed.indicator_types;
@@ -303,12 +304,13 @@ fn backfill_official_threat_feeds(data: &mut AppData) {
             existing.license_url = feed.license_url;
             existing.refresh_interval_seconds = feed.refresh_interval_seconds;
             existing.ttl_seconds = feed.ttl_seconds;
-            if url_changed {
+            if content_contract_changed {
                 existing.etag = None;
                 existing.last_modified = None;
                 existing.content_sha256 = None;
                 existing.last_attempt_unix = None;
                 existing.last_success_unix = None;
+                existing.source_notice = None;
             }
         } else {
             data.official_threat_feeds.push(feed);
@@ -4481,7 +4483,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_preserves_validators_only_while_registry_url_is_unchanged() {
+    fn backfill_preserves_official_feed_state_only_while_content_contract_is_unchanged() {
         let mut data = AppData::seeded();
         let feed = &mut data.official_threat_feeds[0];
         feed.parser = "stale".to_string();
@@ -4490,6 +4492,7 @@ mod tests {
         feed.content_sha256 = Some("preserved-sha".to_string());
         feed.last_attempt_unix = Some(456);
         feed.last_success_unix = Some(123);
+        feed.source_notice = Some("preserved-notice".to_string());
         let source_id = feed.source_id.clone();
 
         backfill_official_threat_feeds(&mut data);
@@ -4505,7 +4508,38 @@ mod tests {
             .unwrap();
         assert_eq!(feed.official_url, canonical.official_url);
         assert_eq!(feed.parser, canonical.parser);
+        assert!(feed.etag.is_none());
+        assert!(feed.last_modified.is_none());
+        assert!(feed.content_sha256.is_none());
+        assert!(feed.last_attempt_unix.is_none());
+        assert!(feed.last_success_unix.is_none());
+        assert!(feed.source_notice.is_none());
+
+        let feed = data
+            .official_threat_feeds
+            .iter_mut()
+            .find(|feed| feed.source_id == source_id)
+            .unwrap();
+        feed.etag = Some("preserved".to_string());
+        feed.last_modified = Some("preserved-date".to_string());
+        feed.content_sha256 = Some("preserved-sha".to_string());
+        feed.last_attempt_unix = Some(456);
+        feed.last_success_unix = Some(123);
+        feed.source_notice = Some("preserved-notice".to_string());
+
+        backfill_official_threat_feeds(&mut data);
+
+        let feed = data
+            .official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == source_id)
+            .unwrap();
         assert_eq!(feed.etag.as_deref(), Some("preserved"));
+        assert_eq!(feed.last_modified.as_deref(), Some("preserved-date"));
+        assert_eq!(feed.content_sha256.as_deref(), Some("preserved-sha"));
+        assert_eq!(feed.last_attempt_unix, Some(456));
+        assert_eq!(feed.last_success_unix, Some(123));
+        assert_eq!(feed.source_notice.as_deref(), Some("preserved-notice"));
 
         let feed = data
             .official_threat_feeds
@@ -4524,6 +4558,7 @@ mod tests {
         assert!(feed.content_sha256.is_none());
         assert!(feed.last_attempt_unix.is_none());
         assert!(feed.last_success_unix.is_none());
+        assert!(feed.source_notice.is_none());
     }
 
     #[test]
