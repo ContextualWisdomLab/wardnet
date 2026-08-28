@@ -5574,6 +5574,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn official_threat_feed_refresh_rejects_redirected_upstream() {
+        let target_feed = Router::new().route(
+            "/drop.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    "{\"cidr\":\"198.51.100.0/24\",\"sblid\":\"SBL1\"}\n",
+                )
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_target = format!("http://{target_addr}/drop.json");
+        let redirect_feed = Router::new().route(
+            "/drop.json",
+            get(move || {
+                let location = redirect_target.clone();
+                async move { (StatusCode::FOUND, [(header::LOCATION, location)]) }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let state = AppState::seeded(Some("secret".to_string())).with_official_feed_url(
+            "spamhaus-drop-v4",
+            format!("http://{redirect_addr}/drop.json"),
+        );
+        let inspect = state.clone();
+        let app = build_app(state);
+
+        let response = app_request(
+            &app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/spamhaus-drop-v4/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let body = body_text(response).await;
+        assert!(body.contains("official feed returned HTTP 302"));
+
+        let state = inspect.inner.read().await;
+        assert!(
+            state
+                .dnsbl
+                .iter()
+                .all(|entry| entry.source != "spamhaus-drop-v4")
+        );
+        let feed = state
+            .official_threat_feeds
+            .iter()
+            .find(|feed| feed.source_id == "spamhaus-drop-v4")
+            .unwrap();
+        assert_eq!(feed.last_success_unix, None);
+        assert_eq!(
+            feed.last_error.as_deref(),
+            Some("official feed returned HTTP 302")
+        );
+    }
+
+    #[tokio::test]
     async fn suricata_eve_ingest_maps_alerts_to_security_events() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(

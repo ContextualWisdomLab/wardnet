@@ -29,13 +29,18 @@ redistribution. The canonical formats are documented by
 [URLhaus](https://urlhaus.abuse.ch/api/), and
 [ThreatFox](https://threatfox.abuse.ch/api/).
 
-The current contracts were rechecked against those official pages on 2026-08-27:
+The current contracts were rechecked against those official pages on 2026-08-28:
 Spamhaus publishes the two JSON URLs, requires attribution and preservation of its date/©
 notice, re-evaluates DROP daily, and says daily fetching is sufficient. URLhaus documents
 the authenticated `recent.csv` export URL. ThreatFox requires `Auth-Key` and documents
 `get_iocs` with a one-day minimum window. Neither abuse.ch API documents a detached
 checksum for these responses, so Wardnet records its own digest after TLS retrieval and
 full-response validation while retaining ETag/Last-Modified when provided.
+
+The built-in GET endpoints were also rechecked live on 2026-08-28. Spamhaus `drop_v4.json`,
+Spamhaus `drop_v6.json`, and URLhaus `csv_recent` each returned direct `HTTP 200` without an
+intermediate redirect. ThreatFox uses a POST-only API contract at `/api/v1/`, so a GET/HEAD
+probe is not the authoritative success path for that source.
 
 ## Credentials
 
@@ -72,7 +77,10 @@ the source refresh interval, so adding a missing key permits an immediate correc
 
 These are threat-intelligence feeds consumed by gateway scoring. The authoritative DNSBL
 zone exports exact IPv4 host entries only; CIDR ranges and IPv6 entries remain available to
-inline gateway scoring rather than being expanded into an unbounded zone. Wardnet is not a
+inline gateway scoring rather than being expanded into an unbounded zone. That host-only
+publication rule applies to both official-feed imports and operator-created `DnsblEntry`
+records with `prefix_len`; subnet entries remain visible through `GET /api/dnsbl` and active
+for inline scoring, but they are intentionally omitted from `/dnsbl/zone`. Wardnet is not a
 recursive DNS resolver and does not configure an upstream DNS resolver.
 
 ## Scrubbed runtime evidence (2026-08-27)
