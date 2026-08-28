@@ -23,11 +23,11 @@ No open PR may be treated as ready until its current head satisfies those exact 
 
 ## 3. Open PR inventory
 
-There are 14 open PRs.
+There are 14 other open PRs, excluding this baseline PR (`#130`).
 
 | PR | Head | State | Exact-head evidence | Current next action |
 | --- | --- | --- | --- | --- |
-| [#129](https://github.com/ContextualWisdomLab/wardnet/pull/129) | `1a5d2c77a8` | Draft, blocked | No unresolved threads; independent review still required | Wait for current-head review and required checks |
+| [#129](https://github.com/ContextualWisdomLab/wardnet/pull/129) | `1a5d2c77a8` | Draft, blocked | Current head is intentionally red; no unresolved threads; independent review still required | Resolve the intentionally red head, then rerun current-head checks and obtain approval |
 | [#127](https://github.com/ContextualWisdomLab/wardnet/pull/127) | `aa29565948` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
 | [#126](https://github.com/ContextualWisdomLab/wardnet/pull/126) | `41d7ba9e8f` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
 | [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115) | `9de0b21916` | Blocked | `opencode-review` failed on current head; `strix` failed; 2 unresolved info threads remain; no approval | Re-run external review gates on a fresh head and resolve remaining thread decisions |
