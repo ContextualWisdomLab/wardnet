@@ -1,0 +1,13 @@
+[package]
+name = "wardnet-agent-artifact-admission"
+version = "0.1.0"
+edition = "2024"
+description = "Fail-closed package-install admission policy for AI coding agents"
+license = "MIT"
+
+[dependencies]
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
