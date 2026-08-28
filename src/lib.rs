@@ -210,19 +210,34 @@ impl AppState {
         self
     }
 
+    fn configured_admin_tokens(&self) -> Option<HashMap<String, AdminPrincipal>> {
+        self.credentials
+            .get_credential(CRED_ADMIN_TOKENS)
+            .map(parse_admin_tokens)
+            .filter(|tokens| !tokens.is_empty())
+            .or_else(|| (!self.admin_tokens.is_empty()).then(|| self.admin_tokens.clone()))
+    }
+
+    fn configured_admin_token(&self) -> Option<&str> {
+        self.credentials
+            .get_credential(CRED_ADMIN_TOKEN)
+            .or(self.admin_token.as_deref())
+    }
+
     /// The principal mapped to the request's `X-Admin-Token`, if configured.
-    fn principal_for_token(&self, headers: &HeaderMap) -> Option<&AdminPrincipal> {
-        headers
+    fn principal_for_token(&self, headers: &HeaderMap) -> Option<AdminPrincipal> {
+        let presented = headers
             .get("x-admin-token")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|token| self.admin_tokens.get(token))
+            .and_then(|value| value.to_str().ok())?;
+        self.configured_admin_tokens()
+            .and_then(|tokens| tokens.get(presented).cloned())
     }
 
     /// The actor name mapped to the request's `X-Admin-Token`, if that token is a
     /// configured RBAC token.
     fn actor_for_token(&self, headers: &HeaderMap) -> Option<String> {
         self.principal_for_token(headers)
-            .map(|principal| principal.actor.clone())
+            .map(|principal| principal.actor)
     }
 
     /// Records one gateway request for `client_ip` and returns `true` if it is
@@ -283,7 +298,9 @@ impl AppState {
             dnsbl_origin: self.dnsbl_origin.clone(),
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
-            admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+            admin_auth_configured: self.credentials.has_admin_auth()
+                || self.admin_token.is_some()
+                || !self.admin_tokens.is_empty(),
         }
     }
 }
@@ -2815,10 +2832,10 @@ fn admin_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
     let presented = headers
         .get("x-admin-token")
         .and_then(|value| value.to_str().ok());
-    if !state.admin_tokens.is_empty() {
-        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+    if let Some(tokens) = state.configured_admin_tokens() {
+        return presented.is_some_and(|token| tokens.contains_key(token));
     }
-    let Some(expected) = state.admin_token.as_deref() else {
+    let Some(expected) = state.configured_admin_token() else {
         return true;
     };
     presented.is_some_and(|actual| actual == expected)
@@ -2831,16 +2848,15 @@ fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
         .get("x-admin-token")
         .and_then(|value| value.to_str().ok());
     // RBAC tokens take precedence when configured.
-    if !state.admin_tokens.is_empty() {
+    if let Some(tokens) = state.configured_admin_tokens() {
         return presented.is_some_and(|token| {
-            state
-                .admin_tokens
+            tokens
                 .get(token)
                 .is_some_and(|principal| principal.can_write)
         });
     }
     // Fallback: single shared token (None means auth is disabled).
-    let Some(expected) = state.admin_token.as_deref() else {
+    let Some(expected) = state.configured_admin_token() else {
         return true;
     };
     presented.is_some_and(|actual| actual == expected)
