@@ -1609,7 +1609,9 @@ async fn read_official_feed_body(response: reqwest::Response) -> Result<String, 
 }
 
 fn official_feed_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
-    (state.admin_token.is_some() || !state.admin_tokens.is_empty())
+    (state.credentials.has_admin_auth()
+        || state.admin_token.is_some()
+        || !state.admin_tokens.is_empty())
         && admin_authenticated(state, headers)
 }
 
@@ -4238,6 +4240,20 @@ mod tests {
         let mut named = HeaderMap::new();
         named.insert("x-admin-actor", "carol".parse().unwrap());
         assert_eq!(audit_actor(&state, &named), "carol");
+    }
+
+    #[test]
+    fn official_feed_auth_accepts_registry_only_admin_token() {
+        let registry =
+            CredentialRegistry::bootstrap_secrets(None, Some("registry-admin".to_string()), None)
+                .unwrap();
+        let state = AppState::seeded(None).with_credential_registry(registry);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-admin-token", "registry-admin".parse().unwrap());
+
+        assert!(admin_authenticated(&state, &headers));
+        assert!(official_feed_authenticated(&state, &headers));
     }
 
     #[tokio::test]
