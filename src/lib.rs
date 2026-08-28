@@ -41,6 +41,10 @@ pub use waf_ids_core::{
 const EGRESS_DNS_TTL: Duration = Duration::from_secs(30);
 const EGRESS_DNS_MAX_ENTRIES: usize = 1024;
 const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+#[cfg(not(test))]
+const OUTBOX_DISPATCH_TIMEOUT_SECS: u64 = 15;
+#[cfg(test)]
+const OUTBOX_DISPATCH_TIMEOUT_SECS: u64 = 1;
 
 #[derive(Default)]
 struct EgressDnsCache {
@@ -1595,6 +1599,7 @@ async fn execute_clearfolio_submit(
     for (name, value) in clearfolio_tenant_headers(config) {
         request = request.header(name, value);
     }
+    request = request.timeout(Duration::from_secs(OUTBOX_DISPATCH_TIMEOUT_SECS));
     let response = request.send().await.map_err(|err| {
         outbox::DispatchError::Transient(format!("clearfolio request failed: {err}"))
     })?;
@@ -1804,6 +1809,7 @@ async fn execute_soc_analyze(
         .post(endpoint)
         .bearer_auth(&config.token)
         .json(&body)
+        .timeout(Duration::from_secs(OUTBOX_DISPATCH_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|err| outbox::DispatchError::Transient(format!("llm request failed: {err}")))?;
@@ -10473,6 +10479,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn clearfolio_outbox_submit_times_out() {
+        let slow = Router::new().route(
+            "/api/v1/convert/jobs",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                (
+                    StatusCode::ACCEPTED,
+                    [("content-type", "application/json")],
+                    r#"{"jobId":"J-SLOW","status":"PENDING"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, slow).into_future());
+
+        let state =
+            AppState::seeded(None).with_destination_policy(DestinationPolicy::development());
+        let error = execute_clearfolio_submit(
+            &state,
+            &clearfolio_test_config(&format!("http://{addr}")),
+            "evidence-manifest.json".into(),
+            b"{}".to_vec(),
+        )
+        .await
+        .expect_err("slow clearfolio dispatch must time out");
+        assert!(matches!(error, outbox::DispatchError::Transient(_)));
+    }
+
     fn soc_test_event() -> SecurityEvent {
         SecurityEvent {
             id: 1,
@@ -10702,5 +10738,41 @@ mod tests {
             .status(),
             StatusCode::BAD_GATEWAY
         );
+    }
+
+    #[tokio::test]
+    async fn soc_outbox_dispatch_times_out() {
+        let slow = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"choices":[{"message":{"content":"slow"}}]}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, slow).into_future());
+
+        let state =
+            AppState::seeded(None).with_destination_policy(DestinationPolicy::development());
+        let error = match execute_soc_analyze(
+            &state,
+            &SocLlmConfig {
+                base_url: format!("http://{addr}"),
+                token: "test-token".into(),
+                model: "contextual-orchestrator".into(),
+            },
+            &soc_test_event(),
+        )
+        .await
+        {
+            Ok(_) => panic!("slow SOC dispatch must time out"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, outbox::DispatchError::Transient(_)));
     }
 }

@@ -18,7 +18,7 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-#[cfg(all(not(test), windows))]
+#[cfg(all(not(test), not(unix)))]
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     let mut ctrl_c = tokio::signal::windows::ctrl_c().expect("install Ctrl-C handler");
     async move {

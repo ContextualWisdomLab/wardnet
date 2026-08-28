@@ -554,6 +554,7 @@ async fn apply_schema(client: &Client) -> Result<(), String> {
         Ok(row) => row.get::<_, i32>(0),
         Err(_) => 0,
     };
+    ensure_supported_migration_version(applied)?;
     if applied < MIGRATION_VERSION {
         client
             .batch_execute(MIGRATION_SQL)
@@ -573,6 +574,16 @@ async fn apply_schema(client: &Client) -> Result<(), String> {
         .await
         .map_err(|error| format!("control plane event hash partition failed: {error:?}"))?;
     Ok(())
+}
+
+fn ensure_supported_migration_version(applied: i32) -> Result<(), String> {
+    if applied > MIGRATION_VERSION {
+        Err(format!(
+            "control plane schema version {applied} is newer than this binary supports ({MIGRATION_VERSION})"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 async fn event_partition_count(client: &Client) -> Result<i64, String> {
@@ -975,7 +986,7 @@ impl PostgresPlane {
     pub async fn restore_drill(&self) -> Result<BackupDrillReport, String> {
         let started = Instant::now();
         let backup = self.logical_backup().await?;
-        let isolated = format!("restore-drill-{}-{}", std::process::id(), unix_now_i64());
+        let isolated = restore_drill_tenant_id();
         let mut client = self.client.lock().await;
         restore_backup(&mut client, &isolated, &backup).await?;
         let restored = export_backup(&mut client, &isolated).await?;
@@ -1004,6 +1015,17 @@ impl PostgresPlane {
             isolated_tenant_id: isolated,
         })
     }
+}
+
+fn restore_drill_tenant_id() -> String {
+    format!(
+        "restore-drill-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2647,6 +2669,13 @@ mod tests {
                 .expect("clock after epoch")
                 .as_nanos()
         )
+    }
+
+    #[test]
+    fn rejects_future_schema_versions() {
+        let error = ensure_supported_migration_version(MIGRATION_VERSION + 1)
+            .expect_err("future schema must fail closed");
+        assert!(error.contains("newer than this binary supports"));
     }
 
     fn sample_event(id: u64, path: &str) -> SecurityEvent {
