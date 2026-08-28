@@ -2,6 +2,8 @@ use crate::{DnsblEntry, Severity, ThreatIndicator};
 use serde_json::Value;
 use std::net::IpAddr;
 
+const MAX_OFFICIAL_FEED_MATERIAL_ITEMS: usize = 50_000;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ParsedOfficialFeed {
     pub threats: Vec<ThreatIndicator>,
@@ -15,10 +17,26 @@ pub fn parse(
     ttl_seconds: u64,
     body: &str,
 ) -> Result<ParsedOfficialFeed, String> {
+    parse_with_limit(
+        parser,
+        source_id,
+        ttl_seconds,
+        body,
+        MAX_OFFICIAL_FEED_MATERIAL_ITEMS,
+    )
+}
+
+fn parse_with_limit(
+    parser: &str,
+    source_id: &str,
+    ttl_seconds: u64,
+    body: &str,
+    max_material_items: usize,
+) -> Result<ParsedOfficialFeed, String> {
     match parser {
-        "spamhaus_drop_json" => parse_spamhaus(source_id, ttl_seconds, body),
-        "urlhaus_recent_csv" => parse_urlhaus(source_id, ttl_seconds, body),
-        "threatfox_json" => parse_threatfox(source_id, ttl_seconds, body),
+        "spamhaus_drop_json" => parse_spamhaus(source_id, ttl_seconds, body, max_material_items),
+        "urlhaus_recent_csv" => parse_urlhaus(source_id, ttl_seconds, body, max_material_items),
+        "threatfox_json" => parse_threatfox(source_id, ttl_seconds, body, max_material_items),
         _ => Err(format!("unsupported official feed parser: {parser}")),
     }
 }
@@ -27,6 +45,7 @@ fn parse_spamhaus(
     source_id: &str,
     ttl_seconds: u64,
     body: &str,
+    max_material_items: usize,
 ) -> Result<ParsedOfficialFeed, String> {
     let mut parsed = ParsedOfficialFeed::default();
     for (line_number, line) in body.lines().enumerate() {
@@ -50,14 +69,19 @@ fn parse_spamhaus(
             .ok_or_else(|| format!("Spamhaus record {} is missing cidr", line_number + 1))?;
         let (address, prefix_len) = parse_cidr(cidr)?;
         let sblid = value.get("sblid").and_then(Value::as_str).unwrap_or("DROP");
-        parsed.dnsbl.push(DnsblEntry {
-            address,
-            prefix_len: Some(prefix_len),
-            code: "127.0.0.2".to_string(),
-            reason: format!("Spamhaus DROP {sblid}"),
-            source: source_id.to_string(),
-            ttl_seconds,
-        });
+        push_dnsbl(
+            &mut parsed,
+            source_id,
+            max_material_items,
+            DnsblEntry {
+                address,
+                prefix_len: Some(prefix_len),
+                code: "127.0.0.2".to_string(),
+                reason: format!("Spamhaus DROP {sblid}"),
+                source: source_id.to_string(),
+                ttl_seconds,
+            },
+        )?;
     }
     require_material(parsed, source_id)
 }
@@ -66,6 +90,7 @@ fn parse_urlhaus(
     source_id: &str,
     ttl_seconds: u64,
     body: &str,
+    max_material_items: usize,
 ) -> Result<ParsedOfficialFeed, String> {
     let mut parsed = ParsedOfficialFeed::default();
     let csv_body = body
@@ -115,33 +140,44 @@ fn parse_urlhaus(
         let Some(url) = record.get(url_index).filter(|url| !url.is_empty()) else {
             continue;
         };
-        parsed
-            .threats
-            .push(threat(url, "url", source_id, ttl_seconds));
+        push_threat(
+            &mut parsed,
+            source_id,
+            max_material_items,
+            threat(url, "url", source_id, ttl_seconds),
+        )?;
         let host = reqwest::Url::parse(url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
         if let Some(host) = host {
             let ip_candidate = host.trim_start_matches('[').trim_end_matches(']');
             if let Ok(address) = ip_candidate.parse::<IpAddr>() {
-                parsed.threats.push(threat(
-                    &address.to_string(),
-                    "client_ip",
+                push_threat(
+                    &mut parsed,
                     source_id,
-                    ttl_seconds,
-                ));
-                parsed.dnsbl.push(DnsblEntry {
-                    address,
-                    prefix_len: None,
-                    code: "127.0.0.2".to_string(),
-                    reason: "URLhaus malware URL host".to_string(),
-                    source: source_id.to_string(),
-                    ttl_seconds,
-                });
+                    max_material_items,
+                    threat(&address.to_string(), "client_ip", source_id, ttl_seconds),
+                )?;
+                push_dnsbl(
+                    &mut parsed,
+                    source_id,
+                    max_material_items,
+                    DnsblEntry {
+                        address,
+                        prefix_len: None,
+                        code: "127.0.0.2".to_string(),
+                        reason: "URLhaus malware URL host".to_string(),
+                        source: source_id.to_string(),
+                        ttl_seconds,
+                    },
+                )?;
             } else {
-                parsed
-                    .threats
-                    .push(threat(&host, "domain", source_id, ttl_seconds));
+                push_threat(
+                    &mut parsed,
+                    source_id,
+                    max_material_items,
+                    threat(&host, "domain", source_id, ttl_seconds),
+                )?;
             }
         }
     }
@@ -152,6 +188,7 @@ fn parse_threatfox(
     source_id: &str,
     ttl_seconds: u64,
     body: &str,
+    max_material_items: usize,
 ) -> Result<ParsedOfficialFeed, String> {
     let value: Value =
         serde_json::from_str(body).map_err(|error| format!("invalid ThreatFox JSON: {error}"))?;
@@ -175,30 +212,74 @@ fn parse_threatfox(
         };
         let ioc_type = record.get("ioc_type").and_then(Value::as_str).unwrap_or("");
         if ioc_type == "domain" {
-            parsed
-                .threats
-                .push(threat(ioc, "domain", source_id, ttl_seconds));
+            push_threat(
+                &mut parsed,
+                source_id,
+                max_material_items,
+                threat(ioc, "domain", source_id, ttl_seconds),
+            )?;
         } else if ioc_type.starts_with("ip") {
             let Some(address) = threatfox_ip(ioc) else {
                 continue;
             };
-            parsed.threats.push(threat(
-                &address.to_string(),
-                "client_ip",
+            push_threat(
+                &mut parsed,
                 source_id,
-                ttl_seconds,
-            ));
-            parsed.dnsbl.push(DnsblEntry {
-                address,
-                prefix_len: None,
-                code: "127.0.0.2".to_string(),
-                reason: format!("ThreatFox {ioc_type}: {ioc}"),
-                source: source_id.to_string(),
-                ttl_seconds,
-            });
+                max_material_items,
+                threat(&address.to_string(), "client_ip", source_id, ttl_seconds),
+            )?;
+            push_dnsbl(
+                &mut parsed,
+                source_id,
+                max_material_items,
+                DnsblEntry {
+                    address,
+                    prefix_len: None,
+                    code: "127.0.0.2".to_string(),
+                    reason: format!("ThreatFox {ioc_type}: {ioc}"),
+                    source: source_id.to_string(),
+                    ttl_seconds,
+                },
+            )?;
         }
     }
     require_material(parsed, source_id)
+}
+
+fn push_threat(
+    parsed: &mut ParsedOfficialFeed,
+    source_id: &str,
+    max_material_items: usize,
+    indicator: ThreatIndicator,
+) -> Result<(), String> {
+    ensure_material_capacity(parsed, source_id, max_material_items)?;
+    parsed.threats.push(indicator);
+    Ok(())
+}
+
+fn push_dnsbl(
+    parsed: &mut ParsedOfficialFeed,
+    source_id: &str,
+    max_material_items: usize,
+    entry: DnsblEntry,
+) -> Result<(), String> {
+    ensure_material_capacity(parsed, source_id, max_material_items)?;
+    parsed.dnsbl.push(entry);
+    Ok(())
+}
+
+fn ensure_material_capacity(
+    parsed: &ParsedOfficialFeed,
+    source_id: &str,
+    max_material_items: usize,
+) -> Result<(), String> {
+    if parsed.threats.len().saturating_add(parsed.dnsbl.len()) >= max_material_items {
+        Err(format!(
+            "official feed {source_id} exceeded material limit of {max_material_items} items"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn threat(value: &str, indicator_type: &str, source: &str, ttl_seconds: u64) -> ThreatIndicator {
@@ -345,5 +426,18 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn official_feed_parse_fails_closed_when_material_limit_is_exceeded() {
+        let err = parse_with_limit(
+            "urlhaus_recent_csv",
+            "urlhaus-online",
+            7200,
+            "# attribution\n# id,dateadded,url,url_status,reporter\n1,2026-01-01,https://[2001:db8::7]/a,online,analyst\n2,2026-01-01,https://evil.example/a,online,analyst\n",
+            3,
+        )
+        .unwrap_err();
+        assert!(err.contains("exceeded material limit"));
     }
 }
