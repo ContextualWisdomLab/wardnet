@@ -437,6 +437,7 @@ fn ssl_mode(raw: &str) -> Result<SslMode, String> {
     let Some((_, query)) = lower.rsplit_once('?') else {
         return Ok(SslMode::Disable);
     };
+    let mut parsed = None;
     for part in query.split('&').flat_map(|chunk| chunk.split('#')) {
         let Some((key, value)) = part.split_once('=') else {
             continue;
@@ -444,15 +445,21 @@ fn ssl_mode(raw: &str) -> Result<SslMode, String> {
         if key != "sslmode" {
             continue;
         }
-        return match value {
+        let mode = match value {
             "disable" => Ok(SslMode::Disable),
             "require" | "verify-ca" | "verify-full" => Ok(SslMode::Require),
             other => Err(format!(
                 "unsupported sslmode {other}; use disable or require/verify-full"
             )),
-        };
+        }?;
+        if parsed.replace(mode).is_some() {
+            return Err(
+                "duplicate sslmode parameters are not allowed in CONTROL_PLANE_DATABASE_URL"
+                    .to_string(),
+            );
+        }
     }
-    Ok(SslMode::Disable)
+    Ok(parsed.unwrap_or(SslMode::Disable))
 }
 
 /// tokio-postgres 0.7 only parses `disable` / `prefer` / `require`. Map the
@@ -2504,6 +2511,11 @@ mod tests {
             Some("postgres://wardnet@db/wardnet?sslmode=verify-full"),
         )
         .unwrap();
+        require_postgres_for_bind(
+            "0.0.0.0:8080",
+            Some("postgres://wardnet@db/wardnet?sslmode=require&sslmode=disable"),
+        )
+        .unwrap_err();
         require_postgres_for_bind("127.0.0.1:8080", None).unwrap();
         require_postgres_for_bind("[::1]:8080", None).unwrap();
         require_postgres_for_bind(
@@ -2519,6 +2531,8 @@ mod tests {
         parse_database_url("mysql://x").unwrap_err();
         parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=prefer").unwrap_err();
         parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=allow").unwrap_err();
+        parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=require&sslmode=disable")
+            .unwrap_err();
         parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=require").unwrap();
         parse_database_url("postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full").unwrap();
         parse_database_url("postgres://wardnet@127.0.0.1/wardnet").unwrap();
@@ -2534,6 +2548,19 @@ mod tests {
         assert_eq!(
             ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-full").unwrap(),
             SslMode::Require
+        );
+        assert_eq!(
+            ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=verify-ca").unwrap(),
+            SslMode::Require
+        );
+        assert_eq!(
+            ssl_mode("postgres://wardnet@127.0.0.1/wardnet?connect_timeout=5&sslmode=disable")
+                .unwrap(),
+            SslMode::Disable
+        );
+        assert!(
+            ssl_mode("postgres://wardnet@127.0.0.1/wardnet?sslmode=require&sslmode=disable")
+                .is_err()
         );
         assert_eq!(
             ssl_mode("postgres://wardnet:p?ss@127.0.0.1/wardnet?sslmode=require").unwrap(),
