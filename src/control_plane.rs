@@ -16,7 +16,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
+use tokio_postgres::{Client, GenericClient, NoTls, Row, Transaction};
 use tokio_postgres_rustls::MakeRustlsConnect;
 use waf_ids_core::{
     AppData, AuditLogEntry, CommercialProfile, DnsblEntry, EnforcementMode, LicenseStatus,
@@ -1161,19 +1161,26 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
             .map_err(|error| format!("control plane load rollback failed: {error}"))?;
         return Ok(None);
     };
-
-    let commercial = load_commercial(&tx, tenant_id).await?;
-    let routes = load_routes(&tx, tenant_id).await?;
-    let threats = load_threats(&tx, tenant_id).await?;
-    let dnsbl = load_dnsbl(&tx, tenant_id).await?;
-    let events = load_events(&tx, tenant_id).await?;
-    let audit_logs = load_audit(&tx, tenant_id).await?;
-    let threat_feeds = load_feeds(&tx, tenant_id).await?;
+    let snapshot = load_snapshot_rows(&tx, tenant_id, &account).await?;
     tx.commit()
         .await
         .map_err(|error| format!("control plane load commit failed: {error}"))?;
+    Ok(Some(snapshot))
+}
 
-    Ok(Some(AppData {
+async fn load_snapshot_rows<C: GenericClient>(
+    client: &C,
+    tenant_id: &str,
+    account: &Row,
+) -> Result<AppData, String> {
+    let commercial = load_commercial(client, tenant_id).await?;
+    let routes = load_routes(client, tenant_id).await?;
+    let threats = load_threats(client, tenant_id).await?;
+    let dnsbl = load_dnsbl(client, tenant_id).await?;
+    let events = load_events(client, tenant_id).await?;
+    let audit_logs = load_audit(client, tenant_id).await?;
+    let threat_feeds = load_feeds(client, tenant_id).await?;
+    Ok(AppData {
         routes,
         threats,
         dnsbl,
@@ -1184,7 +1191,7 @@ async fn load_snapshot(client: &mut Client, tenant_id: &str) -> Result<Option<Ap
         commercial,
         threat_feeds,
         snapshot_version: account.get::<_, i64>(2) as u64,
-    }))
+    })
 }
 
 async fn save_snapshot(
@@ -2161,7 +2168,19 @@ async fn list_outbox(
     )
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
-    let rows = tx
+    let messages = list_outbox_rows(&tx, tenant_id, limit).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("control plane list commit failed: {error}"))?;
+    Ok(messages)
+}
+
+async fn list_outbox_rows<C: GenericClient>(
+    client: &C,
+    tenant_id: &str,
+    limit: i64,
+) -> Result<Vec<OutboxMessage>, String> {
+    let rows = client
         .query(
             "SELECT message_id, aggregate_id, aggregate_version, event_type, schema_version,
                     created_unix, payload_json, payload_hash, idempotency_key, message_status,
@@ -2180,14 +2199,10 @@ async fn list_outbox(
         )
         .await
         .map_err(|error| format!("control plane list outbox failed: {error}"))?;
-    let messages = rows
+    Ok(rows
         .iter()
         .map(|row| row_to_outbox(row, tenant_id))
-        .collect();
-    tx.commit()
-        .await
-        .map_err(|error| format!("control plane list commit failed: {error}"))?;
-    Ok(messages)
+        .collect())
 }
 
 async fn replay_dead_letter(
@@ -2235,12 +2250,39 @@ async fn replay_dead_letter(
 }
 
 async fn export_backup(client: &mut Client, tenant_id: &str) -> Result<ControlPlaneBackup, String> {
-    let snapshot = load_snapshot(client, tenant_id)
-        .await?
-        .ok_or_else(|| format!("tenant {tenant_id} has no snapshot to back up"))?;
-    let outbox = list_outbox(client, tenant_id, i64::MAX).await?;
-    let receipts = list_receipts(client, tenant_id).await?;
-    ControlPlaneBackup {
+    let tx = client
+        .transaction()
+        .await
+        .map_err(|error| format!("control plane backup transaction failed: {error}"))?;
+    tx.execute(
+        "SELECT set_config('wardnet.tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        &[],
+    )
+    .await
+    .map_err(|error| format!("control plane backup isolation failed: {error}"))?;
+    let account = tx
+        .query_opt(
+            "SELECT event_sequence, audit_sequence, snapshot_version FROM tenant_account WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|error| format!("control plane load tenant_account failed: {error}"))?;
+    let Some(account) = account else {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("control plane backup rollback failed: {error}"))?;
+        return Err(format!("tenant {tenant_id} has no snapshot to back up"));
+    };
+    let snapshot = load_snapshot_rows(&tx, tenant_id, &account).await?;
+    let outbox = list_outbox_rows(&tx, tenant_id, i64::MAX).await?;
+    let receipts = list_receipts_rows(&tx, tenant_id).await?;
+    let backup = ControlPlaneBackup {
         schema_version: MIGRATION_VERSION,
         tenant_id: tenant_id.to_string(),
         created_unix: unix_now_i64(),
@@ -2249,24 +2291,18 @@ async fn export_backup(client: &mut Client, tenant_id: &str) -> Result<ControlPl
         receipts,
         payload_hash: String::new(),
     }
-    .seal()
+    .seal()?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("control plane backup commit failed: {error}"))?;
+    Ok(backup)
 }
 
-async fn list_receipts(
-    client: &mut Client,
+async fn list_receipts_rows<C: GenericClient>(
+    client: &C,
     tenant_id: &str,
 ) -> Result<Vec<OutboxReceiptRow>, String> {
-    let tx = client
-        .transaction()
-        .await
-        .map_err(|error| format!("control plane receipt list transaction failed: {error}"))?;
-    tx.execute(
-        "SELECT set_config('wardnet.tenant_id', $1, true)",
-        &[&tenant_id],
-    )
-    .await
-    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
-    let rows = tx
+    let rows = client
         .query(
             "SELECT idempotency_key, message_id, processed_unix, receipt_evidence
              FROM outbox_receipt WHERE tenant_id = $1
@@ -2275,7 +2311,7 @@ async fn list_receipts(
         )
         .await
         .map_err(|error| format!("control plane list outbox_receipt failed: {error}"))?;
-    let receipts = rows
+    Ok(rows
         .iter()
         .map(|row| OutboxReceiptRow {
             tenant_id: tenant_id.to_string(),
@@ -2284,11 +2320,7 @@ async fn list_receipts(
             processed_unix: row.get(2),
             receipt_evidence: row.get(3),
         })
-        .collect();
-    tx.commit()
-        .await
-        .map_err(|error| format!("control plane receipt list commit failed: {error}"))?;
-    Ok(receipts)
+        .collect())
 }
 
 async fn restore_backup(
