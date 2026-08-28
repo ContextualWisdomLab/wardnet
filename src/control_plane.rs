@@ -331,14 +331,6 @@ BEGIN
       WITH CHECK (tenant_id = current_setting('wardnet.tenant_id', true));
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardnet_runtime') THEN
       GRANT SELECT, INSERT, UPDATE, DELETE ON {parent} TO wardnet_runtime;
-      i := 0;
-      WHILE i < {modulus} LOOP
-        EXECUTE format(
-          'GRANT SELECT, INSERT, UPDATE, DELETE ON {parent}_p%s TO wardnet_runtime',
-          i
-        );
-        i := i + 1;
-      END LOOP;
     END IF;
   ELSIF kind = 'p' THEN
     i := 0;
@@ -358,21 +350,6 @@ BEGIN
     END LOOP;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardnet_runtime') THEN
       GRANT SELECT, INSERT, UPDATE, DELETE ON {parent} TO wardnet_runtime;
-      i := 0;
-      WHILE i < {modulus} LOOP
-        IF EXISTS (
-          SELECT 1 FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = current_schema()
-            AND c.relname = format('{parent}_p%s', i)
-        ) THEN
-          EXECUTE format(
-            'GRANT SELECT, INSERT, UPDATE, DELETE ON {parent}_p%s TO wardnet_runtime',
-            i
-          );
-        END IF;
-        i := i + 1;
-      END LOOP;
     END IF;
   END IF;
 END
@@ -3344,6 +3321,18 @@ mod tests {
         let sql = hash_partition_sql_for("security_event").expect("sql");
         assert!(sql.contains("PARTITION BY HASH (tenant_id)"));
         assert!(sql.contains(&format!("MODULUS {EVENT_PARTITION_MODULUS}")));
+    }
+
+    #[test]
+    fn hash_partition_runtime_grants_stay_on_parent_only() {
+        let sql = hash_partition_sql_for("security_event").expect("sql");
+        assert!(sql.contains(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON security_event TO wardnet_runtime;"
+        ));
+        assert!(
+            !sql.contains("GRANT SELECT, INSERT, UPDATE, DELETE ON security_event_p"),
+            "runtime role must not bypass parent RLS through direct child grants"
+        );
     }
 
     async fn owner_client(url: &str) -> tokio_postgres::Client {
