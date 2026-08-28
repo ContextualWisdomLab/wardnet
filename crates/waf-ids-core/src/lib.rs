@@ -22,6 +22,8 @@ pub struct AppData {
     pub commercial: CommercialProfile,
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
+    #[serde(default = "official_threat_feed_registry")]
+    pub official_threat_feeds: Vec<OfficialThreatFeed>,
 }
 
 impl AppData {
@@ -56,8 +58,115 @@ impl AppData {
             next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
+            official_threat_feeds: official_threat_feed_registry(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OfficialThreatFeed {
+    pub source_id: String,
+    pub official_url: String,
+    pub parser: String,
+    pub indicator_types: Vec<String>,
+    pub attribution: String,
+    pub license_url: String,
+    pub refresh_interval_seconds: u64,
+    pub ttl_seconds: u64,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub last_attempt_unix: Option<u64>,
+    #[serde(default)]
+    pub last_success_unix: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub source_notice: Option<String>,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
+}
+
+pub fn official_threat_feed_registry() -> Vec<OfficialThreatFeed> {
+    [
+        (
+            "spamhaus-drop-v4",
+            "https://www.spamhaus.org/drop/drop_v4.json",
+            "spamhaus_drop_json",
+            &["ipv4_cidr"][..],
+            "The Spamhaus Project",
+            "https://www.spamhaus.org/blocklists/drop-fair-use-policy/",
+            86_400,
+            172_800,
+        ),
+        (
+            "spamhaus-drop-v6",
+            "https://www.spamhaus.org/drop/drop_v6.json",
+            "spamhaus_drop_json",
+            &["ipv6_cidr"][..],
+            "The Spamhaus Project",
+            "https://www.spamhaus.org/blocklists/drop-fair-use-policy/",
+            86_400,
+            172_800,
+        ),
+        (
+            "urlhaus-online",
+            "https://urlhaus-api.abuse.ch/v2/files/exports/{AUTH_KEY}/recent.csv",
+            "urlhaus_recent_csv",
+            &["url", "domain", "client_ip"][..],
+            "URLhaus by abuse.ch",
+            "https://abuse.ch/terms-of-use/",
+            3_600,
+            7_200,
+        ),
+        (
+            "threatfox-recent",
+            "https://threatfox-api.abuse.ch/api/v1/",
+            "threatfox_json",
+            &["domain", "client_ip"][..],
+            "ThreatFox by abuse.ch",
+            "https://abuse.ch/terms-of-use/",
+            3_600,
+            7_200,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(
+            source_id,
+            official_url,
+            parser,
+            indicator_types,
+            attribution,
+            license_url,
+            refresh_interval_seconds,
+            ttl_seconds,
+        )| {
+            OfficialThreatFeed {
+                source_id: source_id.to_string(),
+                official_url: official_url.to_string(),
+                parser: parser.to_string(),
+                indicator_types: indicator_types
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+                attribution: attribution.to_string(),
+                license_url: license_url.to_string(),
+                refresh_interval_seconds,
+                ttl_seconds,
+                etag: None,
+                last_modified: None,
+                last_attempt_unix: None,
+                last_success_unix: None,
+                last_error: None,
+                source_notice: None,
+                content_sha256: None,
+            }
+        },
+    )
+    .collect()
 }
 
 fn initial_audit_log_id() -> u64 {
@@ -510,10 +619,11 @@ pub fn upsert_threat(
 }
 
 pub fn upsert_dnsbl(entries: &mut Vec<DnsblEntry>, entry: DnsblEntry) -> DnsblEntry {
-    if let Some(existing) = entries
-        .iter_mut()
-        .find(|item| item.address == entry.address)
-    {
+    if let Some(existing) = entries.iter_mut().find(|item| {
+        item.address == entry.address
+            && item.prefix_len == entry.prefix_len
+            && item.source == entry.source
+    }) {
         *existing = entry.clone();
     } else {
         entries.push(entry.clone());
@@ -1335,6 +1445,12 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
+        if !matches!(
+            (entry.address, entry.prefix_len),
+            (IpAddr::V4(_), None | Some(32)) | (IpAddr::V6(_), None | Some(128))
+        ) {
+            continue;
+        }
         if let IpAddr::V4(address) = entry.address {
             // The response code is emitted as a bare, unquoted A-record token, so
             // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers
@@ -1410,6 +1526,21 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_feed_metadata_names_the_emitted_indicator_types() {
+        let feeds = official_threat_feed_registry();
+        let urlhaus = feeds
+            .iter()
+            .find(|feed| feed.source_id == "urlhaus-online")
+            .unwrap();
+        assert_eq!(urlhaus.indicator_types, ["url", "domain", "client_ip"]);
+        let threatfox = feeds
+            .iter()
+            .find(|feed| feed.source_id == "threatfox-recent")
+            .unwrap();
+        assert_eq!(threatfox.indicator_types, ["domain", "client_ip"]);
+    }
 
     #[test]
     fn score_request_matches_client_ip_threat_indicators() {
@@ -1532,6 +1663,33 @@ mod tests {
         );
         assert!(zone.contains("10.2.0.192 IN TXT \"back\\\\slash and \\\"quote\\\" source=unit\""));
         assert_txt_quotes_escaped(&zone);
+    }
+
+    #[test]
+    fn export_dnsbl_zone_keeps_exact_ipv4_hosts_and_omits_subnets() {
+        let entries = [
+            DnsblEntry {
+                address: "198.51.100.7".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "exact host".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: Some(32),
+            },
+            DnsblEntry {
+                address: "198.51.100.0".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "subnet".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: Some(24),
+            },
+        ];
+
+        let zone = export_dnsbl_zone("dnsbl.example", &entries);
+
+        assert!(zone.contains("7.100.51.198 IN A 127.0.0.2"));
+        assert!(!zone.contains("0.100.51.198"));
     }
 
     #[test]
