@@ -451,6 +451,13 @@ impl AppState {
         mutate: impl FnOnce(&mut AppData) -> T,
     ) -> Result<T, String> {
         let _guard = self.persist_lock.lock().await;
+        self.mutate_and_persist_locked(mutate).await
+    }
+
+    async fn mutate_and_persist_locked<T>(
+        &self,
+        mutate: impl FnOnce(&mut AppData) -> T,
+    ) -> Result<T, String> {
         let (result, snapshot, previous) = {
             let mut data = self.inner.write().await;
             let previous = data.clone();
@@ -2225,6 +2232,7 @@ async fn restore_backup(
     if let Err(message) = backup.verify() {
         return error(StatusCode::BAD_REQUEST, message);
     }
+    let _guard = state.persist_lock.lock().await;
     if let Err(message) = plane.restore_logical_backup(&backup).await {
         return error(StatusCode::BAD_REQUEST, message);
     }
@@ -2242,7 +2250,7 @@ async fn restore_backup(
     }
     let actor = audit_actor(&state, &headers);
     match state
-        .mutate_and_persist(|data| {
+        .mutate_and_persist_locked(|data| {
             record_successful_audit_log(
                 data,
                 actor,
@@ -3916,7 +3924,34 @@ async fn record_event(
     let action = action.to_string();
     let path = path.to_string();
     let event_limit = state.event_limit;
-    let durable = state.control_plane.is_some() || state.state_path.is_some();
+    let template = SecurityEvent {
+        id: 0,
+        timestamp_unix: now_unix(),
+        client_ip,
+        route_id,
+        action,
+        reason,
+        score,
+        path,
+    };
+    if let Some(plane) = &state.control_plane {
+        let _guard = state.persist_lock.lock().await;
+        match plane.append_security_event(&template, event_limit).await {
+            Ok((event, snapshot_version)) => {
+                let mut data = state.inner.write().await;
+                data.next_event_id = event.id.saturating_add(1);
+                data.events.push(event);
+                enforce_event_limit(&mut data, event_limit);
+                data.snapshot_version = snapshot_version;
+            }
+            Err(error) => {
+                eprintln!("failed to persist security event: {error}");
+            }
+        }
+        return;
+    }
+
+    let durable = state.state_path.is_some();
     let _guard = if durable {
         Some(state.persist_lock.lock().await)
     } else {
@@ -3927,41 +3962,22 @@ async fn record_event(
         let previous = durable.then(|| data.clone());
         let id = data.next_event_id;
         data.next_event_id += 1;
-        let event = SecurityEvent {
-            id,
-            timestamp_unix: now_unix(),
-            client_ip,
-            route_id,
-            action,
-            reason,
-            score,
-            path,
-        };
+        let mut event = template;
+        event.id = id;
         data.events.push(event.clone());
         enforce_event_limit(&mut data, event_limit);
         (event, previous)
     };
-    let persist = if let Some(plane) = &state.control_plane {
-        plane
-            .append_security_event(&event, event_limit)
-            .await
-            .map(|version| (true, version))
+    // File/memory has no leased worker; emit the SIEM line on the request path.
+    println!("{}", security_event_log_line(&event));
+    let persist = if state.state_path.is_some() {
+        let snapshot = state.inner.read().await.clone();
+        state.persist_snapshot(&snapshot).await
     } else {
-        // File/memory has no leased worker; emit the SIEM line on the request path.
-        println!("{}", security_event_log_line(&event));
-        if state.state_path.is_some() {
-            let snapshot = state.inner.read().await.clone();
-            state.persist_snapshot(&snapshot).await.map(|_| (false, 0))
-        } else {
-            Ok((false, 0))
-        }
+        Ok(())
     };
     match persist {
-        Ok((true, snapshot_version)) => {
-            let mut data = state.inner.write().await;
-            data.snapshot_version = snapshot_version;
-        }
-        Ok((false, _)) => {}
+        Ok(()) => {}
         Err(error) => {
             let mut data = state.inner.write().await;
             *data = previous.expect("durable event writes retain rollback state");

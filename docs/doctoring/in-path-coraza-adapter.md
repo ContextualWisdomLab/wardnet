@@ -18,14 +18,14 @@ Coraza. (n.d.). *Coraza Web Application Firewall*.
 https://coraza.io/docs/
 
 - **Design impact:** The sidecar contract is Coraza audit JSON (interrupted
-  transaction + `messages[]`). A 403 without audit JSON is still treated as an
+  transaction + `messages[]`). A 403 or 406 without audit JSON is still treated as an
   interruption. Transport failures do not leak the sidecar URL into SOC
   events. Review-hardening this pass: the evaluate request now carries a
   bounded allowlist of client headers (`host`, `user-agent`, `accept`,
   `content-type`, `referer`, `origin`, `x-requested-with`, `x-forwarded-for`,
   `x-real-ip` — never bearer credentials such as `Authorization` or `Cookie`,
   capped at 32 headers / 8 KiB); responses are streamed with a 1 MiB cap; any
-  empty or malformed 2xx bodies and every non-success status other than 403
+  empty or malformed 2xx bodies and every non-success status other than 403 or 406
   are `Unavailable`. Live blocking requires
   the engine's explicit interruption signal; non-interrupting CRS messages
   remain `engine_hit` evidence. Fail-open outages are recorded.

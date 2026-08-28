@@ -294,6 +294,7 @@ BEGIN
 
   IF kind = 'r' THEN
     ALTER TABLE {parent} RENAME TO {unpartitioned};
+    ALTER TABLE {unpartitioned} DISABLE ROW LEVEL SECURITY;
     DROP INDEX IF EXISTS {parent}_tenant_event;
     CREATE TABLE {parent} (
       tenant_id TEXT NOT NULL REFERENCES tenant_account (tenant_id),
@@ -757,7 +758,7 @@ impl PostgresPlane {
         &self,
         event: &SecurityEvent,
         event_limit: usize,
-    ) -> Result<u64, String> {
+    ) -> Result<(SecurityEvent, u64), String> {
         let mut client = self.client.lock().await;
         append_security_event(&mut client, &self.tenant_id, event, event_limit).await
     }
@@ -1674,7 +1675,7 @@ async fn append_security_event(
     tenant_id: &str,
     event: &SecurityEvent,
     event_limit: usize,
-) -> Result<u64, String> {
+) -> Result<(SecurityEvent, u64), String> {
     let tx = client
         .transaction()
         .await
@@ -1686,42 +1687,49 @@ async fn append_security_event(
     .await
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
 
-    let next_event_id = event.id.saturating_add(1) as i64;
-    let snapshot_version: i64 = tx
+    let account = tx
         .query_one(
             "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
-         VALUES ($1, $2, 1, 1)
+         VALUES ($1, 2, 1, 1)
          ON CONFLICT (tenant_id) DO UPDATE SET
-           event_sequence = GREATEST(tenant_account.event_sequence, EXCLUDED.event_sequence),
+           event_sequence = tenant_account.event_sequence + 1,
            snapshot_version = tenant_account.snapshot_version + 1
-         RETURNING snapshot_version",
-            &[&tenant_id, &next_event_id],
+         RETURNING event_sequence, snapshot_version",
+            &[&tenant_id],
         )
         .await
-        .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?
-        .get(0);
+        .map_err(|error| format!("control plane reserve security_event id failed: {error}"))?;
+    let next_event_id: i64 = account.get(0);
+    let snapshot_version: i64 = account.get(1);
+    let persisted_event_id = next_event_id.saturating_sub(1) as u64;
+    let mut persisted_event = event.clone();
+    persisted_event.id = persisted_event_id;
 
-    let client_address = event.client_ip.map(|ip| ip.to_string());
-    tx.execute(
-        "INSERT INTO security_event (
+    let client_address = persisted_event.client_ip.map(|ip| ip.to_string());
+    let inserted = tx
+        .execute(
+            "INSERT INTO security_event (
             tenant_id, event_id, timestamp_unix, client_address, route_id,
             action_name, event_reason, event_score, request_path
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (tenant_id, event_id) DO NOTHING",
-        &[
-            &tenant_id,
-            &(event.id as i64),
-            &(event.timestamp_unix as i64),
-            &client_address,
-            &event.route_id,
-            &event.action,
-            &event.reason,
-            &i32::from(event.score),
-            &event.path,
-        ],
-    )
-    .await
-    .map_err(|error| format!("control plane insert security_event failed: {error}"))?;
+            &[
+                &tenant_id,
+                &(persisted_event.id as i64),
+                &(persisted_event.timestamp_unix as i64),
+                &client_address,
+                &persisted_event.route_id,
+                &persisted_event.action,
+                &persisted_event.reason,
+                &i32::from(persisted_event.score),
+                &persisted_event.path,
+            ],
+        )
+        .await
+        .map_err(|error| format!("control plane insert security_event failed: {error}"))?;
+    if inserted == 0 {
+        return Err("control plane reserved duplicate security_event id".to_string());
+    }
 
     let keep_from = next_event_id.saturating_sub(event_limit.max(1) as i64);
     tx.execute(
@@ -1731,18 +1739,19 @@ async fn append_security_event(
     .await
     .map_err(|error| format!("control plane event retention failed: {error}"))?;
 
-    let payload = serde_json::to_string(event).expect("SecurityEvent is JSON-serializable");
+    let payload =
+        serde_json::to_string(&persisted_event).expect("SecurityEvent is JSON-serializable");
     let hash = outbox::payload_hash(&payload);
-    let (message_id, idempotency_key) = outbox::security_event_ids(tenant_id, event.id);
+    let (message_id, idempotency_key) = outbox::security_event_ids(tenant_id, persisted_event.id);
     insert_outbox(
         &tx,
         tenant_id,
         &OutboxInsert {
             message_id,
-            aggregate_id: event.id.to_string(),
-            aggregate_version: event.id as i64,
+            aggregate_id: persisted_event.id.to_string(),
+            aggregate_version: persisted_event.id as i64,
             event_type: EVENT_SECURITY_RECORDED,
-            created_unix: event.timestamp_unix as i64,
+            created_unix: persisted_event.timestamp_unix as i64,
             payload_json: payload,
             payload_hash: hash,
             idempotency_key,
@@ -1754,7 +1763,7 @@ async fn append_security_event(
     tx.commit()
         .await
         .map_err(|error| format!("control plane event commit failed: {error}"))?;
-    Ok(snapshot_version as u64)
+    Ok((persisted_event, snapshot_version as u64))
 }
 
 struct OutboxInsert {
@@ -3407,7 +3416,12 @@ mod tests {
                    event_score INTEGER NOT NULL,
                    request_path TEXT NOT NULL,
                    PRIMARY KEY (tenant_id, event_id)
-                 );",
+                 );
+                 ALTER TABLE event_hash_probe ENABLE ROW LEVEL SECURITY;
+                 ALTER TABLE event_hash_probe FORCE ROW LEVEL SECURITY;
+                 CREATE POLICY tenant_isolation ON event_hash_probe
+                   USING (tenant_id = current_setting('wardnet.tenant_id', true))
+                   WITH CHECK (tenant_id = current_setting('wardnet.tenant_id', true));",
             )
             .await
             .expect("unpartitioned probe");
@@ -3444,6 +3458,13 @@ mod tests {
             .expect("children")
             .get(0);
         assert_eq!(children, i64::from(EVENT_PARTITION_MODULUS));
+        client
+            .execute(
+                "SELECT set_config('wardnet.tenant_id', $1, true)",
+                &[&tenant],
+            )
+            .await
+            .expect("tenant scope");
         let row = client
             .query_one(
                 "SELECT client_address, request_path, tableoid::regclass::text
@@ -3520,12 +3541,12 @@ mod tests {
             .expect("stale load")
             .expect("stale tenant");
         let event = sample_event(current.next_event_id, "/event-occ");
-        let appended_version = plane_a
+        let (persisted, appended_version) = plane_a
             .append_security_event(&event, 1_000)
             .await
             .expect("append event");
-        current.next_event_id = current.next_event_id.saturating_add(1);
-        current.events.push(event);
+        current.next_event_id = persisted.id.saturating_add(1);
+        current.events.push(persisted);
         current.snapshot_version = appended_version;
 
         let reloaded = plane_a.load().await.expect("reload").expect("tenant");
@@ -3547,6 +3568,39 @@ mod tests {
         let winner = plane_a.load().await.expect("winner").expect("tenant");
         assert_eq!(winner.routes[0].path_prefix, "/after-event");
         assert!(winner.events.iter().any(|item| item.path == "/event-occ"));
+    }
+
+    #[tokio::test]
+    async fn postgres_event_append_allocates_unique_ids_across_replicas() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("event-ids");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane a");
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane b");
+        plane_a.save(&AppData::seeded()).await.expect("seed");
+
+        let event_a = sample_event(1, "/replica-a");
+        let event_b = sample_event(1, "/replica-b");
+        let (persisted_a, persisted_b) = tokio::join!(
+            plane_a.append_security_event(&event_a, 1_000),
+            plane_b.append_security_event(&event_b, 1_000)
+        );
+        let persisted_a = persisted_a.expect("append a");
+        let persisted_b = persisted_b.expect("append b");
+
+        assert_ne!(persisted_a.0.id, persisted_b.0.id);
+        let reloaded = plane_a.load().await.expect("reload").expect("tenant");
+        assert_eq!(reloaded.next_event_id, 3);
+        assert!(
+            reloaded.events.iter().any(|item| item.path == "/replica-a")
+                && reloaded.events.iter().any(|item| item.path == "/replica-b"),
+            "both replica events must survive with distinct ids"
+        );
     }
 
     #[tokio::test]
