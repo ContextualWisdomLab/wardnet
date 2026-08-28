@@ -223,6 +223,16 @@ pub enum ReasonCode {
     ExecutableNotAllowed,
     /// The request omitted an executable.
     MissingExecutable,
+    /// The request omitted a required remote source URI.
+    MissingSourceUri,
+    /// The request omitted a required source content digest.
+    MissingSourceDigest,
+    /// The request used an insecure or malformed source URI.
+    InvalidSourceUri,
+    /// The command path is forbidden even if otherwise allowlisted.
+    ForbiddenCommand,
+    /// The package manager invocation omitted a mandatory hardening flag.
+    MissingSafetyFlag,
 }
 
 impl ReasonCode {
@@ -233,6 +243,11 @@ impl ReasonCode {
             Self::ManifestNotApproved => "manifest_not_approved",
             Self::ExecutableNotAllowed => "executable_not_allowed",
             Self::MissingExecutable => "missing_executable",
+            Self::MissingSourceUri => "missing_source_uri",
+            Self::MissingSourceDigest => "missing_source_digest",
+            Self::InvalidSourceUri => "invalid_source_uri",
+            Self::ForbiddenCommand => "forbidden_command",
+            Self::MissingSafetyFlag => "missing_safety_flag",
         }
     }
 }
