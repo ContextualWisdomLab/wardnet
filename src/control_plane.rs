@@ -762,7 +762,7 @@ impl PostgresPlane {
         &self,
         event: &SecurityEvent,
         event_limit: usize,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let mut client = self.client.lock().await;
         append_security_event(&mut client, &self.tenant_id, event, event_limit).await
     }
@@ -1661,7 +1661,7 @@ async fn append_security_event(
     tenant_id: &str,
     event: &SecurityEvent,
     event_limit: usize,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let tx = client
         .transaction()
         .await
@@ -1674,15 +1674,19 @@ async fn append_security_event(
     .map_err(|error| format!("control plane tenant context failed: {error}"))?;
 
     let next_event_id = event.id.saturating_add(1) as i64;
-    tx.execute(
-        "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence)
-         VALUES ($1, $2, 1)
+    let snapshot_version: i64 = tx
+        .query_one(
+            "INSERT INTO tenant_account (tenant_id, event_sequence, audit_sequence, snapshot_version)
+         VALUES ($1, $2, 1, 1)
          ON CONFLICT (tenant_id) DO UPDATE SET
-           event_sequence = GREATEST(tenant_account.event_sequence, EXCLUDED.event_sequence)",
-        &[&tenant_id, &next_event_id],
-    )
-    .await
-    .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?;
+           event_sequence = GREATEST(tenant_account.event_sequence, EXCLUDED.event_sequence),
+           snapshot_version = tenant_account.snapshot_version + 1
+         RETURNING snapshot_version",
+            &[&tenant_id, &next_event_id],
+        )
+        .await
+        .map_err(|error| format!("control plane upsert tenant_account failed: {error}"))?
+        .get(0);
 
     let client_address = event.client_ip.map(|ip| ip.to_string());
     tx.execute(
@@ -1737,7 +1741,7 @@ async fn append_security_event(
     tx.commit()
         .await
         .map_err(|error| format!("control plane event commit failed: {error}"))?;
-    Ok(())
+    Ok(snapshot_version as u64)
 }
 
 struct OutboxInsert {
@@ -3417,6 +3421,55 @@ mod tests {
         let winner = plane_a.load().await.expect("reload").expect("tenant");
         assert_eq!(winner.routes[0].path_prefix, "/occ-a");
         assert!(winner.snapshot_version > loaded_a.snapshot_version);
+    }
+
+    #[tokio::test]
+    async fn postgres_event_append_advances_snapshot_version_and_rejects_stale_save() {
+        let Some(url) = test_database_url() else {
+            return;
+        };
+        let tenant = unique_tenant("event-occ");
+        let plane_a = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane a");
+        let plane_b = PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane b");
+        plane_a.save(&AppData::seeded()).await.expect("first save");
+        let mut current = plane_a.load().await.expect("load").expect("tenant");
+        let stale = plane_b
+            .load()
+            .await
+            .expect("stale load")
+            .expect("stale tenant");
+        let event = sample_event(current.next_event_id, "/event-occ");
+        let appended_version = plane_a
+            .append_security_event(&event, 1_000)
+            .await
+            .expect("append event");
+        current.next_event_id = current.next_event_id.saturating_add(1);
+        current.events.push(event);
+        current.snapshot_version = appended_version;
+
+        let reloaded = plane_a.load().await.expect("reload").expect("tenant");
+        assert_eq!(reloaded.snapshot_version, appended_version);
+
+        let mut stale_write = stale;
+        stale_write.routes[0].path_prefix = "/stale-after-event".into();
+        let error = plane_b
+            .save(&stale_write)
+            .await
+            .expect_err("stale write after event append must conflict");
+        assert!(
+            error.contains("snapshot conflict"),
+            "event append must force stale writers to fail closed: {error}"
+        );
+
+        current.routes[0].path_prefix = "/after-event".into();
+        plane_a.save(&current).await.expect("save after append");
+        let winner = plane_a.load().await.expect("winner").expect("tenant");
+        assert_eq!(winner.routes[0].path_prefix, "/after-event");
+        assert!(winner.events.iter().any(|item| item.path == "/event-occ"));
     }
 
     #[tokio::test]
