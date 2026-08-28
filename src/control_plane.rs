@@ -2232,17 +2232,17 @@ async fn export_backup(client: &mut Client, tenant_id: &str) -> Result<ControlPl
         .await
         .map_err(|error| format!("control plane backup transaction failed: {error}"))?;
     tx.execute(
-        "SELECT set_config('wardnet.tenant_id', $1, true)",
-        &[&tenant_id],
-    )
-    .await
-    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
-    tx.execute(
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
         &[],
     )
     .await
     .map_err(|error| format!("control plane backup isolation failed: {error}"))?;
+    tx.execute(
+        "SELECT set_config('wardnet.tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .map_err(|error| format!("control plane tenant context failed: {error}"))?;
     let account = tx
         .query_opt(
             "SELECT event_sequence, audit_sequence, snapshot_version FROM tenant_account WHERE tenant_id = $1",
