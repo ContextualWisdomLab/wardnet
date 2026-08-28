@@ -3497,6 +3497,7 @@ mod tests {
 
         let mut restored = backup.clone();
         restored.snapshot.routes[0].path_prefix = "/after-restore".into();
+        let restored = restored.seal().expect("re-seal restored backup");
         plane_a
             .restore_logical_backup(&restored)
             .await

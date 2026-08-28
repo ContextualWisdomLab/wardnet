@@ -10262,7 +10262,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_http_fails_closed_without_a_preauthorized_pin() {
         let error = outbound_http_client(Arc::new(destination::DestinationPins::default()))
-            .get("http://pin-test.invalid/")
+            .get("https://pin-test.invalid/")
             .send()
             .await
             .expect_err("unpinned hostname must not hit OS DNS");
