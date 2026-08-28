@@ -4,9 +4,7 @@
 //! fail because Wardnet has no agent artifact admission boundary yet. The next
 //! implementation commit moves this regression into the owning crate.
 
-use wardnet_agent_artifact_admission::{
-    AdmissionPolicy, InstallIntent, admission_decision,
-};
+use wardnet_agent_artifact_admission::{AdmissionPolicy, InstallIntent, admission_decision};
 
 #[test]
 fn unowned_package_from_llms_txt_is_blocked() {
