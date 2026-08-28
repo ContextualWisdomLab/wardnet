@@ -1309,6 +1309,34 @@ async fn refresh_official_threat_feed(
         }
         _ => (configured_url, None, None),
     };
+    let url = if auth_header.is_some() {
+        let parsed = match reqwest::Url::parse(&url) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return official_feed_failure(
+                    &state,
+                    &source_id,
+                    now,
+                    "official feed URL is invalid",
+                    false,
+                )
+                .await;
+            }
+        };
+        if parsed.scheme() != "https" {
+            return official_feed_failure(
+                &state,
+                &source_id,
+                now,
+                "official feed URL must use https",
+                false,
+            )
+            .await;
+        }
+        parsed.to_string()
+    } else {
+        url
+    };
 
     let mut request = if let Some(body) = request_body {
         state.feed_http.post(&url).json(&body)
@@ -3542,6 +3570,19 @@ mod tests {
         }
     }
 
+    fn credentials_file_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("credentials.json")
+    }
+
     #[test]
     fn parse_event_limit_reads_optional_env() {
         assert_eq!(
@@ -3621,6 +3662,49 @@ mod tests {
                 .last_attempt_unix
                 .is_none(),
             "preflight failures must not throttle the corrective retry"
+        );
+        let credentials_path = credentials_file_path("official-feed-auth");
+        std::fs::write(
+            &credentials_path,
+            r#"{"admin_token":"secret","threatfox_auth_key":"threatfox-secret"}"#,
+        )
+        .unwrap();
+        let credentialed_state = AppState::seeded(Some("secret".to_string()))
+            .with_credential_registry(
+                CredentialRegistry::bootstrap_secrets(Some(&credentials_path), None, None).unwrap(),
+            )
+            .with_official_feed_url("threatfox-recent", "http://127.0.0.1:9/api/v1/".to_string());
+        let credentialed_inspect = credentialed_state.clone();
+        let credentialed_app = build_app(credentialed_state);
+        let insecure = app_request(
+            &credentialed_app,
+            authed_empty_request(
+                Method::POST,
+                "/api/official-threat-feeds/threatfox-recent/refresh",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(insecure.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_text(insecure).await.contains("must use https"));
+        assert!(
+            credentialed_inspect
+                .inner
+                .read()
+                .await
+                .official_threat_feeds
+                .iter()
+                .find(|feed| feed.source_id == "threatfox-recent")
+                .unwrap()
+                .last_attempt_unix
+                .is_none(),
+            "insecure preflight failures must not throttle the corrective retry"
+        );
+        let _ = std::fs::remove_file(&credentials_path);
+        let _ = std::fs::remove_dir(
+            credentials_path
+                .parent()
+                .expect("credentials path always has a parent"),
         );
         let stalled_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let stalled_address = stalled_listener.local_addr().unwrap();
