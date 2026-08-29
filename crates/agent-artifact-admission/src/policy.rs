@@ -1,20 +1,38 @@
+use std::collections::BTreeSet;
+
 use crate::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSourceKind, ReasonCode,
 };
 use url::Url;
 
+const MAX_REQUEST_ID_BYTES: usize = 256;
+const MAX_ACTOR_ID_BYTES: usize = 512;
+const MAX_WORKSPACE_ID_BYTES: usize = 512;
+const MAX_OPERATION_BYTES: usize = 32;
+const MAX_ARGV_TOKENS: usize = 128;
+const MAX_ARG_BYTES: usize = 4 * 1024;
+const MAX_ARGV_BYTES: usize = 64 * 1024;
+const MAX_SOURCE_URI_BYTES: usize = 4 * 1024;
+const MAX_ARTIFACTS: usize = 64;
+const MAX_ECOSYSTEM_BYTES: usize = 64;
+const MAX_ARTIFACT_NAME_BYTES: usize = 512;
+const MAX_VERSION_BYTES: usize = 256;
+const MAX_OWNER_BYTES: usize = 512;
+const MAX_ARTIFACT_ARGUMENT_BYTES: usize = 1024;
+
 /// Compute a deterministic fail-closed admission decision for one install intent.
 pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> AdmissionDecision {
-    let mut reason_codes = Vec::new();
+    let mut reason_codes = validate_install_intent(intent);
+
     match intent.argv.first() {
         Some(executable)
             if policy
                 .allowed_executables
                 .iter()
                 .any(|allowed| allowed == executable) => {}
-        Some(_) => reason_codes.push(ReasonCode::ExecutableNotAllowed),
-        None => reason_codes.push(ReasonCode::MissingExecutable),
+        Some(_) => push_reason(&mut reason_codes, ReasonCode::ExecutableNotAllowed),
+        None => push_reason(&mut reason_codes, ReasonCode::MissingExecutable),
     }
 
     validate_source(intent, &mut reason_codes);
@@ -42,7 +60,7 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         DecisionKind::Block
     };
     AdmissionDecision {
-        request_id: intent.request_id.clone(),
+        request_id: auditable_identifier("request", &intent.request_id, MAX_REQUEST_ID_BYTES),
         decision,
         reason_codes,
         policy_id: policy.policy_id.clone(),
@@ -53,13 +71,81 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     }
 }
 
+/// Validate the bounded structural contract independently of policy membership.
+pub fn validate_install_intent(intent: &InstallIntent) -> Vec<ReasonCode> {
+    let mut reason_codes = Vec::new();
+
+    if !valid_text_field(&intent.request_id, MAX_REQUEST_ID_BYTES)
+        || !valid_text_field(&intent.actor_id, MAX_ACTOR_ID_BYTES)
+        || !valid_text_field(&intent.workspace_id, MAX_WORKSPACE_ID_BYTES)
+        || !valid_text_field(&intent.operation, MAX_OPERATION_BYTES)
+    {
+        push_reason(&mut reason_codes, ReasonCode::InvalidRequest);
+    }
+
+    if intent.operation != "install" {
+        push_reason(&mut reason_codes, ReasonCode::InvalidOperation);
+    }
+
+    if intent.argv.is_empty() {
+        push_reason(&mut reason_codes, ReasonCode::MissingExecutable);
+    } else if intent.argv.len() > MAX_ARGV_TOKENS
+        || intent.argv.iter().any(|argument| {
+            !valid_text_field(argument, MAX_ARG_BYTES) || argument.contains('\0')
+        })
+        || intent.argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES
+    {
+        push_reason(&mut reason_codes, ReasonCode::InvalidRequest);
+    }
+
+    if !is_sha256_hex(&intent.manifest_sha256) {
+        push_reason(&mut reason_codes, ReasonCode::InvalidManifestDigest);
+    }
+
+    if intent
+        .source
+        .uri
+        .as_deref()
+        .is_some_and(|uri| uri.len() > MAX_SOURCE_URI_BYTES || uri.chars().any(char::is_control))
+    {
+        push_reason(&mut reason_codes, ReasonCode::InvalidSourceUri);
+    }
+
+    if intent.artifacts.is_empty() || intent.artifacts.len() > MAX_ARTIFACTS {
+        push_reason(&mut reason_codes, ReasonCode::InvalidArtifact);
+    }
+
+    let mut artifact_identities = BTreeSet::new();
+    let mut artifact_arguments = BTreeSet::new();
+    for artifact in &intent.artifacts {
+        if !valid_artifact_coordinate(artifact) {
+            push_reason(&mut reason_codes, ReasonCode::InvalidArtifact);
+        }
+        let identity = (
+            artifact.ecosystem.as_str(),
+            artifact.name.as_str(),
+            artifact.version.as_str(),
+            artifact.registry_url.as_str(),
+            artifact.owner.as_str(),
+            artifact.sha256.as_str(),
+        );
+        if !artifact_identities.insert(identity)
+            || !artifact_arguments.insert(artifact.artifact_argument.as_str())
+        {
+            push_reason(&mut reason_codes, ReasonCode::DuplicateArtifact);
+        }
+    }
+
+    reason_codes
+}
+
 fn validate_source(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCode>) {
     if !requires_remote_source_validation(intent.source.kind) {
         return;
     }
 
     match intent.source.uri.as_deref() {
-        Some(uri) if is_valid_remote_source_uri(uri) => {}
+        Some(uri) if normalize_https_source_uri(uri).is_some() => {}
         Some(_) => push_reason(reason_codes, ReasonCode::InvalidSourceUri),
         None => push_reason(reason_codes, ReasonCode::MissingSourceUri),
     }
@@ -68,7 +154,7 @@ fn validate_source(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCode>) {
         .source
         .content_sha256
         .as_deref()
-        .is_some_and(crate::is_sha256_hex)
+        .is_some_and(is_sha256_hex)
     {
         push_reason(reason_codes, ReasonCode::MissingSourceDigest);
     }
@@ -78,8 +164,15 @@ fn validate_command_path(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return;
     };
-    if is_forbidden_executable(executable) || requests_inline_eval(executable, &intent.argv[1..]) {
+    let arguments = &intent.argv[1..];
+    if is_permanently_forbidden_executable(executable)
+        || requests_inline_eval(executable, arguments)
+        || !supported_install_command(executable, arguments)
+    {
         push_reason(reason_codes, ReasonCode::ForbiddenCommand);
+    }
+    if requests_alternate_trust_root(arguments) {
+        push_reason(reason_codes, ReasonCode::AlternateTrustRoot);
     }
 }
 
@@ -87,15 +180,39 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return;
     };
-    let args = &intent.argv[1..];
+    let arguments = &intent.argv[1..];
     let missing = match executable {
-        "npm" | "pnpm" | "yarn" | "bun" => !args.iter().any(|arg| arg == "--ignore-scripts"),
-        "pip" | "pip3" => !args.iter().any(|arg| arg == "--require-hashes"),
-        "cargo" if args.first().is_some_and(|arg| arg == "install") => {
-            !args.iter().any(|arg| arg == "--locked")
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            !arguments.iter().any(|argument| argument == "--ignore-scripts")
         }
-        "uv" if args.first().is_some_and(|arg| arg == "pip") => {
-            !args.iter().any(|arg| arg == "--require-hashes")
+        "pip" | "pip3" => !arguments
+            .iter()
+            .any(|argument| argument == "--require-hashes"),
+        "cargo" if arguments.first().is_some_and(|argument| argument == "install") => {
+            !arguments.iter().any(|argument| argument == "--locked")
+        }
+        "uv"
+            if arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments.get(1).is_some_and(|argument| argument == "install") =>
+        {
+            !arguments
+                .iter()
+                .any(|argument| argument == "--require-hashes")
+        }
+        "docker" | "podman"
+            if arguments.first().is_some_and(|argument| argument == "pull") =>
+        {
+            intent.artifacts.is_empty()
+                || intent.artifacts.iter().any(|artifact| {
+                    artifact.artifact_argument
+                        != format!("{}@sha256:{}", artifact.name, artifact.sha256)
+                        || intent
+                            .argv
+                            .iter()
+                            .filter(|token| *token == &artifact.artifact_argument)
+                            .count()
+                            != 1
+                })
         }
         _ => false,
     };
@@ -135,26 +252,44 @@ fn requires_remote_source_validation(kind: InstructionSourceKind) -> bool {
 }
 
 fn normalized_source_uri(intent: &InstallIntent) -> Option<String> {
-    let uri = intent.source.uri.as_deref()?;
+    intent
+        .source
+        .uri
+        .as_deref()
+        .and_then(normalize_https_source_uri)
+}
+
+pub(crate) fn normalize_https_source_uri(uri: &str) -> Option<String> {
     let mut url = Url::parse(uri).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+    {
+        return None;
+    }
     url.set_query(None);
     url.set_fragment(None);
     Some(url.to_string())
 }
 
-fn is_valid_remote_source_uri(uri: &str) -> bool {
-    let Ok(url) = Url::parse(uri) else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.host_str().is_some()
+pub(crate) fn canonical_registry_url(registry_url: &str) -> Option<String> {
+    let url = Url::parse(registry_url).ok()?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url.to_string())
 }
 
-fn is_forbidden_executable(executable: &str) -> bool {
+pub(crate) fn is_permanently_forbidden_executable(executable: &str) -> bool {
     matches!(
-        executable,
+        executable.to_ascii_lowercase().as_str(),
         "sh" | "bash"
             | "zsh"
             | "cmd"
@@ -171,13 +306,73 @@ fn is_forbidden_executable(executable: &str) -> bool {
     )
 }
 
-fn requests_inline_eval(executable: &str, args: &[String]) -> bool {
+pub(crate) fn supported_executable(executable: &str) -> bool {
     matches!(
         executable,
+        "npm"
+            | "pnpm"
+            | "yarn"
+            | "bun"
+            | "pip"
+            | "pip3"
+            | "uv"
+            | "cargo"
+            | "docker"
+            | "podman"
+    )
+}
+
+fn supported_install_command(executable: &str, arguments: &[String]) -> bool {
+    match executable {
+        "npm" => arguments
+            .first()
+            .is_some_and(|argument| matches!(argument.as_str(), "install" | "i")),
+        "pnpm" | "bun" => arguments
+            .first()
+            .is_some_and(|argument| matches!(argument.as_str(), "add" | "install")),
+        "yarn" => arguments.first().is_some_and(|argument| argument == "add"),
+        "pip" | "pip3" | "cargo" => arguments
+            .first()
+            .is_some_and(|argument| argument == "install"),
+        "uv" => {
+            arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments.get(1).is_some_and(|argument| argument == "install")
+        }
+        "docker" | "podman" => arguments
+            .first()
+            .is_some_and(|argument| argument == "pull"),
+        _ => false,
+    }
+}
+
+fn requests_inline_eval(executable: &str, arguments: &[String]) -> bool {
+    matches!(
+        executable.to_ascii_lowercase().as_str(),
         "python" | "python3" | "node" | "ruby" | "perl" | "php"
-    ) && args
+    ) && arguments
         .iter()
-        .any(|arg| matches!(arg.as_str(), "-c" | "-e" | "--eval" | "--execute"))
+        .any(|argument| matches!(argument.as_str(), "-c" | "-e" | "--eval" | "--execute"))
+}
+
+fn requests_alternate_trust_root(arguments: &[String]) -> bool {
+    const FORBIDDEN_FLAGS: &[&str] = &[
+        "--extra-index-url",
+        "--index-url",
+        "--trusted-host",
+        "--find-links",
+        "--registry",
+        "--registry-url",
+        "-i",
+        "-f",
+    ];
+    arguments.iter().any(|argument| {
+        FORBIDDEN_FLAGS.iter().any(|flag| {
+            argument == flag
+                || argument
+                    .strip_prefix(flag)
+                    .is_some_and(|suffix| suffix.starts_with('='))
+        })
+    })
 }
 
 fn push_reason(reason_codes: &mut Vec<ReasonCode>, reason: ReasonCode) {
@@ -190,9 +385,48 @@ fn exact_artifact_match(approved: &ApprovedArtifact, artifact: &ArtifactCoordina
     approved.ecosystem == artifact.ecosystem
         && approved.name == artifact.name
         && approved.version == artifact.version
-        && approved.registry_url == artifact.registry_url
+        && canonical_registry_url(&approved.registry_url)
+            == canonical_registry_url(&artifact.registry_url)
         && approved.owner == artifact.owner
         && approved.sha256 == artifact.sha256
+}
+
+pub(crate) fn valid_artifact_coordinate(artifact: &ArtifactCoordinate) -> bool {
+    valid_text_field(&artifact.ecosystem, MAX_ECOSYSTEM_BYTES)
+        && valid_text_field(&artifact.name, MAX_ARTIFACT_NAME_BYTES)
+        && valid_pinned_version(&artifact.version)
+        && canonical_registry_url(&artifact.registry_url).is_some()
+        && valid_text_field(&artifact.owner, MAX_OWNER_BYTES)
+        && is_sha256_hex(&artifact.sha256)
+        && valid_text_field(&artifact.artifact_argument, MAX_ARTIFACT_ARGUMENT_BYTES)
+}
+
+pub(crate) fn valid_pinned_version(version: &str) -> bool {
+    if !valid_text_field(version, MAX_VERSION_BYTES) {
+        return false;
+    }
+    let lowercase = version.to_ascii_lowercase();
+    if matches!(
+        lowercase.as_str(),
+        "latest" | "main" | "master" | "head" | "stable" | "next"
+    ) {
+        return false;
+    }
+    version
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
+}
+
+pub(crate) fn valid_text_field(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum_bytes && !value.chars().any(char::is_control)
+}
+
+pub(crate) fn auditable_identifier(label: &str, value: &str, maximum_bytes: usize) -> String {
+    if valid_text_field(value, maximum_bytes) {
+        value.to_string()
+    } else {
+        format!("{label}:sha256:{}", sha256_hex(value.as_bytes()))
+    }
 }
 
 /// Return `true` when `value` is a lowercase hexadecimal SHA-256 digest.

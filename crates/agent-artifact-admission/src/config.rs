@@ -6,8 +6,11 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use url::Url;
 
+use crate::policy::{
+    canonical_registry_url, is_permanently_forbidden_executable, supported_executable,
+    valid_pinned_version, valid_text_field,
+};
 use crate::{AdmissionPolicy, is_sha256_hex};
 
 const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
@@ -167,6 +170,7 @@ fn validate_policy(policy: &AdmissionPolicy) -> Result<(), ConfigError> {
     let mut executables = BTreeSet::new();
     for executable in &policy.allowed_executables {
         if !valid_executable(executable)
+            || !supported_executable(executable)
             || is_permanently_forbidden_executable(executable)
             || !executables.insert(executable.as_str())
         {
@@ -189,7 +193,7 @@ fn validate_policy(policy: &AdmissionPolicy) -> Result<(), ConfigError> {
         if !valid_text_field(&artifact.ecosystem, 64)
             || !valid_text_field(&artifact.name, 512)
             || !valid_pinned_version(&artifact.version)
-            || !valid_https_registry(&artifact.registry_url)
+            || canonical_registry_url(&artifact.registry_url).is_none()
             || !valid_text_field(&artifact.owner, 512)
             || !is_sha256_hex(&artifact.sha256)
             || !valid_text_field(&artifact.artifact_argument, 1024)
@@ -198,6 +202,9 @@ fn validate_policy(policy: &AdmissionPolicy) -> Result<(), ConfigError> {
                 artifact.name.as_str(),
                 artifact.version.as_str(),
                 artifact.registry_url.as_str(),
+                artifact.owner.as_str(),
+                artifact.sha256.as_str(),
+                artifact.artifact_argument.as_str(),
             ))
         {
             return Err(ConfigError::InvalidConfiguration);
@@ -220,64 +227,14 @@ fn validate_admin_token(token: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn valid_text_field(value: &str, maximum_bytes: usize) -> bool {
-    !value.is_empty() && value.len() <= maximum_bytes && !value.chars().any(char::is_control)
-}
-
 fn valid_executable(value: &str) -> bool {
     valid_text_field(value, 128)
+        && value == value.to_ascii_lowercase()
         && !value.contains('/')
         && !value.contains('\\')
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+'))
-}
-
-fn is_permanently_forbidden_executable(executable: &str) -> bool {
-    matches!(
-        executable,
-        "sh" | "bash"
-            | "zsh"
-            | "cmd"
-            | "powershell"
-            | "pwsh"
-            | "curl"
-            | "wget"
-            | "aria2c"
-            | "ftp"
-            | "scp"
-            | "npx"
-            | "pnpx"
-            | "bunx"
-    )
-}
-
-fn valid_pinned_version(version: &str) -> bool {
-    if !valid_text_field(version, 256) {
-        return false;
-    }
-    let lowercase = version.to_ascii_lowercase();
-    if matches!(
-        lowercase.as_str(),
-        "latest" | "main" | "master" | "head" | "stable" | "next"
-    ) {
-        return false;
-    }
-    !version
-        .chars()
-        .any(|character| character.is_whitespace() || "*^~<>=,|".contains(character))
-}
-
-fn valid_https_registry(registry_url: &str) -> bool {
-    let Ok(url) = Url::parse(registry_url) else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
 }
 
 fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {

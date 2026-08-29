@@ -1,4 +1,4 @@
-name: Refresh agent admission lockfile
+name: Verify and refresh agent admission lockfile
 
 on:
   push:
@@ -6,13 +6,15 @@ on:
       - feat/agent-artifact-admission
     paths:
       - crates/agent-artifact-admission/Cargo.toml
+      - crates/agent-artifact-admission/src/**
+      - crates/agent-artifact-admission/tests/**
       - .github/workflows/agent-admission-lock-refresh.yml
 
 permissions:
   contents: write
 
 jobs:
-  refresh-lockfile:
+  verify-and-refresh:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -23,8 +25,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - name: Refresh only the manifest-required lockfile edges
-        run: cargo check -p wardnet-agent-artifact-admission --tests
+      - name: Verify the focused service and refresh its lockfile edges
+        run: cargo test -p wardnet-agent-artifact-admission --tests
       - name: Remove the completed one-shot workflow
         run: rm .github/workflows/agent-admission-lock-refresh.yml
       - name: Commit the lockfile and workflow cleanup

@@ -7,9 +7,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::{
+    auditable_identifier, canonical_registry_url, normalize_https_source_uri, valid_text_field,
+};
 use crate::{
-    AdmissionDecision, ArtifactCoordinate, DecisionKind, InstallIntent, InstructionSourceKind,
-    ReasonCode,
+    AdmissionDecision, AdmissionPolicy, ArtifactCoordinate, DecisionKind, InstallIntent,
+    InstructionSourceKind, ReasonCode, is_sha256_hex, sha256_hex,
 };
 
 const MAX_AUDIT_LINE_BYTES: usize = 64 * 1024;
@@ -32,15 +35,24 @@ pub struct AuditArtifact {
     pub sha256: String,
 }
 
-impl From<&ArtifactCoordinate> for AuditArtifact {
-    fn from(artifact: &ArtifactCoordinate) -> Self {
+impl AuditArtifact {
+    fn from_coordinate(artifact: &ArtifactCoordinate) -> Self {
         Self {
-            ecosystem: artifact.ecosystem.clone(),
-            name: artifact.name.clone(),
-            version: artifact.version.clone(),
-            registry_url: artifact.registry_url.clone(),
-            owner: artifact.owner.clone(),
-            sha256: artifact.sha256.clone(),
+            ecosystem: auditable_identifier("ecosystem", &artifact.ecosystem, 64),
+            name: auditable_identifier("artifact", &artifact.name, 512),
+            version: auditable_identifier("version", &artifact.version, 256),
+            registry_url: canonical_registry_url(&artifact.registry_url).unwrap_or_else(|| {
+                format!(
+                    "registry:sha256:{}",
+                    sha256_hex(artifact.registry_url.as_bytes())
+                )
+            }),
+            owner: auditable_identifier("owner", &artifact.owner, 512),
+            sha256: if is_sha256_hex(&artifact.sha256) {
+                artifact.sha256.clone()
+            } else {
+                sha256_hex(artifact.sha256.as_bytes())
+            },
         }
     }
 }
@@ -51,11 +63,11 @@ impl From<&ArtifactCoordinate> for AuditArtifact {
 pub struct AuditRecord {
     /// Milliseconds since the Unix epoch when the record was constructed.
     pub timestamp_unix_ms: u128,
-    /// Caller-supplied stable request identifier.
+    /// Caller-supplied stable request identifier or a malformed-body surrogate.
     pub request_id: String,
-    /// Identity of the requesting agent or broker.
+    /// Identity of the requesting agent or broker when available.
     pub actor_id: String,
-    /// Workspace or repository identifier.
+    /// Workspace or repository identifier when available.
     pub workspace_id: String,
     /// Structured operation, such as `install`.
     pub operation: String,
@@ -68,15 +80,17 @@ pub struct AuditRecord {
     /// Immutable policy revision identifier.
     pub policy_revision: String,
     /// Instruction-source kind without untrusted raw content.
-    pub source_kind: InstructionSourceKind,
+    pub source_kind: Option<InstructionSourceKind>,
     /// Source URI after removing query and fragment data.
     pub normalized_source_uri: Option<String>,
-    /// SHA-256 digest of remote source content when supplied.
+    /// SHA-256 digest of remote source content when supplied and valid.
     pub source_content_sha256: Option<String>,
-    /// SHA-256 digest of the structured command vector; raw argv is never persisted.
+    /// SHA-256 digest of the structured command vector or malformed body.
     pub command_sha256: String,
-    /// Reviewed dependency-manifest digest supplied with the request.
-    pub manifest_sha256: String,
+    /// SHA-256 digest of a malformed authenticated request body when parsing failed.
+    pub request_body_sha256: Option<String>,
+    /// Reviewed dependency-manifest digest supplied with a parsed request.
+    pub manifest_sha256: Option<String>,
     /// Content-addressed artifact coordinates with no command argument token.
     pub artifacts: Vec<AuditArtifact>,
 }
@@ -185,25 +199,78 @@ impl AuditSink for MemoryAuditSink {
     }
 }
 
-/// Build minimized audit evidence from an admission request and its deterministic decision.
-pub fn build_audit_record(intent: &InstallIntent, decision: &AdmissionDecision) -> AuditRecord {
-    AuditRecord {
-        timestamp_unix_ms: unix_timestamp_ms().unwrap_or_default(),
-        request_id: intent.request_id.clone(),
-        actor_id: intent.actor_id.clone(),
-        workspace_id: intent.workspace_id.clone(),
-        operation: intent.operation.clone(),
+/// Build minimized audit evidence from a parsed admission request and its decision.
+pub fn build_audit_record(
+    intent: &InstallIntent,
+    decision: &AdmissionDecision,
+) -> Result<AuditRecord, AuditError> {
+    Ok(AuditRecord {
+        timestamp_unix_ms: unix_timestamp_ms()?,
+        request_id: auditable_identifier("request", &intent.request_id, 256),
+        actor_id: auditable_identifier("actor", &intent.actor_id, 512),
+        workspace_id: auditable_identifier("workspace", &intent.workspace_id, 512),
+        operation: if valid_text_field(&intent.operation, 32) {
+            intent.operation.clone()
+        } else {
+            "invalid".to_string()
+        },
         decision: decision.decision,
         reason_codes: decision.reason_codes.clone(),
-        policy_id: decision.policy_id.clone(),
-        policy_revision: decision.policy_revision.clone(),
-        source_kind: intent.source.kind,
-        normalized_source_uri: decision.normalized_source_uri.clone(),
-        source_content_sha256: intent.source.content_sha256.clone(),
+        policy_id: auditable_identifier("policy", &decision.policy_id, 256),
+        policy_revision: auditable_identifier("policy_revision", &decision.policy_revision, 256),
+        source_kind: Some(intent.source.kind),
+        normalized_source_uri: intent
+            .source
+            .uri
+            .as_deref()
+            .and_then(normalize_https_source_uri),
+        source_content_sha256: intent
+            .source
+            .content_sha256
+            .as_ref()
+            .filter(|digest| is_sha256_hex(digest))
+            .cloned(),
         command_sha256: decision.command_sha256.clone(),
-        manifest_sha256: intent.manifest_sha256.clone(),
-        artifacts: intent.artifacts.iter().map(AuditArtifact::from).collect(),
-    }
+        request_body_sha256: None,
+        manifest_sha256: is_sha256_hex(&intent.manifest_sha256)
+            .then(|| intent.manifest_sha256.clone()),
+        artifacts: intent
+            .artifacts
+            .iter()
+            .take(64)
+            .map(AuditArtifact::from_coordinate)
+            .collect(),
+    })
+}
+
+/// Build minimized evidence for authenticated JSON that failed strict parsing.
+pub fn build_malformed_audit_record(
+    policy: &AdmissionPolicy,
+    request_body_sha256: &str,
+) -> Result<AuditRecord, AuditError> {
+    let digest = if is_sha256_hex(request_body_sha256) {
+        request_body_sha256.to_string()
+    } else {
+        sha256_hex(request_body_sha256.as_bytes())
+    };
+    Ok(AuditRecord {
+        timestamp_unix_ms: unix_timestamp_ms()?,
+        request_id: format!("malformed:{digest}"),
+        actor_id: "unavailable".to_string(),
+        workspace_id: "unavailable".to_string(),
+        operation: "unavailable".to_string(),
+        decision: DecisionKind::Block,
+        reason_codes: vec![ReasonCode::MalformedRequest],
+        policy_id: auditable_identifier("policy", &policy.policy_id, 256),
+        policy_revision: auditable_identifier("policy_revision", &policy.policy_revision, 256),
+        source_kind: None,
+        normalized_source_uri: None,
+        source_content_sha256: None,
+        command_sha256: digest.clone(),
+        request_body_sha256: Some(digest),
+        manifest_sha256: None,
+        artifacts: Vec::new(),
+    })
 }
 
 fn encode_record(record: &AuditRecord) -> Result<Vec<u8>, AuditError> {

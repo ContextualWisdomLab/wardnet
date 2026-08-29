@@ -152,7 +152,8 @@ impl InstallIntent {
                 kind: InstructionSourceKind::LlmsTxt,
                 uri: Some("https://example.invalid/llms.txt".to_string()),
                 content_sha256: Some(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
                 ),
             },
             artifacts: vec![ArtifactCoordinate {
@@ -173,7 +174,7 @@ impl InstallIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionDecision {
-    /// Original caller request identifier.
+    /// Original caller request identifier or a content-addressed malformed surrogate.
     pub request_id: String,
     /// Final policy decision.
     pub decision: DecisionKind,
@@ -185,7 +186,7 @@ pub struct AdmissionDecision {
     pub policy_revision: String,
     /// Normalized source URI when present.
     pub normalized_source_uri: Option<String>,
-    /// SHA-256 of the structured command vector.
+    /// SHA-256 of the structured command vector or malformed request body.
     pub command_sha256: String,
     /// Number of artifacts the caller asked to install.
     pub artifact_count: usize,
@@ -215,6 +216,18 @@ impl DecisionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasonCode {
+    /// The request body could not be parsed as the strict install-intent schema.
+    MalformedRequest,
+    /// A bounded identifier, argument vector, source field, or count was invalid.
+    InvalidRequest,
+    /// The structured operation was not the supported install operation.
+    InvalidOperation,
+    /// The reviewed workspace manifest digest was malformed.
+    InvalidManifestDigest,
+    /// One or more artifact coordinates were malformed or unpinned.
+    InvalidArtifact,
+    /// Duplicate artifact identities or artifact argument tokens were supplied.
+    DuplicateArtifact,
     /// No exact approved artifact matched the requested install.
     ArtifactNotApproved,
     /// No reviewed manifest matched the workspace digest.
@@ -231,14 +244,24 @@ pub enum ReasonCode {
     InvalidSourceUri,
     /// The command path is forbidden even if otherwise allowlisted.
     ForbiddenCommand,
+    /// The command attempted to introduce an alternate package trust root.
+    AlternateTrustRoot,
     /// The package manager invocation omitted a mandatory hardening flag.
     MissingSafetyFlag,
+    /// Durable audit evidence could not be persisted before returning a decision.
+    AuditUnavailable,
 }
 
 impl ReasonCode {
     /// Stable string form used by tests and audit sinks.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::MalformedRequest => "malformed_request",
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidOperation => "invalid_operation",
+            Self::InvalidManifestDigest => "invalid_manifest_digest",
+            Self::InvalidArtifact => "invalid_artifact",
+            Self::DuplicateArtifact => "duplicate_artifact",
             Self::ArtifactNotApproved => "artifact_not_approved",
             Self::ManifestNotApproved => "manifest_not_approved",
             Self::ExecutableNotAllowed => "executable_not_allowed",
@@ -247,7 +270,9 @@ impl ReasonCode {
             Self::MissingSourceDigest => "missing_source_digest",
             Self::InvalidSourceUri => "invalid_source_uri",
             Self::ForbiddenCommand => "forbidden_command",
+            Self::AlternateTrustRoot => "alternate_trust_root",
             Self::MissingSafetyFlag => "missing_safety_flag",
+            Self::AuditUnavailable => "audit_unavailable",
         }
     }
 }
