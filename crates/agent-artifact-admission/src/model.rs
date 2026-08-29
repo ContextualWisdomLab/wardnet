@@ -152,8 +152,7 @@ impl InstallIntent {
                 kind: InstructionSourceKind::LlmsTxt,
                 uri: Some("https://example.invalid/llms.txt".to_string()),
                 content_sha256: Some(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                        .to_string(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
                 ),
             },
             artifacts: vec![ArtifactCoordinate {

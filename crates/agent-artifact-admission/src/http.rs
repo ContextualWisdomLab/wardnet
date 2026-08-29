@@ -17,9 +17,9 @@ use tokio::net::TcpListener;
 
 use crate::{
     AdmissionDecision, AdmissionPolicy, AdmissionServiceConfig, AuditRecord, AuditSink,
-    DecisionKind, FileAuditSink, InstallIntent, ReasonCode, admission_decision,
-    build_audit_record, build_malformed_audit_record, load_admin_token, load_config, parse_cli_args,
-    sha256_hex, validate_install_intent,
+    DecisionKind, FileAuditSink, InstallIntent, ReasonCode, admission_decision, build_audit_record,
+    build_malformed_audit_record, load_admin_token, load_config, parse_cli_args, sha256_hex,
+    validate_install_intent,
 };
 
 const MAX_ADMIN_TOKEN_BYTES: usize = 4096;
@@ -118,7 +118,8 @@ pub async fn run_service(
 /// Parse strict CLI arguments, load bounded files, and run the standalone service.
 pub async fn run_cli(args: &[String]) -> Result<(), ServiceError> {
     let cli = parse_cli_args(args).map_err(|_| ServiceError::Configuration)?;
-    let config = load_config(Path::new(&cli.config_path)).map_err(|_| ServiceError::Configuration)?;
+    let config =
+        load_config(Path::new(&cli.config_path)).map_err(|_| ServiceError::Configuration)?;
     let token = load_admin_token(Path::new(&cli.credentials_path))
         .map_err(|_| ServiceError::Configuration)?;
     run_service(config, token).await

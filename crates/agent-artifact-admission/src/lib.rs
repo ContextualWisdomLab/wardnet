@@ -19,6 +19,4 @@ pub use model::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate,
     DecisionKind, InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode,
 };
-pub use policy::{
-    admission_decision, is_sha256_hex, sha256_hex, validate_install_intent,
-};
+pub use policy::{admission_decision, is_sha256_hex, sha256_hex, validate_install_intent};

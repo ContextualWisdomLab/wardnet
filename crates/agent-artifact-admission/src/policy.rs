@@ -90,9 +90,10 @@ pub fn validate_install_intent(intent: &InstallIntent) -> Vec<ReasonCode> {
     if intent.argv.is_empty() {
         push_reason(&mut reason_codes, ReasonCode::MissingExecutable);
     } else if intent.argv.len() > MAX_ARGV_TOKENS
-        || intent.argv.iter().any(|argument| {
-            !valid_text_field(argument, MAX_ARG_BYTES) || argument.contains('\0')
-        })
+        || intent
+            .argv
+            .iter()
+            .any(|argument| !valid_text_field(argument, MAX_ARG_BYTES) || argument.contains('\0'))
         || intent.argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES
     {
         push_reason(&mut reason_codes, ReasonCode::InvalidRequest);
@@ -182,26 +183,29 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     };
     let arguments = &intent.argv[1..];
     let missing = match executable {
-        "npm" | "pnpm" | "yarn" | "bun" => {
-            !arguments.iter().any(|argument| argument == "--ignore-scripts")
-        }
+        "npm" | "pnpm" | "yarn" | "bun" => !arguments
+            .iter()
+            .any(|argument| argument == "--ignore-scripts"),
         "pip" | "pip3" => !arguments
             .iter()
             .any(|argument| argument == "--require-hashes"),
-        "cargo" if arguments.first().is_some_and(|argument| argument == "install") => {
+        "cargo"
+            if arguments
+                .first()
+                .is_some_and(|argument| argument == "install") =>
+        {
             !arguments.iter().any(|argument| argument == "--locked")
         }
-        "uv"
-            if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments.get(1).is_some_and(|argument| argument == "install") =>
+        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+            && arguments
+                .get(1)
+                .is_some_and(|argument| argument == "install") =>
         {
             !arguments
                 .iter()
                 .any(|argument| argument == "--require-hashes")
         }
-        "docker" | "podman"
-            if arguments.first().is_some_and(|argument| argument == "pull") =>
-        {
+        "docker" | "podman" if arguments.first().is_some_and(|argument| argument == "pull") => {
             intent.artifacts.is_empty()
                 || intent.artifacts.iter().any(|artifact| {
                     artifact.artifact_argument
@@ -309,16 +313,7 @@ pub(crate) fn is_permanently_forbidden_executable(executable: &str) -> bool {
 pub(crate) fn supported_executable(executable: &str) -> bool {
     matches!(
         executable,
-        "npm"
-            | "pnpm"
-            | "yarn"
-            | "bun"
-            | "pip"
-            | "pip3"
-            | "uv"
-            | "cargo"
-            | "docker"
-            | "podman"
+        "npm" | "pnpm" | "yarn" | "bun" | "pip" | "pip3" | "uv" | "cargo" | "docker" | "podman"
     )
 }
 
@@ -336,11 +331,11 @@ fn supported_install_command(executable: &str, arguments: &[String]) -> bool {
             .is_some_and(|argument| argument == "install"),
         "uv" => {
             arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments.get(1).is_some_and(|argument| argument == "install")
+                && arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "install")
         }
-        "docker" | "podman" => arguments
-            .first()
-            .is_some_and(|argument| argument == "pull"),
+        "docker" | "podman" => arguments.first().is_some_and(|argument| argument == "pull"),
         _ => false,
     }
 }

@@ -227,7 +227,11 @@ async fn malformed_authenticated_json_is_audited_before_bad_request() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let decision: AdmissionDecision = decode_json(response).await;
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::MalformedRequest));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MalformedRequest)
+    );
     let records = sink.records().expect("audit snapshot must succeed");
     assert_eq!(records.len(), 1);
     assert!(records[0].request_id.starts_with("malformed:"));
@@ -256,7 +260,11 @@ async fn structurally_invalid_authenticated_intent_is_audited_and_returns_bad_re
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let decision: AdmissionDecision = decode_json(response).await;
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::InvalidOperation));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::InvalidOperation)
+    );
     let records = sink.records().expect("audit snapshot must succeed");
     assert_eq!(records.len(), 1);
     assert!(
