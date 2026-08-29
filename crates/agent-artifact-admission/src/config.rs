@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::Read;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -146,8 +146,7 @@ pub fn validate_service_config(config: &AdmissionServiceConfig) -> Result<(), Co
         return Err(ConfigError::InvalidConfiguration);
     }
 
-    if config.max_request_body_bytes == 0
-        || config.max_request_body_bytes > MAX_REQUEST_BODY_BYTES
+    if config.max_request_body_bytes == 0 || config.max_request_body_bytes > MAX_REQUEST_BODY_BYTES
     {
         return Err(ConfigError::InvalidConfiguration);
     }
@@ -160,7 +159,8 @@ pub fn validate_service_config(config: &AdmissionServiceConfig) -> Result<(), Co
 }
 
 fn validate_policy(policy: &AdmissionPolicy) -> Result<(), ConfigError> {
-    if !valid_text_field(&policy.policy_id, 256) || !valid_text_field(&policy.policy_revision, 256) {
+    if !valid_text_field(&policy.policy_id, 256) || !valid_text_field(&policy.policy_revision, 256)
+    {
         return Err(ConfigError::InvalidConfiguration);
     }
 
@@ -210,7 +210,10 @@ fn validate_policy(policy: &AdmissionPolicy) -> Result<(), ConfigError> {
 fn validate_admin_token(token: &str) -> Result<(), ConfigError> {
     if token.len() < MIN_ADMIN_TOKEN_BYTES
         || token.len() > MAX_ADMIN_TOKEN_BYTES
-        || !token.as_bytes().iter().all(|byte| (0x21..=0x7e).contains(byte))
+        || !token
+            .as_bytes()
+            .iter()
+            .all(|byte| (0x21..=0x7e).contains(byte))
     {
         return Err(ConfigError::InvalidCredential);
     }
@@ -218,9 +221,7 @@ fn validate_admin_token(token: &str) -> Result<(), ConfigError> {
 }
 
 fn valid_text_field(value: &str, maximum_bytes: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= maximum_bytes
-        && !value.chars().any(char::is_control)
+    !value.is_empty() && value.len() <= maximum_bytes && !value.chars().any(char::is_control)
 }
 
 fn valid_executable(value: &str) -> bool {
@@ -256,7 +257,10 @@ fn valid_pinned_version(version: &str) -> bool {
         return false;
     }
     let lowercase = version.to_ascii_lowercase();
-    if matches!(lowercase.as_str(), "latest" | "main" | "master" | "head" | "stable" | "next") {
+    if matches!(
+        lowercase.as_str(),
+        "latest" | "main" | "master" | "head" | "stable" | "next"
+    ) {
         return false;
     }
     !version
@@ -277,7 +281,7 @@ fn valid_https_registry(registry_url: &str) -> bool {
 }
 
 fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
-    let file = File::open(PathBuf::from(path)).map_err(|_| ConfigError::Io)?;
+    let file = File::open(path).map_err(|_| ConfigError::Io)?;
     let mut bytes = Vec::new();
     file.take(maximum_bytes + 1)
         .read_to_end(&mut bytes)
@@ -286,9 +290,4 @@ fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError>
         return Err(ConfigError::FileTooLarge);
     }
     Ok(bytes)
-}
-
-#[allow(dead_code)]
-fn _map_io_error(_: io::Error) -> ConfigError {
-    ConfigError::Io
 }
