@@ -2765,7 +2765,7 @@ mod tests {
             .await
             .expect("ack snapshot outbox");
         let event = sample_event(7, "/gateway/login");
-        plane
+        let (persisted, snapshot_version) = plane
             .append_security_event(&event, 1_000)
             .await
             .expect("append event + outbox");
@@ -2774,10 +2774,11 @@ mod tests {
             loaded
                 .events
                 .iter()
-                .any(|row| row.id == 7 && row.path == "/gateway/login"),
+                .any(|row| row.id == persisted.id && row.path == "/gateway/login"),
             "event must round-trip unmasked"
         );
-        assert_eq!(loaded.next_event_id, 8);
+        assert_eq!(loaded.next_event_id, persisted.id.saturating_add(1));
+        assert_eq!(loaded.snapshot_version, snapshot_version);
         let messages = plane
             .list_outbox_limited(LIST_LIMIT)
             .await
@@ -2789,10 +2790,11 @@ mod tests {
         assert!(recorded.payload_json.contains("198.51.100.20"));
         assert!(recorded.payload_json.contains("/gateway/login"));
         assert_eq!(recorded.message_status, STATUS_PENDING);
-        plane
+        let (retried, _) = plane
             .append_security_event(&event, 1_000)
             .await
-            .expect("idempotent retry of same event id");
+            .expect("repeated append allocates a distinct durable event id");
+        assert_ne!(retried.id, persisted.id);
         let again = plane
             .list_outbox_limited(LIST_LIMIT)
             .await
@@ -2802,8 +2804,8 @@ mod tests {
                 .iter()
                 .filter(|message| message.event_type == EVENT_SECURITY_RECORDED)
                 .count(),
-            1,
-            "duplicate event id must not enqueue a second outbox row"
+            2,
+            "repeated appends must produce distinct outbox rows after durable id allocation"
         );
     }
 

@@ -2249,25 +2249,31 @@ async fn restore_backup(
         Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
     let actor = audit_actor(&state, &headers);
-    match state
-        .mutate_and_persist_locked(|data| {
-            record_successful_audit_log(
-                data,
-                actor,
-                "restore_backup",
-                "control_plane_backup",
-                backup.payload_hash.clone(),
-            );
-        })
-        .await
-    {
-        Ok(_) => Json(serde_json::json!({
+    let (snapshot, previous) = {
+        let mut data = state.inner.write().await;
+        let previous = data.clone();
+        record_successful_audit_log(
+            &mut data,
+            actor,
+            "restore_backup",
+            "control_plane_backup",
+            backup.payload_hash.clone(),
+        );
+        (data.clone(), previous)
+    };
+    match state.persist_snapshot(&snapshot).await {
+        Ok(()) => Json(serde_json::json!({
             "status": "restored",
             "schema_version": backup.schema_version,
             "payload_hash": backup.payload_hash,
         }))
         .into_response(),
-        Err(message) => persist_error(message),
+        Err(message) => {
+            let latest = plane.load().await.ok().flatten();
+            let mut data = state.inner.write().await;
+            *data = latest.unwrap_or(previous);
+            persist_error(message)
+        }
     }
 }
 
@@ -9976,6 +9982,52 @@ mod tests {
         )
         .await;
         assert_eq!(drill.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn backup_restore_endpoint_completes_under_persist_lock_and_audits_the_restore() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("restore-endpoint");
+        let state = AppState::load_postgres_for_tenant(
+            AppConfig::memory(Some("secret".to_string())),
+            &url,
+            &tenant,
+        )
+        .await
+        .expect("load postgres state");
+        let plane = Arc::clone(state.control_plane.as_ref().expect("postgres plane"));
+        let backup = plane.logical_backup().await.expect("backup artifact");
+        let app = build_app(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/backup", Some("secret"), &backup),
+            ),
+        )
+        .await
+        .expect("restore handler must not deadlock");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["status"], "restored");
+        assert_eq!(body["payload_hash"], backup.payload_hash);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "restore_backup"
+                && entry.resource == "control_plane_backup"
+                && entry.resource_id == backup.payload_hash
+        }));
     }
 
     #[tokio::test]
