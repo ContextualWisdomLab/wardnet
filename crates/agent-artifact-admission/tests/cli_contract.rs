@@ -74,7 +74,10 @@ fn strict_cli_requires_exactly_one_config_and_credentials_path() {
         vec!["--config", "a", "--credentials", "b", "--unknown", "x"],
     ] {
         let invalid: Vec<String> = invalid.into_iter().map(str::to_string).collect();
-        assert!(parse_cli_args(&invalid).is_err(), "accepted invalid argv: {invalid:?}");
+        assert!(
+            parse_cli_args(&invalid).is_err(),
+            "accepted invalid argv: {invalid:?}"
+        );
     }
 }
 
@@ -111,7 +114,10 @@ fn service_config_rejects_unsafe_boundaries_and_policy_drift() {
     cases.push(config);
 
     let mut config = valid_config();
-    config.policy.approved_manifests.push(config.policy.approved_manifests[0].clone());
+    config
+        .policy
+        .approved_manifests
+        .push(config.policy.approved_manifests[0].clone());
     cases.push(config);
 
     let mut config = valid_config();
@@ -119,7 +125,10 @@ fn service_config_rejects_unsafe_boundaries_and_policy_drift() {
     cases.push(config);
 
     let mut config = valid_config();
-    config.policy.approved_artifacts.push(config.policy.approved_artifacts[0].clone());
+    config
+        .policy
+        .approved_artifacts
+        .push(config.policy.approved_artifacts[0].clone());
     cases.push(config);
 
     let mut config = valid_config();
@@ -131,11 +140,16 @@ fn service_config_rejects_unsafe_boundaries_and_policy_drift() {
     cases.push(config);
 
     let mut config = valid_config();
-    config.policy.approved_artifacts[0].artifact_argument.clear();
+    config.policy.approved_artifacts[0]
+        .artifact_argument
+        .clear();
     cases.push(config);
 
     for config in cases {
-        assert!(validate_service_config(&config).is_err(), "unsafe config validated: {config:?}");
+        assert!(
+            validate_service_config(&config).is_err(),
+            "unsafe config validated: {config:?}"
+        );
     }
 
     assert!(validate_service_config(&valid_config()).is_ok());
