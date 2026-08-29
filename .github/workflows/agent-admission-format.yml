@@ -1,0 +1,38 @@
+name: Format agent admission service
+
+on:
+  push:
+    branches:
+      - feat/agent-artifact-admission
+    paths:
+      - .github/workflows/agent-admission-format.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format-and-clean:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: feat/agent-artifact-admission
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Apply and verify rustfmt
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+      - name: Remove the completed one-shot workflow
+        run: rm .github/workflows/agent-admission-format.yml
+      - name: Commit formatting and workflow cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/agent-artifact-admission .github/workflows/agent-admission-format.yml
+          git diff --cached --check
+          git commit -m "style(rust): format admission service"
+          git push origin HEAD:feat/agent-artifact-admission
