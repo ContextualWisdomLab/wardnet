@@ -279,7 +279,11 @@ fn constant_time_token_equal(presented: &str, configured: &str) -> bool {
     presented_buffer[2..2 + presented.len()].copy_from_slice(presented.as_bytes());
     configured_buffer[2..2 + configured.len()].copy_from_slice(configured.as_bytes());
 
-    ring::constant_time::verify_slices_are_equal(&presented_buffer, &configured_buffer).is_ok()
+    let mut diff = 0_u8;
+    for (lhs, rhs) in presented_buffer.iter().zip(configured_buffer.iter()) {
+        diff |= lhs ^ rhs;
+    }
+    diff == 0
 }
 
 async fn shutdown_signal() {
