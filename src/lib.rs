@@ -37,6 +37,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod kev_import;
 mod misp_import;
 mod opencti_import;
 mod stix_import;
@@ -424,6 +425,29 @@ fn phishing_database_default_severity() -> Severity {
     Severity::High
 }
 
+const KEV_DEFAULT_FEED_ID: &str = "cisa-kev";
+const KEV_DEFAULT_SOURCE: &str = "feed:cisa-kev";
+const KEV_DEFAULT_URL: &str =
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+const KEV_DEFAULT_TTL_SECONDS: u64 = 86_400;
+const KEV_ALLOWED_HOSTS: &[&str] = &["www.cisa.gov"];
+
+fn kev_default_feed_id() -> String {
+    KEV_DEFAULT_FEED_ID.to_string()
+}
+
+fn kev_default_source() -> String {
+    KEV_DEFAULT_SOURCE.to_string()
+}
+
+fn kev_default_url() -> String {
+    KEV_DEFAULT_URL.to_string()
+}
+
+fn kev_default_ttl_seconds() -> u64 {
+    KEV_DEFAULT_TTL_SECONDS
+}
+
 fn default_true() -> bool {
     true
 }
@@ -473,6 +497,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threat-intel/misp", post(import_misp_document))
         .route("/api/threat-intel/taxii/poll", post(poll_taxii_collection))
         .route("/api/threat-intel/opencti", post(import_opencti_document))
+        .route("/api/threat-intel/cisa-kev", post(import_kev_feed))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -725,6 +750,29 @@ struct PhishingDatabaseImportRequest {
     import_ips: bool,
     #[serde(default)]
     allow_non_default_hosts: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct KevImportRequest {
+    #[serde(default = "kev_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "kev_default_source")]
+    source: String,
+    #[serde(default = "kev_default_url")]
+    kev_url: String,
+    #[serde(default = "kev_default_ttl_seconds")]
+    ttl_seconds: u64,
+    #[serde(default)]
+    allow_non_default_hosts: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct KevImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_entries: usize,
+    last_updated_unix: u64,
 }
 
 #[derive(Serialize)]
@@ -1476,7 +1524,7 @@ async fn poll_taxii_collection(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true) {
+    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true, &[]) {
         return error(
             StatusCode::BAD_REQUEST,
             format!("invalid TAXII objects URL: {message}"),
@@ -2007,18 +2055,108 @@ fn validate_phishing_database_import_request(
         if request.domain_limit == 0 {
             return Err("domain_limit must be greater than zero when import_domains is enabled");
         }
-        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
+        validate_http_url(
+            &request.domain_url,
+            request.allow_non_default_hosts,
+            PHISHING_DATABASE_ALLOWED_HOSTS,
+        )?;
     }
     if request.import_ips {
         if request.ip_limit == 0 {
             return Err("ip_limit must be greater than zero when import_ips is enabled");
         }
-        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
+        validate_http_url(
+            &request.ip_url,
+            request.allow_non_default_hosts,
+            PHISHING_DATABASE_ALLOWED_HOSTS,
+        )?;
     }
     Ok(())
 }
 
-fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
+fn validate_kev_import_request(request: &KevImportRequest) -> Result<(), &'static str> {
+    if request.feed_id.trim().is_empty() {
+        return Err("feed_id is required");
+    }
+    if request.source.trim().is_empty() {
+        return Err("source is required");
+    }
+    if request.ttl_seconds == 0 {
+        return Err("ttl_seconds must be greater than zero");
+    }
+    validate_http_url(
+        &request.kev_url,
+        request.allow_non_default_hosts,
+        KEV_ALLOWED_HOSTS,
+    )
+}
+
+async fn import_kev_feed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<KevImportRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_kev_import_request(&request) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    let body_text = match fetch_text_feed(&state, &request.kev_url).await {
+        Ok(text) => text,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    let material = match kev_import::parse_kev_document(
+        &body_text,
+        request.source.trim(),
+        request.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("invalid fetched KEV catalog: {message}"),
+            );
+        }
+    };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id.trim().to_string(),
+        source: request.source.trim().to_string(),
+        ttl_seconds: request.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            format!("invalid fetched feed data: {message}"),
+        );
+    }
+    let skipped_entries = material.skipped_entries;
+    match apply_threat_feed_import(&state, actor, "import_kev_feed", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(KevImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_entries,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+fn validate_http_url(
+    value: &str,
+    allow_non_default_hosts: bool,
+    allowed_hosts: &[&str],
+) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
     let host = parsed.host_str().ok_or("feed URL host is required")?;
     match parsed.scheme() {
@@ -2028,7 +2166,7 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &
         _ => return Err("feed URL scheme must be http or https"),
     }
     if !allow_non_default_hosts
-        && !PHISHING_DATABASE_ALLOWED_HOSTS
+        && !allowed_hosts
             .iter()
             .any(|allowed| host.eq_ignore_ascii_case(allowed))
     {
@@ -2501,7 +2639,7 @@ async fn apply_threat_feed_import(
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    validate_http_url(url, /* allow_non_default_hosts */ true)
+    validate_http_url(url, /* allow_non_default_hosts */ true, &[])
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
         .feed_http
@@ -2787,6 +2925,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>OpenCTI threat intelligence</h2>
       <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
+    </section>
+    <section class="card"><h2>CISA KEV catalog</h2>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/cisa-kev</code> with optional <code>feed_id</code>, <code>source</code>, <code>kev_url</code> (defaults to the official CISA Known Exploited Vulnerabilities catalog), and <code>ttl_seconds</code>. Fetches the catalog and upserts a <code>cve</code> threat indicator per entry (severity escalated to critical when CISA has tied the CVE to a known ransomware campaign). Fetch is restricted to the default CISA host unless <code>allow_non_default_hosts</code> is set.</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -3288,6 +3429,16 @@ mod tests {
             severity: Severity::Critical,
             import_domains: true,
             import_ips: true,
+            allow_non_default_hosts: true,
+        }
+    }
+
+    fn kev_import_request(base_url: &str) -> KevImportRequest {
+        KevImportRequest {
+            feed_id: "cisa-kev-seoul".to_string(),
+            source: "feed:cisa-kev".to_string(),
+            kev_url: format!("{base_url}/kev.json"),
+            ttl_seconds: 900,
             allow_non_default_hosts: true,
         }
     }
@@ -4700,6 +4851,222 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_endpoint_maps_catalog_to_cve_indicators() {
+        let catalog = serde_json::json!({
+            "title": "CISA Catalog of Known Exploited Vulnerabilities",
+            "catalogVersion": "2026.08.27",
+            "dateReleased": "2026-08-27T17:00:36.6632Z",
+            "count": 2,
+            "vulnerabilities": [
+                {
+                    "cveID": "CVE-2023-49105",
+                    "vendorProject": "ownCloud",
+                    "product": "ownCloud",
+                    "vulnerabilityName": "ownCloud Improper Authentication Vulnerability",
+                    "dateAdded": "2026-08-27",
+                    "shortDescription": "desc",
+                    "requiredAction": "action",
+                    "dueDate": "2026-08-30",
+                    "knownRansomwareCampaignUse": "Unknown",
+                    "notes": "",
+                    "cwes": ["CWE-287"]
+                },
+                {
+                    "cveID": "CVE-2021-44228",
+                    "vendorProject": "Apache",
+                    "product": "Log4j2",
+                    "vulnerabilityName": "Apache Log4j2 RCE",
+                    "dateAdded": "2021-12-10",
+                    "shortDescription": "desc",
+                    "requiredAction": "action",
+                    "dueDate": "2021-12-24",
+                    "knownRansomwareCampaignUse": "Known",
+                    "notes": "",
+                    "cwes": ["CWE-917"]
+                }
+            ]
+        });
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let body = catalog.to_string();
+                async move { (StatusCode::OK, body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = kev_import_request(&format!("http://{addr}"));
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/threat-intel/cisa-kev", None, &payload),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_request = KevImportRequest {
+            ttl_seconds: 0,
+            ..payload.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &invalid_request,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-intel/cisa-kev",
+                    Some("secret"),
+                    &payload,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "cisa-kev-seoul");
+        assert_eq!(import_result.upserted_threats, 2);
+        assert_eq!(import_result.upserted_dnsbl, 0);
+
+        let audit_logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|item| item.action == "import_kev_feed")
+        );
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        let owncloud = threat_entries
+            .iter()
+            .find(|entry| entry.value == "CVE-2023-49105")
+            .expect("ownCloud CVE upserted");
+        assert_eq!(owncloud.indicator_type, "cve");
+        assert_eq!(owncloud.severity, Severity::High);
+        assert_eq!(owncloud.source, "feed:cisa-kev");
+        let log4j = threat_entries
+            .iter()
+            .find(|entry| entry.value == "CVE-2021-44228")
+            .expect("Log4j CVE upserted");
+        assert_eq!(
+            log4j.severity,
+            Severity::Critical,
+            "ransomware-linked CVE escalates to critical"
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|feed| feed.feed_id == "cisa-kev-seoul" && !feed.stale)
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/cisa-kev")
+        );
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_rejects_redirected_feed_fetches() {
+        let target_feed = Router::new().route(
+            "/kev.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"vulnerabilities":[{"cveID":"CVE-2024-0001"}]}"#,
+                )
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_target = format!("http://{target_addr}/kev.json");
+        let redirect_feed = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let location = redirect_target.clone();
+                async move { (StatusCode::FOUND, [("location", location)]) }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = kev_import_request(&format!("http://{redirect_addr}"));
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_rejects_disallowed_host_by_default() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = KevImportRequest {
+            allow_non_default_hosts: false,
+            ..kev_import_request("http://127.0.0.1:1")
+        };
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

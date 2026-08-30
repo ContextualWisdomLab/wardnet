@@ -1292,6 +1292,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "OpenCTI observable/indicator JSON ingest into threat indicators and DNSBL (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "cisa_kev_ingest",
+            "POST",
+            "/api/threat-intel/cisa-kev",
+            "application/json",
+            "CISA Known Exploited Vulnerabilities catalog pull into CVE threat indicators (admin-auth)",
+            false,
+        ),
     ]
 }
 
