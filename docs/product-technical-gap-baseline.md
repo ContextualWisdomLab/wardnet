@@ -23,11 +23,12 @@ No open PR may be treated as ready until its current head satisfies those exact 
 
 ## 3. Open PR inventory
 
-There are 14 other open PRs, excluding this baseline PR (`#130`).
+There are 14 other open PRs at this exact head, intentionally excluding this
+baseline PR (`#130`) from the table below.
 
 | PR | Head | State | Exact-head evidence | Current next action |
 | --- | --- | --- | --- | --- |
-| [#129](https://github.com/ContextualWisdomLab/wardnet/pull/129) | `1a5d2c77a8` | Draft, blocked | Current head is intentionally red; no unresolved threads; independent review still required | Resolve the intentionally red head, then rerun current-head checks and obtain approval |
+| [#129](https://github.com/ContextualWisdomLab/wardnet/pull/129) | `6eea1293bb` | Draft, intentionally blocked | Current exact head is intentionally RED: `noema-review`, `opencode-review`, and `strix` failed; no unresolved threads; independent review still required; must not be merged in this state | Keep the PR in draft, finish the remaining service/docs slices, then replace the intentionally red head with a green exact head before requesting approval |
 | [#127](https://github.com/ContextualWisdomLab/wardnet/pull/127) | `aa29565948` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
 | [#126](https://github.com/ContextualWisdomLab/wardnet/pull/126) | `41d7ba9e8f` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
 | [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115) | `9de0b21916` | Blocked | `opencode-review` failed on current head; `strix` failed; 2 unresolved info threads remain; no approval | Re-run external review gates on a fresh head and resolve remaining thread decisions |
