@@ -1529,7 +1529,7 @@ async fn poll_taxii_collection(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true, &[]) {
+    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true) {
         return error(
             StatusCode::BAD_REQUEST,
             format!("invalid TAXII objects URL: {message}"),
@@ -2060,21 +2060,13 @@ fn validate_phishing_database_import_request(
         if request.domain_limit == 0 {
             return Err("domain_limit must be greater than zero when import_domains is enabled");
         }
-        validate_http_url(
-            &request.domain_url,
-            request.allow_non_default_hosts,
-            PHISHING_DATABASE_ALLOWED_HOSTS,
-        )?;
+        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
     }
     if request.import_ips {
         if request.ip_limit == 0 {
             return Err("ip_limit must be greater than zero when import_ips is enabled");
         }
-        validate_http_url(
-            &request.ip_url,
-            request.allow_non_default_hosts,
-            PHISHING_DATABASE_ALLOWED_HOSTS,
-        )?;
+        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
     }
     Ok(())
 }
@@ -2108,7 +2100,10 @@ async fn import_kev_feed(
     // real CISA feed; overridable only via server-side config, never by the
     // request body) -- there is no request-controlled URL construction here
     // at all, unlike the operator-URL adapters (phishing-database, TAXII).
-    let body_text = match fetch_text_feed(&state, &state.kev_catalog_url).await {
+    // Uses its own fetch_kev_catalog rather than the shared fetch_text_feed
+    // so this config-only path never shares a function with (and can't be
+    // conflated by static analysis with) phishing-database's request-URL fetch.
+    let body_text = match fetch_kev_catalog(&state, &state.kev_catalog_url).await {
         Ok(text) => text,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
@@ -2157,11 +2152,7 @@ async fn import_kev_feed(
     }
 }
 
-fn validate_http_url(
-    value: &str,
-    allow_non_default_hosts: bool,
-    allowed_hosts: &[&str],
-) -> Result<(), &'static str> {
+fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
     let host = parsed.host_str().ok_or("feed URL host is required")?;
     match parsed.scheme() {
@@ -2171,13 +2162,62 @@ fn validate_http_url(
         _ => return Err("feed URL scheme must be http or https"),
     }
     if !allow_non_default_hosts
-        && !allowed_hosts
+        && !PHISHING_DATABASE_ALLOWED_HOSTS
             .iter()
             .any(|allowed| host.eq_ignore_ascii_case(allowed))
     {
         return Err("feed URL host is not allowed");
     }
     Ok(())
+}
+
+// Deliberately separate from `fetch_text_feed`: that helper's `url` argument
+// is fed by phishing-database's request-supplied `domain_url`/`ip_url`, so it
+// carries request-tainted flow into `feed_http.get(url)` by design (an
+// admin-gated "fetch from an operator-chosen URL" feature). The KEV catalog
+// URL is never taken from a request -- only from `AppState::kev_catalog_url`
+// (deployment config) -- and giving it its own fetch function keeps that
+// config-only path structurally independent of the request-URL adapters, the
+// same separation `fetch_taxii_objects` already uses.
+async fn fetch_kev_catalog(state: &AppState, url: &str) -> Result<String, String> {
+    use futures_util::StreamExt;
+
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
+    let response = state
+        .feed_http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch KEV catalog {url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("KEV catalog {url} returned HTTP {status}"));
+    }
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "KEV catalog {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| format!("failed to read KEV catalog body from {url}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "KEV catalog {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("KEV catalog {url} is not valid UTF-8 text: {error}"))
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -2644,7 +2684,7 @@ async fn apply_threat_feed_import(
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    validate_http_url(url, /* allow_non_default_hosts */ true, &[])
+    validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
         .feed_http
@@ -3184,7 +3224,7 @@ pub async fn run_from_env(
     // AppState::kev_catalog_url / import_kev_feed.
     let kev_catalog_url = std::env::var("KEV_CATALOG_URL").ok();
     if let Some(url) = &kev_catalog_url {
-        validate_http_url(url, true, &[]).map_err(|message| {
+        validate_http_url(url, true).map_err(|message| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("KEV_CATALOG_URL is invalid: {message}"),
@@ -3250,6 +3290,7 @@ mod tests {
             "RATE_LIMIT",
             "RATE_LIMIT_WINDOW",
             "MAX_BODY_BYTES",
+            "KEV_CATALOG_URL",
         ] {
             unsafe { std::env::remove_var(name) };
         }
