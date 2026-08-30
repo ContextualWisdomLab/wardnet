@@ -2334,11 +2334,38 @@ fn client_ip_from_headers(
 ) -> Option<IpAddr> {
     if let Some(peer_ip) = peer_ip {
         if trusted_proxies.contains(&peer_ip) {
-            return forwarded_client_ip(headers).or(Some(peer_ip));
+            return trusted_forwarded_client_ip(headers, peer_ip, trusted_proxies)
+                .or(Some(peer_ip));
         }
         return Some(peer_ip);
     }
     forwarded_client_ip(headers)
+}
+
+/// Extract the first untrusted client IP from a trusted proxy chain.
+fn trusted_forwarded_client_ip(
+    headers: &HeaderMap,
+    peer_ip: IpAddr,
+    trusted_proxies: &HashSet<IpAddr>,
+) -> Option<IpAddr> {
+    let value = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())?;
+
+    let mut current_hop = peer_ip;
+    for hop in value.rsplit(',').map(str::trim) {
+        let candidate = hop.parse::<IpAddr>().ok()?;
+        if !trusted_proxies.contains(&current_hop) {
+            return Some(current_hop);
+        }
+        current_hop = candidate;
+    }
+
+    if trusted_proxies.contains(&current_hop) {
+        None
+    } else {
+        Some(current_hop)
+    }
 }
 
 /// Extract a forwarded client IP from standard proxy headers.
@@ -3785,6 +3812,51 @@ mod tests {
                 "/gateway/demo",
                 "198.51.100.200, 203.0.113.9",
                 "198.51.100.10",
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn gateway_walks_trusted_proxy_chain_right_to_left() {
+        let app = build_app(
+            AppState::seeded(None)
+                .with_rate_limit(1, 60)
+                .with_trusted_proxies(HashSet::from([
+                    "198.51.100.10".parse().unwrap(),
+                    "198.51.100.11".parse().unwrap(),
+                ])),
+        );
+
+        let first = app_request(
+            &app,
+            gateway_get_via_proxy(
+                "/gateway/demo",
+                "203.0.113.9, 198.51.100.10",
+                "198.51.100.11",
+            ),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app_request(
+            &app,
+            gateway_get_via_proxy(
+                "/gateway/demo",
+                "203.0.113.20, 198.51.100.10",
+                "198.51.100.11",
+            ),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let blocked = app_request(
+            &app,
+            gateway_get_via_proxy(
+                "/gateway/demo",
+                "203.0.113.9, 198.51.100.10",
+                "198.51.100.11",
             ),
         )
         .await;
