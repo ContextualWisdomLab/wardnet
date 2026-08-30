@@ -5070,6 +5070,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kev_cve_indicators_never_block_legitimate_requests() {
+        // A CVE identifier tracked from a KEV import is vulnerability
+        // metadata, not a request-content attack signature. A legitimate
+        // request that happens to reference a cataloged CVE (e.g. a
+        // vulnerability-management dashboard proxied through the gateway)
+        // must not be blocked just because the identifier appears in it.
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"vulnerabilities":[{"cveID":"CVE-2021-44228","knownRansomwareCampaignUse":"Known"}]}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = kev_import_request(&format!("http://{addr}"));
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let block_route = RouteConfig {
+            id: "cve-lookup".to_string(),
+            path_prefix: "/cve-lookup".to_string(),
+            upstream: "mock://cve-lookup".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: None,
+        };
+        let route_response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/cve-lookup?id=CVE-2021-44228"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn suricata_eve_ingest_maps_alerts_to_security_events() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(

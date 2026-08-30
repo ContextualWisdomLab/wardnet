@@ -845,6 +845,14 @@ pub fn score_request(
         let kind = indicator.indicator_type.to_ascii_lowercase();
         let matched = if matches!(kind.as_str(), "ip" | "client_ip" | "source_ip" | "src_ip") {
             client_ip.is_some_and(|ip| indicator.value.parse::<IpAddr>().ok() == Some(ip))
+        } else if kind == "cve" {
+            // A CVE identifier is vulnerability-catalog metadata (e.g. from a
+            // CISA KEV import), not a request-content observable: it can
+            // legitimately appear in a vulnerability-management or security
+            // tool's own traffic (`/api/cve/CVE-2021-44228`), so it must never
+            // drive content-substring scoring. It stays visible via the
+            // threat-indicator, feed-freshness, and buyer-evidence APIs.
+            false
         } else {
             haystack.contains(&indicator.value.to_lowercase())
         };
@@ -1447,6 +1455,31 @@ mod tests {
             &[],
         );
         assert_eq!(miss.score, 0);
+    }
+
+    #[test]
+    fn score_request_never_content_matches_cve_indicators() {
+        // A CVE indicator (e.g. from a CISA KEV import) is vulnerability
+        // metadata, not a request-content signature: a security-tooling
+        // request can legitimately carry the literal CVE string, and that
+        // must never contribute to the block score.
+        let threats = vec![ThreatIndicator {
+            value: "CVE-2021-44228".to_string(),
+            indicator_type: "cve".to_string(),
+            severity: Severity::Critical,
+            source: "feed:cisa-kev".to_string(),
+            ttl_seconds: 86_400,
+        }];
+        let hit = score_request(
+            "/api/cve/CVE-2021-44228",
+            None,
+            "looking up CVE-2021-44228 details",
+            None,
+            &threats,
+            &[],
+        );
+        assert_eq!(hit.score, 0);
+        assert_eq!(hit.reason, "no matching indicator");
     }
 
     #[test]
