@@ -946,6 +946,7 @@ async fn create_threat(
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_threat(&mut data.threats, indicator.clone());
+            mark_operator_threat_key(data, &saved);
             record_successful_audit_log(
                 data,
                 actor,
@@ -2680,6 +2681,13 @@ fn threat_resource_id(indicator: &ThreatIndicator) -> String {
     )
 }
 
+fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) {
+    let key = threat_indicator_key(indicator);
+    if !data.operator_threat_keys.contains(&key) {
+        data.operator_threat_keys.push(key);
+    }
+}
+
 async fn apply_threat_feed_import(
     state: &AppState,
     actor: String,
@@ -2702,16 +2710,21 @@ async fn apply_threat_feed_import(
                 // feed (e.g. two feeds importing the same CVE under a shared
                 // `source`) -- only reap it once no feed's ownership record
                 // claims it any more, so a refresh on one feed can't make a
-                // still-relevant indicator vanish from enforcement.
+                // still-relevant indicator vanish from enforcement. Also keep
+                // indicators an operator independently upserted via /api/threats.
                 let still_owned: HashSet<_> = data
                     .threat_feed_ownership
                     .iter()
                     .filter(|ownership| ownership.feed_id != feed.feed_id)
                     .flat_map(|ownership| ownership.threat_keys.iter().cloned())
                     .collect();
+                let operator_owned: HashSet<_> =
+                    data.operator_threat_keys.iter().cloned().collect();
                 data.threats.retain(|threat| {
                     let key = threat_indicator_key(threat);
-                    !previous_keys.contains(&key) || still_owned.contains(&key)
+                    !previous_keys.contains(&key)
+                        || still_owned.contains(&key)
+                        || operator_owned.contains(&key)
                 });
             }
             for threat in feed.threats.iter().cloned() {
@@ -5469,6 +5482,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_refresh_preserves_indicators_independently_upserted_by_operator() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let shared = ThreatIndicator {
+            value: "198.51.100.88".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::High,
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+        };
+        let feed = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let operator_upsert = app_request(
+            &app,
+            json_request(Method::POST, "/api/threats", Some("secret"), &shared),
+        )
+        .await;
+        assert_eq!(operator_upsert.status(), StatusCode::CREATED);
+
+        let placeholder_dnsbl = DnsblEntry {
+            address: "203.0.113.10".parse().unwrap(),
+            code: "127.0.0.5".to_string(),
+            reason: "refresh placeholder".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            prefix_len: None,
+        };
+        let refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl],
+            ..feed
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == shared.value),
+            "operator-managed indicator must survive feed withdrawal"
+        );
+    }
+
+    #[tokio::test]
     async fn suricata_eve_ingest_maps_alerts_to_security_events() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(
@@ -6312,6 +6396,7 @@ mod tests {
                     },
                 ],
                 threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
@@ -7188,6 +7273,7 @@ mod tests {
                     block_threshold: None,
                 }],
                 threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,

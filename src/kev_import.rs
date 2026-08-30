@@ -65,7 +65,7 @@ pub fn kev_material_from_value(
     // otherwise look like a mass withdrawal of still-exploited CVEs instead
     // of the bad fetch it actually is. Require a real majority of entries to
     // have parsed before trusting this snapshot as authoritative.
-    if skipped_entries > threats.len() {
+    if skipped_entries >= threats.len() {
         return Err(format!(
             "KEV catalog mostly unparsable: {skipped_entries} entries skipped vs {} usable -- refusing to treat as an authoritative snapshot",
             threats.len()
@@ -234,10 +234,11 @@ mod tests {
     fn skips_entries_missing_cve_id() {
         let raw = r#"{"vulnerabilities": [
           {"vendorProject": "NoId Inc", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "CVE-2024-9998", "knownRansomwareCampaignUse": "Unknown"},
           {"cveID": "CVE-2024-9999", "knownRansomwareCampaignUse": "Unknown"}
         ]}"#;
         let material = parse_kev_document(raw, "feed:cisa-kev", 3600).unwrap();
-        assert_eq!(material.threats.len(), 1);
+        assert_eq!(material.threats.len(), 2);
         assert_eq!(material.skipped_entries, 1);
     }
 
@@ -272,6 +273,18 @@ mod tests {
           {"cveID": "also-not-a-cve"},
           {"cveID": "CVE-24-0001"},
           {"cveID": "CVE-2024-9999", "knownRansomwareCampaignUse": "Unknown"}
+        ]}"#;
+        let error = parse_kev_document(raw, "feed:cisa-kev", 3600).unwrap_err();
+        assert!(error.contains("mostly unparsable"), "got: {error}");
+    }
+
+    #[test]
+    fn rejects_catalog_where_usable_and_skipped_entries_tie() {
+        let raw = r#"{"vulnerabilities": [
+          {"cveID": "CVE-2024-0001", "knownRansomwareCampaignUse": "Unknown"},
+          {"vendorProject": "missing-id"},
+          {"cveID": "CVE-2024-0002", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "not-a-cve"}
         ]}"#;
         let error = parse_kev_document(raw, "feed:cisa-kev", 3600).unwrap_err();
         assert!(error.contains("mostly unparsable"), "got: {error}");

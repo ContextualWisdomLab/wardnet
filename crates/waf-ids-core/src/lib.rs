@@ -11,6 +11,8 @@ pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
 pub struct AppData {
     pub routes: Vec<RouteConfig>,
     pub threats: Vec<ThreatIndicator>,
+    #[serde(default)]
+    pub operator_threat_keys: Vec<ThreatIndicatorKey>,
     pub dnsbl: Vec<DnsblEntry>,
     pub events: Vec<SecurityEvent>,
     pub next_event_id: u64,
@@ -44,6 +46,7 @@ impl AppData {
                 source: "seed:owasp-crs-shape".to_string(),
                 ttl_seconds: 86_400,
             }],
+            operator_threat_keys: Vec::new(),
             dnsbl: vec![DnsblEntry {
                 address: "203.0.113.10".parse().expect("seed IP address is valid"),
                 code: "127.0.0.2".to_string(),

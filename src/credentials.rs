@@ -65,13 +65,13 @@ impl CredentialRegistry {
                 .is_some_and(|v| !v.trim().is_empty())
     }
 
-    /// Bootstrap secret-bearing and fetch-sensitive credentials.
+    /// Bootstrap secret-bearing credentials plus the optional KEV fetch override.
     ///
     /// Precedence: JSON credentials file (when present) wins per-key; missing
     /// keys are filled from the env bootstrap values. Operational non-secret
-    /// config (bind address, limits, DNSBL origin) stays on env, but the
-    /// KEV catalog fetches stay fixed to the built-in CISA endpoint at
-    /// runtime; only admin secrets flow through this registry.
+    /// config (bind address, limits, DNSBL origin) stays on env. The KEV URL
+    /// defaults to the built-in CISA endpoint and is accepted here only as a
+    /// server-side override that must still satisfy the runtime allowlist.
     pub fn bootstrap_secrets(
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
