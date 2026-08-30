@@ -80,8 +80,14 @@ impl CredentialRegistry {
         env_kev_catalog_url: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
-        let mut from_file = false;
-        let mut from_env = false;
+        // CredentialSource is documented (and reported via HealthStatus/support
+        // bundle) as admin-secret provenance specifically, so only
+        // CRED_ADMIN_TOKEN/CRED_ADMIN_TOKENS may set these -- KEV_CATALOG_URL
+        // shares this registry's storage but must not affect the reported
+        // source, or a file that carries only a KEV override would make an
+        // env-sourced admin token misreport as file-backed.
+        let mut admin_from_file = false;
+        let mut admin_from_env = false;
 
         if let Some(path) = credentials_path {
             match std::fs::read_to_string(path) {
@@ -98,7 +104,9 @@ impl CredentialRegistry {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
                                 values.insert(key.to_string(), text);
-                                from_file = true;
+                                if key != CRED_KEV_CATALOG_URL {
+                                    admin_from_file = true;
+                                }
                             }
                         }
                     }
@@ -117,24 +125,23 @@ impl CredentialRegistry {
             && let Some(token) = env_admin_token.filter(|value| !value.is_empty())
         {
             values.insert(CRED_ADMIN_TOKEN.to_string(), token);
-            from_env = true;
+            admin_from_env = true;
         }
         if !values.contains_key(CRED_ADMIN_TOKENS)
             && let Some(tokens) = env_admin_tokens.filter(|value| !value.is_empty())
         {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
-            from_env = true;
+            admin_from_env = true;
         }
         if !values.contains_key(CRED_KEV_CATALOG_URL)
             && let Some(url) = env_kev_catalog_url.filter(|value| !value.is_empty())
         {
             values.insert(CRED_KEV_CATALOG_URL.to_string(), url);
-            from_env = true;
         }
 
-        let source = if from_file {
+        let source = if admin_from_file {
             CredentialSource::File
-        } else if from_env {
+        } else if admin_from_env {
             CredentialSource::Env
         } else {
             CredentialSource::None
@@ -342,6 +349,43 @@ mod tests {
             Some(
                 "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
             )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_only_kev_catalog_url_does_not_misreport_env_admin_token_as_file_backed() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-mixed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"kev_catalog_url":"https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"}"#,
+        )
+        .unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            Some("env-admin-secret".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            registry.source(),
+            CredentialSource::Env,
+            "admin token came from env even though the file supplied kev_catalog_url"
+        );
+        assert_eq!(
+            registry.get_credential(CRED_ADMIN_TOKEN),
+            Some("env-admin-secret")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

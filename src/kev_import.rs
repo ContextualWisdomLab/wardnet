@@ -58,6 +58,19 @@ pub fn kev_material_from_value(
     if threats.is_empty() {
         return Err("no KEV entries carried a usable cveID".to_string());
     }
+    // A refreshed import now reconciles: entries missing from this snapshot
+    // are treated as withdrawn and removed from enforcement (see
+    // apply_threat_feed_import). A catalog that's mostly unparsable --
+    // truncated mid-transfer, or a CISA response format regression -- would
+    // otherwise look like a mass withdrawal of still-exploited CVEs instead
+    // of the bad fetch it actually is. Require a real majority of entries to
+    // have parsed before trusting this snapshot as authoritative.
+    if skipped_entries > threats.len() {
+        return Err(format!(
+            "KEV catalog mostly unparsable: {skipped_entries} entries skipped vs {} usable -- refusing to treat as an authoritative snapshot",
+            threats.len()
+        ));
+    }
 
     Ok(KevImportMaterial {
         threats,
@@ -233,13 +246,35 @@ mod tests {
         let raw = r#"{"vulnerabilities": [
           {"cveID": "not-a-cve", "knownRansomwareCampaignUse": "Unknown"},
           {"cveID": "CVE-24-0001", "knownRansomwareCampaignUse": "Unknown"},
-          {"cveID": "CVE-2024-001", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "CVE-2024-0001", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "CVE-2024-9998", "knownRansomwareCampaignUse": "Unknown"},
           {"cveID": "CVE-2024-9999", "knownRansomwareCampaignUse": "Unknown"}
         ]}"#;
         let material = parse_kev_document(raw, "feed:cisa-kev", 3600).unwrap();
-        assert_eq!(material.threats.len(), 1);
-        assert_eq!(material.threats[0].value, "CVE-2024-9999");
-        assert_eq!(material.skipped_entries, 3);
+        assert_eq!(material.threats.len(), 3);
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|threat| threat.value == "CVE-2024-9999")
+        );
+        assert_eq!(material.skipped_entries, 2);
+    }
+
+    #[test]
+    fn rejects_catalog_where_most_entries_are_unparsable() {
+        // A snapshot that's mostly garbage (truncated fetch, upstream format
+        // regression) must not be trusted as authoritative -- a refresh now
+        // reconciles, so treating this as "the current catalog" would read
+        // as a mass withdrawal of still-tracked CVEs.
+        let raw = r#"{"vulnerabilities": [
+          {"cveID": "not-a-cve"},
+          {"cveID": "also-not-a-cve"},
+          {"cveID": "CVE-24-0001"},
+          {"cveID": "CVE-2024-9999", "knownRansomwareCampaignUse": "Unknown"}
+        ]}"#;
+        let error = parse_kev_document(raw, "feed:cisa-kev", 3600).unwrap_err();
+        assert!(error.contains("mostly unparsable"), "got: {error}");
     }
 
     #[test]
