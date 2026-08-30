@@ -69,6 +69,13 @@ Useful environment variables:
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
+- `RATE_LIMIT`: optional per-client gateway request budget; `0` disables local limiting
+- `RATE_LIMIT_WINDOW`: fixed-window length in seconds for `RATE_LIMIT`, default `60`
+- `RATE_LIMIT_MAX_CLIENTS`: maximum in-memory client buckets retained by the local limiter, default `4096`
+
+When the local limiter returns HTTP `429`, the response includes a `Retry-After`
+header plus JSON `reason` codes that distinguish per-client quota exhaustion
+from local limiter saturation (`local_rate_limiter_capacity_exceeded`).
 
 Example with persistent local state:
 

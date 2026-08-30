@@ -44,6 +44,8 @@ mod suricata_eve;
 mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
 
+const DEFAULT_RATE_LIMIT_MAX_CLIENTS: usize = 4_096;
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppData>>,
@@ -60,10 +62,10 @@ pub struct AppState {
     dnsbl_origin: String,
     event_limit: usize,
     // Ephemeral per-client-IP fixed-window counters (not persisted).
-    // ponytail: unbounded map — add TTL eviction if client-IP cardinality grows.
-    rate_limiter: Arc<Mutex<HashMap<IpAddr, (u64, u32)>>>,
+    rate_limiter: Arc<Mutex<HashMap<IpAddr, RateLimitBucket>>>,
     rate_limit: u32,
     rate_limit_window: u64,
+    rate_limit_max_clients: usize,
     // Max accepted request body size in bytes; oversized requests get 413.
     max_body_bytes: usize,
     // Optional Clearfolio document-viewer integration. `None` unless configured.
@@ -94,6 +96,41 @@ pub struct ClearfolioConfig {
     pub tenant_id: String,
     pub subject_id: String,
     pub permissions: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateLimitBucket {
+    window_start: u64,
+    count: u32,
+    last_seen: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RateLimitDecision {
+    allowed: bool,
+    retry_after_seconds: u64,
+    reason: &'static str,
+}
+
+impl RateLimitDecision {
+    const WINDOW_EXCEEDED: &'static str = "rate_limit_exceeded";
+    const CAPACITY_EXCEEDED: &'static str = "local_rate_limiter_capacity_exceeded";
+
+    fn allowed() -> Self {
+        Self {
+            allowed: true,
+            retry_after_seconds: 0,
+            reason: "",
+        }
+    }
+
+    fn denied(reason: &'static str, retry_after_seconds: u64) -> Self {
+        Self {
+            allowed: false,
+            retry_after_seconds: retry_after_seconds.max(1),
+            reason,
+        }
+    }
 }
 
 impl AppState {
@@ -132,6 +169,7 @@ impl AppState {
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
             rate_limit: 0,
             rate_limit_window: 60,
+            rate_limit_max_clients: DEFAULT_RATE_LIMIT_MAX_CLIENTS,
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
@@ -168,6 +206,13 @@ impl AppState {
         self
     }
 
+    /// Bound the number of local in-memory client buckets retained by the rate
+    /// limiter. When full, unseen clients receive 429 until stale buckets age out.
+    pub fn with_rate_limit_max_clients(mut self, max_clients: usize) -> Self {
+        self.rate_limit_max_clients = max_clients.max(1);
+        self
+    }
+
     /// Configure RBAC admin tokens (token -> principal). A non-empty map takes
     /// precedence over the single `admin_token`. Builder-style.
     pub fn with_admin_tokens(mut self, tokens: HashMap<String, AdminPrincipal>) -> Self {
@@ -196,25 +241,50 @@ impl AppState {
             .map(|principal| principal.actor.clone())
     }
 
-    /// Records one gateway request for `client_ip` and returns `true` if it is
-    /// within the configured rate limit. Unknown IPs share one bucket.
-    async fn allow_request(&self, client_ip: Option<IpAddr>) -> bool {
+    /// Records one gateway request for `client_ip` and returns the local
+    /// admission decision. Unknown IPs share one bucket.
+    async fn allow_request(&self, client_ip: Option<IpAddr>) -> RateLimitDecision {
         if self.rate_limit == 0 {
-            return true;
+            return RateLimitDecision::allowed();
         }
         let key = client_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         let now = now_unix();
         let mut map = self.rate_limiter.lock().await;
-        let (window_start, count) = map.get(&key).copied().unwrap_or((now, 0));
+        prune_rate_limit_buckets(&mut map, now, self.rate_limit_window);
+        if !map.contains_key(&key) && map.len() >= self.rate_limit_max_clients {
+            return RateLimitDecision::denied(
+                RateLimitDecision::CAPACITY_EXCEEDED,
+                self.rate_limit_window,
+            );
+        }
+        let bucket = map.get(&key).copied().unwrap_or(RateLimitBucket {
+            window_start: now,
+            count: 0,
+            last_seen: now,
+        });
         let (allowed, new_start, new_count) = rate_limit_step(
             now,
-            window_start,
-            count,
+            bucket.window_start,
+            bucket.count,
             self.rate_limit,
             self.rate_limit_window,
         );
-        map.insert(key, (new_start, new_count));
-        allowed
+        map.insert(
+            key,
+            RateLimitBucket {
+                window_start: new_start,
+                count: new_count,
+                last_seen: now,
+            },
+        );
+        if allowed {
+            RateLimitDecision::allowed()
+        } else {
+            RateLimitDecision::denied(
+                RateLimitDecision::WINDOW_EXCEEDED,
+                retry_after_seconds(now, new_start, self.rate_limit_window),
+            )
+        }
     }
 
     async fn mutate_and_persist<T>(
@@ -2124,30 +2194,50 @@ async fn gateway(
     let client_ip = client_ip_from_headers(&headers);
 
     // Rate limiting runs before scoring/proxying so floods are shed cheaply.
-    if !state.allow_request(client_ip).await {
+    let rate_limit = state.allow_request(client_ip).await;
+    if !rate_limit.allowed {
+        let action = if rate_limit.reason == RateLimitDecision::CAPACITY_EXCEEDED {
+            "rate_limiter_saturated"
+        } else {
+            "rate_limited"
+        };
         record_event(
             &state,
             client_ip,
             Some(route.id.clone()),
-            "rate_limited",
-            format!(
-                "rate limit exceeded ({} requests per {}s)",
-                state.rate_limit, state.rate_limit_window
-            ),
+            action,
+            match rate_limit.reason {
+                RateLimitDecision::CAPACITY_EXCEEDED => format!(
+                    "local rate limiter saturated (max {} client buckets, {}s TTL)",
+                    state.rate_limit_max_clients, state.rate_limit_window
+                ),
+                _ => format!(
+                    "rate limit exceeded ({} requests per {}s)",
+                    state.rate_limit, state.rate_limit_window
+                ),
+            },
             0,
             gateway_path,
         )
         .await;
-        return (
+        let mut response = (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
-                "action": "rate_limited",
+                "action": action,
+                "reason": rate_limit.reason,
                 "route_id": route.id,
                 "limit": state.rate_limit,
-                "window_seconds": state.rate_limit_window
+                "window_seconds": state.rate_limit_window,
+                "max_clients": state.rate_limit_max_clients,
+                "retry_after_seconds": rate_limit.retry_after_seconds
             })),
         )
             .into_response();
+        let retry_after =
+            axum::http::HeaderValue::from_str(&rate_limit.retry_after_seconds.to_string())
+                .expect("retry-after header is numeric");
+        response.headers_mut().insert("retry-after", retry_after);
+        return response;
     }
 
     let body_text = String::from_utf8_lossy(&body);
@@ -2387,6 +2477,21 @@ fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("admin-token")
         .to_string()
+}
+
+fn prune_rate_limit_buckets(
+    map: &mut HashMap<IpAddr, RateLimitBucket>,
+    now: u64,
+    window_secs: u64,
+) {
+    map.retain(|_, bucket| now.saturating_sub(bucket.last_seen) < window_secs);
+}
+
+fn retry_after_seconds(now: u64, window_start: u64, window_secs: u64) -> u64 {
+    window_start
+        .saturating_add(window_secs)
+        .saturating_sub(now)
+        .max(1)
 }
 
 /// Parses an `ADMIN_TOKENS` string into a token -> [`AdminPrincipal`] map.
@@ -2989,6 +3094,34 @@ pub fn parse_u64_env(
     }
 }
 
+/// Parse a `usize` environment value (already read as an optional string),
+/// returning `default` when absent and rejecting zero or malformed values.
+pub fn parse_usize_env(
+    name: &str,
+    raw: Option<&str>,
+    default: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    match raw {
+        Some(raw) => {
+            let value = raw.parse::<usize>().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{name} must be a positive integer, got {raw:?}: {error}"),
+                )
+            })?;
+            if value == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{name} must be greater than 0"),
+                )
+                .into());
+            }
+            Ok(value)
+        }
+        None => Ok(default),
+    }
+}
+
 /// Read gateway configuration from the process environment, bind the listener,
 /// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
 /// over this function so every branch is reachable from tests (the parse/error
@@ -3023,6 +3156,11 @@ pub async fn run_from_env(
         std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
         60,
     )?;
+    let rate_limit_max_clients = parse_usize_env(
+        "RATE_LIMIT_MAX_CLIENTS",
+        std::env::var("RATE_LIMIT_MAX_CLIENTS").ok().as_deref(),
+        DEFAULT_RATE_LIMIT_MAX_CLIENTS,
+    )?;
     let admin_tokens = parse_admin_tokens(
         credentials
             .get_credential(CRED_ADMIN_TOKENS)
@@ -3043,6 +3181,7 @@ pub async fn run_from_env(
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
+        .with_rate_limit_max_clients(rate_limit_max_clients)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_max_body_size(max_body_bytes);
@@ -3088,6 +3227,7 @@ mod tests {
             "EVENT_LIMIT",
             "RATE_LIMIT",
             "RATE_LIMIT_WINDOW",
+            "RATE_LIMIT_MAX_CLIENTS",
             "MAX_BODY_BYTES",
         ] {
             unsafe { std::env::remove_var(name) };
@@ -3120,6 +3260,20 @@ mod tests {
             30
         );
         assert!(parse_u64_env("RATE_LIMIT_WINDOW", Some("abc"), 60).is_err());
+    }
+
+    #[test]
+    fn parse_usize_env_reads_optional_env() {
+        assert_eq!(
+            parse_usize_env("RATE_LIMIT_MAX_CLIENTS", None, 7).unwrap(),
+            7
+        );
+        assert_eq!(
+            parse_usize_env("RATE_LIMIT_MAX_CLIENTS", Some("120"), 1).unwrap(),
+            120
+        );
+        assert!(parse_usize_env("RATE_LIMIT_MAX_CLIENTS", Some("0"), 1).is_err());
+        assert!(parse_usize_env("RATE_LIMIT_MAX_CLIENTS", Some("abc"), 1).is_err());
     }
 
     #[test]
@@ -3173,6 +3327,22 @@ mod tests {
             std::env::set_var("RATE_LIMIT_WINDOW", "not-a-number");
         }
         // A malformed window is a hard configuration error, surfaced before bind.
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_rejects_malformed_rate_limit_max_clients() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("RATE_LIMIT_MAX_CLIENTS", "not-a-number");
+        }
         assert!(
             run_from_env(Box::pin(std::future::ready(())))
                 .await
@@ -3353,6 +3523,33 @@ mod tests {
         assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
     }
 
+    #[test]
+    fn prune_rate_limit_buckets_drops_expired_clients() {
+        let mut map = HashMap::from([
+            (
+                "203.0.113.10".parse().unwrap(),
+                RateLimitBucket {
+                    window_start: 10,
+                    count: 2,
+                    last_seen: 10,
+                },
+            ),
+            (
+                "203.0.113.11".parse().unwrap(),
+                RateLimitBucket {
+                    window_start: 11,
+                    count: 1,
+                    last_seen: 11,
+                },
+            ),
+        ]);
+
+        prune_rate_limit_buckets(&mut map, 70, 60);
+
+        assert!(!map.contains_key(&"203.0.113.10".parse::<IpAddr>().unwrap()));
+        assert!(map.contains_key(&"203.0.113.11".parse::<IpAddr>().unwrap()));
+    }
+
     #[tokio::test]
     async fn gateway_rate_limits_per_client_ip() {
         let app = build_app(AppState::seeded(None).with_rate_limit(2, 60));
@@ -3368,6 +3565,35 @@ mod tests {
         // A different client IP keeps its own independent budget.
         let other = app_request(&app, gateway_get_from_ip("/gateway/demo", "198.51.100.7")).await;
         assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gateway_rejects_new_clients_when_local_limiter_is_full() {
+        let app = build_app(
+            AppState::seeded(None)
+                .with_rate_limit(2, 60)
+                .with_rate_limit_max_clients(1),
+        );
+
+        let first = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let saturated =
+            app_request(&app, gateway_get_from_ip("/gateway/demo", "198.51.100.7")).await;
+        assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            saturated
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+
+        let body: serde_json::Value = json_body(saturated).await;
+        assert_eq!(body["action"], "rate_limiter_saturated");
+        assert_eq!(body["reason"], RateLimitDecision::CAPACITY_EXCEEDED);
+        assert_eq!(body["max_clients"], 1);
+        assert_eq!(body["retry_after_seconds"], 60);
     }
 
     async fn body_text(response: Response) -> String {

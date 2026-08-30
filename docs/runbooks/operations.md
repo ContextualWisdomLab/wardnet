@@ -78,6 +78,22 @@ The smoke test starts the service on a temporary port with a temporary JSON stat
 
 When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling file and atomically replaces the configured state path. If a management write cannot be persisted, the in-memory mutation is rolled back and the API returns `500`.
 
+## Local Admission Control
+
+`RATE_LIMIT` and `RATE_LIMIT_WINDOW` enable a per-client fixed-window limiter for
+`/gateway` traffic. `RATE_LIMIT_MAX_CLIENTS` bounds the number of in-memory
+client buckets the process will retain; stale buckets age out after one full
+window. When the map is full, unseen clients receive `429 Too Many Requests`
+with `Retry-After` and reason
+`local_rate_limiter_capacity_exceeded` until older buckets expire.
+
+This is a local emergency guard, not the distributed quota authority described
+in issue `#83`. The contract follows RFC 6585's guidance that `429` responses
+may include `Retry-After`, and it aligns with OWASP ASVS 5.0 availability
+controls by failing with a bounded, operator-visible response instead of
+allowing attacker-controlled client cardinality to grow process memory without
+limit.
+
 ## Safe Change Procedure
 
 1. Start new routes in `monitor` mode.
@@ -107,3 +123,9 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement
+
+## References
+
+- Nottingham, M., & Fielding, R. (2012). *Additional HTTP status codes* (RFC 6585). https://www.rfc-editor.org/info/rfc6585
+- OWASP Foundation. (2025). *OWASP Application Security Verification Standard 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/
+- Souppaya, M., Scarfone, K., & Dodson, D. (2022). *Secure Software Development Framework (SSDF) version 1.1* (NIST SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
