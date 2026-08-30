@@ -73,9 +73,10 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
-    // CISA KEV catalog URL fetched by `import_kev_feed`. Runtime uses the
-    // built-in CISA URL; this builder override exists for loopback-backed tests.
-    kev_catalog_url: String,
+    // Non-test runtime always fetches the built-in CISA KEV URL. Tests can
+    // override it to point at a loopback mock server.
+    #[cfg(test)]
+    kev_catalog_url: Option<String>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -140,7 +141,8 @@ impl AppState {
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
-            kev_catalog_url: KEV_DEFAULT_URL.to_string(),
+            #[cfg(test)]
+            kev_catalog_url: None,
         }
     }
 
@@ -148,9 +150,20 @@ impl AppState {
     /// Deployment-time config only, for pointing at a local mock server in
     /// tests -- see `validate_kev_catalog_url`, which restricts the fetch to
     /// CISA's own host (or loopback) with no mirror override. Builder-style.
+    #[cfg(test)]
     pub fn with_kev_catalog_url(mut self, url: impl Into<String>) -> Self {
-        self.kev_catalog_url = url.into();
+        self.kev_catalog_url = Some(url.into());
         self
+    }
+
+    #[cfg(test)]
+    fn kev_catalog_url(&self) -> &str {
+        self.kev_catalog_url.as_deref().unwrap_or(KEV_DEFAULT_URL)
+    }
+
+    #[cfg(not(test))]
+    fn kev_catalog_url(&self) -> &str {
+        KEV_DEFAULT_URL
     }
 
     /// Set the maximum accepted request body size in bytes; larger requests are
@@ -2113,7 +2126,7 @@ async fn import_kev_feed(
     // Uses its own fetch_kev_catalog rather than the shared fetch_text_feed
     // so this config-only path never shares a function with (and can't be
     // conflated by static analysis with) phishing-database's request-URL fetch.
-    let body_text = match fetch_kev_catalog(&state, &state.kev_catalog_url).await {
+    let body_text = match fetch_kev_catalog(&state).await {
         Ok(text) => text,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
@@ -2205,9 +2218,10 @@ fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn fetch_kev_catalog(state: &AppState, url: &str) -> Result<String, String> {
+async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let url = state.kev_catalog_url();
     validate_kev_catalog_url(url)?;
     let response = state
         .feed_http
@@ -2697,6 +2711,7 @@ async fn apply_threat_feed_import(
     let imported_at = now_unix();
     state
         .mutate_and_persist(|data| {
+            let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect();
             let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
             let previous_keys: HashSet<_> = replace_threat_feed_ownership(
                 &mut data.threat_feed_ownership,
@@ -2718,8 +2733,6 @@ async fn apply_threat_feed_import(
                     .filter(|ownership| ownership.feed_id != feed.feed_id)
                     .flat_map(|ownership| ownership.threat_keys.iter().cloned())
                     .collect();
-                let operator_owned: HashSet<_> =
-                    data.operator_threat_keys.iter().cloned().collect();
                 data.threats.retain(|threat| {
                     let key = threat_indicator_key(threat);
                     !previous_keys.contains(&key)
@@ -2728,6 +2741,9 @@ async fn apply_threat_feed_import(
                 });
             }
             for threat in feed.threats.iter().cloned() {
+                if operator_owned.contains(&threat_indicator_key(&threat)) {
+                    continue;
+                }
                 upsert_threat(&mut data.threats, threat);
             }
             for entry in feed.dnsbl.iter().cloned() {
@@ -5550,6 +5566,89 @@ mod tests {
                 .any(|entry| entry.value == shared.value),
             "operator-managed indicator must survive feed withdrawal"
         );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_operator_managed_indicator_payload() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let operator_indicator = ThreatIndicator {
+            value: "198.51.100.89".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::Critical,
+            source: "shared-source".to_string(),
+            ttl_seconds: 86_400,
+        };
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &operator_indicator,
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let feed = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 60,
+            threats: vec![ThreatIndicator {
+                severity: Severity::Low,
+                ttl_seconds: 60,
+                ..operator_indicator.clone()
+            }],
+            dnsbl: Vec::new(),
+        };
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![DnsblEntry {
+                address: "203.0.113.19".parse().unwrap(),
+                code: "127.0.0.19".to_string(),
+                reason: "refresh placeholder".to_string(),
+                source: "shared-source".to_string(),
+                ttl_seconds: 60,
+                prefix_len: None,
+            }],
+            ..feed
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        let stored = threat_entries
+            .iter()
+            .find(|entry| {
+                entry.value == operator_indicator.value
+                    && entry.indicator_type == operator_indicator.indicator_type
+                    && entry.source == operator_indicator.source
+            })
+            .expect("operator-managed indicator should remain present");
+        assert_eq!(stored.severity, Severity::Critical);
+        assert_eq!(stored.ttl_seconds, 86_400);
     }
 
     #[tokio::test]
