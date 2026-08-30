@@ -2380,17 +2380,24 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
     }
 }
 
-/// Resolve the effective client IP, trusting forwarded headers only from known
-/// proxy peers and only after walking the proxy chain right-to-left.
-fn client_ip_from_request(
-    headers: &HeaderMap,
+/// Resolve the effective client IP from direct peer and optional forwarding
+/// metadata.
+///
+/// Forwarded headers participate only when the direct peer is within
+/// `trusted_proxies`. In that trusted context, the `X-Forwarded-For` chain is
+/// walked from right to left so appended trusted-proxy hops are skipped and the
+/// first untrusted valid address becomes the client identity. If no such hop is
+/// present, a trusted `X-Real-IP` fallback is used, then the direct peer.
+pub fn effective_client_ip(
     peer_ip: Option<IpAddr>,
+    x_forwarded_for: Option<&str>,
+    x_real_ip: Option<&str>,
     trusted_proxies: &[IpNet],
 ) -> Option<IpAddr> {
     match peer_ip {
         Some(peer_ip) if trusted_proxies.iter().any(|proxy| proxy.contains(peer_ip)) => {
-            trusted_forwarded_client_ip(headers, trusted_proxies)
-                .or_else(|| trusted_real_ip(headers))
+            trusted_forwarded_chain_client_ip(x_forwarded_for, trusted_proxies)
+                .or_else(|| trusted_real_ip_value(x_real_ip))
                 .or(Some(peer_ip))
         }
         Some(peer_ip) => Some(peer_ip),
@@ -2398,11 +2405,28 @@ fn client_ip_from_request(
     }
 }
 
-/// Extract the first untrusted client hop from `X-Forwarded-For`, scanning from
-/// the right so trusted proxy hops are skipped instead of attacker-chosen
-/// leading values being accepted as the client identity.
-fn trusted_forwarded_client_ip(headers: &HeaderMap, trusted_proxies: &[IpNet]) -> Option<IpAddr> {
-    let forwarded = headers.get("x-forwarded-for")?.to_str().ok()?;
+/// Resolve the effective client IP from request headers and peer metadata.
+fn client_ip_from_request(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trusted_proxies: &[IpNet],
+) -> Option<IpAddr> {
+    effective_client_ip(
+        peer_ip,
+        header_str(headers, "x-forwarded-for"),
+        header_str(headers, "x-real-ip"),
+        trusted_proxies,
+    )
+}
+
+/// Extract the first untrusted client hop from an `X-Forwarded-For` chain,
+/// scanning from the right so trusted proxy hops are skipped instead of
+/// attacker-chosen leading values being accepted as the client identity.
+pub fn trusted_forwarded_chain_client_ip(
+    x_forwarded_for: Option<&str>,
+    trusted_proxies: &[IpNet],
+) -> Option<IpAddr> {
+    let forwarded = x_forwarded_for?;
     let mut client_ip = None;
     for candidate in forwarded.split(',').rev() {
         let candidate = candidate.trim();
@@ -2424,11 +2448,12 @@ fn trusted_forwarded_client_ip(headers: &HeaderMap, trusted_proxies: &[IpNet]) -
 
 /// Trusted-proxy fallback for deployments that emit a single canonical client
 /// address via `X-Real-IP`.
-fn trusted_real_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
+fn trusted_real_ip_value(x_real_ip: Option<&str>) -> Option<IpAddr> {
+    x_real_ip.and_then(|value| value.trim().parse().ok())
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 async fn proxy_request(
