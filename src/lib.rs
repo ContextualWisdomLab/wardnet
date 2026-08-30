@@ -146,8 +146,9 @@ impl AppState {
     }
 
     /// Override the CISA KEV catalog URL (default: the real CISA feed).
-    /// Deployment-time config only -- for pointing at an internal mirror, or
-    /// (in tests) a local mock server. Builder-style.
+    /// Deployment-time config only, for pointing at a local mock server in
+    /// tests -- see `validate_kev_catalog_url`, which restricts the fetch to
+    /// CISA's own host (or loopback) with no mirror override. Builder-style.
     pub fn with_kev_catalog_url(mut self, url: impl Into<String>) -> Self {
         self.kev_catalog_url = url.into();
         self
