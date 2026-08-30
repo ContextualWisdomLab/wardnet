@@ -430,7 +430,6 @@ const KEV_DEFAULT_SOURCE: &str = "feed:cisa-kev";
 const KEV_DEFAULT_URL: &str =
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 const KEV_DEFAULT_TTL_SECONDS: u64 = 86_400;
-const KEV_ALLOWED_HOSTS: &[&str] = &["www.cisa.gov"];
 
 fn kev_default_feed_id() -> String {
     KEV_DEFAULT_FEED_ID.to_string()
@@ -2084,11 +2083,17 @@ fn validate_kev_import_request(request: &KevImportRequest) -> Result<(), &'stati
     if request.ttl_seconds == 0 {
         return Err("ttl_seconds must be greater than zero");
     }
-    validate_http_url(
-        &request.kev_url,
-        request.allow_non_default_hosts,
-        KEV_ALLOWED_HOSTS,
-    )
+    // `kev_url` only takes effect when the operator opts out of the safe
+    // default (see import_kev_feed's fetch_url selection) -- validating it
+    // otherwise would accept-then-silently-ignore a value, which is
+    // confusing rather than unsafe. When opting out, any well-formed
+    // http(s) URL is accepted (no host allowlist): that flag is the
+    // explicit trust boundary, exactly as it already is for
+    // phishing-database and TAXII.
+    if request.allow_non_default_hosts {
+        validate_http_url(&request.kev_url, true, &[])?;
+    }
+    Ok(())
 }
 
 async fn import_kev_feed(
@@ -5061,24 +5066,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
-    #[tokio::test]
-    async fn kev_feed_import_rejects_disallowed_host_by_default() {
-        let app = build_app(AppState::seeded(Some("secret".to_string())));
-        let payload = KevImportRequest {
+    #[test]
+    fn validate_kev_import_request_ignores_kev_url_unless_overriding() {
+        // On the default (non-override) path, kev_url is never fetched (see
+        // import_kev_feed), so validation must not reject it either -- an
+        // operator who left it at its default, or set it to something
+        // irrelevant, should never be blocked by it. A malformed value is a
+        // no-op, not a validation error.
+        let default_path = KevImportRequest {
             allow_non_default_hosts: false,
-            ..kev_import_request("http://127.0.0.1:1")
+            kev_url: "not a url at all".to_string(),
+            ..kev_import_request("unused")
         };
-        let response = app_request(
-            &app,
-            json_request(
-                Method::POST,
-                "/api/threat-intel/cisa-kev",
-                Some("secret"),
-                &payload,
-            ),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(validate_kev_import_request(&default_path).is_ok());
+
+        // Once the operator opts in, kev_url is what actually gets fetched,
+        // so it must be validated -- and, unlike the default path, any host
+        // is allowed (that flag is the explicit trust boundary).
+        let mut overridden = default_path.clone();
+        overridden.allow_non_default_hosts = true;
+        assert!(validate_kev_import_request(&overridden).is_err());
+
+        overridden.kev_url = "https://internal-mirror.example/kev.json".to_string();
+        assert!(validate_kev_import_request(&overridden).is_ok());
     }
 
     #[tokio::test]
