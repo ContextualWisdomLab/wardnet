@@ -1,4 +1,5 @@
-//! Secret-bearing configuration via a process-local credential registry.
+//! Secret-bearing configuration plus narrowly scoped runtime bootstrap values
+//! via a process-local credential registry.
 //!
 //! Org guidance: runtime code must not treat raw environment variables as the
 //! source of secrets. Environment (and optional credentials file) are bootstrap
@@ -11,6 +12,7 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 /// Well-known secret keys loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+pub const CRED_RATE_LIMIT_MAX_CLIENTS: &str = "rate_limit_max_clients";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -67,12 +69,12 @@ impl CredentialRegistry {
     /// Bootstrap secret-bearing credentials.
     ///
     /// Precedence: JSON credentials file (when present) wins per-key; missing
-    /// keys are filled from the env bootstrap values. Operational non-secret
-    /// config (bind address, limits, DNSBL origin) stays on env.
+    /// keys are filled from the env bootstrap values.
     pub fn bootstrap_secrets(
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
+        env_rate_limit_max_clients: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         let mut from_file = false;
@@ -88,12 +90,18 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_RATE_LIMIT_MAX_CLIENTS,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
                                 values.insert(key.to_string(), text);
-                                from_file = true;
+                                if matches!(key, CRED_ADMIN_TOKEN | CRED_ADMIN_TOKENS) {
+                                    from_file = true;
+                                }
                             }
                         }
                     }
@@ -119,6 +127,11 @@ impl CredentialRegistry {
         {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             from_env = true;
+        }
+        if !values.contains_key(CRED_RATE_LIMIT_MAX_CLIENTS)
+            && let Some(max_clients) = env_rate_limit_max_clients.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_RATE_LIMIT_MAX_CLIENTS.to_string(), max_clients);
         }
 
         let source = if from_file {
@@ -159,6 +172,7 @@ mod tests {
             None,
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
+            Some("2048".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -167,13 +181,17 @@ mod tests {
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
         );
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("2048")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
         let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
+            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
@@ -202,6 +220,7 @@ mod tests {
             Some(&path),
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
+            Some("1024".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -209,6 +228,10 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("filetok:operator")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("1024")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -232,6 +255,7 @@ mod tests {
             Some(&path),
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
+            Some("3072".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -239,6 +263,10 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("envtok:bob")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("3072")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -257,6 +285,7 @@ mod tests {
         let registry = CredentialRegistry::bootstrap_secrets(
             Some(&path),
             Some("env-secret".to_string()),
+            None,
             None,
         )
         .unwrap();
@@ -280,8 +309,38 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
+        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_overrides_rate_limit_max_clients_without_affecting_secret_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"rate_limit_max_clients":"512"}"#).unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            None,
+            None,
+            Some("2048".to_string()),
+        )
+        .unwrap();
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("512")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

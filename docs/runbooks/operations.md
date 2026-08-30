@@ -86,13 +86,20 @@ client buckets the process will retain; stale buckets age out after one full
 window. When the map is full, unseen clients receive `429 Too Many Requests`
 with `Retry-After` and reason
 `local_rate_limiter_capacity_exceeded` until older buckets expire.
+By default the limiter keys on the connected peer IP. `X-Forwarded-For` and
+`X-Real-IP` are considered only when the peer IP is listed in
+`TRUSTED_PROXY_IPS`, which prevents direct clients from manufacturing new local
+limiter buckets with spoofed forwarding headers.
 
 This is a local emergency guard, not the distributed quota authority described
 in issue `#83`. The contract follows RFC 6585's guidance that `429` responses
 may include `Retry-After`, and it aligns with OWASP ASVS 5.0 availability
 controls by failing with a bounded, operator-visible response instead of
 allowing attacker-controlled client cardinality to grow process memory without
-limit.
+limit. Welsh et al. (2001) and Welsh and Culler (2002) motivate this choice:
+overload control should be explicit in the service design, and excess demand
+should be shed early enough to bound queue growth, latency, and memory rather
+than letting attacker-driven request cardinality expand invisibly.
 
 ## Safe Change Procedure
 
@@ -129,3 +136,5 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - Nottingham, M., & Fielding, R. (2012). *Additional HTTP status codes* (RFC 6585). https://www.rfc-editor.org/info/rfc6585
 - OWASP Foundation. (2025). *OWASP Application Security Verification Standard 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/
 - Souppaya, M., Scarfone, K., & Dodson, D. (2022). *Secure Software Development Framework (SSDF) version 1.1* (NIST SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
+- Welsh, M., Culler, D., & Brewer, E. (2001). *SEDA: An architecture for well-conditioned, scalable Internet services*. Proceedings of the Eighteenth ACM Symposium on Operating Systems Principles, 230-243. https://www.sosp.org/2001/papers/welsh.pdf
+- Welsh, M., & Culler, D. (2002). *Overload management as a fundamental service design primitive*. Proceedings of the 10th ACM SIGOPS European Workshop, 63-69. Local PDF: `docs/papers/overload-management-service-design-primitive-ew10-2002.pdf`
