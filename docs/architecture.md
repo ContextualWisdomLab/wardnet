@@ -49,6 +49,12 @@ flowchart LR
 - **DNSBL Serving**: Hickory DNS should serve authoritative DNSBL responses directly after zone export semantics stabilize.
 - **AI SOC**: AI triage should summarize events, map likely ATT&CK tactics, and recommend actions. Enforcement-changing recommendations require human approval.
 
+### Further reading (CISA KEV catalog pull)
+
+- CISA. (2021). *Binding Operational Directive 22-01: Reducing the Significant Risk of Known Exploited Vulnerabilities.* Cybersecurity and Infrastructure Security Agency. https://www.cisa.gov/known-exploited-vulnerabilities — the directive establishing the catalog's confirmed-active-exploitation inclusion criterion, which is why `kev_import.rs` treats catalog membership alone as at least `High` severity rather than deriving it from a numeric score.
+- Jacobs, J., Romanosky, S., Edwards, B., Adjerid, I., & Roytman, M. (2021). Exploit Prediction Scoring System (EPSS). *Digital Threats: Research and Practice, 2*(3), Article 20. https://doi.org/10.1145/3436242 — the seminal data-driven framework establishing that confirmed/predicted exploitation likelihood is a stronger remediation-priority signal than static CVSS severity, motivating exploitation-evidence-first indicators like KEV over severity-only scoring.
+- Shimizu, N., & Hashimoto, M. (2025). Vulnerability Management Chaining: An Integrated Framework for Efficient Cybersecurity Risk Prioritization. *arXiv:2506.01220* — [`papers/vulnerability-management-chaining-kev-epss-cvss-arxiv-2506.01220.pdf`](papers/vulnerability-management-chaining-kev-epss-cvss-arxiv-2506.01220.pdf) (CC BY 4.0). Demonstrates that KEV-membership-first filtering ahead of CVSS materially reduces urgent-remediation workload versus severity-only triage, and that KEV alone still misses exploited vulnerabilities EPSS catches — supporting this adapter's role as one input among several proven feeds (STIX/MISP/TAXII/OpenCTI), not a replacement for them.
+
 ## Security Boundaries
 
 - Default bind address is localhost.
