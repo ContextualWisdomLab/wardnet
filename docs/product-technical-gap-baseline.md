@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-28T17:38:19+09:00 (live exact-head GitHub inventory for `ContextualWisdomLab/wardnet`).
+Snapshot date: 2026-08-30T09:45:00+09:00 (live exact-head GitHub inventory for `ContextualWisdomLab/wardnet`).
 
 ## 1. Executive summary
 
@@ -29,19 +29,19 @@ baseline PR (`#130`) from the table below.
 | PR | Head | State | Exact-head evidence | Current next action |
 | --- | --- | --- | --- | --- |
 | [#129](https://github.com/ContextualWisdomLab/wardnet/pull/129) | `6eea1293bb` | Draft, intentionally blocked | Current exact head is intentionally RED: `noema-review`, `opencode-review`, and `strix` failed; no unresolved threads; independent review still required; must not be merged in this state | Keep the PR in draft, finish the remaining service/docs slices, then replace the intentionally red head with a green exact head before requesting approval |
-| [#127](https://github.com/ContextualWisdomLab/wardnet/pull/127) | `aa29565948` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#126](https://github.com/ContextualWisdomLab/wardnet/pull/126) | `41d7ba9e8f` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115) | `9de0b21916` | Blocked | `opencode-review` failed on current head; `strix` failed; 2 unresolved info threads remain; no approval | Re-run external review gates on a fresh head and resolve remaining thread decisions |
-| [#114](https://github.com/ContextualWisdomLab/wardnet/pull/114) | `95da92339f` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#112](https://github.com/ContextualWisdomLab/wardnet/pull/112) | `bab3c72bb7` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#111](https://github.com/ContextualWisdomLab/wardnet/pull/111) | `43369a8801` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | `3c5b3eb65f` | Blocked | Current head was advanced on 2026-08-28; required checks re-queued; substantive review threads remain open; no approval | Let current-head workflows finish, then continue reducing review findings |
-| [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | `d7fa9a16a7` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#93](https://github.com/ContextualWisdomLab/wardnet/pull/93) | `b38feb9489` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#90](https://github.com/ContextualWisdomLab/wardnet/pull/90) | `e316d4b08e` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#88](https://github.com/ContextualWisdomLab/wardnet/pull/88) | `cbe21a11ab` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#77](https://github.com/ContextualWisdomLab/wardnet/pull/77) | `17cca73671` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
-| [#72](https://github.com/ContextualWisdomLab/wardnet/pull/72) | `892f9277ba` | Blocked | No unresolved threads; independent review still required | Wait for approval and hosted gates |
+| [#127](https://github.com/ContextualWisdomLab/wardnet/pull/127) | `aa29565948` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#126](https://github.com/ContextualWisdomLab/wardnet/pull/126) | `41d7ba9e8f` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115) | `aad8224ab6` | Blocked | `opencode-review` and `strix` failed on the current head; no unresolved threads; independent review still required | Re-run the external review gates on a fresh head, then obtain approval |
+| [#114](https://github.com/ContextualWisdomLab/wardnet/pull/114) | `95da92339f` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#112](https://github.com/ContextualWisdomLab/wardnet/pull/112) | `bab3c72bb7` | Blocked | No unresolved threads; all current hosted checks are green; independent review still required | Obtain an independent approval on the current head |
+| [#111](https://github.com/ContextualWisdomLab/wardnet/pull/111) | `43369a8801` | Blocked | No unresolved threads; all current hosted checks are green; independent review still required | Obtain an independent approval on the current head |
+| [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) | `0e025945c4` | Blocked | `required-workflow-bootstrap`, `noema-review`, and `strix` failed on the current head; 7 unresolved review threads remain; no independent approval | Clear the current review threads, rerun current-head gates, then obtain approval |
+| [#94](https://github.com/ContextualWisdomLab/wardnet/pull/94) | `d7fa9a16a7` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#93](https://github.com/ContextualWisdomLab/wardnet/pull/93) | `b38feb9489` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#90](https://github.com/ContextualWisdomLab/wardnet/pull/90) | `e316d4b08e` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#88](https://github.com/ContextualWisdomLab/wardnet/pull/88) | `cbe21a11ab` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#77](https://github.com/ContextualWisdomLab/wardnet/pull/77) | `17cca73671` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
+| [#72](https://github.com/ContextualWisdomLab/wardnet/pull/72) | `892f9277ba` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
 
 ## 4. Open issue inventory
 
@@ -62,7 +62,7 @@ Relative to the current PRD/TRD/ADR set, the main unproven or unmerged requireme
 - Proven-engine enforcement is still not merged to `main`, so Wardnet cannot yet truthfully claim in-path Coraza-backed enforcement on the protected branch.
 - PostgreSQL control-plane authority, tenant-isolated backup and restore, and transactional outbox durability are still in the open PR stack rather than on `main`.
 - The Wardnet rename is still incomplete on the protected branch; customer-facing and artifact-facing naming remains mixed until [#114](https://github.com/ContextualWisdomLab/wardnet/pull/114) lands.
-- Exact-head hosted evidence is unstable for the highest-value stack: [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115) currently has failing external review checks, and [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) is still mid-validation on a fresh head.
+- Exact-head hosted evidence is unstable for the highest-value stack: [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115) currently has failing external review checks, and [#95](https://github.com/ContextualWisdomLab/wardnet/pull/95) still has multiple failed required workflows plus unresolved review threads on its current head.
 - Commercial-readiness proof remains incomplete for release promotion, telemetry/SLO evidence, accessibility/screenshot evidence, and customer-facing production-readiness packaging.
 
 ## 6. Next-step order
