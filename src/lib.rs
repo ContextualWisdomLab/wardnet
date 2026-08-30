@@ -72,6 +72,11 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
+    // CISA KEV catalog URL fetched by `import_kev_feed`. Deployment-time
+    // config only (env var, or this builder override in tests) -- never
+    // taken from the HTTP request body, so it is not a request-forgery
+    // taint source.
+    kev_catalog_url: String,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -136,7 +141,16 @@ impl AppState {
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
+            kev_catalog_url: KEV_DEFAULT_URL.to_string(),
         }
+    }
+
+    /// Override the CISA KEV catalog URL (default: the real CISA feed).
+    /// Deployment-time config only -- for pointing at an internal mirror, or
+    /// (in tests) a local mock server. Builder-style.
+    pub fn with_kev_catalog_url(mut self, url: impl Into<String>) -> Self {
+        self.kev_catalog_url = url.into();
+        self
     }
 
     /// Set the maximum accepted request body size in bytes; larger requests are
@@ -437,10 +451,6 @@ fn kev_default_feed_id() -> String {
 
 fn kev_default_source() -> String {
     KEV_DEFAULT_SOURCE.to_string()
-}
-
-fn kev_default_url() -> String {
-    KEV_DEFAULT_URL.to_string()
 }
 
 fn kev_default_ttl_seconds() -> u64 {
@@ -757,12 +767,8 @@ struct KevImportRequest {
     feed_id: String,
     #[serde(default = "kev_default_source")]
     source: String,
-    #[serde(default = "kev_default_url")]
-    kev_url: String,
     #[serde(default = "kev_default_ttl_seconds")]
     ttl_seconds: u64,
-    #[serde(default)]
-    allow_non_default_hosts: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2083,16 +2089,6 @@ fn validate_kev_import_request(request: &KevImportRequest) -> Result<(), &'stati
     if request.ttl_seconds == 0 {
         return Err("ttl_seconds must be greater than zero");
     }
-    // `kev_url` only takes effect when the operator opts out of the safe
-    // default (see import_kev_feed's fetch_url selection) -- validating it
-    // otherwise would accept-then-silently-ignore a value, which is
-    // confusing rather than unsafe. When opting out, any well-formed
-    // http(s) URL is accepted (no host allowlist): that flag is the
-    // explicit trust boundary, exactly as it already is for
-    // phishing-database and TAXII.
-    if request.allow_non_default_hosts {
-        validate_http_url(&request.kev_url, true, &[])?;
-    }
     Ok(())
 }
 
@@ -2108,19 +2104,11 @@ async fn import_kev_feed(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    // Fetch the fixed, hardcoded CISA URL unless the operator has explicitly
-    // opted into a non-default host: the request body's `kev_url` never
-    // reaches the outbound fetch on the (default) safe path, so there is no
-    // request-controlled URL construction to defend against there. Opting in
-    // (`allow_non_default_hosts: true`, e.g. for tests or an internal
-    // mirror) is what makes the operator-supplied URL take over, exactly as
-    // `validate_http_url`'s host-allowlist check already gates it.
-    let fetch_url = if request.allow_non_default_hosts {
-        request.kev_url.as_str()
-    } else {
-        KEV_DEFAULT_URL
-    };
-    let body_text = match fetch_text_feed(&state, fetch_url).await {
+    // Always fetches the deployment-configured CISA KEV URL (default: the
+    // real CISA feed; overridable only via server-side config, never by the
+    // request body) -- there is no request-controlled URL construction here
+    // at all, unlike the operator-URL adapters (phishing-database, TAXII).
+    let body_text = match fetch_text_feed(&state, &state.kev_catalog_url).await {
         Ok(text) => text,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
@@ -2944,7 +2932,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
     </section>
     <section class="card"><h2>CISA KEV catalog</h2>
-      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/cisa-kev</code> with optional <code>feed_id</code>, <code>source</code>, <code>kev_url</code> (defaults to the official CISA Known Exploited Vulnerabilities catalog), and <code>ttl_seconds</code>. Fetches the catalog and upserts a <code>cve</code> threat indicator per entry (severity escalated to critical when CISA has tied the CVE to a known ransomware campaign). Fetch is restricted to the default CISA host unless <code>allow_non_default_hosts</code> is set.</p>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/cisa-kev</code> with optional <code>feed_id</code>, <code>source</code>, and <code>ttl_seconds</code>. Fetches the deployment-configured CISA Known Exploited Vulnerabilities catalog URL (server-side config only, not part of this request) and upserts a <code>cve</code> threat indicator per entry (severity escalated to critical when CISA has tied the CVE to a known ransomware campaign).</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -3191,19 +3179,34 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
+    // Deployment-time override for the CISA KEV catalog URL (e.g. an
+    // internal mirror). Never taken from an HTTP request; see
+    // AppState::kev_catalog_url / import_kev_feed.
+    let kev_catalog_url = std::env::var("KEV_CATALOG_URL").ok();
+    if let Some(url) = &kev_catalog_url {
+        validate_http_url(url, true, &[]).map_err(|message| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("KEV_CATALOG_URL is invalid: {message}"),
+            )
+        })?;
+    }
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     println!("waf-ids-ai-soc listening on http://{local_addr}");
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let state = AppState::load(config)
+    let mut state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_max_body_size(max_body_bytes);
+    if let Some(url) = kev_catalog_url {
+        state = state.with_kev_catalog_url(url);
+    }
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;
@@ -3450,13 +3453,11 @@ mod tests {
         }
     }
 
-    fn kev_import_request(base_url: &str) -> KevImportRequest {
+    fn kev_import_request() -> KevImportRequest {
         KevImportRequest {
             feed_id: "cisa-kev-seoul".to_string(),
             source: "feed:cisa-kev".to_string(),
-            kev_url: format!("{base_url}/kev.json"),
             ttl_seconds: 900,
-            allow_non_default_hosts: true,
         }
     }
 
@@ -4917,8 +4918,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, feed_mock).into_future());
 
-        let app = build_app(AppState::seeded(Some("secret".to_string())));
-        let payload = kev_import_request(&format!("http://{addr}"));
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
 
         let unauthorized = app_request(
             &app,
@@ -5050,8 +5054,11 @@ mod tests {
         let redirect_addr = redirect_listener.local_addr().unwrap();
         tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
 
-        let app = build_app(AppState::seeded(Some("secret".to_string())));
-        let payload = kev_import_request(&format!("http://{redirect_addr}"));
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{redirect_addr}/kev.json")),
+        );
+        let payload = kev_import_request();
 
         let response = app_request(
             &app,
@@ -5067,28 +5074,29 @@ mod tests {
     }
 
     #[test]
-    fn validate_kev_import_request_ignores_kev_url_unless_overriding() {
-        // On the default (non-override) path, kev_url is never fetched (see
-        // import_kev_feed), so validation must not reject it either -- an
-        // operator who left it at its default, or set it to something
-        // irrelevant, should never be blocked by it. A malformed value is a
-        // no-op, not a validation error.
-        let default_path = KevImportRequest {
-            allow_non_default_hosts: false,
-            kev_url: "not a url at all".to_string(),
-            ..kev_import_request("unused")
+    fn validate_kev_import_request_checks_feed_metadata_only() {
+        // The request no longer carries a URL at all (see import_kev_feed:
+        // it always fetches AppState::kev_catalog_url, server-side config
+        // only), so validation is limited to the feed metadata fields.
+        assert!(validate_kev_import_request(&kev_import_request()).is_ok());
+
+        let blank_feed_id = KevImportRequest {
+            feed_id: "  ".to_string(),
+            ..kev_import_request()
         };
-        assert!(validate_kev_import_request(&default_path).is_ok());
+        assert!(validate_kev_import_request(&blank_feed_id).is_err());
 
-        // Once the operator opts in, kev_url is what actually gets fetched,
-        // so it must be validated -- and, unlike the default path, any host
-        // is allowed (that flag is the explicit trust boundary).
-        let mut overridden = default_path.clone();
-        overridden.allow_non_default_hosts = true;
-        assert!(validate_kev_import_request(&overridden).is_err());
+        let blank_source = KevImportRequest {
+            source: "".to_string(),
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&blank_source).is_err());
 
-        overridden.kev_url = "https://internal-mirror.example/kev.json".to_string();
-        assert!(validate_kev_import_request(&overridden).is_ok());
+        let zero_ttl = KevImportRequest {
+            ttl_seconds: 0,
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&zero_ttl).is_err());
     }
 
     #[tokio::test]
@@ -5111,8 +5119,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, feed_mock).into_future());
 
-        let app = build_app(AppState::seeded(Some("secret".to_string())));
-        let payload = kev_import_request(&format!("http://{addr}"));
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
         let imported = app_request(
             &app,
             json_request(
