@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-08-30T18:57:50+09:00 (live exact-head GitHub inventory for `ContextualWisdomLab/wardnet`).
+Snapshot date: 2026-08-30T20:10:00+09:00 (live exact-head GitHub inventory for `ContextualWisdomLab/wardnet`).
 
 ## 1. Executive summary
 
@@ -28,7 +28,7 @@ baseline PR (`#130`) from the table below.
 
 | PR | Head | State | Exact-head evidence | Current next action |
 | --- | --- | --- | --- | --- |
-| [#131](https://github.com/ContextualWisdomLab/wardnet/pull/131) | `66dbfd0cc3` | Blocked, current-head checks in progress | Fresh head pushed on 2026-08-30; `CI`, `CodeQL`, `Fuzz`, `Security Scan`, `Strix Security Scan`, `Required OpenCode Review`, and `Required Noema Review` are queued or in progress; independent review still required | Wait for the exact-head checks to finish, resolve any current findings, then obtain an independent approval |
+| [#131](https://github.com/ContextualWisdomLab/wardnet/pull/131) | `82caad04c0` | Blocked, current-head checks in progress | Fresh head pushed on 2026-08-30; `CI`, `CodeQL`, `Fuzz`, `Security Scan`, `Strix Security Scan`, `Required OpenCode Review`, and `Required Noema Review` are queued or in progress on the new exact head; independent review still required | Wait for the exact-head checks to finish, resolve any current findings, then obtain an independent approval |
 | [#129](https://github.com/ContextualWisdomLab/wardnet/pull/129) | `6eea1293bb` | Draft, intentionally blocked | Current exact head is intentionally RED: `noema-review`, `opencode-review`, and `strix` failed; no unresolved threads; independent review still required; must not be merged in this state | Keep the PR in draft, finish the remaining service/docs slices, then replace the intentionally red head with a green exact head before requesting approval |
 | [#127](https://github.com/ContextualWisdomLab/wardnet/pull/127) | `aa29565948` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
 | [#126](https://github.com/ContextualWisdomLab/wardnet/pull/126) | `41d7ba9e8f` | Blocked | `strix` failed on the current head; no unresolved threads; independent review still required | Wait for a current-head Strix verdict and an independent approval |
