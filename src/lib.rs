@@ -283,6 +283,7 @@ impl AppConfig {
     pub const DEFAULT_DNSBL_ORIGIN: &'static str = "dnsbl.local";
     pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 
+    /// Build an in-memory app config with no trusted proxy ranges.
     pub fn memory(admin_token: Option<String>) -> Self {
         Self {
             admin_token,
@@ -334,6 +335,8 @@ impl IpNet {
         Ok(Self { addr, prefix_len })
     }
 
+    /// Report whether the candidate IP falls within this network after
+    /// normalizing IPv4-mapped IPv6 forms.
     fn contains(&self, ip: IpAddr) -> bool {
         let (network, prefix_len) = normalized_network(self.addr, self.prefix_len);
         let ip = normalized_ip(ip);
@@ -357,6 +360,7 @@ impl std::str::FromStr for IpNet {
     }
 }
 
+/// Return the maximum CIDR prefix width for one IP family.
 fn max_prefix_len(addr: IpAddr) -> u8 {
     match addr {
         IpAddr::V4(_) => 32,
@@ -364,6 +368,7 @@ fn max_prefix_len(addr: IpAddr) -> u8 {
     }
 }
 
+/// Convert IPv4-mapped IPv6 networks into canonical IPv4 form when possible.
 fn normalized_network(addr: IpAddr, prefix_len: u8) -> (IpAddr, u8) {
     match addr {
         IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
@@ -374,6 +379,7 @@ fn normalized_network(addr: IpAddr, prefix_len: u8) -> (IpAddr, u8) {
     }
 }
 
+/// Canonicalize IPv4-mapped IPv6 addresses before trust comparisons.
 fn normalized_ip(addr: IpAddr) -> IpAddr {
     match addr {
         IpAddr::V6(ip) => ip
@@ -384,6 +390,7 @@ fn normalized_ip(addr: IpAddr) -> IpAddr {
     }
 }
 
+/// Apply an IPv4 prefix mask as an integer comparison aid.
 fn masked_v4(ip: Ipv4Addr, prefix_len: u8) -> u32 {
     let raw = u32::from(ip);
     let shift = 32_u32.saturating_sub(prefix_len as u32);
@@ -394,6 +401,7 @@ fn masked_v4(ip: Ipv4Addr, prefix_len: u8) -> u32 {
     }
 }
 
+/// Apply an IPv6 prefix mask as an integer comparison aid.
 fn masked_v6(ip: std::net::Ipv6Addr, prefix_len: u8) -> u128 {
     let raw = u128::from(ip);
     let shift = 128_u32.saturating_sub(prefix_len as u32);
@@ -423,6 +431,7 @@ fn parse_trusted_proxies(raw: Option<&str>) -> Result<Vec<IpNet>, String> {
     Ok(proxies)
 }
 
+/// Load an existing state snapshot or write a seeded one on first boot.
 async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
     match fs::read_to_string(path).await {
         Ok(content) => serde_json::from_str(&content)
@@ -439,6 +448,7 @@ async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
     }
 }
 
+/// Persist state through a temporary sibling file followed by atomic rename.
 async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
@@ -470,6 +480,7 @@ async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
     Ok(())
 }
 
+/// Build a sibling temporary path for atomic snapshot replacement.
 fn temporary_state_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -482,6 +493,7 @@ fn temporary_state_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.tmp-{}-{unique}", std::process::id()))
 }
 
+/// Trim operator input and fall back to the default DNSBL origin when blank.
 fn normalized_origin(origin: &str) -> String {
     let trimmed = origin.trim().trim_end_matches('.');
     if trimmed.is_empty() {
@@ -575,7 +587,8 @@ struct ErrorBody {
     error: String,
 }
 
-/// Build the HTTP router. Gateway requests still require peer metadata via
+/// Build the HTTP application surface for management, DNSBL, and gateway
+/// traffic. Gateway requests still require peer metadata via
 /// `ConnectInfo<SocketAddr>`; use [`serve`] or
 /// `Router::into_make_service_with_connect_info::<SocketAddr>()`.
 pub fn build_app(state: AppState) -> Router {
@@ -2237,6 +2250,7 @@ async fn events_ndjson(State(state): State<AppState>) -> Response {
     events_ndjson_response(export_events_ndjson(&data.events))
 }
 
+/// Render NDJSON event export or an internal serialization failure.
 fn events_ndjson_response(export: Result<String, serde_json::Error>) -> Response {
     match export {
         Ok(body) => (
@@ -2252,6 +2266,7 @@ fn events_ndjson_response(export: Result<String, serde_json::Error>) -> Response
     }
 }
 
+/// Export the current DNSBL zone body in RFC 5782 text form.
 async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
     let data = state.inner.read().await;
     (
@@ -2261,6 +2276,8 @@ async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// Enforce trusted client attribution, rate limits, scoring, and proxying for
+/// one gateway request.
 async fn gateway(State(state): State<AppState>, request: Request) -> Response {
     let connect_info = request
         .extensions()
@@ -2474,6 +2491,7 @@ fn trusted_real_ip_value(x_real_ip: Option<&str>) -> Option<IpAddr> {
     x_real_ip.and_then(|value| value.trim().parse().ok())
 }
 
+/// Read one request header as UTF-8 text.
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }

@@ -27,6 +27,7 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
+    /// Stable string label for non-secret source reporting surfaces.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -45,14 +46,18 @@ pub struct CredentialRegistry {
 }
 
 impl CredentialRegistry {
+    /// Build an empty registry for tests or runtime paths with no bootstrap
+    /// credentials.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Return one bootstrap value by well-known credential key.
     pub fn get_credential(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
+    /// Report whether the bootstrap source was env, file, or absent.
     pub fn source(&self) -> CredentialSource {
         self.source
     }
@@ -65,6 +70,7 @@ impl CredentialRegistry {
         }
     }
 
+    /// Report whether any admin credential was bootstrapped for runtime auth.
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
             .is_some_and(|v| !v.is_empty())
@@ -153,6 +159,7 @@ impl CredentialRegistry {
     }
 }
 
+/// Normalize JSON scalar/bootstrap values into non-empty strings.
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
