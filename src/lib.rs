@@ -4509,6 +4509,44 @@ mod tests {
         assert_eq!(support.threat_feed_freshness.len(), 1);
         assert!(!support.threat_feed_freshness[0].stale);
         assert!(support.event_count >= 1);
+        assert_eq!(support.route_count, support.kpis.route_count);
+        assert_eq!(
+            support.threat_indicator_count,
+            support.kpis.threat_indicator_count
+        );
+        assert_eq!(support.dnsbl_entry_count, support.kpis.dnsbl_entry_count);
+        assert_eq!(support.threat_feed_count, support.kpis.threat_feed_count);
+        assert_eq!(support.event_count, support.kpis.event_count);
+        assert_eq!(support.audit_log_count, support.kpis.audit_log_count);
+        assert_eq!(
+            support.route_count,
+            support.evidence_manifest.runtime_counts.route_count
+        );
+        assert_eq!(
+            support.threat_indicator_count,
+            support
+                .evidence_manifest
+                .runtime_counts
+                .threat_indicator_count
+        );
+        assert_eq!(
+            support.dnsbl_entry_count,
+            support.evidence_manifest.runtime_counts.dnsbl_entry_count
+        );
+        assert_eq!(
+            support.threat_feed_count,
+            support.evidence_manifest.runtime_counts.threat_feed_count
+        );
+        assert_eq!(
+            support.event_count,
+            support.evidence_manifest.runtime_counts.event_count
+        );
+        assert_eq!(
+            support.audit_log_count,
+            support.evidence_manifest.runtime_counts.audit_log_count
+        );
+        let support_json = serde_json::to_string(&support).unwrap();
+        assert!(!support_json.contains("\"secret\""));
 
         let persisted: AppData =
             serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
