@@ -444,6 +444,12 @@ const KEV_DEFAULT_SOURCE: &str = "feed:cisa-kev";
 const KEV_DEFAULT_URL: &str =
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 const KEV_DEFAULT_TTL_SECONDS: u64 = 86_400;
+// KEV_CATALOG_URL is deployment config, not per-request input, but it is
+// still externally influenceable (env inheritance/misconfiguration in a
+// container or orchestrator) -- so the privileged catalog fetch it drives is
+// still restricted to CISA's own host, with loopback additionally allowed
+// only so tests can point it at a local mock server.
+const KEV_ALLOWED_HOSTS: &[&str] = &["www.cisa.gov"];
 
 fn kev_default_feed_id() -> String {
     KEV_DEFAULT_FEED_ID.to_string()
@@ -2179,11 +2185,35 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &
 // (deployment config) -- and giving it its own fetch function keeps that
 // config-only path structurally independent of the request-URL adapters, the
 // same separation `fetch_taxii_objects` already uses.
+// Restricts KEV_CATALOG_URL to CISA's own host (plus loopback, for tests)
+// regardless of validate_http_url's generic allow_non_default_hosts escape
+// hatch: unlike the operator-URL adapters, there is no per-request or
+// per-deployment opt-in for KEV to point elsewhere, so this check has no
+// bypass. Used both at startup (fail fast on a misconfigured env var) and
+// again immediately before the fetch (defense in depth).
+fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
+    let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid KEV catalog URL {url}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("invalid KEV catalog URL {url}: host is required"))?;
+    if !KEV_ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        && !is_loopback_host(host)
+    {
+        return Err(format!(
+            "KEV catalog URL {url} host is not on the CISA KEV allowlist"
+        ));
+    }
+    Ok(())
+}
+
 async fn fetch_kev_catalog(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    validate_http_url(url, /* allow_non_default_hosts */ true)
-        .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
+    validate_kev_catalog_url(url)?;
     let response = state
         .feed_http
         .get(url)
@@ -3219,12 +3249,14 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
-    // Deployment-time override for the CISA KEV catalog URL (e.g. an
-    // internal mirror). Never taken from an HTTP request; see
-    // AppState::kev_catalog_url / import_kev_feed.
+    // Deployment-time override for the CISA KEV catalog URL. Never taken
+    // from an HTTP request; restricted to CISA's own host (see
+    // validate_kev_catalog_url / KEV_ALLOWED_HOSTS) even though it comes
+    // from the environment rather than a request body, since an inherited
+    // or misconfigured value could otherwise redirect this privileged fetch.
     let kev_catalog_url = std::env::var("KEV_CATALOG_URL").ok();
     if let Some(url) = &kev_catalog_url {
-        validate_http_url(url, true).map_err(|message| {
+        validate_kev_catalog_url(url).map_err(|message| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("KEV_CATALOG_URL is invalid: {message}"),
