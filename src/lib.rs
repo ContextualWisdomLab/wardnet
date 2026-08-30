@@ -2740,11 +2740,13 @@ async fn apply_threat_feed_import(
                         || operator_owned.contains(&key)
                 });
             }
+            let mut upserted_threats = 0usize;
             for threat in feed.threats.iter().cloned() {
                 if operator_owned.contains(&threat_indicator_key(&threat)) {
                     continue;
                 }
                 upsert_threat(&mut data.threats, threat);
+                upserted_threats += 1;
             }
             for entry in feed.dnsbl.iter().cloned() {
                 upsert_dnsbl(&mut data.dnsbl, entry);
@@ -2762,7 +2764,7 @@ async fn apply_threat_feed_import(
             );
             let result = ThreatFeedImportResult {
                 feed_id: feed.feed_id.clone(),
-                upserted_threats: feed.threats.len(),
+                upserted_threats,
                 upserted_dnsbl: feed.dnsbl.len(),
                 last_updated_unix: imported_at,
             };
@@ -5649,6 +5651,71 @@ mod tests {
             .expect("operator-managed indicator should remain present");
         assert_eq!(stored.severity, Severity::Critical);
         assert_eq!(stored.ttl_seconds, 86_400);
+    }
+
+    #[tokio::test]
+    async fn import_result_excludes_operator_owned_threats_from_upserted_count() {
+        // apply_threat_feed_import skips upserting threats whose key is
+        // operator-owned (see feed_refresh_preserves_operator_managed_indicator_payload),
+        // so the reported upserted_threats count must reflect what was
+        // actually applied, not the feed's full submitted set.
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let operator_indicator = ThreatIndicator {
+            value: "198.51.100.90".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::Critical,
+            source: "shared-source".to_string(),
+            ttl_seconds: 86_400,
+        };
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &operator_indicator,
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let feed = ThreatFeedImport {
+            feed_id: "feed-b".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 60,
+            threats: vec![
+                ThreatIndicator {
+                    severity: Severity::Low,
+                    ttl_seconds: 60,
+                    ..operator_indicator.clone()
+                },
+                ThreatIndicator {
+                    value: "198.51.100.91".to_string(),
+                    indicator_type: "ip".to_string(),
+                    severity: Severity::Low,
+                    source: "shared-source".to_string(),
+                    ttl_seconds: 60,
+                },
+            ],
+            dnsbl: Vec::new(),
+        };
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    &feed,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            import_result.upserted_threats, 1,
+            "only the non-operator-owned threat should count as upserted"
+        );
     }
 
     #[tokio::test]
