@@ -22,9 +22,10 @@ use tokio::{
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
     enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
-    select_route, signature_catalog, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route,
-    upsert_threat, upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
-    validate_threat, validate_threat_feed_import,
+    replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
+    threat_indicator_key, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
+    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
+    validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
@@ -2683,6 +2684,16 @@ async fn apply_threat_feed_import(
     let imported_at = now_unix();
     state
         .mutate_and_persist(|data| {
+            let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
+            let previous_keys = replace_threat_feed_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                threat_keys,
+            );
+            if !previous_keys.is_empty() {
+                data.threats
+                    .retain(|threat| !previous_keys.contains(&threat_indicator_key(threat)));
+            }
             for threat in feed.threats.iter().cloned() {
                 upsert_threat(&mut data.threats, threat);
             }
@@ -5234,6 +5245,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kev_feed_refresh_removes_withdrawn_cves() {
+        let initial_catalog = serde_json::json!({
+            "vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2021-44228", "knownRansomwareCampaignUse": "Known"}
+            ]
+        });
+        let refreshed_catalog = serde_json::json!({
+            "vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"}
+            ]
+        });
+        let catalogs = Arc::new(Mutex::new(vec![
+            initial_catalog.to_string(),
+            refreshed_catalog.to_string(),
+        ]));
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let catalogs = catalogs.clone();
+                async move {
+                    let body = catalogs.lock().await.remove(0);
+                    (StatusCode::OK, body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let first_import = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(first_import.status(), StatusCode::CREATED);
+
+        let second_import = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(second_import.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == "CVE-2023-49105")
+        );
+        assert!(
+            threat_entries
+                .iter()
+                .all(|entry| entry.value != "CVE-2021-44228"),
+            "withdrawn CVEs should be removed on refresh"
+        );
+    }
+
+    #[tokio::test]
     async fn suricata_eve_ingest_maps_alerts_to_security_events() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(
@@ -6084,6 +6171,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
             },
             AppConfig {
                 admin_token: None,
@@ -6959,6 +7047,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
             },
             AppConfig {
                 admin_token: None,

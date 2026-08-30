@@ -22,6 +22,8 @@ pub struct AppData {
     pub commercial: CommercialProfile,
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
+    #[serde(default)]
+    pub threat_feed_ownership: Vec<ThreatFeedOwnership>,
 }
 
 impl AppData {
@@ -56,6 +58,7 @@ impl AppData {
             next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
+            threat_feed_ownership: Vec::new(),
         }
     }
 }
@@ -177,6 +180,19 @@ pub struct ThreatFeedStatus {
     pub threat_count: usize,
     pub dnsbl_count: usize,
     pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreatFeedOwnership {
+    pub feed_id: String,
+    pub threat_keys: Vec<ThreatIndicatorKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ThreatIndicatorKey {
+    pub indicator_type: String,
+    pub value: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -531,6 +547,32 @@ pub fn upsert_threat_feed(
         feeds.push(feed.clone());
     }
     feed
+}
+
+pub fn threat_indicator_key(indicator: &ThreatIndicator) -> ThreatIndicatorKey {
+    ThreatIndicatorKey {
+        indicator_type: indicator.indicator_type.clone(),
+        value: indicator.value.clone(),
+        source: indicator.source.clone(),
+    }
+}
+
+pub fn replace_threat_feed_ownership(
+    ownership: &mut Vec<ThreatFeedOwnership>,
+    feed_id: String,
+    threat_keys: Vec<ThreatIndicatorKey>,
+) -> Vec<ThreatIndicatorKey> {
+    if let Some(existing) = ownership.iter_mut().find(|item| item.feed_id == feed_id) {
+        let previous = existing.threat_keys.clone();
+        existing.threat_keys = threat_keys;
+        previous
+    } else {
+        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys,
+        });
+        Vec::new()
+    }
 }
 
 pub fn record_audit_log(data: &mut AppData, entry: NewAuditLogEntry) -> AuditLogEntry {
