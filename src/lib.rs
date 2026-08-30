@@ -44,9 +44,7 @@ mod opencti_import;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{
-    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_KEV_CATALOG_URL, CredentialRegistry, CredentialSource,
-};
+pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -75,10 +73,8 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
-    // CISA KEV catalog URL fetched by `import_kev_feed`. Deployment-time
-    // config only (env var, or this builder override in tests) -- never
-    // taken from the HTTP request body, so it is not a request-forgery
-    // taint source.
+    // CISA KEV catalog URL fetched by `import_kev_feed`. Runtime uses the
+    // built-in CISA URL; this builder override exists for loopback-backed tests.
     kev_catalog_url: String,
 }
 
@@ -448,11 +444,8 @@ const KEV_DEFAULT_SOURCE: &str = "feed:cisa-kev";
 const KEV_DEFAULT_URL: &str =
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 const KEV_DEFAULT_TTL_SECONDS: u64 = 86_400;
-// KEV_CATALOG_URL is deployment config, not per-request input, but it is
-// still externally influenceable (env inheritance/misconfiguration in a
-// container or orchestrator) -- so the privileged catalog fetch it drives is
-// still restricted to CISA's own host, with loopback additionally allowed
-// only so tests can point it at a local mock server.
+// Runtime fetches stay fixed to the official CISA endpoint. Loopback remains
+// allowed so integration tests can point AppState at a local mock server.
 const KEV_ALLOWED_HOSTS: &[&str] = &["www.cisa.gov"];
 
 fn kev_default_feed_id() -> String {
@@ -2187,20 +2180,11 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &
     Ok(())
 }
 
-// Deliberately separate from `fetch_text_feed`: that helper's `url` argument
-// is fed by phishing-database's request-supplied `domain_url`/`ip_url`, so it
-// carries request-tainted flow into `feed_http.get(url)` by design (an
-// admin-gated "fetch from an operator-chosen URL" feature). The KEV catalog
-// URL is never taken from a request -- only from `AppState::kev_catalog_url`
-// (deployment config) -- and giving it its own fetch function keeps that
-// config-only path structurally independent of the request-URL adapters, the
-// same separation `fetch_taxii_objects` already uses.
-// Restricts KEV_CATALOG_URL to CISA's own host (plus loopback, for tests)
-// regardless of validate_http_url's generic allow_non_default_hosts escape
-// hatch: unlike the operator-URL adapters, there is no per-request or
-// per-deployment opt-in for KEV to point elsewhere, so this check has no
-// bypass. Used both at startup (fail fast on a misconfigured env var) and
-// again immediately before the fetch (defense in depth).
+// Deliberately separate from `fetch_text_feed`: that helper's `url` argument is
+// fed by operator-supplied request URLs for phishing-database imports. KEV does
+// not support a runtime URL override, so this fetch path stays structurally
+// independent and fixed to the built-in CISA host; loopback is allowed only for
+// tests that inject a local mock via `with_kev_catalog_url`.
 fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
@@ -3271,7 +3255,6 @@ pub async fn run_from_env(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
-        std::env::var("KEV_CATALOG_URL").ok(),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -3298,34 +3281,19 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
-    // Deployment-time override for the CISA KEV catalog URL. It is bootstrapped
-    // into the process-local credential/config registry so handlers never read
-    // it directly from the ambient environment at runtime.
-    let kev_catalog_url = credentials.get_credential(CRED_KEV_CATALOG_URL);
-    if let Some(url) = &kev_catalog_url {
-        validate_kev_catalog_url(url).map_err(|message| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("KEV_CATALOG_URL is invalid: {message}"),
-            )
-        })?;
-    }
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     println!("waf-ids-ai-soc listening on http://{local_addr}");
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let mut state = AppState::load(config)
+    let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_max_body_size(max_body_bytes);
-    if let Some(url) = kev_catalog_url {
-        state = state.with_kev_catalog_url(url);
-    }
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;
@@ -3369,7 +3337,6 @@ mod tests {
             "RATE_LIMIT",
             "RATE_LIMIT_WINDOW",
             "MAX_BODY_BYTES",
-            "KEV_CATALOG_URL",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -3503,31 +3470,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_from_env_prefers_credentials_file_kev_catalog_url_over_env() {
+    async fn run_from_env_ignores_kev_catalog_url_env_override() {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
-        let dir = std::env::temp_dir().join(format!(
-            "wardnet-kev-creds-{}-{}",
-            std::process::id(),
-            now_unix()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("credentials.json");
-        std::fs::write(
-            &path,
-            r#"{"kev_catalog_url":"http://127.0.0.1:9/kev.json"}"#,
-        )
-        .unwrap();
         unsafe {
             std::env::set_var("BIND_ADDR", "127.0.0.1:0");
-            std::env::set_var("WAF_IDS_CREDENTIALS_PATH", path.to_str().unwrap());
-            std::env::set_var("KEV_CATALOG_URL", "https://evil.example/kev.json");
+            std::env::set_var("ADMIN_TOKENS", "tok:operator");
+            std::env::set_var("KEV_CATALOG_URL", "://not-a-valid-url");
         }
+        // KEV imports now always use the built-in runtime endpoint; an ambient
+        // KEV_CATALOG_URL must not influence process startup at all.
         run_from_env(Box::pin(std::future::ready(())))
             .await
             .unwrap();
         clear_run_env();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn route() -> RouteConfig {
