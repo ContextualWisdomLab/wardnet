@@ -72,5 +72,36 @@ Model Context Protocol. (2026). *Model Context Protocol specification:
 2026-07-28*. Retrieved August 27, 2026, from
 https://modelcontextprotocol.io/specification/2026-07-28
 
+- Design impact: the endpoint stays stateless and read-only because MCP does
+  not require a sticky session for discovery or tool execution in this slice,
+  and Wardnet has not yet closed the authorization evidence required for
+  mutating tools.
+
 Model Context Protocol. (2026). *Transports*. Retrieved August 27, 2026, from
 https://modelcontextprotocol.io/specification/2026-07-28/basic/transports
+
+- Design impact: the handler validates transport metadata against the JSON-RPC
+  body and advertises both JSON and event-stream support so clients can use the
+  standard transport contract without relying on deployment-specific behavior.
+
+Fielding, R., Nottingham, M., & Reschke, J. (2022). *HTTP semantics* (RFC
+9110). Internet Engineering Task Force. https://doi.org/10.17487/RFC9110
+
+- Design impact: Wardnet exposes MCP over ordinary HTTP semantics, keeps the
+  surface stateless, and uses explicit method and content negotiation checks
+  rather than inventing a private session protocol.
+
+Fielding, R., Nottingham, M., & Reschke, J. (2022). *HTTP caching* (RFC 9111).
+Internet Engineering Task Force. https://www.rfc-editor.org/rfc/rfc9111
+
+- Design impact: only deterministic discovery surfaces receive short private
+  cache hints, while authenticated tool results remain isolated from shared
+  caches.
+
+Jackson, C., Bortz, A., Boneh, D., & Mitchell, J. C. (2009). *Protecting
+browsers from DNS rebinding attacks*. ACM Transactions on the Web, 3(1), 1-26.
+https://dl.acm.org/doi/10.1145/1462148.1462150
+
+- Design impact: browser requests carrying `Origin` are rejected up front so
+  Wardnet does not trust attacker-controlled browser contexts on an endpoint
+  that can expose internal inventory and control-plane evidence.

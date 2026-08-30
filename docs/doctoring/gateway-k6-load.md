@@ -79,10 +79,19 @@ or capacity-planning claim.
 Dean, J., & Barroso, L. A. (2013). The tail at scale. *Communications of the
 ACM, 56*(2), 74–80. https://doi.org/10.1145/2408776.2408794
 
+- Design impact: Wardnet records tail latency under concurrent load instead of
+  only mean throughput because slow outliers dominate operator-visible service
+  quality long before aggregate request rate looks unhealthy.
+
 Aron, M., Sanders, D., Druschel, P., & Zwaenepoel, W. (1999). *Scalable
 content-aware request distribution in cluster-based network servers*. USENIX
 Annual Technical Conference.
 https://www.usenix.org/legacy/event/usenix99/full_papers/aron/aron.pdf
+
+- Design impact: the default harness uses a closed model with a fixed number of
+  active clients because that exposes how the current gateway decision path
+  behaves as concurrency rises, without overstating the result as full
+  saturation or admission-capacity evidence.
 
 Grafana Labs. (n.d.). *Grafana k6 documentation*. Retrieved August 27, 2026,
 from https://grafana.com/docs/k6/latest/

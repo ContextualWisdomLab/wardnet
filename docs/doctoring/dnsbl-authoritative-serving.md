@@ -85,3 +85,20 @@ Force. https://doi.org/10.17487/RFC2308
 - Design impact: authoritative `NXDOMAIN` and NODATA responses include the SOA
   so clients can cache negative answers for a bounded interval instead of
   hammering the listener on every miss.
+
+West, A. G., Kapoor, A., Lee, J., Niu, K., & Weiss, M. (2010). *Spam
+mitigation using spatio-temporal reputations from blacklists*. ACM Conference
+on Email and Anti-Spam. https://dl.acm.org/doi/10.1145/1920261.1920287
+
+- Design impact: DNSBL publication stays authoritative and low-latency because
+  blacklist usefulness depends on fast reputation lookups at decision time; the
+  implementation therefore answers from validated in-memory state instead of
+  inserting recursive resolution or secondary database joins into the query
+  path.
+
+Magnusson, J. (2024). *Survey and analysis of DNS filtering components*.
+arXiv. https://arxiv.org/abs/2401.03864
+
+- Design impact: the DNSBL listener is kept as a narrowly scoped filtering
+  authority, separated from recursive egress resolution, because the filtering
+  and resolver roles have different trust boundaries and failure modes.
