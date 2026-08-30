@@ -28,6 +28,7 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
+    /// Return the stable telemetry label exposed in health/support surfaces.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -46,18 +47,22 @@ pub struct CredentialRegistry {
 }
 
 impl CredentialRegistry {
+    /// Construct an empty registry with no bootstrapped credentials.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Read a previously bootstrapped credential or config override by name.
     pub fn get_credential(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
+    /// Report where secret-bearing bootstrap values came from.
     pub fn source(&self) -> CredentialSource {
         self.source
     }
 
+    /// True when at least one admin authentication path is configured.
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
             .is_some_and(|v| !v.is_empty())
@@ -146,6 +151,7 @@ impl CredentialRegistry {
     }
 }
 
+/// Convert supported JSON credential values into non-empty strings.
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),

@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::{ConnectInfo, DefaultBodyLimit, Path as PathParam, Query, State},
     http::{HeaderMap, Method, StatusCode, Uri},
@@ -120,6 +120,7 @@ impl RateLimitDecision {
     const WINDOW_EXCEEDED: &'static str = "rate_limit_exceeded";
     const CAPACITY_EXCEEDED: &'static str = "local_rate_limiter_capacity_exceeded";
 
+    /// Build the success result for an admitted request.
     fn allowed() -> Self {
         Self {
             allowed: true,
@@ -128,6 +129,7 @@ impl RateLimitDecision {
         }
     }
 
+    /// Build a denied decision with a stable reason and retry horizon.
     fn denied(reason: &'static str, retry_after_seconds: u64) -> Self {
         Self {
             allowed: false,
@@ -2182,7 +2184,7 @@ async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn gateway(
     State(state): State<AppState>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    peer_addr: Option<Extension<ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -2205,7 +2207,7 @@ async fn gateway(
         (route.clone(), data.threats.clone(), data.dnsbl.clone())
     };
 
-    let peer_ip = Some(peer_addr.ip());
+    let peer_ip = peer_addr.map(|Extension(ConnectInfo(peer_addr))| peer_addr.ip());
     let client_ip = client_ip_from_headers(&headers, peer_ip, &state.trusted_proxies);
 
     // Rate limiting runs before scoring/proxying so floods are shed cheaply.
@@ -2323,6 +2325,8 @@ async fn gateway(
     }
 }
 
+/// Resolve the client IP for rate limiting, trusting forwarded headers only
+/// when the connected peer is an explicitly trusted proxy.
 fn client_ip_from_headers(
     headers: &HeaderMap,
     peer_ip: Option<IpAddr>,
@@ -2337,11 +2341,12 @@ fn client_ip_from_headers(
     forwarded_client_ip(headers)
 }
 
+/// Extract a forwarded client IP from standard proxy headers.
 fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.rsplit(',').next())
         .map(str::trim)
         .or_else(|| {
             headers
@@ -2508,6 +2513,7 @@ fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
         .to_string()
 }
 
+/// Drop client buckets that have been idle for at least one rate-limit window.
 fn prune_rate_limit_buckets(
     map: &mut HashMap<IpAddr, RateLimitBucket>,
     now: u64,
@@ -2516,6 +2522,7 @@ fn prune_rate_limit_buckets(
     map.retain(|_, bucket| now.saturating_sub(bucket.last_seen) < window_secs);
 }
 
+/// Compute the `Retry-After` value for a fixed-window rate-limit rejection.
 fn retry_after_seconds(now: u64, window_start: u64, window_secs: u64) -> u64 {
     window_start
         .saturating_add(window_secs)
@@ -3151,6 +3158,7 @@ pub fn parse_usize_env(
     }
 }
 
+/// Parse a comma-separated set of IP addresses from an optional env value.
 pub fn parse_ip_set_env(
     name: &str,
     raw: Option<&str>,
@@ -3751,6 +3759,62 @@ mod tests {
         )
         .await;
         assert_eq!(second.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gateway_uses_rightmost_forwarded_hop_from_trusted_proxy() {
+        let app = build_app(
+            AppState::seeded(None)
+                .with_rate_limit(1, 60)
+                .with_trusted_proxies(HashSet::from(["198.51.100.10".parse().unwrap()])),
+        );
+        let first = app_request(
+            &app,
+            gateway_get_via_proxy(
+                "/gateway/demo",
+                "203.0.113.200, 203.0.113.9",
+                "198.51.100.10",
+            ),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let blocked = app_request(
+            &app,
+            gateway_get_via_proxy(
+                "/gateway/demo",
+                "198.51.100.200, 203.0.113.9",
+                "198.51.100.10",
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn gateway_accepts_requests_without_connect_info() {
+        let app = build_app(AppState::seeded(None).with_rate_limit(2, 60));
+
+        let first = app
+            .clone()
+            .oneshot(empty_request(Method::GET, "/gateway/demo"))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .clone()
+            .oneshot(empty_request(Method::GET, "/gateway/demo"))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let third = app
+            .clone()
+            .oneshot(empty_request(Method::GET, "/gateway/demo"))
+            .await
+            .unwrap();
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     async fn body_text(response: Response) -> String {
