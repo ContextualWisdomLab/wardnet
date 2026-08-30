@@ -9,15 +9,18 @@ client IP unmasked.
 ## What is proven (and what is not)
 
 Proven end to end on the real binary: operator-supplied `CORAZA_LIB_PATH`
-loading, rules-file admission, per-transaction evaluation of method/URI/body,
-block responses citing `coraza/crs: rule <id>`, benign traffic still
-forwarding, and unmasked client attribution in `/api/events`.
+admission into the in-process ABI path, rules-file admission,
+per-transaction evaluation of method/URI/body, block responses citing
+`coraza/crs: rule <id>`, benign traffic still forwarding, and unmasked client
+attribution in `/api/events`.
 
-Not proven: detection *quality* against arbitrary live traffic. The CI engine
-is the build-script ABI stub (`src/coraza_abi_stub.rs`), a fixture that
-mirrors the libcoraza C ABI, not Coraza itself. Quality evidence stays with an
-operator deployment using a real libcoraza plus the OWASP Core Rule Set; this
-slice only removes "the path was never exercised in CI" from the gap list.
+Not proven: detection *quality* against arbitrary live traffic or an
+operator-supplied production `libcoraza` binary itself. The CI engine is the
+build-script ABI stub (`src/coraza_abi_stub.rs`), a fixture that mirrors the
+libcoraza C ABI, not Coraza itself. Quality evidence and real shared-library
+loading evidence stay with an operator deployment using a real libcoraza plus
+the OWASP Core Rule Set; this slice only removes "the path was never exercised
+in CI" from the gap list.
 
 ## Adopted standards and literature
 

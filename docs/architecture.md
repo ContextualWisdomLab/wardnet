@@ -66,6 +66,26 @@ flowchart LR
 
 ## Product Architecture Evidence
 
+- NIST SP 800-218 grounding:
+  - NIST. (2022). *Secure software development framework (SSDF) version 1.1:
+    Recommendations for mitigating the risk of software vulnerabilities*
+    (SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
+  - Design impact: the release path keeps signed, attestable build evidence
+    and the runtime path keeps configuration validation ahead of readiness so
+    the product can prove secure-build and secure-deploy controls separately.
+- PostgreSQL RLS and outbox grounding:
+  - Kleppmann, M. (2017). *Designing data-intensive applications*. O'Reilly
+    Media.
+  - Design impact: tenant isolation is enforced in the database rather than in
+    application memory alone, and external side effects are emitted through a
+    transactional outbox so durable state changes and asynchronous delivery do
+    not diverge silently.
+- Proven-engine WAF grounding:
+  - OWASP Foundation. (n.d.). *OWASP Core Rule Set documentation*.
+    https://coreruleset.org/docs/
+  - Design impact: Wardnet reuses Coraza/CRS as the decision authority for WAF
+    enforcement instead of claiming equivalent protection from hand-rolled
+    route logic.
 - FigJam: `docs/figma/enterprise-product-architecture.md`
 - Product workflows: `docs/product-design/enterprise-operator-workflows.md`
 - Enterprise scorecard: `docs/analytics/enterprise-value-scorecard.md`

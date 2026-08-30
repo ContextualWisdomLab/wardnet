@@ -68,6 +68,12 @@ load: as utilization and system scale increase, uncommon slow responses can
 dominate end-to-end service latency. That evidence supports measuring the tail;
 it does not establish a Wardnet latency target, which remains deployment-specific.
 
+Aron et al. (1999) ground the closed-model request distribution choice here:
+the benchmark keeps concurrency fixed while the gateway makes route-selection
+and admission decisions, which is useful for isolating how the current service
+degrades as active clients rise even though it is not, by itself, a saturation
+or capacity-planning claim.
+
 ## References
 
 Dean, J., & Barroso, L. A. (2013). The tail at scale. *Communications of the

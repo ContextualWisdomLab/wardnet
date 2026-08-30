@@ -18,3 +18,22 @@ This document maps the commercial baseline to common enterprise security review 
 ## Review Position
 
 The project can support buyer lab validation and paid pilot discussions after this baseline. It should not be represented as fully compliant for PCI DSS, ISO 27001, SOC 2, or regulated production without the remaining controls above.
+
+## Standards grounding
+
+NIST. (2022). *Secure software development framework (SSDF) version 1.1:
+Recommendations for mitigating the risk of software vulnerabilities*
+(SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
+
+- Design impact: the Secure SDLC row is evidence-bound to build, test, and
+  attestation artifacts rather than a policy-only claim, and the regulated
+  production gap stays explicit until signed release admission and hermetic
+  verification are proven on protected `main`.
+
+American Institute of Certified Public Accountants. (2017). *Trust services
+criteria for security, availability, processing integrity, confidentiality,
+and privacy*.
+
+- Design impact: the table is organized around buyer-review control families
+  such as access control, auditability, availability, and change control, but
+  it remains a gap map instead of a certification statement.

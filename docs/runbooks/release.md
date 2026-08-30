@@ -4,6 +4,22 @@ Issue #84. IEEE/ACM PDFs are not redistributed. Buyer evidence path:
 `GET /api/commercial/evidence-manifest` lists this runbook. NIST SP 800-218
 is committed at `docs/papers/nist-sp-800-218-ssdf.pdf`.
 
+## Standards grounding
+
+NIST. (2022). *Secure software development framework (SSDF) version 1.1:
+Recommendations for mitigating the risk of software vulnerabilities*
+(SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
+
+- Design impact: release admission requires an annotated signed tag on
+  `origin/main`, and the workflow emits verifiable provenance, signatures, and
+  SBOMs so the release artifact can be traced back to one reviewed source head.
+
+OpenSSF. (2023). *SLSA v1.0 specification*. https://slsa.dev/spec/v1.0/
+
+- Design impact: promotion authority is the immutable digest plus provenance,
+  not a mutable tag, which is why the runbook pins Kubernetes deployments from
+  `IMAGE-DIGEST.txt` and forbids a moving `latest` tag.
+
 ## Immutable artifacts
 
 A git tag `vX.Y.Z` starts `.github/workflows/release.yml`. Lightweight

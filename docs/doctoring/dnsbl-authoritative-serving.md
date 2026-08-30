@@ -66,10 +66,22 @@ protected-branch checks and deployed port-53 evidence.
 Levine, J. (2010). *DNS blacklists and whitelists* (RFC 5782). Internet
 Research Task Force. https://doi.org/10.17487/RFC5782
 
+- Design impact: reversed-octet IPv4 query names, 127/8 A responses, and TXT
+  evidence are kept exactly in the DNSBL contract instead of inventing a
+  Wardnet-only lookup format.
+
 Thomson, S., Huitema, C., Ksinant, V., & Souissi, M. (2003). *DNS extensions
 to support IP version 6* (RFC 3596). Internet Engineering Task Force.
 https://doi.org/10.17487/RFC3596
 
+- Design impact: IPv6 list lookups use 32 reversed hexadecimal nibbles and are
+  answered authoritatively without a recursive fallback, which preserves the
+  DNSBL trust boundary for IPv6 the same way RFC 5782 does for IPv4.
+
 Vixie, P., Andrews, M., Lindqvist, M., & Wassenaar, E. (1998). *Negative
 caching of DNS queries (DNS NCACHE)* (RFC 2308). Internet Engineering Task
 Force. https://doi.org/10.17487/RFC2308
+
+- Design impact: authoritative `NXDOMAIN` and NODATA responses include the SOA
+  so clients can cache negative answers for a bounded interval instead of
+  hammering the listener on every miss.

@@ -51,9 +51,11 @@ independent-approval gates. Local tests or a stacked PR do not prove that the
 endpoint is available on protected `main`. Runtime acceptance additionally
 requires an authenticated client to perform discovery, list the tool, call it,
 and compare the structured result with `/api/support-bundle` on the same
-deployment. `tests/load/mcp.js` is the repeatable k6 contract; concurrency and
-duration are command-line test conditions, while pass/fail is limited to HTTP
-and response-contract correctness rather than an invented latency target.
+deployment. `tests/load/mcp.js` is narrower than that full acceptance slice:
+it exercises authenticated `tools/call` only and passes when HTTP succeeds and
+the returned `structuredContent.health.status` is `ok`. Discovery, tool-list,
+and support-bundle equivalence remain separate runtime checks rather than claims
+made by the k6 harness itself.
 
 Local runtime evidence on 2026-08-27 used the real debug binary on
 `127.0.0.1:3017` with 10 concurrent k6 virtual users for 10 seconds. All 4,992
