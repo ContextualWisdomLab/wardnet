@@ -332,6 +332,14 @@ impl IpNet {
                 "trusted proxy prefix {prefix_len} exceeds {max} for {raw:?}"
             ));
         }
+        if let IpAddr::V6(ip) = addr
+            && ip.to_ipv4_mapped().is_some()
+            && prefix_len < 96
+        {
+            return Err(format!(
+                "trusted proxy prefix {prefix_len} must be at least 96 for IPv4-mapped IPv6 {raw:?}"
+            ));
+        }
         Ok(Self { addr, prefix_len })
     }
 
@@ -3735,6 +3743,9 @@ mod tests {
     fn parse_trusted_proxies_rejects_invalid_prefixes() {
         let error = parse_trusted_proxies(Some("192.0.2.0/40")).expect_err("bad prefix");
         assert!(error.contains("exceeds 32"));
+        let error =
+            parse_trusted_proxies(Some("::ffff:192.0.2.0/24")).expect_err("mapped bad prefix");
+        assert!(error.contains("at least 96"));
     }
 
     #[test]
