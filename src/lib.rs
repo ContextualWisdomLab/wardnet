@@ -44,7 +44,9 @@ mod opencti_import;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_KEV_CATALOG_URL, CredentialRegistry, CredentialSource,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -2097,6 +2099,12 @@ async fn import_kev_feed(
     headers: HeaderMap,
     Json(request): Json<KevImportRequest>,
 ) -> Response {
+    if !has_write_admin_credential(&state) {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "KEV import requires a configured write-capable admin credential",
+        );
+    }
     if !admin_authorized(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
@@ -2587,6 +2595,19 @@ fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
         return true;
     };
     presented.is_some_and(|actual| actual == expected)
+}
+
+fn has_write_admin_credential(state: &AppState) -> bool {
+    if !state.admin_tokens.is_empty() {
+        return state
+            .admin_tokens
+            .values()
+            .any(|principal| principal.can_write);
+    }
+    state
+        .admin_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
 }
 
 fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
@@ -3250,6 +3271,7 @@ pub async fn run_from_env(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
+        std::env::var("KEV_CATALOG_URL").ok(),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -3276,12 +3298,10 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
-    // Deployment-time override for the CISA KEV catalog URL. Never taken
-    // from an HTTP request; restricted to CISA's own host (see
-    // validate_kev_catalog_url / KEV_ALLOWED_HOSTS) even though it comes
-    // from the environment rather than a request body, since an inherited
-    // or misconfigured value could otherwise redirect this privileged fetch.
-    let kev_catalog_url = std::env::var("KEV_CATALOG_URL").ok();
+    // Deployment-time override for the CISA KEV catalog URL. It is bootstrapped
+    // into the process-local credential/config registry so handlers never read
+    // it directly from the ambient environment at runtime.
+    let kev_catalog_url = credentials.get_credential(CRED_KEV_CATALOG_URL);
     if let Some(url) = &kev_catalog_url {
         validate_kev_catalog_url(url).map_err(|message| {
             std::io::Error::new(
@@ -3480,6 +3500,34 @@ mod tests {
         );
         clear_run_env();
         std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_prefers_credentials_file_kev_catalog_url_over_env() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-kev-creds-{}-{}",
+            std::process::id(),
+            now_unix()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"kev_catalog_url":"http://127.0.0.1:9/kev.json"}"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("WAF_IDS_CREDENTIALS_PATH", path.to_str().unwrap());
+            std::env::set_var("KEV_CATALOG_URL", "https://evil.example/kev.json");
+        }
+        run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap();
+        clear_run_env();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn route() -> RouteConfig {
@@ -5125,6 +5173,27 @@ mod tests {
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/threat-intel/cisa-kev")
         );
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_requires_configured_write_credential() {
+        let app = build_app(
+            AppState::seeded(None).with_kev_catalog_url("http://127.0.0.1:9/kev.json".to_string()),
+        );
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                None,
+                &kev_import_request(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_text(response).await;
+        assert!(body.contains("configured write-capable admin credential"));
     }
 
     #[tokio::test]
