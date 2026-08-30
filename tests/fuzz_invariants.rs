@@ -7,6 +7,20 @@ use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use waf_ids_ai_soc::{IpNet, effective_client_ip, parse_admin_tokens};
 
+fn normalized_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V4(ip) => IpAddr::V4(ip),
+    }
+}
+
+fn is_trusted_single_host(ip: IpAddr, trusted_proxy_ip: IpAddr) -> bool {
+    normalized_ip(ip) == normalized_ip(trusted_proxy_ip)
+}
+
 proptest! {
     #[test]
     fn parse_admin_tokens_upholds_invariants(raw in ".*") {
@@ -50,7 +64,9 @@ proptest! {
         } else {
             peer_ip
         };
-        let trust_peer = peer_ip == Some(trusted_proxy_ip);
+        let trust_peer = peer_ip
+            .map(|peer_ip| is_trusted_single_host(peer_ip, trusted_proxy_ip))
+            .unwrap_or(false);
         let x_forwarded_for = if forwarded_hops.is_empty() {
             None
         } else {
@@ -75,7 +91,7 @@ proptest! {
                     let Ok(ip) = hop.parse::<IpAddr>() else {
                         continue;
                     };
-                    if ip == trusted_proxy_ip {
+                    if is_trusted_single_host(ip, trusted_proxy_ip) {
                         continue;
                     }
                     return Some(ip);
@@ -89,4 +105,18 @@ proptest! {
 
         prop_assert_eq!(resolved, expected);
     }
+}
+
+#[test]
+fn trusted_forwarded_client_ip_accepts_ipv4_mapped_trusted_peer_reference_model() {
+    let trusted_proxies = vec![IpNet::parse("192.0.2.44/32").unwrap()];
+    let peer_ip = Some(IpAddr::V6(Ipv4Addr::new(192, 0, 2, 44).to_ipv6_mapped()));
+    let resolved = effective_client_ip(
+        peer_ip,
+        Some("198.51.100.7, 192.0.2.44"),
+        None,
+        &trusted_proxies,
+    );
+
+    assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
 }

@@ -27,6 +27,20 @@ impl AnyIp {
     }
 }
 
+fn normalized_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V4(ip) => IpAddr::V4(ip),
+    }
+}
+
+fn is_trusted_single_host(ip: IpAddr, trusted_proxy_ip: IpAddr) -> bool {
+    normalized_ip(ip) == normalized_ip(trusted_proxy_ip)
+}
+
 #[derive(Arbitrary, Debug)]
 enum Hop {
     Ip(AnyIp),
@@ -79,7 +93,7 @@ fn expected_client_ip(
             let Ok(ip) = hop.parse::<IpAddr>() else {
                 continue;
             };
-            if ip == trusted_proxy_ip {
+            if is_trusted_single_host(ip, trusted_proxy_ip) {
                 continue;
             }
             return Some(ip);
@@ -105,7 +119,9 @@ fuzz_target!(|input: Input| {
     } else {
         peer_ip
     };
-    let trust_peer = peer_ip == Some(trusted_proxy_ip);
+    let trust_peer = peer_ip
+        .map(|peer_ip| is_trusted_single_host(peer_ip, trusted_proxy_ip))
+        .unwrap_or(false);
     let x_forwarded_for = if input.forwarded_hops.is_empty() {
         None
     } else {
