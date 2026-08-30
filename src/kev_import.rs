@@ -91,7 +91,7 @@ fn kev_entry_outcome(entry: &serde_json::Value, source: &str, ttl_seconds: u64) 
         .get("cveID")
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_valid_cve_id(s))
     else {
         return KevEntryOutcome::Skipped;
     };
@@ -116,6 +116,31 @@ fn kev_entry_outcome(entry: &serde_json::Value, source: &str, ttl_seconds: u64) 
         source: source.to_string(),
         ttl_seconds,
     })
+}
+
+/// Checks the `CVE-<4-digit year>-<4+ digit sequence>` syntax CVE.org
+/// defines (<https://www.cve.org/ResourcesSupport/AllResources/CVEHelp>),
+/// case-insensitively. A malformed `cveID` (typo, placeholder, truncated
+/// feed) would otherwise become an indistinguishable-looking `cve` threat
+/// indicator with no signal that it never matched a real CVE record.
+fn is_valid_cve_id(value: &str) -> bool {
+    // `str::get` (unlike slicing) returns None instead of panicking on a
+    // byte range that isn't a valid char boundary, so this stays panic-safe
+    // on arbitrary catalog input.
+    let Some(rest) = value
+        .get(0..4)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("cve-"))
+        .map(|_| &value[4..])
+    else {
+        return false;
+    };
+    let Some((year, sequence)) = rest.split_once('-') else {
+        return false;
+    };
+    year.len() == 4
+        && year.bytes().all(|b| b.is_ascii_digit())
+        && sequence.len() >= 4
+        && sequence.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -204,6 +229,37 @@ mod tests {
     }
 
     #[test]
+    fn skips_entries_with_malformed_cve_id() {
+        let raw = r#"{"vulnerabilities": [
+          {"cveID": "not-a-cve", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "CVE-24-0001", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "CVE-2024-001", "knownRansomwareCampaignUse": "Unknown"},
+          {"cveID": "CVE-2024-9999", "knownRansomwareCampaignUse": "Unknown"}
+        ]}"#;
+        let material = parse_kev_document(raw, "feed:cisa-kev", 3600).unwrap();
+        assert_eq!(material.threats.len(), 1);
+        assert_eq!(material.threats[0].value, "CVE-2024-9999");
+        assert_eq!(material.skipped_entries, 3);
+    }
+
+    #[test]
+    fn validates_cve_id_syntax() {
+        assert!(is_valid_cve_id("CVE-2024-0001"));
+        assert!(is_valid_cve_id("cve-2024-0001"));
+        assert!(is_valid_cve_id("CVE-2021-44228"));
+        assert!(is_valid_cve_id("CVE-2024-123456"));
+        assert!(!is_valid_cve_id("not-a-cve"));
+        assert!(!is_valid_cve_id("CVE-24-0001"));
+        assert!(!is_valid_cve_id("CVE-2024-001"));
+        assert!(!is_valid_cve_id("CVE-2024-"));
+        assert!(!is_valid_cve_id("CVE-"));
+        assert!(!is_valid_cve_id(""));
+        assert!(!is_valid_cve_id("CV"));
+        // A multi-byte char straddling the byte-4 prefix boundary must not panic.
+        assert!(!is_valid_cve_id("CVE\u{20ac}1234-0001"));
+    }
+
+    #[test]
     fn rejects_empty_and_non_kev_documents() {
         assert!(parse_kev_document("", "s", 60).is_err());
         assert!(parse_kev_document("not-json", "s", 60).is_err());
@@ -216,7 +272,15 @@ mod tests {
 
     #[test]
     fn parse_never_panics_on_arbitrary_text() {
-        for sample in ["", "{", "[]", "null", "\0", "{\"vulnerabilities\":[]}"] {
+        for sample in [
+            "",
+            "{",
+            "[]",
+            "null",
+            "\0",
+            "{\"vulnerabilities\":[]}",
+            "{\"vulnerabilities\":[{\"cveID\":\"CVE\u{20ac}1234-0001\"}]}",
+        ] {
             let _ = parse_kev_document(sample, "s", 60);
         }
     }
