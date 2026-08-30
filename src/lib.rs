@@ -2685,14 +2685,29 @@ async fn apply_threat_feed_import(
     state
         .mutate_and_persist(|data| {
             let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
-            let previous_keys = replace_threat_feed_ownership(
+            let previous_keys: HashSet<_> = replace_threat_feed_ownership(
                 &mut data.threat_feed_ownership,
                 feed.feed_id.clone(),
                 threat_keys,
-            );
+            )
+            .into_iter()
+            .collect();
             if !previous_keys.is_empty() {
-                data.threats
-                    .retain(|threat| !previous_keys.contains(&threat_indicator_key(threat)));
+                // A key this feed is dropping might still be owned by another
+                // feed (e.g. two feeds importing the same CVE under a shared
+                // `source`) -- only reap it once no feed's ownership record
+                // claims it any more, so a refresh on one feed can't make a
+                // still-relevant indicator vanish from enforcement.
+                let still_owned: HashSet<_> = data
+                    .threat_feed_ownership
+                    .iter()
+                    .filter(|ownership| ownership.feed_id != feed.feed_id)
+                    .flat_map(|ownership| ownership.threat_keys.iter().cloned())
+                    .collect();
+                data.threats.retain(|threat| {
+                    let key = threat_indicator_key(threat);
+                    !previous_keys.contains(&key) || still_owned.contains(&key)
+                });
             }
             for threat in feed.threats.iter().cloned() {
                 upsert_threat(&mut data.threats, threat);
@@ -5317,6 +5332,114 @@ mod tests {
                 .iter()
                 .all(|entry| entry.value != "CVE-2021-44228"),
             "withdrawn CVEs should be removed on refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_indicators_still_owned_by_another_feed() {
+        // Two independently-managed feeds can legitimately report the same
+        // indicator_type+value+source. Refreshing one feed without it must
+        // not delete it while the other feed still claims it.
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let shared = ThreatIndicator {
+            value: "198.51.100.77".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::High,
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+        };
+        let feed_a = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        let feed_b = ThreatFeedImport {
+            feed_id: "feed-b".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        for feed in [&feed_a, &feed_b] {
+            let imported = app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    feed,
+                ),
+            )
+            .await;
+            assert_eq!(imported.status(), StatusCode::CREATED);
+        }
+
+        // validate_threat_feed_import requires at least one threat or DNSBL
+        // entry, so refreshes carry an unrelated DNSBL row to stay valid
+        // while genuinely dropping the shared indicator from `threats`.
+        let placeholder_dnsbl = DnsblEntry {
+            address: "203.0.113.9".parse().unwrap(),
+            code: "127.0.0.5".to_string(),
+            reason: "refresh placeholder".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            prefix_len: None,
+        };
+
+        // Feed A refreshes and drops the shared indicator; feed B still owns it.
+        let feed_a_refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl.clone()],
+            ..feed_a.clone()
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed_a_refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == shared.value),
+            "an indicator still owned by feed-b must survive feed-a's refresh"
+        );
+
+        // Feed B now also drops it -- no feed owns it any more, so it's reaped.
+        let feed_b_refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl],
+            ..feed_b.clone()
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed_b_refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .all(|entry| entry.value != shared.value),
+            "an indicator no feed owns any more should be reaped"
         );
     }
 
