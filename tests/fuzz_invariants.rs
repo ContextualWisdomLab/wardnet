@@ -38,20 +38,19 @@ proptest! {
             Just(String::from(" ")),
         ]),
     ) {
-        let trusted_proxy_raw = match trusted_proxy {
+        let trusted_proxy_ip = trusted_proxy;
+        let trusted_proxy_raw = match trusted_proxy_ip {
             IpAddr::V4(ip) => format!("{ip}/32"),
             IpAddr::V6(ip) => format!("{ip}/128"),
         };
         let trusted_proxy = IpNet::parse(&trusted_proxy_raw).unwrap();
         let trusted_proxies = vec![trusted_proxy.clone()];
         let peer_ip = if trust_peer && peer_ip.is_some() {
-            Some(match trusted_proxy_raw.split('/').next().unwrap().parse::<IpAddr>() {
-                Ok(ip) => ip,
-                Err(_) => unreachable!("trusted proxy literal must parse"),
-            })
+            Some(trusted_proxy_ip)
         } else {
             peer_ip
         };
+        let trust_peer = peer_ip == Some(trusted_proxy_ip);
         let x_forwarded_for = if forwarded_hops.is_empty() {
             None
         } else {
@@ -63,8 +62,6 @@ proptest! {
             x_real_ip.as_deref(),
             &trusted_proxies,
         );
-        let trusted_proxy_ip = peer_ip.filter(|_| trust_peer);
-
         let expected = peer_ip.and_then(|peer_ip| {
             if !trust_peer {
                 return Some(peer_ip);
@@ -78,7 +75,7 @@ proptest! {
                     let Ok(ip) = hop.parse::<IpAddr>() else {
                         continue;
                     };
-                    if trusted_proxy_ip.is_some_and(|trusted_proxy_ip| ip == trusted_proxy_ip) {
+                    if ip == trusted_proxy_ip {
                         continue;
                     }
                     return Some(ip);

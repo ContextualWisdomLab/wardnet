@@ -94,13 +94,18 @@ fn expected_client_ip(
 fuzz_target!(|input: Input| {
     let trusted_proxy_ip = input.trusted_proxy.clone().into_ip();
     let peer_ip = input.peer_ip.map(AnyIp::into_ip);
-    let trust_peer = input.trust_peer && peer_ip.is_some();
     let trusted_cidr = match trusted_proxy_ip {
         IpAddr::V4(ip) => format!("{ip}/32"),
         IpAddr::V6(ip) => format!("{ip}/128"),
     };
     let trusted_proxy = IpNet::parse(&trusted_cidr).expect("single-host CIDR must parse");
     let trusted_proxies = vec![trusted_proxy.clone()];
+    let peer_ip = if input.trust_peer && peer_ip.is_some() {
+        Some(trusted_proxy_ip)
+    } else {
+        peer_ip
+    };
+    let trust_peer = peer_ip == Some(trusted_proxy_ip);
     let x_forwarded_for = if input.forwarded_hops.is_empty() {
         None
     } else {
@@ -114,14 +119,9 @@ fuzz_target!(|input: Input| {
         )
     };
     let x_real_ip = input.x_real_ip.map(Hop::into_text);
-    let resolved = effective_client_ip(
-        if trust_peer { Some(trusted_proxy_ip) } else { peer_ip },
-        x_forwarded_for.as_deref(),
-        x_real_ip.as_deref(),
-        &trusted_proxies,
-    );
+    let resolved = effective_client_ip(peer_ip, x_forwarded_for.as_deref(), x_real_ip.as_deref(), &trusted_proxies);
     let expected = expected_client_ip(
-        if trust_peer { Some(trusted_proxy_ip) } else { peer_ip },
+        peer_ip,
         x_forwarded_for.as_deref(),
         x_real_ip.as_deref(),
         trusted_proxy_ip,

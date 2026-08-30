@@ -335,12 +335,14 @@ impl IpNet {
     }
 
     fn contains(&self, ip: IpAddr) -> bool {
-        match (self.addr, ip) {
+        let (network, prefix_len) = normalized_network(self.addr, self.prefix_len);
+        let ip = normalized_ip(ip);
+        match (network, ip) {
             (IpAddr::V4(network), IpAddr::V4(ip)) => {
-                masked_v4(network, self.prefix_len) == masked_v4(ip, self.prefix_len)
+                masked_v4(network, prefix_len) == masked_v4(ip, prefix_len)
             }
             (IpAddr::V6(network), IpAddr::V6(ip)) => {
-                masked_v6(network, self.prefix_len) == masked_v6(ip, self.prefix_len)
+                masked_v6(network, prefix_len) == masked_v6(ip, prefix_len)
             }
             _ => false,
         }
@@ -359,6 +361,26 @@ fn max_prefix_len(addr: IpAddr) -> u8 {
     match addr {
         IpAddr::V4(_) => 32,
         IpAddr::V6(_) => 128,
+    }
+}
+
+fn normalized_network(addr: IpAddr, prefix_len: u8) -> (IpAddr, u8) {
+    match addr {
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(mapped) if prefix_len >= 96 => (IpAddr::V4(mapped), prefix_len - 96),
+            _ => (IpAddr::V6(ip), prefix_len),
+        },
+        IpAddr::V4(ip) => (IpAddr::V4(ip), prefix_len),
+    }
+}
+
+fn normalized_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V4(ip) => IpAddr::V4(ip),
     }
 }
 
@@ -3231,12 +3253,8 @@ pub async fn run_from_env(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
-    )?;
-    let mut credentials = credentials;
-    credentials.bootstrap_value(
-        CRED_TRUSTED_PROXY_CIDRS,
         std::env::var("TRUSTED_PROXY_CIDRS").ok(),
-    );
+    )?;
     let config = AppConfig {
         admin_token: credentials
             .get_credential(CRED_ADMIN_TOKEN)
@@ -3630,6 +3648,23 @@ mod tests {
             client_ip_from_request(
                 &headers,
                 Some("192.0.2.44".parse().unwrap()),
+                &[IpNet::parse("192.0.2.0/24").unwrap()],
+            ),
+            Some("203.0.113.9".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn client_ip_from_request_accepts_ipv4_mapped_trusted_proxy_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 192.0.2.10"),
+        );
+        assert_eq!(
+            client_ip_from_request(
+                &headers,
+                Some("::ffff:192.0.2.44".parse().unwrap()),
                 &[IpNet::parse("192.0.2.0/24").unwrap()],
             ),
             Some("203.0.113.9".parse().unwrap())

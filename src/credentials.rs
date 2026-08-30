@@ -82,6 +82,7 @@ impl CredentialRegistry {
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
+        env_trusted_proxy_cidrs: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         let mut from_file = false;
@@ -97,7 +98,11 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_TRUSTED_PROXY_CIDRS,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
@@ -127,6 +132,12 @@ impl CredentialRegistry {
             && let Some(tokens) = env_admin_tokens.filter(|value| !value.is_empty())
         {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
+            from_env = true;
+        }
+        if !values.contains_key(CRED_TRUSTED_PROXY_CIDRS)
+            && let Some(cidr_list) = env_trusted_proxy_cidrs.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_TRUSTED_PROXY_CIDRS.to_string(), cidr_list);
             from_env = true;
         }
 
@@ -168,6 +179,7 @@ mod tests {
             None,
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
+            Some("192.0.2.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -176,13 +188,17 @@ mod tests {
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
         );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
         let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
+            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
@@ -211,6 +227,7 @@ mod tests {
             Some(&path),
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
+            Some("198.51.100.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -218,6 +235,10 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("filetok:operator")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("198.51.100.0/24")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -241,6 +262,7 @@ mod tests {
             Some(&path),
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
+            Some("198.51.100.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -267,12 +289,17 @@ mod tests {
             Some(&path),
             Some("env-secret".to_string()),
             None,
+            Some("203.0.113.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKEN),
             Some("env-secret")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("203.0.113.0/24")
         );
     }
 
@@ -289,8 +316,43 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
+        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_overrides_env_for_trusted_proxy_cidrs() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-trusted-proxies-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"trusted_proxy_cidrs":"192.0.2.0/24,2001:db8::/32"}"#,
+        )
+        .unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            None,
+            None,
+            Some("198.51.100.0/24".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(registry.source(), CredentialSource::File);
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24,2001:db8::/32")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
