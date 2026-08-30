@@ -2103,7 +2103,19 @@ async fn import_kev_feed(
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let body_text = match fetch_text_feed(&state, &request.kev_url).await {
+    // Fetch the fixed, hardcoded CISA URL unless the operator has explicitly
+    // opted into a non-default host: the request body's `kev_url` never
+    // reaches the outbound fetch on the (default) safe path, so there is no
+    // request-controlled URL construction to defend against there. Opting in
+    // (`allow_non_default_hosts: true`, e.g. for tests or an internal
+    // mirror) is what makes the operator-supplied URL take over, exactly as
+    // `validate_http_url`'s host-allowlist check already gates it.
+    let fetch_url = if request.allow_non_default_hosts {
+        request.kev_url.as_str()
+    } else {
+        KEV_DEFAULT_URL
+    };
+    let body_text = match fetch_text_feed(&state, fetch_url).await {
         Ok(text) => text,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
