@@ -1,9 +1,9 @@
-//! Secret-bearing configuration via a process-local credential registry.
+//! Secret-bearing and trust-boundary configuration via a process-local registry.
 //!
 //! Org guidance: runtime code must not treat raw environment variables as the
-//! source of secrets. Environment (and optional credentials file) are bootstrap
-//! transports that seed this registry; handlers and auth checks read through
-//! [`CredentialRegistry::get_credential`].
+//! source of runtime secrets. Environment (and optional credentials file) are
+//! bootstrap transports that seed this registry; handlers and auth checks read
+//! through [`CredentialRegistry::get_credential`].
 
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::ErrorKind, path::Path};
@@ -11,6 +11,7 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 /// Well-known secret keys loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+pub const CRED_TRUSTED_PROXY_CIDRS: &str = "trusted_proxy_cidrs";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -54,6 +55,14 @@ impl CredentialRegistry {
 
     pub fn source(&self) -> CredentialSource {
         self.source
+    }
+
+    /// Store one bootstrap value for later runtime reads. Empty values are
+    /// discarded so callers can treat env/file as optional transports.
+    pub fn bootstrap_value(&mut self, name: &str, value: Option<String>) {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            self.values.insert(name.to_string(), value);
+        }
     }
 
     pub fn has_admin_auth(&self) -> bool {
@@ -283,5 +292,18 @@ mod tests {
         let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_value_stores_non_empty_runtime_config() {
+        let mut registry = CredentialRegistry::empty();
+        registry.bootstrap_value(CRED_TRUSTED_PROXY_CIDRS, Some("192.0.2.0/24".to_string()));
+        registry.bootstrap_value("blank", Some(String::new()));
+
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24")
+        );
+        assert_eq!(registry.get_credential("blank"), None);
     }
 }

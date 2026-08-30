@@ -42,7 +42,10 @@ mod opencti_import;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_TRUSTED_PROXY_CIDRS, CredentialRegistry,
+    CredentialSource,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -298,7 +301,8 @@ pub struct IpNet {
 }
 
 impl IpNet {
-    fn parse(raw: &str) -> Result<Self, String> {
+    /// Parse one IP or CIDR entry used by trusted-proxy admission.
+    pub fn parse(raw: &str) -> Result<Self, String> {
         let raw = raw.trim();
         if raw.is_empty() {
             return Err("trusted proxy entry must be non-empty".to_string());
@@ -343,6 +347,14 @@ impl IpNet {
     }
 }
 
+impl std::str::FromStr for IpNet {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
 fn max_prefix_len(addr: IpAddr) -> u8 {
     match addr {
         IpAddr::V4(_) => 32,
@@ -370,14 +382,23 @@ fn masked_v6(ip: std::net::Ipv6Addr, prefix_len: u8) -> u128 {
     }
 }
 
+/// Parse the trusted-proxy allowlist from one comma-separated bootstrap value.
 fn parse_trusted_proxies(raw: Option<&str>) -> Result<Vec<IpNet>, String> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
-    raw.split(',')
-        .filter(|entry| !entry.trim().is_empty())
-        .map(IpNet::parse)
-        .collect()
+    let mut proxies = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        proxies.push(IpNet::parse(entry)?);
+    }
+    if proxies.is_empty() {
+        return Err("trusted proxy list must contain at least one IP or CIDR".to_string());
+    }
+    Ok(proxies)
 }
 
 async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
@@ -532,6 +553,9 @@ struct ErrorBody {
     error: String,
 }
 
+/// Build the HTTP router. Gateway requests still require peer metadata via
+/// `ConnectInfo<SocketAddr>`; use [`serve`] or
+/// `Router::into_make_service_with_connect_info::<SocketAddr>()`.
 pub fn build_app(state: AppState) -> Router {
     let max_body_bytes = state.max_body_bytes;
     Router::new()
@@ -582,6 +606,25 @@ pub fn build_app(state: AppState) -> Router {
         .route("/gateway/{*path}", any(gateway))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+/// Serve the Wardnet router with peer address attribution enabled for gateway
+/// controls such as rate limiting, DNSBL matching, and event attribution.
+pub async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    shutdown: F,
+) -> Result<(), std::io::Error>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    axum::serve(
+        listener,
+        build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
+    Ok(())
 }
 
 pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_json::Error> {
@@ -2201,6 +2244,15 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .cloned();
+    let peer_ip = match connect_info.as_ref().map(|peer| peer.0.ip()) {
+        Some(peer_ip) => peer_ip,
+        None => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "gateway requires peer address metadata; serve with `serve(...)` or `into_make_service_with_connect_info::<SocketAddr>()`",
+            );
+        }
+    };
     let (parts, body) = request.into_parts();
     let method = parts.method;
     let uri = parts.uri;
@@ -2231,11 +2283,7 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
         (route.clone(), data.threats.clone(), data.dnsbl.clone())
     };
 
-    let client_ip = client_ip_from_request(
-        &headers,
-        connect_info.map(|peer| peer.0.ip()),
-        &state.trusted_proxies,
-    );
+    let client_ip = client_ip_from_request(&headers, Some(peer_ip), &state.trusted_proxies);
 
     // Rate limiting runs before scoring/proxying so floods are shed cheaply.
     if !state.allow_request(client_ip).await {
@@ -2332,28 +2380,55 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
     }
 }
 
+/// Resolve the effective client IP, trusting forwarded headers only from known
+/// proxy peers and only after walking the proxy chain right-to-left.
 fn client_ip_from_request(
     headers: &HeaderMap,
     peer_ip: Option<IpAddr>,
     trusted_proxies: &[IpNet],
 ) -> Option<IpAddr> {
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-        });
     match peer_ip {
-        Some(peer_ip) if trusted_proxies.iter().any(|proxy| proxy.contains(peer_ip)) => forwarded
-            .and_then(|value| value.parse().ok())
-            .or(Some(peer_ip)),
+        Some(peer_ip) if trusted_proxies.iter().any(|proxy| proxy.contains(peer_ip)) => {
+            trusted_forwarded_client_ip(headers, trusted_proxies)
+                .or_else(|| trusted_real_ip(headers))
+                .or(Some(peer_ip))
+        }
         Some(peer_ip) => Some(peer_ip),
         None => None,
     }
+}
+
+/// Extract the first untrusted client hop from `X-Forwarded-For`, scanning from
+/// the right so trusted proxy hops are skipped instead of attacker-chosen
+/// leading values being accepted as the client identity.
+fn trusted_forwarded_client_ip(headers: &HeaderMap, trusted_proxies: &[IpNet]) -> Option<IpAddr> {
+    let forwarded = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let mut client_ip = None;
+    for candidate in forwarded.split(',').rev() {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let ip = match candidate.parse::<IpAddr>() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+        if trusted_proxies.iter().any(|proxy| proxy.contains(ip)) {
+            continue;
+        }
+        client_ip = Some(ip);
+        break;
+    }
+    client_ip
+}
+
+/// Trusted-proxy fallback for deployments that emit a single canonical client
+/// address via `X-Real-IP`.
+fn trusted_real_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
 }
 
 async fn proxy_request(
@@ -3132,6 +3207,11 @@ pub async fn run_from_env(
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
     )?;
+    let mut credentials = credentials;
+    credentials.bootstrap_value(
+        CRED_TRUSTED_PROXY_CIDRS,
+        std::env::var("TRUSTED_PROXY_CIDRS").ok(),
+    );
     let config = AppConfig {
         admin_token: credentials
             .get_credential(CRED_ADMIN_TOKEN)
@@ -3141,7 +3221,7 @@ pub async fn run_from_env(
             .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
         event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
         trusted_proxies: parse_trusted_proxies(
-            std::env::var("TRUSTED_PROXY_CIDRS").ok().as_deref(),
+            credentials.get_credential(CRED_TRUSTED_PROXY_CIDRS),
         )
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
     };
@@ -3174,13 +3254,7 @@ pub async fn run_from_env(
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_max_body_size(max_body_bytes);
-    let served = axum::serve(
-        listener,
-        build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await;
-    served?;
+    serve(listener, state, shutdown).await?;
     Ok(())
 }
 
@@ -3525,7 +3599,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.9, 10.0.0.1"),
+            HeaderValue::from_static("203.0.113.9, 192.0.2.10"),
         );
         assert_eq!(
             client_ip_from_request(
@@ -3538,16 +3612,36 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_from_request_falls_back_to_proxy_ip_on_invalid_forwarded_value() {
+    fn client_ip_from_request_uses_rightmost_untrusted_forwarded_hop() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.77, 203.0.113.9, 192.0.2.10"),
+        );
         assert_eq!(
             client_ip_from_request(
                 &headers,
                 Some("192.0.2.44".parse().unwrap()),
                 &[IpNet::parse("192.0.2.0/24").unwrap()],
             ),
-            Some("192.0.2.44".parse().unwrap())
+            Some("203.0.113.9".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn client_ip_from_request_skips_invalid_spoofed_leading_forwarded_hops() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("not-an-ip, 203.0.113.9"),
+        );
+        assert_eq!(
+            client_ip_from_request(
+                &headers,
+                Some("192.0.2.44".parse().unwrap()),
+                &[IpNet::parse("192.0.2.0/24").unwrap()],
+            ),
+            Some("203.0.113.9".parse().unwrap())
         );
     }
 
@@ -3563,6 +3657,12 @@ mod tests {
     fn parse_trusted_proxies_rejects_invalid_prefixes() {
         let error = parse_trusted_proxies(Some("192.0.2.0/40")).expect_err("bad prefix");
         assert!(error.contains("exceeds 32"));
+    }
+
+    #[test]
+    fn parse_trusted_proxies_rejects_blank_configurations() {
+        let error = parse_trusted_proxies(Some(" , ")).expect_err("blank trusted proxies");
+        assert!(error.contains("at least one IP or CIDR"));
     }
 
     #[test]
@@ -3642,6 +3742,88 @@ mod tests {
         )
         .await;
         assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gateway_rejects_missing_connect_info_instead_of_silently_sharing_unknown_ip() {
+        let app = build_app(AppState::seeded(None).with_rate_limit(1, 60));
+
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            body_text(response)
+                .await
+                .contains("gateway requires peer address metadata")
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_preserves_peer_ip_for_real_tcp_gateway_requests() {
+        let state = AppState::seeded(None).with_rate_limit(1, 60);
+        state
+            .mutate_and_persist(|data| {
+                data.routes.push(RouteConfig {
+                    id: "loopback".to_string(),
+                    path_prefix: "/loopback".to_string(),
+                    upstream: "mock://loopback".to_string(),
+                    mode: EnforcementMode::Block,
+                    enabled: true,
+                    block_threshold: None,
+                });
+                data.dnsbl.push(DnsblEntry {
+                    address: "127.0.0.1".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "loopback test".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                });
+            })
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(listener, state, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/loopback");
+
+        let blocked = client.get(&url).send().await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let limited = client.get(&url).send().await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let events: Vec<SecurityEvent> = client
+            .get(format!("http://{addr}/api/events"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.client_ip == Some("127.0.0.1".parse().unwrap()) && event.action == "blocked"
+        }));
+        assert!(events.iter().any(|event| {
+            event.client_ip == Some("127.0.0.1".parse().unwrap()) && event.action == "rate_limited"
+        }));
+
+        let _ = shutdown_tx.send(());
+        server.await.unwrap().unwrap();
     }
 
     async fn body_text(response: Response) -> String {
@@ -3953,11 +4135,17 @@ mod tests {
             &serde_json::json!({"id": "hi", "path_prefix": "/hi", "upstream": "mock://x", "mode": "block", "enabled": true}),
         );
         assert!(app_request(&app, hi).await.status().is_success());
-        let blocked =
-            app_request(&app, empty_request(Method::GET, "/gateway/low?q=probe-xyz")).await;
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/low?q=probe-xyz", "203.0.113.9"),
+        )
+        .await;
         assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
-        let allowed =
-            app_request(&app, empty_request(Method::GET, "/gateway/hi?q=probe-xyz")).await;
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/hi?q=probe-xyz", "203.0.113.9"),
+        )
+        .await;
         assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
         let bad = json_request(
             Method::POST,
@@ -3974,20 +4162,26 @@ mod tests {
     #[tokio::test]
     async fn oversized_request_body_is_rejected() {
         let app = build_app(AppState::seeded(None).with_max_body_size(16));
-        let big = Request::builder()
-            .method(Method::POST)
-            .uri("/gateway/demo")
-            .body(Body::from("x".repeat(64)))
-            .unwrap();
+        let big = with_peer_ip(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gateway/demo")
+                .body(Body::from("x".repeat(64)))
+                .unwrap(),
+            "203.0.113.9",
+        );
         assert_eq!(
             app_request(&app, big).await.status(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
-        let small = Request::builder()
-            .method(Method::POST)
-            .uri("/gateway/demo")
-            .body(Body::from("x"))
-            .unwrap();
+        let small = with_peer_ip(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gateway/demo")
+                .body(Body::from("x"))
+                .unwrap(),
+            "203.0.113.9",
+        );
         assert_ne!(
             app_request(&app, small).await.status(),
             StatusCode::PAYLOAD_TOO_LARGE
@@ -4450,7 +4644,7 @@ mod tests {
             Request::builder()
                 .method(Method::POST)
                 .uri("/gateway/secure/login?q=DROP%20TABLE")
-                .header("x-forwarded-for", "198.51.100.7, 10.0.0.1")
+                .header("x-forwarded-for", "198.51.100.7, 192.0.2.10")
                 .body(Body::from("payload"))
                 .unwrap(),
             "192.0.2.44",
@@ -4692,7 +4886,7 @@ mod tests {
 
         let gateway_response = app_request(
             &app,
-            empty_request(Method::GET, "/gateway/demo?q=union%20select"),
+            gateway_get_from_ip("/gateway/demo?q=union%20select", "203.0.113.9"),
         )
         .await;
         assert_eq!(gateway_response.status(), StatusCode::OK);
@@ -4921,9 +5115,9 @@ mod tests {
 
         let blocked = app_request(
             &app,
-            empty_request(
-                Method::GET,
+            gateway_get_from_ip(
                 "/gateway/phish?q=https%3A%2F%2Fevil.example%2Flogin",
+                "203.0.113.9",
             ),
         )
         .await;
@@ -5844,15 +6038,19 @@ mod tests {
         );
         let app = build_app(state);
 
-        let no_route = app_request(&app, empty_request(Method::GET, "/gateway/none")).await;
+        let no_route =
+            app_request(&app, gateway_get_from_ip("/gateway/none", "198.51.100.8")).await;
         assert_eq!(no_route.status(), StatusCode::NOT_FOUND);
 
-        let mock_request = Request::builder()
-            .method(Method::GET)
-            .uri("/gateway/mock")
-            .header("x-real-ip", "198.51.100.8")
-            .body(Body::empty())
-            .unwrap();
+        let mock_request = with_peer_ip(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/mock")
+                .header("x-real-ip", "198.51.100.8")
+                .body(Body::empty())
+                .unwrap(),
+            "198.51.100.8",
+        );
         let mock_response = app_request(&app, mock_request).await;
         assert_eq!(mock_response.status(), StatusCode::OK);
         assert!(
@@ -5863,17 +6061,21 @@ mod tests {
 
         let proxy_response = app_request(
             &app,
-            empty_request(Method::GET, "/gateway/proxy/v1/items?ok=1"),
+            gateway_get_from_ip("/gateway/proxy/v1/items?ok=1", "198.51.100.8"),
         )
         .await;
         assert_eq!(proxy_response.status(), StatusCode::ACCEPTED);
         assert_eq!(body_text(proxy_response).await, "proxied");
 
-        let down_response = app_request(&app, empty_request(Method::GET, "/gateway/down")).await;
+        let down_response =
+            app_request(&app, gateway_get_from_ip("/gateway/down", "198.51.100.8")).await;
         assert_eq!(down_response.status(), StatusCode::BAD_GATEWAY);
 
-        let truncated_response =
-            app_request(&app, empty_request(Method::GET, "/gateway/truncated")).await;
+        let truncated_response = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/truncated", "198.51.100.8"),
+        )
+        .await;
         assert_eq!(truncated_response.status(), StatusCode::BAD_GATEWAY);
         raw_task.join().unwrap();
 
@@ -6825,7 +7027,8 @@ mod tests {
                 .await;
         assert!(feeds.is_empty());
 
-        let gateway_response = app_request(&app, empty_request(Method::GET, "/gateway/mock")).await;
+        let gateway_response =
+            app_request(&app, gateway_get_from_ip("/gateway/mock", "203.0.113.9")).await;
         assert_eq!(gateway_response.status(), StatusCode::OK);
         let events: Vec<SecurityEvent> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
