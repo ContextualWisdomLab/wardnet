@@ -1,22 +1,25 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    extract::{DefaultBodyLimit, Path as PathParam, Query, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     fs,
+    io::copy_bidirectional,
+    net::TcpStream,
     sync::{Mutex, RwLock},
 };
 use waf_ids_core::{
@@ -35,26 +38,90 @@ pub use waf_ids_core::{
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
 
+const EGRESS_DNS_TTL: Duration = Duration::from_secs(30);
+const EGRESS_DNS_MAX_ENTRIES: usize = 1024;
+const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+#[cfg(not(test))]
+const OUTBOX_DISPATCH_TIMEOUT_SECS: u64 = 15;
+#[cfg(test)]
+const OUTBOX_DISPATCH_TIMEOUT_SECS: u64 = 1;
+
+#[derive(Default)]
+struct EgressDnsCache {
+    inner: Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
+}
+
+impl EgressDnsCache {
+    async fn live_entry_count(&self) -> usize {
+        let mut cache = self.inner.lock().await;
+        let now = Instant::now();
+        cache.retain(|_, (expires, _)| *expires > now);
+        cache.len()
+    }
+
+    async fn lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let mut cache = self.inner.lock().await;
+        let (expires, addresses) = cache.get(&host)?;
+        if *expires <= Instant::now() {
+            cache.remove(&host);
+            return None;
+        }
+        Some(addresses.clone())
+    }
+
+    async fn record(&self, host: &str, addresses: &[IpAddr]) {
+        let mut cache = self.inner.lock().await;
+        if cache.len() >= EGRESS_DNS_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            host.trim_end_matches('.').to_ascii_lowercase(),
+            (Instant::now() + EGRESS_DNS_TTL, addresses.to_vec()),
+        );
+    }
+}
+
+struct CachedHostResolver(Vec<IpAddr>);
+
+impl HostResolver for CachedHostResolver {
+    fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+mod control_plane;
 mod coraza_audit;
+mod coraza_inprocess;
 mod credentials;
+mod destination;
+mod egress_dns;
 mod misp_import;
 mod opencti_import;
+mod outbox;
+mod proven_engine;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
-pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_CONTROL_PLANE_URL, CRED_DESTINATION_ALLOWLIST,
+    CRED_DESTINATION_DENYLIST, CRED_EGRESS_PROXY_TOKEN, CRED_SOC_LLM_TOKEN, CRED_TAXII_BEARER,
+    CredentialRegistry, CredentialSource,
+};
+pub use destination::{DestinationPolicy, HostResolver, SystemHostResolver};
+pub use proven_engine::{ProvenEngineConfig, ProvenEngineOutcome};
 
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppData>>,
     persist_lock: Arc<Mutex<()>>,
-    http: reqwest::Client,
-    feed_http: reqwest::Client,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
     admin_tokens: HashMap<String, AdminPrincipal>,
-    /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
+    /// Dedicated browser-proxy password loaded from the credential registry.
+    egress_proxy_token: Option<String>,
+    /// Where secrets were bootstrapped from (file/env/mixed/none). Never holds values.
     credentials_source: CredentialSource,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
@@ -71,6 +138,20 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
+    /// Optional TAXII Bearer for durable polls. Never logged or written to outbox.
+    taxii_bearer: Option<String>,
+    /// Exact URL origin authorized to receive the registry TAXII bearer.
+    taxii_bearer_origin: Option<String>,
+    /// In-path Coraza consult (in-process libcoraza and/or sidecar).
+    proven_engine: ProvenEngineConfig,
+    /// Fail-closed destination policy for every outbound http/https call.
+    destination: DestinationPolicy,
+    resolver: Arc<dyn HostResolver + Send + Sync>,
+    egress_dns: Arc<EgressDnsCache>,
+    egress_dns_listener_enabled: bool,
+    destination_resolve_permits: Arc<tokio::sync::Semaphore>,
+    /// PostgreSQL snapshot store. `None` keeps the JSON-file / memory adapter.
+    control_plane: Option<Arc<control_plane::PostgresPlane>>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -99,6 +180,7 @@ pub struct ClearfolioConfig {
 impl AppState {
     pub fn seeded(admin_token: Option<String>) -> Self {
         Self::new(AppData::seeded(), AppConfig::memory(admin_token))
+            .with_destination_policy(DestinationPolicy::development())
     }
 
     pub async fn load(config: AppConfig) -> Result<Self, String> {
@@ -114,17 +196,58 @@ impl AppState {
         Ok(Self::new(data, config))
     }
 
+    /// Load from PostgreSQL, seeding the tenant snapshot when empty.
+    pub async fn load_postgres(config: AppConfig, database_url: &str) -> Result<Self, String> {
+        Self::load_postgres_from_plane(
+            config,
+            control_plane::PostgresPlane::connect(database_url).await?,
+        )
+        .await
+    }
+
+    /// Load a specific tenant snapshot. `save` bumps `snapshot_version`; the
+    /// in-memory token must match that next value or the first management write
+    /// false-conflicts (HTTP 409) forever.
+    pub async fn load_postgres_for_tenant(
+        config: AppConfig,
+        database_url: &str,
+        tenant_id: &str,
+    ) -> Result<Self, String> {
+        Self::load_postgres_from_plane(
+            config,
+            control_plane::PostgresPlane::connect_tenant(database_url, tenant_id).await?,
+        )
+        .await
+    }
+
+    async fn load_postgres_from_plane(
+        config: AppConfig,
+        plane: control_plane::PostgresPlane,
+    ) -> Result<Self, String> {
+        let plane = plane.with_event_limit(config.event_limit);
+        let loaded = plane.load().await?;
+        let mut data = loaded.clone().unwrap_or_else(AppData::seeded);
+        let event_limit = config.event_limit.max(1);
+        enforce_event_limit(&mut data, event_limit);
+        if loaded.is_none() {
+            plane.save(&data).await?;
+            data.snapshot_version = data.snapshot_version.saturating_add(1);
+        }
+        Ok(Self::new(data, config).with_control_plane(Arc::new(plane)))
+    }
+
+    fn with_control_plane(mut self, plane: Arc<control_plane::PostgresPlane>) -> Self {
+        self.control_plane = Some(plane);
+        self
+    }
+
     fn new(data: AppData, config: AppConfig) -> Self {
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: reqwest::Client::new(),
-            feed_http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("failed to build no-redirect feed client"),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
+            egress_proxy_token: None,
             credentials_source: CredentialSource::None,
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
@@ -135,6 +258,15 @@ impl AppState {
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
+            taxii_bearer: None,
+            taxii_bearer_origin: None,
+            proven_engine: ProvenEngineConfig::disabled(),
+            destination: DestinationPolicy::production(),
+            resolver: Arc::new(SystemHostResolver),
+            egress_dns: Arc::new(EgressDnsCache::default()),
+            egress_dns_listener_enabled: false,
+            destination_resolve_permits: Arc::new(tokio::sync::Semaphore::new(64)),
+            control_plane: None,
         }
     }
 
@@ -159,6 +291,93 @@ impl AppState {
         self
     }
 
+    /// Optional TAXII Bearer from the credential registry. Never written to outbox payloads.
+    pub fn with_taxii_bearer(mut self, token: Option<String>, origin: Option<String>) -> Self {
+        self.taxii_bearer = token.filter(|value| !value.is_empty());
+        self.taxii_bearer_origin = origin;
+        self
+    }
+
+    /// Configure the in-path Coraza adapter (sidecar and/or libcoraza).
+    /// Builder-style.
+    pub fn with_proven_engine(mut self, config: ProvenEngineConfig) -> Self {
+        self.proven_engine = config;
+        self
+    }
+
+    /// Replace the outbound destination policy. Builder-style.
+    pub fn with_destination_policy(mut self, policy: DestinationPolicy) -> Self {
+        self.destination = policy;
+        self
+    }
+
+    /// Replace the destination DNS resolver. Tests inject a static map so a
+    /// hostname that is not in OS DNS can still be evaluated and pinned.
+    #[cfg(test)]
+    fn with_resolver(mut self, resolver: Arc<dyn HostResolver + Send + Sync>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// Fail closed before any outbound http/https send.
+    ///
+    /// Blocking OS DNS runs on `spawn_blocking` with a bounded timeout so a
+    /// hung resolver cannot starve Tokio workers. Successful evaluations are
+    /// recorded on the pin board the HTTP clients use for connect-time DNS.
+    async fn resolve_outbound(
+        &self,
+        url: &str,
+    ) -> Result<destination::DestinationDecision, OutboundResolutionError> {
+        let policy = self.destination.clone();
+        let parsed = reqwest::Url::parse(url).map_err(|_| {
+            OutboundResolutionError::Destination(destination::DestinationError::Invalid(
+                "destination URL is invalid".to_string(),
+            ))
+        })?;
+        let host = parsed.host_str().ok_or_else(|| {
+            OutboundResolutionError::Destination(destination::DestinationError::Invalid(
+                "destination URL has no host".to_string(),
+            ))
+        })?;
+        if let Some(ips) = self.egress_dns.lookup(host).await {
+            return policy
+                .evaluate(url, &CachedHostResolver(ips))
+                .map_err(OutboundResolutionError::Destination);
+        }
+        let permit = tokio::time::timeout(
+            DESTINATION_RESOLVE_TIMEOUT,
+            Arc::clone(&self.destination_resolve_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| OutboundResolutionError::Timeout)?
+        .map_err(|_| OutboundResolutionError::Unavailable)?;
+        let resolver = Arc::clone(&self.resolver);
+        let url = url.to_string();
+        let decision = tokio::time::timeout(
+            DESTINATION_RESOLVE_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                policy.evaluate(&url, resolver.as_ref())
+            }),
+        )
+        .await
+        .map_err(|_| OutboundResolutionError::Timeout)?
+        .map_err(|_| OutboundResolutionError::Unavailable)?
+        .map_err(OutboundResolutionError::Destination)?;
+        self.egress_dns.record(&decision.host, &decision.ips).await;
+        Ok(decision)
+    }
+
+    async fn outbound_client(&self, url: &str) -> Result<reqwest::Client, String> {
+        let decision = self
+            .resolve_outbound(url)
+            .await
+            .map_err(|error| error.to_string())?;
+        let pins = Arc::new(destination::DestinationPins::default());
+        pins.record(&decision.host, &decision.ips);
+        Ok(outbound_http_client(pins))
+    }
+
     /// Enable per-client-IP rate limiting: at most `limit` gateway requests per
     /// `window_secs`. `limit == 0` disables it (the default). Builder-style so
     /// callers keep using [`AppConfig`] unchanged.
@@ -172,6 +391,16 @@ impl AppState {
     /// precedence over the single `admin_token`. Builder-style.
     pub fn with_admin_tokens(mut self, tokens: HashMap<String, AdminPrincipal>) -> Self {
         self.admin_tokens = tokens;
+        self
+    }
+
+    pub fn with_egress_proxy_token(mut self, token: Option<String>) -> Self {
+        self.egress_proxy_token = token.filter(|value| !value.is_empty());
+        self
+    }
+
+    fn with_egress_dns_listener_enabled(mut self, enabled: bool) -> Self {
+        self.egress_dns_listener_enabled = enabled;
         self
     }
 
@@ -222,6 +451,13 @@ impl AppState {
         mutate: impl FnOnce(&mut AppData) -> T,
     ) -> Result<T, String> {
         let _guard = self.persist_lock.lock().await;
+        self.mutate_and_persist_locked(mutate).await
+    }
+
+    async fn mutate_and_persist_locked<T>(
+        &self,
+        mutate: impl FnOnce(&mut AppData) -> T,
+    ) -> Result<T, String> {
         let (result, snapshot, previous) = {
             let mut data = self.inner.write().await;
             let previous = data.clone();
@@ -229,14 +465,32 @@ impl AppState {
             (result, data.clone(), previous)
         };
         if let Err(error) = self.persist_snapshot(&snapshot).await {
+            let latest = if error.contains("snapshot conflict") {
+                match &self.control_plane {
+                    Some(plane) => plane.load().await.ok().flatten(),
+                    None => None,
+                }
+            } else {
+                None
+            };
             let mut data = self.inner.write().await;
-            *data = previous;
+            if let Some(latest) = latest {
+                *data = latest;
+            } else {
+                *data = previous;
+            }
             return Err(error);
         }
         Ok(result)
     }
 
     async fn persist_snapshot(&self, data: &AppData) -> Result<(), String> {
+        if let Some(plane) = &self.control_plane {
+            plane.save(data).await?;
+            let mut inner = self.inner.write().await;
+            inner.snapshot_version = data.snapshot_version.saturating_add(1);
+            return Ok(());
+        }
         let Some(path) = self.state_path.as_deref() else {
             return Ok(());
         };
@@ -246,7 +500,9 @@ impl AppState {
     fn health_status(&self) -> HealthStatus {
         HealthStatus {
             status: "ok".to_string(),
-            persistence: if self.state_path.is_some() {
+            persistence: if self.control_plane.is_some() {
+                "postgres".to_string()
+            } else if self.state_path.is_some() {
                 "file".to_string()
             } else {
                 "memory".to_string()
@@ -255,7 +511,46 @@ impl AppState {
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+            proven_engine: self.proven_engine.mode().to_string(),
+            proven_engine_fail_closed: self.proven_engine.fail_closed,
+            destination_mode: self.destination.mode().to_string(),
+            outbox: if self.control_plane.is_some() {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            outbox_pending: 0,
+            outbox_leased: 0,
+            outbox_dead_letter: 0,
+            outbox_oldest_age_seconds: None,
+            backup: if self.control_plane.is_some() {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            event_partitions: 0,
         }
+    }
+
+    async fn health_status_live(&self) -> HealthStatus {
+        let mut health = self.health_status();
+        let Some(plane) = &self.control_plane else {
+            return health;
+        };
+        match plane.outbox_health(now_unix() as i64).await {
+            Ok(stats) => {
+                health.outbox = stats.status;
+                health.outbox_pending = stats.pending;
+                health.outbox_leased = stats.leased;
+                health.outbox_dead_letter = stats.dead_letter;
+                health.outbox_oldest_age_seconds = stats.oldest_age_seconds;
+            }
+            Err(_) => health.outbox = "error".to_string(),
+        }
+        if let Ok(count) = plane.event_partition_count().await {
+            health.event_partitions = count;
+        }
+        health
     }
 }
 
@@ -369,6 +664,7 @@ pub struct SupportBundle {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthStatus {
     pub status: String,
+    /// `postgres` (production authority), `file` (loopback/community), or `memory`.
     pub persistence: String,
     pub dnsbl_origin: String,
     pub event_limit: usize,
@@ -376,6 +672,22 @@ pub struct HealthStatus {
     pub credentials_source: String,
     /// True when at least one admin write token is configured.
     pub admin_auth_configured: bool,
+    /// `coraza_in_process`, `coraza_sidecar`, or `ingest_hints_only`.
+    pub proven_engine: String,
+    /// True when a configured engine outage fails the live transaction closed.
+    pub proven_engine_fail_closed: bool,
+    /// `production` (fail-closed classes) or `development` (loopback class permitted).
+    pub destination_mode: String,
+    /// `ready` when the PostgreSQL outbox is the authority; `disabled` on file/memory.
+    pub outbox: String,
+    pub outbox_pending: i64,
+    pub outbox_leased: i64,
+    pub outbox_dead_letter: i64,
+    pub outbox_oldest_age_seconds: Option<i64>,
+    /// `ready` when PostgreSQL logical backup/restore is the authority; `disabled` on file/memory.
+    pub backup: String,
+    /// HASH child count for `security_event` (0 on file/memory).
+    pub event_partitions: i64,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -389,7 +701,29 @@ const PHISHING_DATABASE_DEFAULT_IP_LIMIT: usize = 5_000;
 const PHISHING_DATABASE_DNSBL_CODE: &str = "127.0.0.66";
 const PHISHING_DATABASE_DNSBL_REASON: &str = "phishing.database active IP";
 const PHISHING_DATABASE_FETCH_TIMEOUT_SECS: u64 = 15;
+/// Bounded wait for blocking OS DNS inside destination-policy evaluation.
+const DESTINATION_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const PHISHING_DATABASE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const OUTBOUND_FETCH_DEFAULT_BYTES: usize = 2 * 1024 * 1024;
+const OUTBOUND_FETCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+const OUTBOUND_FETCH_MAX_REDIRECTS: usize = 3;
+
+#[derive(Debug)]
+enum OutboundResolutionError {
+    Destination(destination::DestinationError),
+    Timeout,
+    Unavailable,
+}
+
+impl std::fmt::Display for OutboundResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Destination(error) => error.fmt(formatter),
+            Self::Timeout => formatter.write_str("destination DNS evaluation timed out"),
+            Self::Unavailable => formatter.write_str("destination DNS evaluation is unavailable"),
+        }
+    }
+}
 const PHISHING_DATABASE_ALLOWED_HOSTS: &[&str] = &["raw.githubusercontent.com", "phish.co.za"];
 
 fn phishing_database_default_feed_id() -> String {
@@ -433,6 +767,32 @@ struct ErrorBody {
     error: String,
 }
 
+#[derive(Deserialize)]
+struct OutboundFetchRequest {
+    url: String,
+    #[serde(default = "outbound_fetch_default_bytes")]
+    max_bytes: usize,
+}
+
+#[derive(Serialize)]
+struct OutboundFetchResponse {
+    status: u16,
+    content_type: String,
+    final_url: String,
+    body_base64: String,
+    redirects: usize,
+}
+
+#[derive(Serialize)]
+struct OutboundFetchError {
+    code: &'static str,
+    error: &'static str,
+}
+
+fn outbound_fetch_default_bytes() -> usize {
+    OUTBOUND_FETCH_DEFAULT_BYTES
+}
+
 pub fn build_app(state: AppState) -> Router {
     let max_body_bytes = state.max_body_bytes;
     Router::new()
@@ -446,10 +806,20 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/dnsbl", get(list_dnsbl).post(create_dnsbl))
         .route("/api/events", get(list_events))
         .route("/api/audit-logs", get(list_audit_logs))
+        .route("/api/outbox", get(list_outbox))
+        .route("/api/outbox/{message_id}", get(get_outbox_item))
+        .route("/api/outbox/{message_id}/replay", post(replay_outbox))
+        .route("/api/backup", get(get_backup).post(restore_backup))
+        .route("/api/backup/drill", post(backup_drill))
         .route("/api/events.ndjson", get(events_ndjson))
         .route("/api/kpis", get(kpis))
         .route("/api/signatures", get(list_signatures))
         .route("/api/evaluate", post(evaluate_request))
+        .route("/api/outbound/fetch", post(outbound_fetch))
+        .route(
+            "/api/egress",
+            get(egress_status).post(evaluate_egress_destination),
+        )
         .route("/metrics", get(metrics))
         .route(
             "/api/commercial/license",
@@ -469,6 +839,7 @@ pub fn build_app(state: AppState) -> Router {
         )
         .route("/api/ids/suricata/eve", post(import_suricata_eve))
         .route("/api/waf/coraza/audit", post(import_coraza_audit))
+        .route("/api/waf/engine-status", get(waf_engine_status))
         .route("/api/threat-intel/stix", post(import_stix_document))
         .route("/api/threat-intel/misp", post(import_misp_document))
         .route("/api/threat-intel/taxii/poll", post(poll_taxii_collection))
@@ -479,10 +850,586 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/soc/llm-config", get(soc_llm_config))
         .route("/api/soc/analyze", post(soc_analyze))
         .route("/api/support-bundle", get(support_bundle))
+        .route("/mcp", post(mcp_post))
         .route("/dnsbl/zone", get(dnsbl_zone))
         .route("/gateway/{*path}", any(gateway))
+        .fallback(connect_proxy)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
+}
+
+#[derive(Debug, Serialize)]
+struct EgressStatus {
+    destination_mode: String,
+    proxy_auth_configured: bool,
+    dns_listener_enabled: bool,
+    cached_host_count: usize,
+    dns_cache_ttl_seconds: u64,
+}
+
+async fn egress_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    Json(EgressStatus {
+        destination_mode: state.destination.mode().to_string(),
+        proxy_auth_configured: state.egress_proxy_token.is_some(),
+        dns_listener_enabled: state.egress_dns_listener_enabled,
+        cached_host_count: state.egress_dns.live_entry_count().await,
+        dns_cache_ttl_seconds: EGRESS_DNS_TTL.as_secs(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EgressEvaluationRequest {
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EgressEvaluationResponse {
+    allowed: bool,
+    host: String,
+    addresses: Vec<IpAddr>,
+    reason: String,
+}
+
+async fn evaluate_egress_destination(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::FORBIDDEN, "admin principal is read-only");
+    }
+    let request: EgressEvaluationRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid egress evaluation request"),
+    };
+    if destination::validate_outbound_url(request.url.trim()).is_err() {
+        return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
+    }
+    let decision = match state.resolve_outbound(request.url.trim()).await {
+        Ok(decision) => decision,
+        Err(OutboundResolutionError::Timeout) => {
+            return error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "destination DNS evaluation timed out",
+            );
+        }
+        Err(OutboundResolutionError::Unavailable)
+        | Err(OutboundResolutionError::Destination(destination::DestinationError::Unavailable(
+            _,
+        ))) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "destination DNS evaluation is unavailable",
+            );
+        }
+        Err(OutboundResolutionError::Destination(destination::DestinationError::Invalid(_))) => {
+            return error(StatusCode::BAD_REQUEST, "destination URL is invalid");
+        }
+        Err(OutboundResolutionError::Destination(destination::DestinationError::Denied(_))) => {
+            return error(StatusCode::FORBIDDEN, "destination policy denied the URL");
+        }
+    };
+    let actor = audit_actor(&state, &headers);
+    let host = decision.host.clone();
+    if let Err(message) = state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "evaluate_egress_destination",
+                "egress_destination",
+                host,
+            );
+        })
+        .await
+    {
+        return persist_error(message);
+    }
+    Json(EgressEvaluationResponse {
+        allowed: decision.allowed,
+        host: decision.host,
+        addresses: decision.ips,
+        reason: decision.reason,
+    })
+    .into_response()
+}
+
+/// Serve one authenticated, stateless MCP 2026-07-28 JSON-RPC message.
+async fn mcp_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(message): Json<serde_json::Value>,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if !mcp_origin_allowed(&headers) {
+        return error(StatusCode::FORBIDDEN, "MCP Origin does not match Host");
+    }
+    let accepts = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !(accepts.contains("application/json") && accepts.contains("text/event-stream")) {
+        return error(
+            StatusCode::NOT_ACCEPTABLE,
+            "MCP requires application/json and text/event-stream",
+        );
+    }
+
+    let method = message.get("method").and_then(|value| value.as_str());
+    let protocol_header = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok());
+    let protocol_meta = message
+        .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(|value| value.as_str());
+    if protocol_header != Some(MCP_PROTOCOL_VERSION) || protocol_meta != Some(MCP_PROTOCOL_VERSION)
+    {
+        return error(StatusCode::BAD_REQUEST, "unsupported MCP protocol version");
+    }
+    if headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+        != method
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Mcp-Method does not match request body",
+        );
+    }
+    let expected_name = match method {
+        Some("tools/call") => message
+            .pointer("/params/name")
+            .and_then(|value| value.as_str()),
+        _ => None,
+    };
+    if headers
+        .get("mcp-name")
+        .and_then(|value| value.to_str().ok())
+        != expected_name
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Mcp-Name does not match request body",
+        );
+    }
+    let id = message
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if message.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
+        return mcp_error(id, -32600, "Invalid Request");
+    }
+    if id.is_null() {
+        return if method.is_some_and(|value| value.starts_with("notifications/")) {
+            StatusCode::ACCEPTED.into_response()
+        } else {
+            mcp_error(id, -32600, "Invalid Request")
+        };
+    }
+    if !(id.is_string() || id.as_i64().is_some() || id.as_u64().is_some()) {
+        return mcp_error(serde_json::Value::Null, -32600, "Invalid Request");
+    }
+    match method {
+        Some("server/discover") => Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "resultType": "complete",
+                "supportedVersions": [MCP_PROTOCOL_VERSION],
+                "capabilities": {"tools": {}},
+                "instructions": "Use wardnet_status to inspect current gateway and SOC readiness.",
+                "ttlMs": 300_000,
+                "cacheScope": "private",
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "wardnet",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }
+            }
+        }))
+        .into_response(),
+        Some("tools/list") => Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "resultType": "complete",
+                "tools": [{
+                    "name": "wardnet_status",
+                    "title": "Wardnet operational status",
+                    "description": "Return current gateway health, security KPIs, readiness, and inventory counts.",
+                    "inputSchema": {"type": "object"},
+                    "annotations": {
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    }
+                }],
+                "ttlMs": 300_000,
+                "cacheScope": "private"
+            }
+        }))
+        .into_response(),
+        Some("tools/call") => {
+            if message.pointer("/params/name").and_then(|value| value.as_str())
+                != Some("wardnet_status")
+            {
+                return mcp_error(id, -32602, "Unknown tool");
+            }
+            let structured = serde_json::to_value(build_support_bundle(&state).await)
+                .expect("SupportBundle is JSON-serializable");
+            let text = serde_json::to_string(&structured)
+                .expect("SupportBundle JSON value is serializable");
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resultType": "complete",
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": structured,
+                    "isError": false
+                }
+            }))
+            .into_response()
+        }
+        Some("ping") => Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        }))
+        .into_response(),
+        _ => mcp_error(id, -32601, "Method not found"),
+    }
+}
+
+/// Reject browser-originated MCP traffic until an explicit origin registry exists.
+fn mcp_origin_allowed(headers: &HeaderMap) -> bool {
+    // Browser clients are not part of the first MCP trust boundary. Rejecting
+    // every Origin-bearing request prevents a rebinding domain from validating
+    // itself through the attacker-controlled Host header.
+    !headers.contains_key(header::ORIGIN)
+}
+
+/// Build a protocol-level JSON-RPC error that preserves a valid request id.
+fn mcp_error(id: serde_json::Value, code: i64, message: &'static str) -> Response {
+    Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": code, "message": message}
+    }))
+    .into_response()
+}
+
+fn proxy_authenticate() -> Response {
+    let mut response = (
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        "proxy authentication required",
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::PROXY_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"wardnet\""),
+    );
+    response
+}
+
+fn proxy_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.egress_proxy_token.as_deref() else {
+        return false;
+    };
+    let Some(encoded) = headers
+        .get(header::PROXY_AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = BASE64.decode(encoded) else {
+        return false;
+    };
+    let Ok(credentials) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    let Some((username, token)) = credentials.split_once(':') else {
+        return false;
+    };
+    if username != "wardnet" || token.is_empty() {
+        return false;
+    }
+    token == expected
+}
+
+async fn connect_proxy(State(state): State<AppState>, mut request: Request) -> Response {
+    if request.method() != Method::CONNECT {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !proxy_authorized(&state, request.headers()) {
+        return proxy_authenticate();
+    }
+    let Some(authority) = request.uri().authority() else {
+        return (StatusCode::BAD_REQUEST, "CONNECT authority is required").into_response();
+    };
+    if authority.port_u16() != Some(443) {
+        return (StatusCode::FORBIDDEN, "CONNECT permits port 443 only").into_response();
+    }
+    let host = authority.host().trim_end_matches('.');
+    if host.is_empty() {
+        return (StatusCode::BAD_REQUEST, "CONNECT host is invalid").into_response();
+    }
+
+    let addresses = match state.egress_dns.lookup(host).await {
+        Some(addresses) => addresses,
+        None => {
+            let policy_url = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+                format!("https://[{host}]/")
+            } else {
+                format!("https://{host}/")
+            };
+            match state.resolve_outbound(&policy_url).await {
+                Ok(decision) => {
+                    state.egress_dns.record(host, &decision.ips).await;
+                    decision.ips
+                }
+                Err(_) => {
+                    return (StatusCode::FORBIDDEN, "destination policy denied CONNECT")
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    let mut upstream = None;
+    for address in addresses.into_iter().take(16) {
+        if let Ok(Ok(stream)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(SocketAddr::new(address, 443)),
+        )
+        .await
+        {
+            upstream = Some(stream);
+            break;
+        }
+    }
+    let Some(mut upstream) = upstream else {
+        return (StatusCode::BAD_GATEWAY, "upstream connection failed").into_response();
+    };
+
+    let upgrade = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+        if let Ok(upgraded) = upgrade.await {
+            let mut client = hyper_util::rt::TokioIo::new(upgraded);
+            let _ = copy_bidirectional(&mut client, &mut upstream).await;
+        }
+    });
+    StatusCode::OK.into_response()
+}
+
+fn outbound_fetch_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    (
+        status,
+        Json(OutboundFetchError {
+            code,
+            error: message,
+        }),
+    )
+        .into_response()
+}
+
+fn outbound_content_type_allowed(value: &str) -> bool {
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence.starts_with("text/")
+        || matches!(
+            essence.as_str(),
+            "application/json" | "application/xml" | "application/xhtml+xml" | "application/pdf"
+        )
+}
+
+async fn outbound_fetch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OutboundFetchRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return outbound_fetch_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid X-Admin-Token",
+        );
+    }
+    if request.max_bytes == 0 || request.max_bytes > OUTBOUND_FETCH_MAX_BYTES {
+        return outbound_fetch_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_max_bytes",
+            "max_bytes is outside the supported range",
+        );
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(20),
+        outbound_fetch_inner(&state, request.url, request.max_bytes),
+    )
+    .await
+    {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err((status, code, message))) => outbound_fetch_error(status, code, message),
+        Err(_) => outbound_fetch_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "fetch_timeout",
+            "upstream fetch timed out",
+        ),
+    }
+}
+
+async fn outbound_fetch_inner(
+    state: &AppState,
+    initial_url: String,
+    max_bytes: usize,
+) -> Result<OutboundFetchResponse, (StatusCode, &'static str, &'static str)> {
+    use futures_util::StreamExt;
+
+    let mut url = reqwest::Url::parse(&initial_url).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            "url must be an absolute HTTPS URL",
+        )
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            "url must be an absolute HTTPS URL without credentials",
+        ));
+    }
+    url.set_fragment(None);
+
+    for redirects in 0..=OUTBOUND_FETCH_MAX_REDIRECTS {
+        let request_http = state.outbound_client(url.as_str()).await.map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "destination_denied",
+                "destination policy denied the URL",
+            )
+        })?;
+        let response = request_http.get(url.clone()).send().await.map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "upstream_request_failed",
+                "upstream request failed",
+            )
+        })?;
+
+        if response.status().is_redirection() {
+            if redirects == OUTBOUND_FETCH_MAX_REDIRECTS {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "too_many_redirects",
+                    "upstream redirect limit exceeded",
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or((
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_redirect",
+                    "upstream redirect is missing a valid Location header",
+                ))?;
+            url = url.join(location).map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_redirect",
+                    "upstream redirect Location is invalid",
+                )
+            })?;
+            if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "unsafe_redirect",
+                    "upstream redirect target is not permitted",
+                ));
+            }
+            url.set_fragment(None);
+            continue;
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= 256)
+            .ok_or((
+                StatusCode::BAD_GATEWAY,
+                "unsupported_content_type",
+                "upstream Content-Type is missing or unsupported",
+            ))?
+            .to_string();
+        if !outbound_content_type_allowed(&content_type) {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_content_type",
+                "upstream Content-Type is missing or unsupported",
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "response_too_large",
+                "upstream response exceeds max_bytes",
+            ));
+        }
+        let status = response.status().as_u16();
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_body_failed",
+                    "upstream response body failed",
+                )
+            })?;
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "response_too_large",
+                    "upstream response exceeds max_bytes",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok(OutboundFetchResponse {
+            status,
+            content_type,
+            final_url: url.to_string(),
+            body_base64: BASE64.encode(body),
+            redirects,
+        });
+    }
+    unreachable!("redirect loop exits at the configured bound")
 }
 
 pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_json::Error> {
@@ -589,25 +1536,85 @@ async fn clearfolio_submit(
             format!("unknown document kind: {kind}"),
         );
     };
+    if state.control_plane.is_some() {
+        let body_text = String::from_utf8_lossy(&bytes).into_owned();
+        let actor = audit_actor(&state, &headers);
+        let intent = ClearfolioSubmitIntent {
+            kind: kind.clone(),
+            filename,
+            body_text,
+            actor: actor.clone(),
+        };
+        return enqueue_external_effect(
+            &state,
+            actor,
+            outbox::EVENT_CLEARFOLIO_SUBMITTED,
+            &kind,
+            &intent,
+        )
+        .await;
+    }
+    match execute_clearfolio_submit(&state, &config, filename, bytes).await {
+        Ok((status, body)) => clearfolio_bytes_response(status, body),
+        Err(error) => dispatch_http_error(error),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClearfolioSubmitIntent {
+    kind: String,
+    filename: String,
+    body_text: String,
+    actor: String,
+}
+
+fn clearfolio_bytes_response(status: u16, body: Vec<u8>) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, [("content-type", "application/json")], body).into_response()
+}
+
+fn dispatch_http_error(failure: outbox::DispatchError) -> Response {
+    let message = failure.as_str();
+    let status = match &failure {
+        outbox::DispatchError::Permanent(text)
+            if text.contains("destination") || text.starts_with("HTTP 4") =>
+        {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    error(status, message.to_string())
+}
+
+async fn execute_clearfolio_submit(
+    state: &AppState,
+    config: &ClearfolioConfig,
+    filename: String,
+    bytes: Vec<u8>,
+) -> Result<(u16, Vec<u8>), outbox::DispatchError> {
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(filename)
         .mime_str("text/plain")
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
-    let mut request = state
-        .http
-        .post(clearfolio_submit_url(&config.base_url))
-        .multipart(form);
-    for (name, value) in clearfolio_tenant_headers(&config) {
+    let submit_url = clearfolio_submit_url(&config.base_url);
+    let http = state
+        .outbound_client(&submit_url)
+        .await
+        .map_err(outbox::DispatchError::Permanent)?;
+    let mut request = http.post(submit_url).multipart(form);
+    for (name, value) in clearfolio_tenant_headers(config) {
         request = request.header(name, value);
     }
-    match request.send().await {
-        Ok(response) => clearfolio_relay_json(response).await,
-        Err(err) => error(
-            StatusCode::BAD_GATEWAY,
-            format!("clearfolio request failed: {err}"),
-        ),
-    }
+    request = request.timeout(Duration::from_secs(OUTBOX_DISPATCH_TIMEOUT_SECS));
+    let response = request.send().await.map_err(|err| {
+        outbox::DispatchError::Transient(format!("clearfolio request failed: {err}"))
+    })?;
+    let status = response.status().as_u16();
+    let body = response.bytes().await.unwrap_or_default().to_vec();
+    let preview = String::from_utf8_lossy(&body);
+    outbox::classify_http_status(status, &preview)?;
+    Ok((status, body))
 }
 
 /// Proxies one Clearfolio job-status read (tenant headers applied server-side),
@@ -626,9 +1633,12 @@ async fn clearfolio_status(
             "Clearfolio integration is not configured",
         );
     };
-    let mut request = state
-        .http
-        .get(clearfolio_status_url(&config.base_url, &job_id));
+    let status_url = clearfolio_status_url(&config.base_url, &job_id);
+    let http = match state.outbound_client(&status_url).await {
+        Ok(http) => http,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let mut request = http.get(status_url);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -723,8 +1733,6 @@ struct PhishingDatabaseImportRequest {
     import_domains: bool,
     #[serde(default = "default_true")]
     import_ips: bool,
-    #[serde(default)]
-    allow_non_default_hosts: bool,
 }
 
 #[derive(Serialize)]
@@ -763,46 +1771,75 @@ async fn soc_analyze(
             format!("unknown event id: {}", request.event_id),
         );
     };
-    let body = soc_llm_chat_body(&config.model, &event);
+    if state.control_plane.is_some() {
+        let actor = audit_actor(&state, &headers);
+        let intent = SocAnalyzeIntent {
+            event: event.clone(),
+            actor: actor.clone(),
+        };
+        return enqueue_external_effect(
+            &state,
+            actor,
+            outbox::EVENT_SOC_ANALYSIS_REQUESTED,
+            &event.id.to_string(),
+            &intent,
+        )
+        .await;
+    }
+    match execute_soc_analyze(&state, &config, &event).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => dispatch_http_error(error),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SocAnalyzeIntent {
+    event: SecurityEvent,
+    actor: String,
+}
+
+async fn execute_soc_analyze(
+    state: &AppState,
+    config: &SocLlmConfig,
+    event: &SecurityEvent,
+) -> Result<SocAnalyzeResponse, outbox::DispatchError> {
+    let body = soc_llm_chat_body(&config.model, event);
     let endpoint = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
-    let response = state
-        .http
+    let http = state
+        .outbound_client(&endpoint)
+        .await
+        .map_err(outbox::DispatchError::Permanent)?;
+    let response = http
         .post(endpoint)
         .bearer_auth(&config.token)
         .json(&body)
+        .timeout(Duration::from_secs(OUTBOX_DISPATCH_TIMEOUT_SECS))
         .send()
-        .await;
-    match response {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(json) => match soc_llm_extract_content(&json) {
-                Some(analysis) => Json(SocAnalyzeResponse {
-                    event_id: event.id,
-                    model: config.model,
-                    analysis,
-                })
-                .into_response(),
-                None => error(
-                    StatusCode::BAD_GATEWAY,
-                    "llm response missing choices[0].message.content",
-                ),
-            },
-            Err(err) => error(
-                StatusCode::BAD_GATEWAY,
-                format!("llm response read failed: {err}"),
-            ),
-        },
-        Err(err) => error(
-            StatusCode::BAD_GATEWAY,
-            format!("llm request failed: {err}"),
-        ),
-    }
+        .await
+        .map_err(|err| outbox::DispatchError::Transient(format!("llm request failed: {err}")))?;
+    let status = response.status().as_u16();
+    let json = response.json::<serde_json::Value>().await.map_err(|err| {
+        outbox::DispatchError::Transient(format!("llm response read failed: {err}"))
+    })?;
+    let preview = json.to_string();
+    outbox::classify_http_status(status, &preview)?;
+    let analysis = soc_llm_extract_content(&json).ok_or_else(|| {
+        outbox::DispatchError::Permanent(
+            "llm response missing choices[0].message.content".to_string(),
+        )
+    })?;
+    Ok(SocAnalyzeResponse {
+        event_id: event.id,
+        model: config.model.clone(),
+        analysis,
+    })
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
-    Json(state.health_status())
+    Json(state.health_status_live().await)
 }
 
 /// Build/version metadata for deployment verification.
@@ -855,7 +1892,6 @@ async fn create_route(
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
     }
-
     let actor = audit_actor(&state, &headers);
     match state
         .mutate_and_persist(|data| {
@@ -866,7 +1902,7 @@ async fn create_route(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -902,7 +1938,7 @@ async fn create_threat(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -938,7 +1974,7 @@ async fn create_dnsbl(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -980,6 +2016,306 @@ async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> R
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
     Json(state.inner.read().await.audit_logs.clone()).into_response()
+}
+
+#[derive(Serialize)]
+struct OutboxListView {
+    status: String,
+    limit: usize,
+    messages: Vec<outbox::OutboxMessage>,
+}
+
+#[derive(Serialize)]
+struct OutboxItemView {
+    status: String,
+    message: outbox::OutboxMessage,
+    receipt_evidence: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OutboxAcceptedView {
+    status: String,
+    message_id: String,
+    event_type: String,
+}
+
+async fn list_outbox(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let limit = state.event_limit.max(1);
+    let Some(plane) = &state.control_plane else {
+        return Json(OutboxListView {
+            status: "disabled".to_string(),
+            limit,
+            messages: Vec::new(),
+        })
+        .into_response();
+    };
+    match plane.list_outbox_limited(limit as i64).await {
+        Ok(messages) => Json(OutboxListView {
+            status: "ready".to_string(),
+            limit,
+            messages,
+        })
+        .into_response(),
+        Err(message) => persist_error(message),
+    }
+}
+
+async fn get_outbox_item(
+    State(state): State<AppState>,
+    PathParam(message_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox item reads require the PostgreSQL control plane",
+        );
+    };
+    match plane.get_outbox_item(&message_id).await {
+        Ok(Some((message, receipt_evidence))) => Json(OutboxItemView {
+            status: "ready".to_string(),
+            message,
+            receipt_evidence,
+        })
+        .into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            format!("unknown outbox message {message_id}"),
+        ),
+        Err(message) => persist_error(message),
+    }
+}
+
+async fn enqueue_external_effect(
+    state: &AppState,
+    actor: String,
+    event_type: &'static str,
+    aggregate_id: &str,
+    payload: &impl Serialize,
+) -> Response {
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox enqueue requires the PostgreSQL control plane",
+        );
+    };
+    let payload_json =
+        serde_json::to_string(payload).expect("outbox effect payload is JSON-serializable");
+    match plane
+        .enqueue_effect(event_type, aggregate_id, payload_json)
+        .await
+    {
+        Ok(message_id) => {
+            if let Err(error) = state
+                .mutate_and_persist(|data| {
+                    record_successful_audit_log(
+                        data,
+                        actor,
+                        event_type,
+                        "outbox_message",
+                        message_id.clone(),
+                    );
+                })
+                .await
+            {
+                eprintln!("failed to audit outbox enqueue {message_id}: {error}");
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(OutboxAcceptedView {
+                    status: "accepted".to_string(),
+                    message_id,
+                    event_type: event_type.to_string(),
+                }),
+            )
+                .into_response()
+        }
+        Err(message) => persist_error(message),
+    }
+}
+
+async fn replay_outbox(
+    State(state): State<AppState>,
+    PathParam(message_id): PathParam<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "outbox replay requires the PostgreSQL control plane",
+        );
+    };
+    let actor = audit_actor(&state, &headers);
+    if let Err(message) = plane
+        .replay_dead_letter(&message_id, now_unix() as i64)
+        .await
+    {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    match state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                "replay_outbox",
+                "outbox_message",
+                message_id.clone(),
+            );
+        })
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "pending",
+            "message_id": message_id
+        }))
+        .into_response(),
+        Err(message) => persist_error(message),
+    }
+}
+
+#[derive(Serialize)]
+struct BackupView {
+    status: String,
+    rpo: String,
+    rto_budget_ms: u64,
+    artifact: Option<control_plane::ControlPlaneBackup>,
+}
+
+async fn get_backup(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authenticated(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return Json(BackupView {
+            status: "disabled".to_string(),
+            rpo: control_plane::BACKUP_RPO.to_string(),
+            rto_budget_ms: control_plane::BACKUP_RTO_BUDGET_MS,
+            artifact: None,
+        })
+        .into_response();
+    };
+    match plane.logical_backup().await {
+        Ok(artifact) => Json(BackupView {
+            status: "ready".to_string(),
+            rpo: control_plane::BACKUP_RPO.to_string(),
+            rto_budget_ms: control_plane::BACKUP_RTO_BUDGET_MS,
+            artifact: Some(artifact),
+        })
+        .into_response(),
+        Err(message) => persist_error(message),
+    }
+}
+
+async fn restore_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(backup): Json<control_plane::ControlPlaneBackup>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backup restore requires the PostgreSQL control plane",
+        );
+    };
+    if let Err(message) = backup.verify() {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    let _guard = state.persist_lock.lock().await;
+    if let Err(message) = plane.restore_logical_backup(&backup).await {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+    match plane.load().await {
+        Ok(Some(loaded)) => {
+            *state.inner.write().await = loaded;
+        }
+        Ok(None) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "restore committed but tenant snapshot is empty",
+            );
+        }
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+    let actor = audit_actor(&state, &headers);
+    let (snapshot, previous) = {
+        let mut data = state.inner.write().await;
+        let previous = data.clone();
+        record_successful_audit_log(
+            &mut data,
+            actor,
+            "restore_backup",
+            "control_plane_backup",
+            backup.payload_hash.clone(),
+        );
+        (data.clone(), previous)
+    };
+    match state.persist_snapshot(&snapshot).await {
+        Ok(()) => Json(serde_json::json!({
+            "status": "restored",
+            "schema_version": backup.schema_version,
+            "payload_hash": backup.payload_hash,
+        }))
+        .into_response(),
+        Err(message) => {
+            let latest = plane.load().await.ok().flatten();
+            let mut data = state.inner.write().await;
+            *data = latest.unwrap_or(previous);
+            persist_error(message)
+        }
+    }
+}
+
+async fn backup_drill(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let Some(plane) = &state.control_plane else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backup drill requires the PostgreSQL control plane",
+        );
+    };
+    let report = match plane.restore_drill().await {
+        Ok(report) => report,
+        Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
+    let actor = audit_actor(&state, &headers);
+    let outcome = if report.passed {
+        "backup_drill"
+    } else {
+        "backup_drill_failed"
+    };
+    if let Err(message) = state
+        .mutate_and_persist(|data| {
+            record_successful_audit_log(
+                data,
+                actor,
+                outcome,
+                "control_plane_backup",
+                report.source_hash.clone(),
+            );
+        })
+        .await
+    {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, message);
+    }
+    if report.passed {
+        (StatusCode::OK, Json(report)).into_response()
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(report)).into_response()
+    }
 }
 
 async fn kpis(State(state): State<AppState>) -> Json<SocKpiSnapshot> {
@@ -1077,7 +2413,7 @@ async fn update_commercial_license(
         .await
     {
         Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1120,7 +2456,7 @@ async fn import_threat_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_threat_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1211,7 +2547,7 @@ async fn import_stix_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1302,7 +2638,7 @@ async fn import_misp_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1398,7 +2734,7 @@ async fn import_opencti_document(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1449,6 +2785,16 @@ struct TaxiiPollResult {
     last_updated_unix: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaxiiPollIntent {
+    objects_url: String,
+    feed_id: String,
+    source: String,
+    ttl_seconds: u64,
+    added_after: Option<String>,
+    actor: String,
+}
+
 /// Poll a TAXII 2.1 collection objects endpoint and import STIX indicators.
 /// Secrets in the request body are never written to audit logs.
 async fn poll_taxii_collection(
@@ -1486,6 +2832,47 @@ async fn poll_taxii_collection(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
+
+    if state.control_plane.is_some() {
+        let has_inline_secret = request
+            .bearer_token
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || request
+                .username
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            || request
+                .password
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+        if has_inline_secret {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "durable TAXII poll cannot store credentials in the outbox; configure taxii_bearer in the credential registry",
+            );
+        }
+        let actor = audit_actor(&state, &headers);
+        let intent = TaxiiPollIntent {
+            objects_url,
+            feed_id: request.feed_id.trim().to_string(),
+            source: request.source.trim().to_string(),
+            ttl_seconds: request.ttl_seconds,
+            added_after: request.added_after.clone(),
+            actor: actor.clone(),
+        };
+        return enqueue_external_effect(
+            &state,
+            actor,
+            outbox::EVENT_TAXII_POLLED,
+            &intent.feed_id,
+            &intent,
+        )
+        .await;
+    }
 
     let body_text = match fetch_taxii_objects(
         &state,
@@ -1538,7 +2925,7 @@ async fn poll_taxii_collection(
             }),
         )
             .into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1578,8 +2965,20 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    let mut request = state
-        .feed_http
+    let inline_bearer = bearer_token.map(str::trim).filter(|s| !s.is_empty());
+    let bearer = if inline_bearer.is_some() {
+        inline_bearer
+    } else if let Some(token) = state.taxii_bearer.as_deref() {
+        let request_origin = url_origin(url)?;
+        if state.taxii_bearer_origin.as_deref() != Some(request_origin.as_str()) {
+            return Err("TAXII URL is outside the configured bearer origin".to_string());
+        }
+        Some(token)
+    } else {
+        None
+    };
+    let http = state.outbound_client(url).await?;
+    let mut request = http
         .get(url)
         .header(
             "Accept",
@@ -1588,8 +2987,7 @@ async fn fetch_taxii_objects(
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ));
-
-    if let Some(token) = bearer_token.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(token) = bearer {
         request = request.bearer_auth(token);
     } else if let Some(user) = username.map(str::trim).filter(|s| !s.is_empty()) {
         request = request.basic_auth(user, password);
@@ -1622,6 +3020,57 @@ async fn fetch_taxii_objects(
         bytes.extend_from_slice(&chunk);
     }
     String::from_utf8(bytes).map_err(|error| format!("TAXII response is not valid UTF-8: {error}"))
+}
+
+fn taxii_fetch_error_to_dispatch(message: String) -> outbox::DispatchError {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("failed to poll")
+        || lower.contains("failed to read")
+        || lower.contains("http 429")
+        || lower.contains("http 5")
+    {
+        outbox::DispatchError::Transient(message)
+    } else {
+        outbox::DispatchError::Permanent(message)
+    }
+}
+
+async fn execute_taxii_poll(
+    state: &AppState,
+    intent: &TaxiiPollIntent,
+) -> Result<TaxiiPollResult, outbox::DispatchError> {
+    let body_text = fetch_taxii_objects(state, &intent.objects_url, None, None, None)
+        .await
+        .map_err(taxii_fetch_error_to_dispatch)?;
+    let stix_json = taxii::stix_json_from_taxii_response(&body_text)
+        .map_err(outbox::DispatchError::Permanent)?;
+    let material =
+        stix_import::parse_stix_document(&stix_json, intent.source.trim(), intent.ttl_seconds)
+            .map_err(outbox::DispatchError::Permanent)?;
+    let feed = ThreatFeedImport {
+        feed_id: intent.feed_id.clone(),
+        source: intent.source.clone(),
+        ttl_seconds: intent.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    validate_threat_feed_import(&feed)
+        .map_err(|message| outbox::DispatchError::Permanent(message.to_string()))?;
+    let skipped_objects = material.skipped_objects;
+    let result =
+        apply_threat_feed_import(state, intent.actor.clone(), "poll_taxii_collection", feed)
+            .await
+            .map_err(outbox::DispatchError::Transient)?;
+    Ok(TaxiiPollResult {
+        feed_id: result.feed_id,
+        objects_url: intent.objects_url.clone(),
+        upserted_threats: result.upserted_threats,
+        upserted_dnsbl: result.upserted_dnsbl,
+        skipped_objects,
+        last_updated_unix: result.last_updated_unix,
+    })
 }
 
 /// Ingest Suricata EVE JSON (single object, array, or NDJSON). Admin-auth only.
@@ -1723,7 +3172,7 @@ async fn import_suricata_eve(
         .await
     {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1825,7 +3274,7 @@ async fn import_coraza_audit(
         .await
     {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -1984,7 +3433,7 @@ async fn import_phishing_database_feed(
     let actor = audit_actor(&state, &headers);
     match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await {
         Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Err(message) => persist_error(message),
     }
 }
 
@@ -2007,15 +3456,34 @@ fn validate_phishing_database_import_request(
         if request.domain_limit == 0 {
             return Err("domain_limit must be greater than zero when import_domains is enabled");
         }
-        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
+        validate_curated_feed_url(&request.domain_url)?;
     }
     if request.import_ips {
         if request.ip_limit == 0 {
             return Err("ip_limit must be greater than zero when import_ips is enabled");
         }
-        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
+        validate_curated_feed_url(&request.ip_url)?;
     }
     Ok(())
+}
+
+fn validate_curated_feed_url(value: &str) -> Result<reqwest::Url, &'static str> {
+    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
+    let host = parsed.host_str().ok_or("feed URL host is required")?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => return Err("feed URL scheme must be https unless host is loopback"),
+        _ => return Err("feed URL scheme must be http or https"),
+    }
+    if !is_loopback_host(host)
+        && !PHISHING_DATABASE_ALLOWED_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err("feed URL host is not in the curated allowlist");
+    }
+    Ok(parsed)
 }
 
 fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
@@ -2046,11 +3514,16 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
+    Json(build_support_bundle(&state).await)
+}
+
+/// Build the shared read-only operational snapshot used by HTTP and MCP.
+async fn build_support_bundle(state: &AppState) -> SupportBundle {
     let data = state.inner.read().await;
     let generated_at_unix = now_unix();
-    Json(SupportBundle {
+    SupportBundle {
         generated_at_unix,
-        health: state.health_status(),
+        health: state.health_status_live().await,
         kpis: kpi_snapshot_at(&data, generated_at_unix),
         commercial: data.commercial.clone(),
         readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
@@ -2065,7 +3538,7 @@ async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
         threat_feed_count: data.threat_feeds.len(),
         event_count: data.events.len(),
         audit_log_count: data.audit_logs.len(),
-    })
+    }
 }
 
 async fn events_ndjson(State(state): State<AppState>) -> Response {
@@ -2151,6 +3624,100 @@ async fn gateway(
     }
 
     let body_text = String::from_utf8_lossy(&body);
+    let request_uri = match uri.query() {
+        Some(query) => format!("{gateway_path}?{query}"),
+        None => gateway_path.to_string(),
+    };
+    let forwarded_headers = proven_engine::engine_forwarded_headers(&headers);
+    let engine_outcome = consult_proven_engine(
+        &state,
+        method.as_str(),
+        &request_uri,
+        &body_text,
+        client_ip,
+        &forwarded_headers,
+    )
+    .await;
+    if let ProvenEngineOutcome::Unavailable { reason } = &engine_outcome {
+        if state.proven_engine.fail_closed {
+            record_event(
+                &state,
+                client_ip,
+                Some(route.id.clone()),
+                "engine_unavailable",
+                reason.clone(),
+                0,
+                gateway_path,
+            )
+            .await;
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "action": "engine_unavailable",
+                    "route_id": route.id,
+                    "reason": reason,
+                })),
+            )
+                .into_response();
+        }
+        // Fail-open deployments still leave evidence that the engine was
+        // down for this request; scoring continues below.
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "engine_unavailable",
+            reason.clone(),
+            0,
+            gateway_path,
+        )
+        .await;
+    }
+    if let ProvenEngineOutcome::Hit(hit) = &engine_outcome {
+        let enforcing_block = hit.interrupted && route.mode == EnforcementMode::Block;
+        if !enforcing_block {
+            // Monitor-mode routes and sub-threshold hits keep the CRS
+            // evidence in the event stream instead of dropping it, while
+            // enforcement stays a Block-route decision.
+            record_event(
+                &state,
+                client_ip,
+                Some(route.id.clone()),
+                "engine_hit",
+                hit.reason.clone(),
+                hit.score,
+                gateway_path,
+            )
+            .await;
+        }
+    }
+    if let ProvenEngineOutcome::Hit(hit) = &engine_outcome
+        && hit.interrupted
+        && route.mode == EnforcementMode::Block
+    {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "blocked",
+            hit.reason.clone(),
+            hit.score,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "action": "blocked",
+                "route_id": route.id,
+                "score": hit.score,
+                "reason": hit.reason,
+                "engine": "coraza"
+            })),
+        )
+            .into_response();
+    }
+
     let scored = score_request(
         gateway_path,
         uri.query(),
@@ -2218,6 +3785,74 @@ async fn gateway(
     }
 }
 
+/// Consult in-process libcoraza first; otherwise the Coraza sidecar.
+async fn consult_proven_engine(
+    state: &AppState,
+    method: &str,
+    request_uri: &str,
+    body_text: &str,
+    client_ip: Option<IpAddr>,
+    forwarded_headers: &[(String, String)],
+) -> ProvenEngineOutcome {
+    if let Some(engine) = state.proven_engine.in_process.clone() {
+        let method = method.to_owned();
+        let request_uri = request_uri.to_owned();
+        let body_text = body_text.to_owned();
+        let headers_owned = forwarded_headers.to_vec();
+        return match tokio::task::spawn_blocking(move || {
+            engine.evaluate(&method, &request_uri, &body_text, client_ip, &headers_owned)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => ProvenEngineOutcome::Unavailable {
+                reason: "coraza in-process task failed".to_string(),
+            },
+        };
+    }
+    let Some(url) = state
+        .proven_engine
+        .sidecar_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+    else {
+        return ProvenEngineOutcome::NotConfigured;
+    };
+    let http = match state.outbound_client(&url).await {
+        Ok(http) => http,
+        Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
+    };
+    proven_engine::evaluate_sidecar(
+        &http,
+        &url,
+        method,
+        request_uri,
+        body_text,
+        client_ip,
+        forwarded_headers,
+    )
+    .await
+}
+
+/// Operator-visible proven-engine status (no sidecar URL or library path;
+/// those may identify an internal host).
+async fn waf_engine_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "mode": state.proven_engine.mode(),
+        "in_path": state.proven_engine.in_path(),
+        "fail_closed": state.proven_engine.fail_closed,
+        "sidecar_configured": state.proven_engine.sidecar_configured(),
+        "in_process_configured": state.proven_engine.in_process.is_some(),
+        "in_process_rules": state
+            .proven_engine
+            .in_process
+            .as_ref()
+            .map(|engine| engine.rules()),
+    }))
+}
+
 fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
     headers
         .get("x-forwarded-for")
@@ -2241,10 +3876,10 @@ async fn proxy_request(
     body: Bytes,
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
+    let http = state.outbound_client(&target).await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
-    let response = state
-        .http
+    let response = http
         .request(method, target)
         .body(body)
         .send()
@@ -2295,30 +3930,65 @@ async fn record_event(
     let action = action.to_string();
     let path = path.to_string();
     let event_limit = state.event_limit;
-    if let Err(error) = state
-        .mutate_and_persist(|data| {
-            let id = data.next_event_id;
-            data.next_event_id += 1;
-            let event = SecurityEvent {
-                id,
-                timestamp_unix: now_unix(),
-                client_ip,
-                route_id,
-                action,
-                reason,
-                score,
-                path,
-            };
-            // Structured stdout log line for SIEM / log-collector ingestion.
-            // ponytail: one println per recorded event — fine at gateway volumes;
-            // add async batching if event throughput ever becomes a bottleneck.
-            println!("{}", security_event_log_line(&event));
-            data.events.push(event);
-            enforce_event_limit(data, event_limit);
-        })
-        .await
-    {
-        eprintln!("failed to persist security event: {error}");
+    let template = SecurityEvent {
+        id: 0,
+        timestamp_unix: now_unix(),
+        client_ip,
+        route_id,
+        action,
+        reason,
+        score,
+        path,
+    };
+    if let Some(plane) = &state.control_plane {
+        let _guard = state.persist_lock.lock().await;
+        match plane.append_security_event(&template, event_limit).await {
+            Ok((event, snapshot_version)) => {
+                let mut data = state.inner.write().await;
+                data.next_event_id = event.id.saturating_add(1);
+                data.events.push(event);
+                enforce_event_limit(&mut data, event_limit);
+                data.snapshot_version = snapshot_version;
+            }
+            Err(error) => {
+                eprintln!("failed to persist security event: {error}");
+            }
+        }
+        return;
+    }
+
+    let durable = state.state_path.is_some();
+    let _guard = if durable {
+        Some(state.persist_lock.lock().await)
+    } else {
+        None
+    };
+    let (event, previous) = {
+        let mut data = state.inner.write().await;
+        let previous = durable.then(|| data.clone());
+        let id = data.next_event_id;
+        data.next_event_id += 1;
+        let mut event = template;
+        event.id = id;
+        data.events.push(event.clone());
+        enforce_event_limit(&mut data, event_limit);
+        (event, previous)
+    };
+    // File/memory has no leased worker; emit the SIEM line on the request path.
+    println!("{}", security_event_log_line(&event));
+    let persist = if state.state_path.is_some() {
+        let snapshot = state.inner.read().await.clone();
+        state.persist_snapshot(&snapshot).await
+    } else {
+        Ok(())
+    };
+    match persist {
+        Ok(()) => {}
+        Err(error) => {
+            let mut data = state.inner.write().await;
+            *data = previous.expect("durable event writes retain rollback state");
+            eprintln!("failed to persist security event: {error}");
+        }
     }
 }
 
@@ -2501,11 +4171,11 @@ async fn apply_threat_feed_import(
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    validate_http_url(url, /* allow_non_default_hosts */ true)
+    let validated = validate_curated_feed_url(url)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    let response = state
-        .feed_http
-        .get(url)
+    let http = state.outbound_client(validated.as_str()).await?;
+    let response = http
+        .get(validated)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ))
@@ -2606,6 +4276,14 @@ fn parse_phishing_ips(feed: &str, limit: usize) -> Vec<IpAddr> {
         }
     }
     values
+}
+
+fn persist_error(message: String) -> Response {
+    if message.contains("snapshot conflict") {
+        error(StatusCode::CONFLICT, message)
+    } else {
+        error(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -2774,7 +4452,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
     </section>
     <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
-      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests. Set <code>CORAZA_LIB_PATH</code> plus <code>CORAZA_RULES_PATH</code> (or <code>CORAZA_DIRECTIVES</code>) for in-process libcoraza, or <code>CORAZA_WAF_URL</code> for a sidecar. Do not invent WAF rules here. See <code>GET /api/waf/engine-status</code>.</p>
     </section>
     <section class="card"><h2>STIX threat intelligence</h2>
       <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p>
@@ -2783,13 +4461,13 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <p class="muted">POST admin-authenticated MISP Event/attribute JSON to <code>/api/threat-intel/misp</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IDS-worthy attributes (ip-src/ip-dst, domain, url, composites, hashes) into threats/DNSBL; attributes with <code>to_ids=false</code> are skipped. Live MISP REST pull is a follow-up.</p>
     </section>
     <section class="card"><h2>TAXII 2.1 collection poll</h2>
-      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>), optional Basic/Bearer credentials, and optional <code>added_after</code>. Fetches TAXII objects, normalizes to STIX, and upserts threats/DNSBL. Credentials are never written to audit logs.</p>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>) and optional <code>added_after</code>. PostgreSQL enqueues <code>taxii.collection_polled</code> (202) for the leased worker; file/memory still fetches on the request path. Inline Basic/Bearer is memory-only — durable polls use <code>taxii_bearer</code> in the credential registry. Credentials are never written to outbox payloads or audit logs. Poll <code>GET /api/outbox/{message_id}</code> for receipt evidence. Indicator values stay unmasked.</p>
     </section>
     <section class="card"><h2>OpenCTI threat intelligence</h2>
       <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
-      <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
+      <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator). PostgreSQL enqueues <code>soc.analysis_requested</code>; analysis never auto-enforces. Client IPs and paths stay unmasked.</p>
       <div class="row">
         <input id="socEventId" class="hdr-input" type="number" min="1" placeholder="Event id" aria-label="Security event id to analyze">
         <button type="button" id="socAnalyzeBtn" class="btn-secondary">Analyze event</button>
@@ -2797,10 +4475,19 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
       <pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre>
     </section>
     <section class="card"><h2>Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Outbox</h2><p class="muted">PostgreSQL leased workers for external effects. File/memory adapters report disabled. Client IPs and paths are not masked.</p><div id="outboxBody" class="muted">Loading…</div></section>
+    <section class="card"><h2>Control-plane backup</h2>
+      <p class="muted">On-demand PostgreSQL logical snapshot. Restore drill uses an isolated tenant and does not mask client IPs, paths, or actors. File/memory adapters report disabled. Declared RPO is last successful export; declared RTO is 60s.</p>
+      <div id="backupBody" class="muted">Loading…</div>
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="backupDrillBtn" class="btn-secondary">Run restore drill</button>
+      </div>
+      <pre class="raw" id="backupDrill" style="margin-top:8px;white-space:pre-wrap"></pre>
+    </section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
     <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
-      <p class="muted">Render live SOC evidence in the Clearfolio document viewer.</p>
+      <p class="muted">Render live SOC evidence in the Clearfolio document viewer. PostgreSQL enqueues <code>clearfolio.document_submitted</code>; poll the outbox receipt for <code>jobId</code>. SOC export paths and IPs stay unmasked.</p>
       <div class="row">
         <button type="button" class="btn-secondary" data-doc="evidence-manifest">Open evidence manifest</button>
         <button type="button" class="btn-secondary" data-doc="soc-export">Open SOC export</button>
@@ -2831,8 +4518,8 @@ function table(capt,cols,rows){
 }
 function toast(msg,ok){const d=document.createElement('div');d.className='toast '+(ok?'ok':'bad');d.textContent=msg;$('toast').appendChild(d);setTimeout(()=>d.remove(),4500);}
 async function guard(id,fn){try{await fn();}catch(e){$(id).innerHTML='<p class="err">Error: '+esc(e.message)+'</p>';}}
-async function loadKpis(){const k=await getJSON('/api/kpis');
-  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)]];
+async function loadKpis(){const k=await getJSON('/api/kpis');const h=await getJSON('/healthz');
+  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)],['Event partitions',h.event_partitions??0]];
   $('kpis').innerHTML=t.map(([l,v])=>'<div class="tile"><div class="label">'+esc(l)+'</div><div class="metric">'+esc(v)+'</div></div>').join('');}
 async function loadRoutes(){const d=await getJSON('/api/routes');
   $('routesBody').innerHTML=table('Configured routes',['Path prefix','Upstream','Mode','State'],d.map(r=>[esc(r.path_prefix),esc(r.upstream),modeBadge(r.mode),stateBadge(r.enabled)]));}
@@ -2860,11 +4547,32 @@ async function loadAudit(){
   const a=await r.json();
   $('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));
 }
+async function loadOutbox(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/outbox',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const o=await r.json();
+  const head='<div class="row" style="margin-bottom:10px">'+badge(o.status||'disabled',o.status==='ready'?'b-pass':'b-neutral')+'</div>';
+  const rows=(o.messages||[]).slice(0,25).map(x=>[esc(x.event_type),esc(x.message_status),esc(x.attempt_count),esc(x.aggregate_id),esc(x.terminal_reason??'—')]);
+  $('outboxBody').innerHTML=head+table('Outbox messages',['Type','Status','Attempts','Aggregate','Terminal reason'],rows);
+}
+async function loadBackup(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/backup',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const b=await r.json();
+  const head='<div class="row" style="margin-bottom:10px">'+badge(b.status||'disabled',b.status==='ready'?'b-pass':'b-neutral')+'<span class="muted">RPO '+esc(b.rpo||'—')+' · RTO '+esc(b.rto_budget_ms)+'ms</span></div>';
+  const art=b.artifact||{};
+  const rows=[[esc(art.schema_version??'—'),esc(art.tenant_id??'—'),esc(art.payload_hash?String(art.payload_hash).slice(0,16)+'…':'—'),esc((art.snapshot&&art.snapshot.events||[]).length),esc((art.outbox||[]).length)]];
+  $('backupBody').innerHTML=head+table('Logical backup artifact',['Schema','Tenant','Hash','Events','Outbox'],rows);
+}
 async function loadRaw(id,url,json){try{const t=json?JSON.stringify(await getJSON(url),null,2):await getText(url);$(id).textContent=t&&t.trim()?t:'(empty)';}catch(e){$(id).textContent='Error: '+e.message;}}
 async function refresh(){await Promise.allSettled([
   guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),
   guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),
-  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),
+  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),guard('outboxBody',loadOutbox),guard('backupBody',loadBackup),
   loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
 function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;
   f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}
@@ -2884,7 +4592,31 @@ function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==
 syncHc();
 $('hcToggle').addEventListener('click',()=>{const on=root.dataset.theme==='hc';if(on){delete root.dataset.theme;}else{root.dataset.theme='hc';}localStorage.setItem('waf-theme',on?'':'hc');syncHc();});
 $('refreshBtn').addEventListener('click',refresh);
+$('backupDrillBtn').addEventListener('click',async()=>{
+  const out=$('backupDrill');out.textContent='Running isolated restore drill…';
+  try{
+    const r=await fetch('/api/backup/drill',{method:'POST',headers:cfHeaders()});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.error||r.statusText);
+    out.textContent=JSON.stringify(j,null,2);
+    toast(j.passed?'Restore drill passed':'Restore drill failed',!!j.passed);
+    guard('backupBody',loadBackup);guard('auditBody',loadAudit);
+  }catch(e){out.innerHTML='<span class="err">Drill error: '+esc(e.message)+'</span>';toast('Restore drill failed: '+e.message,false);}});
 function cfHeaders(){const t=($('adminToken').value||'').trim();return t?{'x-admin-token':t}:{};}
+async function pollOutboxReceipt(id,pick){
+  const h=cfHeaders();
+  for(let i=0;i<40;i++){
+    const r=await fetch('/api/outbox/'+encodeURIComponent(id),{headers:h});
+    if(r.status===404){await new Promise(res=>setTimeout(res,400));continue;}
+    if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+    const j=await r.json();
+    const status=j.message&&j.message.message_status;
+    if(status==='dead_letter')throw new Error((j.message&&j.message.terminal_reason)||'dead letter');
+    if(j.receipt_evidence){const v=pick(j.receipt_evidence);if(v)return v;}
+    await new Promise(res=>setTimeout(res,400));
+  }
+  throw new Error('outbox timed out');
+}
 async function pollClearfolio(id){
   for(let i=0;i<40;i++){
     const r=await fetch('/api/clearfolio/jobs/'+encodeURIComponent(id),{headers:cfHeaders()});
@@ -2898,7 +4630,14 @@ async function openClearfolioDoc(kind,base){
   try{
     const sr=await fetch('/api/clearfolio/documents/'+encodeURIComponent(kind),{method:'POST',headers:cfHeaders()});
     if(!sr.ok)throw new Error((await sr.json().catch(()=>({}))).error||sr.statusText);
-    const job=await sr.json();const id=job.jobId||job.job_id;if(!id)throw new Error('no job id returned');
+    const job=await sr.json();
+    let id=job.jobId||job.job_id;
+    if(!id && job.message_id){
+      st.textContent='Queued outbox '+job.message_id+'…';
+      const evidence=await pollOutboxReceipt(job.message_id, ev=>{try{const p=JSON.parse(ev);return p.jobId||p.job_id;}catch(e){return null;}});
+      id=evidence;
+    }
+    if(!id)throw new Error('no job id returned');
     st.textContent='Converting… (job '+id+')';
     const doc=await pollClearfolio(id);
     frame.src=base.replace(/\/+$/,'')+'/viewer/'+encodeURIComponent(doc);frame.hidden=false;st.textContent='Document ready.';
@@ -2915,7 +4654,15 @@ async function analyzeSocEvent(){
   try{
     const r=await fetch('/api/soc/analyze',{method:'POST',headers:{'content-type':'application/json',...cfHeaders()},body:JSON.stringify({event_id:id})});
     if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.statusText);
-    const j=await r.json();out.textContent=j.analysis||'(no analysis)';
+    const j=await r.json();
+    if(j.analysis){out.textContent=j.analysis;return;}
+    if(j.message_id){
+      out.textContent='Queued outbox '+j.message_id+'…';
+      const analysis=await pollOutboxReceipt(j.message_id, ev=>{try{const p=JSON.parse(ev);return p.analysis||ev;}catch(e){return ev;}});
+      out.textContent=analysis||'(no analysis)';
+      return;
+    }
+    out.textContent='(no analysis)';
   }catch(e){out.innerHTML='<span class="err">Analysis error: '+esc(e.message)+'</span>';}}
 async function initSocLlm(){
   let cfg;try{cfg=await getJSON('/api/soc/llm-config');}catch(e){return;}
@@ -2971,6 +4718,27 @@ pub fn parse_u32_env(
     }
 }
 
+/// Parse a boolean environment value (`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`).
+/// Returns `default` when absent.
+pub fn parse_bool_env(
+    name: &str,
+    raw: Option<&str>,
+    default: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match raw {
+        None => Ok(default),
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must be a boolean, got {value:?}"),
+            )
+            .into()),
+        },
+    }
+}
+
 /// Parse a `u64` environment value (already read as an optional string),
 /// returning `default` when absent and a configuration error when malformed.
 pub fn parse_u64_env(
@@ -2989,6 +4757,125 @@ pub fn parse_u64_env(
     }
 }
 
+fn outbound_http_client(pins: Arc<destination::DestinationPins>) -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(Arc::new(destination::PinnedDns::new(pins)))
+        .build()
+        .expect("failed to build fail-closed outbound HTTP client")
+}
+
+pub(crate) fn bind_is_loopback(bind_addr: &str) -> bool {
+    let trimmed = bind_addr.trim();
+    if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    let host = trimmed
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_start_matches('[').trim_end_matches(']'))
+        .unwrap_or(trimmed);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn startup_clearfolio() -> Option<ClearfolioConfig> {
+    let base_url = std::env::var("CLEARFOLIO_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    Some(ClearfolioConfig {
+        base_url,
+        tenant_id: std::env::var("CLEARFOLIO_TENANT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "buyer-demo".to_string()),
+        subject_id: std::env::var("CLEARFOLIO_SUBJECT_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "buyer-demo".to_string()),
+        permissions: std::env::var("CLEARFOLIO_PERMISSIONS")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "job:read".to_string()),
+    })
+}
+
+fn startup_soc_llm(credentials: &CredentialRegistry) -> Option<SocLlmConfig> {
+    let base_url = std::env::var("SOC_LLM_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    Some(SocLlmConfig {
+        base_url,
+        token: credentials
+            .get_credential(CRED_SOC_LLM_TOKEN)
+            .unwrap_or("")
+            .to_string(),
+        model: std::env::var("SOC_LLM_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "contextual-orchestrator".to_string()),
+    })
+}
+
+fn url_origin(raw: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| "URL origin is invalid".to_string())?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL origin has no host".to_string())?;
+    let mut origin = format!("{}://{}", url.scheme(), host.to_ascii_lowercase());
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(origin)
+}
+
+fn startup_destination_policy(
+    bind_addr: &str,
+    registry: &CredentialRegistry,
+) -> Result<DestinationPolicy, Box<dyn std::error::Error>> {
+    let base = if bind_is_loopback(bind_addr) {
+        DestinationPolicy::development()
+    } else {
+        DestinationPolicy::production()
+    };
+    let allow = registry
+        .get_credential(CRED_DESTINATION_ALLOWLIST)
+        .unwrap_or_default();
+    let deny = registry
+        .get_credential(CRED_DESTINATION_DENYLIST)
+        .unwrap_or_default();
+    Ok(base
+        .with_lists(allow, deny)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?)
+}
+
+async fn validate_sidecar_destination(state: &AppState) -> Result<(), std::io::Error> {
+    if state.proven_engine.in_process.is_none()
+        && let Some(sidecar_url) = state.proven_engine.sidecar_url.as_deref()
+    {
+        state
+            .outbound_client(sidecar_url)
+            .await
+            .map_err(|message| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("CORAZA_WAF_URL is denied or unavailable: {message}"),
+                )
+            })?;
+    }
+    Ok(())
+}
+
 /// Read gateway configuration from the process environment, bind the listener,
 /// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
 /// over this function so every branch is reachable from tests (the parse/error
@@ -3003,11 +4890,17 @@ pub async fn run_from_env(
     let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
         .ok()
         .map(PathBuf::from);
-    let credentials = CredentialRegistry::bootstrap_secrets(
+    let mut credentials = CredentialRegistry::bootstrap_secrets(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
+        std::env::var("CONTROL_PLANE_DATABASE_URL").ok(),
+        std::env::var("EGRESS_PROXY_TOKEN").ok(),
+        std::env::var("DESTINATION_ALLOWLIST").ok(),
+        std::env::var("DESTINATION_DENYLIST").ok(),
     )?;
+    credentials.load_optional_secret(CRED_SOC_LLM_TOKEN, std::env::var("SOC_LLM_TOKEN").ok());
+    credentials.load_optional_secret(CRED_TAXII_BEARER, std::env::var("TAXII_BEARER").ok());
     let config = AppConfig {
         admin_token: credentials
             .get_credential(CRED_ADMIN_TOKEN)
@@ -3033,24 +4926,200 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
+    let coraza_waf_url = std::env::var("CORAZA_WAF_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let proven_engine_fail_closed = parse_bool_env(
+        "PROVEN_ENGINE_FAIL_CLOSED",
+        std::env::var("PROVEN_ENGINE_FAIL_CLOSED").ok().as_deref(),
+        false,
+    )?;
+    let coraza_lib_path = std::env::var("CORAZA_LIB_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let coraza_rules_path = std::env::var("CORAZA_RULES_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let coraza_directives = std::env::var("CORAZA_DIRECTIVES")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let in_process = match coraza_lib_path {
+        Some(path) => Some(Arc::new(
+            crate::coraza_inprocess::InProcessCoraza::load(
+                Path::new(&path),
+                coraza_rules_path.as_deref().map(Path::new),
+                coraza_directives.as_deref(),
+            )
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
+        )),
+        None => None,
+    };
+    let proven_engine = ProvenEngineConfig {
+        sidecar_url: coraza_waf_url,
+        fail_closed: proven_engine_fail_closed,
+        in_process,
+    };
+    let destination_policy = startup_destination_policy(&bind_addr, &credentials)?;
+    let control_plane_url = credentials
+        .get_credential(CRED_CONTROL_PLANE_URL)
+        .map(str::to_owned);
+    let taxii_bearer = credentials
+        .get_credential(CRED_TAXII_BEARER)
+        .map(str::to_owned);
+    let taxii_bearer_origin = std::env::var("TAXII_BEARER_ORIGIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| url_origin(&value))
+        .transpose()?;
+    if taxii_bearer.is_some() && taxii_bearer_origin.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "taxii_bearer requires TAXII_BEARER_ORIGIN",
+        )
+        .into());
+    }
+    control_plane::require_postgres_for_bind(&bind_addr, control_plane_url.as_deref())
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let state = match control_plane_url.as_deref() {
+        Some(url) => AppState::load_postgres(config, url).await,
+        None => AppState::load(config).await,
+    }
+    .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    let state = state
+        .with_rate_limit(rate_limit, rate_limit_window)
+        .with_admin_tokens(admin_tokens)
+        .with_egress_proxy_token(
+            credentials
+                .get_credential(CRED_EGRESS_PROXY_TOKEN)
+                .map(str::to_owned),
+        )
+        .with_credentials_source(credentials.source())
+        .with_proven_engine(proven_engine)
+        .with_destination_policy(destination_policy)
+        .with_max_body_size(max_body_bytes)
+        .with_clearfolio(startup_clearfolio())
+        .with_soc_llm(startup_soc_llm(&credentials))
+        .with_taxii_bearer(taxii_bearer, taxii_bearer_origin);
+    validate_sidecar_destination(&state).await?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
+    let egress_dns = match std::env::var("EGRESS_DNS_BIND_ADDR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(bind) => {
+            let udp = tokio::net::UdpSocket::bind(&bind).await?;
+            let dns_addr = udp.local_addr()?;
+            let tcp = tokio::net::TcpListener::bind(dns_addr).await?;
+            Some((udp, tcp, dns_addr))
+        }
+        None => None,
+    };
+    let state = state.with_egress_dns_listener_enabled(egress_dns.is_some());
     println!("waf-ids-ai-soc listening on http://{local_addr}");
+    if let Some((_, _, dns_addr)) = &egress_dns {
+        println!("wardnet egress DNS listening on udp+tcp://{dns_addr}");
+    }
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let state = AppState::load(config)
-        .await
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
-        .with_rate_limit(rate_limit, rate_limit_window)
-        .with_admin_tokens(admin_tokens)
-        .with_credentials_source(credentials.source())
-        .with_max_body_size(max_body_bytes);
+    let (stop_workers, stop_rx) = tokio::sync::watch::channel(false);
+    if let Some((udp, tcp, _)) = egress_dns {
+        let dns_state = state.clone();
+        let stop = stop_rx.clone();
+        tokio::spawn(async move {
+            egress_dns::serve(dns_state, udp, tcp, stop).await;
+        });
+    }
+    if state.control_plane.is_some() {
+        let worker_state = state.clone();
+        let stop = stop_rx;
+        tokio::spawn(async move {
+            run_outbox_worker(worker_state, stop).await;
+        });
+    }
     let served = axum::serve(listener, build_app(state))
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stop_workers.send(true);
+        })
         .await;
     served?;
     Ok(())
+}
+
+async fn run_outbox_worker(state: AppState, mut stop: tokio::sync::watch::Receiver<bool>) {
+    let owner = format!("wardnet:{}", std::process::id());
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() { break; }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Some(plane) = &state.control_plane {
+                    let worker_state = state.clone();
+                    let _ = plane
+                        .drain_due_async(&owner, now_unix() as i64, move |message| {
+                            let state = worker_state.clone();
+                            async move { dispatch_outbox_message(&state, &message).await }
+                        })
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+async fn dispatch_outbox_message(
+    state: &AppState,
+    message: &outbox::OutboxMessage,
+) -> Result<String, outbox::DispatchError> {
+    match message.event_type.as_str() {
+        outbox::EVENT_SECURITY_RECORDED | outbox::EVENT_SNAPSHOT_REPLACED => {
+            outbox::dispatch_stdout(message)
+        }
+        outbox::EVENT_TAXII_POLLED => {
+            let intent: TaxiiPollIntent = serde_json::from_str(&message.payload_json)
+                .map_err(|error| outbox::DispatchError::Permanent(error.to_string()))?;
+            let result = execute_taxii_poll(state, &intent).await?;
+            Ok(serde_json::to_string(&result).expect("TaxiiPollResult is JSON-serializable"))
+        }
+        outbox::EVENT_CLEARFOLIO_SUBMITTED => {
+            let intent: ClearfolioSubmitIntent = serde_json::from_str(&message.payload_json)
+                .map_err(|error| outbox::DispatchError::Permanent(error.to_string()))?;
+            let config = state.clearfolio.clone().ok_or_else(|| {
+                outbox::DispatchError::Permanent(
+                    "Clearfolio integration is not configured".to_string(),
+                )
+            })?;
+            let (_status, body) = execute_clearfolio_submit(
+                state,
+                &config,
+                intent.filename,
+                intent.body_text.into_bytes(),
+            )
+            .await?;
+            Ok(String::from_utf8_lossy(&body).into_owned())
+        }
+        outbox::EVENT_SOC_ANALYSIS_REQUESTED => {
+            let intent: SocAnalyzeIntent = serde_json::from_str(&message.payload_json)
+                .map_err(|error| outbox::DispatchError::Permanent(error.to_string()))?;
+            let config = state.soc_llm.clone().ok_or_else(|| {
+                outbox::DispatchError::Permanent("LLM SOC analysis is not configured".to_string())
+            })?;
+            let result = execute_soc_analyze(state, &config, &intent.event).await?;
+            Ok(serde_json::to_string(&result).expect("SocAnalyzeResponse is JSON-serializable"))
+        }
+        other => Err(outbox::DispatchError::Permanent(format!(
+            "unknown outbox event type {other}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -3089,6 +5158,22 @@ mod tests {
             "RATE_LIMIT",
             "RATE_LIMIT_WINDOW",
             "MAX_BODY_BYTES",
+            "CORAZA_WAF_URL",
+            "CORAZA_LIB_PATH",
+            "CORAZA_RULES_PATH",
+            "CORAZA_DIRECTIVES",
+            "PROVEN_ENGINE_FAIL_CLOSED",
+            "DESTINATION_ALLOWLIST",
+            "DESTINATION_DENYLIST",
+            "CONTROL_PLANE_DATABASE_URL",
+            "CLEARFOLIO_BASE_URL",
+            "CLEARFOLIO_TENANT_ID",
+            "CLEARFOLIO_SUBJECT_ID",
+            "CLEARFOLIO_PERMISSIONS",
+            "SOC_LLM_BASE_URL",
+            "SOC_LLM_TOKEN",
+            "SOC_LLM_MODEL",
+            "TAXII_BEARER",
         ] {
             unsafe { std::env::remove_var(name) };
         }
@@ -3120,6 +5205,14 @@ mod tests {
             30
         );
         assert!(parse_u64_env("RATE_LIMIT_WINDOW", Some("abc"), 60).is_err());
+    }
+
+    #[test]
+    fn parse_bool_env_reads_optional_env() {
+        assert!(parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", None, true).unwrap());
+        assert!(!parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", Some("false"), true).unwrap());
+        assert!(parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", Some("YES"), false).unwrap());
+        assert!(parse_bool_env("PROVEN_ENGINE_FAIL_CLOSED", Some("maybe"), false).is_err());
     }
 
     #[test]
@@ -3182,6 +5275,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_from_env_rejects_malformed_destination_allowlist() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("DESTINATION_ALLOWLIST", "10.0.0.0/33");
+        }
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_fail_closes_public_bind_without_postgres() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::remove_var("CONTROL_PLANE_DATABASE_URL");
+        }
+        let error = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .expect_err("production bind must require postgres");
+        let message = error.to_string();
+        assert!(
+            message.contains("CONTROL_PLANE_DATABASE_URL"),
+            "operator must see the production authority requirement: {message}"
+        );
+        clear_run_env();
+    }
+
+    fn control_plane_test_database_url() -> Option<String> {
+        std::env::var("CONTROL_PLANE_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    fn unique_test_tenant(label: &str) -> String {
+        format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        )
+    }
+
+    #[tokio::test]
+    async fn postgres_first_management_write_does_not_conflict() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("occ-load");
+        let state = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("startup save must succeed");
+        state
+            .mutate_and_persist(|data| {
+                data.routes[0].path_prefix = "/after-start".into();
+            })
+            .await
+            .expect("first management write after load_postgres must not false-conflict");
+        let inner = state.inner.read().await;
+        assert_eq!(inner.routes[0].path_prefix, "/after-start");
+        assert!(inner.snapshot_version >= 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_conflict_refreshes_replica_for_a_later_retry() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("occ-refresh");
+        let seed = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("seed tenant");
+        drop(seed);
+        let winner = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("winner load");
+        let loser = AppState::load_postgres_for_tenant(AppConfig::memory(None), &url, &tenant)
+            .await
+            .expect("loser load");
+        winner
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/winner".into())
+            .await
+            .expect("winner save");
+        let conflict = loser
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/loser-stale".into())
+            .await
+            .expect_err("stale replica must conflict once");
+        assert!(conflict.contains("snapshot conflict"));
+        assert_eq!(loser.inner.read().await.routes[0].path_prefix, "/winner");
+        loser
+            .mutate_and_persist(|data| data.routes[0].path_prefix = "/loser-retry".into())
+            .await
+            .expect("refreshed replica must be able to retry");
+    }
+
+    #[tokio::test]
+    async fn startup_clearfolio_and_soc_llm_read_optional_config() {
+        let _guard = ENV_GUARD.lock().await;
+        unsafe {
+            std::env::remove_var("CLEARFOLIO_BASE_URL");
+            std::env::remove_var("SOC_LLM_BASE_URL");
+        }
+        assert!(startup_clearfolio().is_none());
+        let empty = CredentialRegistry::empty();
+        assert!(startup_soc_llm(&empty).is_none());
+        unsafe {
+            std::env::set_var("CLEARFOLIO_BASE_URL", "http://viewer.example");
+            std::env::set_var("SOC_LLM_BASE_URL", "http://llm.example");
+        }
+        let cf = startup_clearfolio().expect("clearfolio");
+        assert_eq!(cf.base_url, "http://viewer.example");
+        assert_eq!(cf.tenant_id, "buyer-demo");
+        let mut registry = CredentialRegistry::empty();
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("llm-secret".into()));
+        let llm = startup_soc_llm(&registry).expect("soc llm");
+        assert_eq!(llm.base_url, "http://llm.example");
+        assert_eq!(llm.token, "llm-secret");
+        assert_eq!(llm.model, "contextual-orchestrator");
+        unsafe {
+            std::env::remove_var("CLEARFOLIO_BASE_URL");
+            std::env::remove_var("SOC_LLM_BASE_URL");
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_outbox_consumers_enqueue_taxii_clearfolio_and_soc() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let taxii_body = r#"{
+          "more": false,
+          "objects": [
+            {
+              "type": "indicator",
+              "id": "indicator--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "name": "outbox-taxii-ip",
+              "pattern": "[ipv4-addr:value = '198.51.100.44']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00.000Z"
+            }
+          ]
+        }"#;
+        let taxii_app = Router::new().route(
+            "/api1/collections/lab/objects/",
+            get(move || async move {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/taxii+json;version=2.1")],
+                    taxii_body,
+                )
+            }),
+        );
+        let taxii_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taxii_addr = taxii_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(taxii_listener, taxii_app).into_future());
+
+        let clearfolio_app = Router::new().route(
+            "/api/v1/convert/jobs",
+            post(|| async {
+                (
+                    StatusCode::ACCEPTED,
+                    [("content-type", "application/json")],
+                    r#"{"jobId":"J-OUTBOX","status":"PENDING"}"#,
+                )
+            }),
+        );
+        let cf_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cf_addr = cf_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(cf_listener, clearfolio_app).into_future());
+
+        let llm_addr = spawn_chat_mock(
+            r#"{"choices":[{"message":{"content":"Likely scanner. High. Keep 198.51.100.44 blocked."}}]}"#,
+        )
+        .await;
+
+        let tenant = unique_test_tenant("outbox-consumers");
+        let mut data = AppData::seeded();
+        data.events.push(SecurityEvent {
+            id: 1,
+            timestamp_unix: 1_700_000_000,
+            client_ip: Some("198.51.100.44".parse().unwrap()),
+            route_id: Some("demo".into()),
+            action: "blocked".into(),
+            reason: "scanner".into(),
+            score: 90,
+            path: "/gateway/login".into(),
+        });
+        data.next_event_id = 2;
+        let plane = control_plane::PostgresPlane::connect_tenant(&url, &tenant)
+            .await
+            .expect("plane");
+        plane.save(&data).await.expect("seed tenant");
+        data.snapshot_version = data.snapshot_version.saturating_add(1);
+        let state = AppState::new(data, AppConfig::memory(Some("secret".into())))
+            .with_control_plane(Arc::new(plane))
+            .with_destination_policy(DestinationPolicy::development())
+            .with_clearfolio(Some(clearfolio_test_config(&format!("http://{cf_addr}"))))
+            .with_soc_llm(Some(SocLlmConfig {
+                base_url: format!("http://{llm_addr}"),
+                token: "test-token".into(),
+                model: "contextual-orchestrator".into(),
+            }));
+        let drain_state = state.clone();
+        let app = build_app(state);
+
+        let taxii = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                Some("secret"),
+                &serde_json::json!({
+                    "api_root": format!("http://{taxii_addr}/api1"),
+                    "collection_id": "lab",
+                    "feed_id": "taxii-outbox",
+                    "source": "taxii:outbox",
+                    "ttl_seconds": 3600
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(taxii.status(), StatusCode::ACCEPTED);
+        let taxii_body: serde_json::Value = json_body(taxii).await;
+        let taxii_id = taxii_body["message_id"].as_str().unwrap().to_string();
+
+        let secrets = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                Some("secret"),
+                &serde_json::json!({
+                    "objects_url": format!("http://{taxii_addr}/api1/collections/lab/objects/"),
+                    "feed_id": "taxii-outbox",
+                    "source": "taxii:outbox",
+                    "ttl_seconds": 3600,
+                    "bearer_token": "must-not-persist"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(secrets.status(), StatusCode::BAD_REQUEST);
+
+        let submit = app_request(
+            &app,
+            authed_empty_request(
+                Method::POST,
+                "/api/clearfolio/documents/soc-export",
+                "secret",
+            ),
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::ACCEPTED);
+
+        let analyze = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/soc/analyze",
+                Some("secret"),
+                &serde_json::json!({"event_id": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(analyze.status(), StatusCode::ACCEPTED);
+
+        let processed = drain_state
+            .control_plane
+            .as_ref()
+            .unwrap()
+            .drain_due_async("test-worker", now_unix() as i64, |message| {
+                let state = drain_state.clone();
+                async move { dispatch_outbox_message(&state, &message).await }
+            })
+            .await
+            .expect("drain consumers");
+        assert!(processed >= 3, "taxii, clearfolio, and soc must process");
+
+        let item: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, &format!("/api/outbox/{taxii_id}"), "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(item["message"]["message_status"], "processed");
+        let evidence = item["receipt_evidence"].as_str().unwrap();
+        assert!(evidence.contains("198.51.100.44") || evidence.contains("taxii-outbox"));
+        assert!(!evidence.contains("must-not-persist"));
+
+        let listed: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/outbox", "secret"),
+            )
+            .await,
+        )
+        .await;
+        let types: Vec<&str> = listed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["event_type"].as_str())
+            .collect();
+        assert!(types.contains(&"taxii.collection_polled"));
+        assert!(types.contains(&"clearfolio.document_submitted"));
+        assert!(types.contains(&"soc.analysis_requested"));
+    }
+
+    #[tokio::test]
     async fn run_from_env_rejects_malformed_max_body_bytes() {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
@@ -3211,7 +5623,7 @@ mod tests {
             std::env::set_var("BIND_ADDR", "127.0.0.1:0");
             std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
         }
-        // Bind succeeds, but loading corrupt persisted state maps to an error.
+        // Corrupt persisted state is a hard error before the listener binds.
         assert!(
             run_from_env(Box::pin(std::future::ready(())))
                 .await
@@ -3288,12 +5700,52 @@ mod tests {
             severity: Severity::Critical,
             import_domains: true,
             import_ips: true,
-            allow_non_default_hosts: true,
         }
     }
 
     async fn app_request(app: &Router, request: Request<Body>) -> Response {
         app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn mcp_request(
+        token: Option<&str>,
+        origin: &str,
+        mut payload: serde_json::Value,
+    ) -> Request<Body> {
+        let method = payload["method"].as_str().unwrap().to_string();
+        let name = payload
+            .pointer("/params/name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let params = payload
+            .as_object_mut()
+            .unwrap()
+            .entry("params")
+            .or_insert_with(|| serde_json::json!({}));
+        params.as_object_mut().unwrap().insert(
+            "_meta".to_string(),
+            serde_json::json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28"}),
+        );
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("host", "wardnet.local")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", method)
+            .header("content-type", "application/json");
+        if !origin.is_empty() {
+            builder = builder.header("origin", origin);
+        }
+        if let Some(name) = name {
+            builder = builder.header("mcp-name", name);
+        }
+        if let Some(token) = token {
+            builder = builder.header("x-admin-token", token);
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap()
     }
 
     fn empty_request(method: Method, uri: &str) -> Request<Body> {
@@ -3302,6 +5754,253 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mcp_discovers_the_stateless_server_contract() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["id"], 1);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(
+            body["result"]["supportedVersions"],
+            serde_json::json!(["2026-07-28"])
+        );
+        assert_eq!(
+            body["result"]["capabilities"]["tools"],
+            serde_json::json!({})
+        );
+        assert_eq!(body["result"]["ttlMs"], 300_000);
+        assert_eq!(body["result"]["cacheScope"], "private");
+        assert_eq!(
+            body["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "wardnet"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_missing_admin_credentials() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                None,
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_browser_origin_requests() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "https://wardnet.local",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "server/discover"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_both_streamable_http_response_types() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let mut request = mcp_request(
+            Some("secret"),
+            "",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover"
+            }),
+        );
+        request
+            .headers_mut()
+            .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[tokio::test]
+    async fn mcp_lists_the_read_only_wardnet_status_tool() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        let tools = body["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "wardnet_status");
+        assert_eq!(
+            tools[0]["inputSchema"],
+            serde_json::json!({"type": "object"})
+        );
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[0]["annotations"]["destructiveHint"], false);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(body["result"]["ttlMs"], 300_000);
+        assert_eq!(body["result"]["cacheScope"], "private");
+    }
+
+    #[tokio::test]
+    async fn mcp_calls_wardnet_status_with_structured_and_text_content() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "wardnet_status", "arguments": {}}
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(body["result"]["resultType"], "complete");
+        assert_eq!(body["result"]["structuredContent"]["route_count"], 1);
+        let text: serde_json::Value =
+            serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, body["result"]["structuredContent"]);
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_an_unsupported_protocol_header() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let mut request = mcp_request(
+            Some("secret"),
+            "",
+            serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+        );
+        request.headers_mut().insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2099-01-01"),
+        );
+
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_unknown_tools_as_protocol_errors() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "delete_everything", "arguments": {}}
+                }),
+            ),
+        )
+        .await;
+
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert_eq!(body["error"]["message"], "Unknown tool");
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_non_string_or_integer_request_ids() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({"jsonrpc": "2.0", "id": true, "method": "tools/list"}),
+            ),
+        )
+        .await;
+
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
+    async fn mcp_ping_confirms_the_server_is_reachable() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let response = app_request(
+            &app,
+            mcp_request(
+                Some("secret"),
+                "",
+                serde_json::json!({"jsonrpc": "2.0", "id": "ping-1", "method": "ping"}),
+            ),
+        )
+        .await;
+
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["id"], "ping-1");
+        assert_eq!(body["result"], serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn mcp_rejects_a_method_header_that_disagrees_with_the_body() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let mut request = mcp_request(
+            Some("secret"),
+            "",
+            serde_json::json!({"jsonrpc": "2.0", "id": 6, "method": "tools/list"}),
+        );
+        request
+            .headers_mut()
+            .insert("mcp-method", HeaderValue::from_static("tools/call"));
+
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     fn authed_empty_request(method: Method, uri: &str, token: &str) -> Request<Body> {
@@ -3351,6 +6050,78 @@ mod tests {
         assert_eq!(rate_limit_step(100, 100, 2, 2, 60), (false, 100, 2));
         // Once the window elapses the counter resets.
         assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
+    }
+
+    #[test]
+    fn outbound_fetch_accepts_only_document_content_types() {
+        assert!(outbound_content_type_allowed("text/html; charset=utf-8"));
+        assert!(outbound_content_type_allowed("application/xhtml+xml"));
+        assert!(outbound_content_type_allowed("application/pdf"));
+        assert!(!outbound_content_type_allowed("application/octet-stream"));
+        assert!(!outbound_content_type_allowed("image/svg+xml"));
+    }
+
+    #[tokio::test]
+    async fn outbound_fetch_requires_auth_and_https_before_dns() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = serde_json::json!({"url": "http://example.com/privacy"});
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/outbound/fetch", None, &payload),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let unauthorized_body: serde_json::Value = json_body(unauthorized).await;
+        assert_eq!(unauthorized_body["code"], "unauthorized");
+
+        let insecure = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/outbound/fetch",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(insecure.status(), StatusCode::BAD_REQUEST);
+        let insecure_body: serde_json::Value = json_body(insecure).await;
+        assert_eq!(insecure_body["code"], "invalid_url");
+    }
+
+    #[tokio::test]
+    async fn connect_proxy_requires_basic_auth_and_denies_private_destination() {
+        let state = AppState::seeded(None)
+            .with_egress_proxy_token(Some("secret".to_string()))
+            .with_destination_policy(DestinationPolicy::production());
+        let app = build_app(state);
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .body(Body::empty())
+            .unwrap();
+        let unauthorized = app_request(&app, request).await;
+        assert_eq!(
+            unauthorized.status(),
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED
+        );
+        assert_eq!(
+            unauthorized.headers()[header::PROXY_AUTHENTICATE],
+            "Basic realm=\"wardnet\""
+        );
+
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("localhost:443")
+            .header(
+                header::PROXY_AUTHORIZATION,
+                format!("Basic {}", BASE64.encode("wardnet:secret")),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let denied = app_request(&app, request).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -3753,6 +6524,18 @@ mod tests {
         );
         assert!(html.contains("Skip to content"), "skip link missing");
         assert!(
+            html.contains("id=\"backupBody\""),
+            "backup card container missing"
+        );
+        assert!(
+            html.contains("id=\"backupDrillBtn\""),
+            "restore drill button missing"
+        );
+        assert!(
+            html.contains("Event partitions"),
+            "HASH event-partition KPI tile missing"
+        );
+        assert!(
             html.contains(":focus-visible"),
             "focus-visible styling missing"
         );
@@ -4036,6 +6819,7 @@ mod tests {
             json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
         assert_eq!(health.persistence, "file");
         assert_eq!(health.dnsbl_origin, "dnsbl.example");
+        assert_eq!(health.destination_mode, "production");
 
         let block_route = RouteConfig {
             id: "secure".to_string(),
@@ -4451,6 +7235,24 @@ mod tests {
                 .iter()
                 .any(|path| path == "Dockerfile")
         );
+        assert!(
+            final_readiness
+                .deployment_assets
+                .iter()
+                .any(|path| path == ".github/workflows/release.yml")
+        );
+        assert!(
+            final_readiness
+                .buyer_evidence
+                .iter()
+                .any(|path| path == "docs/runbooks/release.md")
+        );
+        assert!(
+            final_readiness
+                .buyer_evidence
+                .iter()
+                .any(|path| path == "docs/doctoring/signed-release.md")
+        );
 
         let manifest: BuyerEvidenceManifest = json_body(
             app_request(
@@ -4483,6 +7285,12 @@ mod tests {
                 .document_paths
                 .iter()
                 .any(|path| path == "docs/figma/enterprise-product-architecture.md")
+        );
+        assert!(
+            manifest
+                .document_paths
+                .iter()
+                .any(|path| path == "docs/doctoring/signed-release.md")
         );
 
         let support: SupportBundle =
@@ -4904,6 +7712,417 @@ mod tests {
                 .required_endpoints
                 .iter()
                 .any(|endpoint| endpoint.path == "/api/waf/coraza/audit")
+        );
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/waf/engine-status")
+        );
+    }
+
+    async fn spawn_coraza_sidecar_mock() -> String {
+        let sidecar = Router::new().route(
+            "/",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let uri = body
+                    .pointer("/transaction/request/uri")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if uri.contains("crs-probe=1") {
+                    Json(serde_json::json!({
+                        "transaction": {
+                            "is_interrupted": true,
+                            "request": { "uri": uri },
+                            "response": { "http_code": 403 }
+                        },
+                        "messages": [{
+                            "message": "SQL Injection Attack Detected via libinjection",
+                            "data": { "id": 942100, "severity": 2 }
+                        }]
+                    }))
+                    .into_response()
+                } else if uri.contains("matched-only=1") {
+                    Json(serde_json::json!({
+                        "transaction": {
+                            "is_interrupted": false,
+                            "request": { "uri": uri },
+                            "response": { "http_code": 200 }
+                        },
+                        "messages": [{
+                            "message": "CRS match below anomaly threshold",
+                            "data": { "id": 920001, "severity": 2 }
+                        }]
+                    }))
+                    .into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "transaction": {
+                            "is_interrupted": false,
+                            "request": { "uri": uri }
+                        },
+                        "messages": []
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, sidecar).into_future());
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn gateway_blocks_live_request_from_coraza_sidecar() {
+        let sidecar_url = spawn_coraza_sidecar_mock().await;
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(sidecar_url, true));
+        let app = build_app(state);
+
+        let status = json_body::<serde_json::Value>(
+            app_request(&app, empty_request(Method::GET, "/api/waf/engine-status")).await,
+        )
+        .await;
+        assert_eq!(status["mode"], "coraza_sidecar");
+        assert_eq!(status["in_path"], true);
+        assert_eq!(status["fail_closed"], true);
+        assert_eq!(status["sidecar_configured"], true);
+        assert_eq!(status["in_process_configured"], false);
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.proven_engine, "coraza_sidecar");
+        assert!(health.proven_engine_fail_closed);
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "sidecar-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let matched_but_not_interrupted = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?matched-only=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(
+            matched_but_not_interrupted.status(),
+            StatusCode::OK,
+            "a CRS message is evidence, not an engine interruption"
+        );
+
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = json_body(blocked).await;
+        assert_eq!(body["action"], "blocked");
+        assert_eq!(body["engine"], "coraza");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("942100"),
+            "block reason must cite the CRS rule from the sidecar: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_blocks_live_request_from_in_process_libcoraza() {
+        let engine = crate::coraza_inprocess::load_stub_engine();
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::in_process(engine, true));
+        let app = build_app(state);
+
+        let status = json_body::<serde_json::Value>(
+            app_request(&app, empty_request(Method::GET, "/api/waf/engine-status")).await,
+        )
+        .await;
+        assert_eq!(status["mode"], "coraza_in_process");
+        assert_eq!(status["in_path"], true);
+        assert_eq!(status["in_process_configured"], true);
+        assert_eq!(status["sidecar_configured"], false);
+        assert!(status["in_process_rules"].as_i64().unwrap_or(0) >= 1);
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.proven_engine, "coraza_in_process");
+        assert!(health.proven_engine_fail_closed);
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "libcoraza-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = json_body(blocked).await;
+        assert_eq!(body["action"], "blocked");
+        assert_eq!(body["engine"], "coraza");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("942100"),
+            "block reason must cite the CRS rule from libcoraza: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_fail_closes_when_coraza_sidecar_is_unreachable() {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = dead.local_addr().unwrap();
+        drop(dead);
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(format!("http://{addr}/"), true));
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "sidecar-block",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let denied = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = json_body(denied).await;
+        assert_eq!(body["action"], "engine_unavailable");
+        assert!(
+            body["reason"].as_str().unwrap_or("").contains("sidecar"),
+            "unavailable reason must name the sidecar, not leak a URL: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_degrades_when_sidecar_down_without_fail_closed() {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = dead.local_addr().unwrap();
+        drop(dead);
+        let state = AppState::seeded(Some("secret".to_string())).with_proven_engine(
+            ProvenEngineConfig::sidecar(format!("http://{addr}/"), false),
+        );
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "demo",
+                    "path_prefix": "/demo",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        // Fail-open keeps serving, but the outage must leave event evidence.
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hello", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let events: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event["action"] == "engine_unavailable"),
+            "fail-open outage must be recorded: {events:?}"
+        );
+    }
+
+    /// Sidecar mock that records whether forwarded client headers arrived.
+    async fn spawn_header_capturing_sidecar() -> (String, Arc<Mutex<Option<serde_json::Value>>>) {
+        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let capture = captured.clone();
+        let sidecar = Router::new()
+            .route(
+                "/",
+                post(
+                    |State(capture): State<Arc<Mutex<Option<serde_json::Value>>>>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        *capture.lock().await = Some(body.clone());
+                        Json(serde_json::json!({
+                            "transaction": {
+                                "is_interrupted": false
+                            },
+                            "messages": []
+                        }))
+                        .into_response()
+                    },
+                ),
+            )
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, sidecar).into_future());
+        (format!("http://{addr}/"), captured)
+    }
+
+    #[tokio::test]
+    async fn gateway_forwards_allowlisted_headers_to_sidecar() {
+        let (sidecar_url, captured) = spawn_header_capturing_sidecar().await;
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(sidecar_url, true));
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "hdr",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/gateway/app?q=hello")
+            .header("X-Forwarded-For", "198.51.100.9")
+            .header("User-Agent", "sqlmap/1.8")
+            .header("Authorization", "Bearer must-not-forward")
+            .header("Cookie", "session=must-not-forward")
+            .body(Body::empty())
+            .unwrap();
+        let response = app_request(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = captured.lock().await.clone().expect("captured payload");
+        let headers = body.pointer("/transaction/request/headers").unwrap();
+        let names: Vec<&str> = headers
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"user-agent"), "{names:?}");
+        assert!(
+            !names.contains(&"authorization"),
+            "credentials must not reach the engine: {names:?}"
+        );
+        assert!(
+            !names.contains(&"cookie"),
+            "cookie credentials must not reach the engine: {names:?}"
+        );
+        let ua = headers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "user-agent")
+            .unwrap();
+        assert_eq!(ua["value"], "sqlmap/1.8");
+    }
+
+    #[tokio::test]
+    async fn monitor_route_records_engine_hit_evidence() {
+        let sidecar_url = spawn_coraza_sidecar_mock().await;
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_proven_engine(ProvenEngineConfig::sidecar(sidecar_url, true));
+        let app = build_app(state);
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "watch",
+                    "path_prefix": "/app",
+                    "upstream": "mock://x",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+
+        // crs-probe=1 triggers the mock's 942100 interruption, but the route
+        // only monitors: the hit must be recorded without enforcement.
+        let response = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?crs-probe=1", "198.51.100.9"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert!(
+            events.iter().any(|event| event["action"] == "engine_hit"
+                && event["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("942100")),
+            "monitor routes keep CRS evidence: {events:?}"
         );
     }
 
@@ -5338,6 +8557,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_taxii_bearer_is_bound_to_one_origin_before_dns() {
+        let state = AppState::seeded(None).with_taxii_bearer(
+            Some("synthetic-taxii-token".to_string()),
+            Some("https://taxii.example".to_string()),
+        );
+        let error = fetch_taxii_objects(
+            &state,
+            "https://attacker.invalid/collections/c/objects/",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("registry bearer must not cross its configured origin");
+        assert!(error.contains("outside the configured bearer origin"));
+    }
+
+    #[tokio::test]
     async fn opencti_observable_ingest_updates_threats_dnsbl_and_feed_freshness() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(
@@ -5553,6 +8790,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                snapshot_version: 0,
             },
             AppConfig {
                 admin_token: None,
@@ -5560,7 +8798,8 @@ mod tests {
                 dnsbl_origin: "dnsbl.local".to_string(),
                 event_limit: 20,
             },
-        );
+        )
+        .with_destination_policy(DestinationPolicy::development());
         let app = build_app(state);
 
         let no_route = app_request(&app, empty_request(Method::GET, "/gateway/none")).await;
@@ -5620,6 +8859,47 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("upstream must use http://"));
+    }
+
+    #[tokio::test]
+    async fn create_route_accepts_metadata_upstream_but_runtime_fails_closed() {
+        let app = build_app(AppState::seeded(None));
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                None,
+                &serde_json::json!({
+                    "id": "pivot",
+                    "path_prefix": "/pivot",
+                    "upstream": "http://169.254.169.254/",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let error = proxy_request(
+            &AppState::seeded(None),
+            &RouteConfig {
+                id: "pivot".to_string(),
+                path_prefix: "/pivot".to_string(),
+                upstream: "http://169.254.169.254/".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/pivot",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect_err("runtime egress must reject metadata addresses before sending");
+        assert!(error.contains("denied address class"), "{error}");
     }
 
     fn temp_state_path(name: &str) -> PathBuf {
@@ -6428,6 +9708,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                snapshot_version: 0,
             },
             AppConfig {
                 admin_token: None,
@@ -6615,6 +9896,16 @@ mod tests {
                 event_limit: 25,
                 credentials_source: "none".to_string(),
                 admin_auth_configured: false,
+                proven_engine: "ingest_hints_only".to_string(),
+                proven_engine_fail_closed: false,
+                destination_mode: "production".to_string(),
+                outbox: "disabled".to_string(),
+                outbox_pending: 0,
+                outbox_leased: 0,
+                outbox_dead_letter: 0,
+                outbox_oldest_age_seconds: None,
+                backup: "disabled".to_string(),
+                event_partitions: 0,
             }
         );
 
@@ -6625,6 +9916,441 @@ mod tests {
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
+        assert_eq!(
+            AppState::seeded(None).health_status().destination_mode,
+            "development"
+        );
+        assert_eq!(state.health_status().outbox, "disabled");
+    }
+
+    #[tokio::test]
+    async fn outbox_api_is_admin_authenticated_and_disabled_without_postgres() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let denied = app_request(&app, empty_request(Method::GET, "/api/outbox")).await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/outbox", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["status"], "disabled");
+        assert_eq!(
+            body["limit"].as_u64(),
+            Some(AppConfig::DEFAULT_EVENT_LIMIT as u64)
+        );
+        assert_eq!(body["messages"], serde_json::json!([]));
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.outbox, "disabled");
+        assert_eq!(health.outbox_pending, 0);
+
+        let replayed = app_request(
+            &app,
+            authed_empty_request(Method::POST, "/api/outbox/missing/replay", "secret"),
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let item = app_request(
+            &app,
+            authed_empty_request(Method::GET, "/api/outbox/missing", "secret"),
+        )
+        .await;
+        assert_eq!(item.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let denied_backup = app_request(&app, empty_request(Method::GET, "/api/backup")).await;
+        assert_eq!(denied_backup.status(), StatusCode::UNAUTHORIZED);
+        let backup: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/backup", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(backup["status"], "disabled");
+        assert_eq!(backup["artifact"], serde_json::Value::Null);
+        assert_eq!(health.backup, "disabled");
+        let drill = app_request(
+            &app,
+            authed_empty_request(Method::POST, "/api/backup/drill", "secret"),
+        )
+        .await;
+        assert_eq!(drill.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn backup_restore_endpoint_completes_under_persist_lock_and_audits_the_restore() {
+        let Some(url) = control_plane_test_database_url() else {
+            return;
+        };
+        let tenant = unique_test_tenant("restore-endpoint");
+        let state = AppState::load_postgres_for_tenant(
+            AppConfig::memory(Some("secret".to_string())),
+            &url,
+            &tenant,
+        )
+        .await
+        .expect("load postgres state");
+        let plane = Arc::clone(state.control_plane.as_ref().expect("postgres plane"));
+        let backup = plane.logical_backup().await.expect("backup artifact");
+        let app = build_app(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/backup", Some("secret"), &backup),
+            ),
+        )
+        .await
+        .expect("restore handler must not deadlock");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["status"], "restored");
+        assert_eq!(body["payload_hash"], backup.payload_hash);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "restore_backup"
+                && entry.resource == "control_plane_backup"
+                && entry.resource_id == backup.payload_hash
+        }));
+    }
+
+    #[tokio::test]
+    async fn create_route_does_not_require_live_dns_but_runtime_policy_still_applies() {
+        let denied_app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_destination_policy(DestinationPolicy::production()),
+        );
+        let created_without_lookup = app_request(
+            &denied_app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "internal-svc",
+                    "path_prefix": "/internal",
+                    "upstream": "http://10.1.2.3:8080/",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created_without_lookup.status(), StatusCode::CREATED);
+
+        let error = proxy_request(
+            &AppState::seeded(None).with_destination_policy(DestinationPolicy::production()),
+            &RouteConfig {
+                id: "internal-svc".to_string(),
+                path_prefix: "/internal".to_string(),
+                upstream: "http://10.1.2.3:8080/".to_string(),
+                mode: EnforcementMode::Block,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/internal",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect_err("runtime egress must enforce destination policy");
+        assert!(
+            error.contains("not a default http/https port")
+                || error.contains("denied address class"),
+            "{error}"
+        );
+
+        let allowlisted = DestinationPolicy::production()
+            .with_lists("10.0.0.0/8", "")
+            .expect("valid CIDR allowlist");
+        let allowed_app = build_app(
+            AppState::seeded(Some("secret".to_string())).with_destination_policy(allowlisted),
+        );
+        let created = app_request(
+            &allowed_app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "internal-svc",
+                    "path_prefix": "/internal",
+                    "upstream": "http://10.1.2.3:8080/",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let health: HealthStatus =
+            json_body(app_request(&allowed_app, empty_request(Method::GET, "/healthz")).await)
+                .await;
+        assert_eq!(health.destination_mode, "production");
+    }
+
+    struct PinMapResolver(HashMap<String, Vec<IpAddr>>);
+
+    impl HostResolver for PinMapResolver {
+        fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+            self.0
+                .get(host)
+                .cloned()
+                .ok_or_else(|| format!("no fixture for {host}"))
+        }
+    }
+
+    struct CountingResolver {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        ips: Vec<IpAddr>,
+    }
+
+    impl HostResolver for CountingResolver {
+        fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.ips.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn egress_operator_api_enforces_rbac_reports_status_and_audits_evaluation() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("reader:r:readonly,writer:w:write"))
+            .with_egress_proxy_token(Some("proxy-secret".to_string()))
+            .with_egress_dns_listener_enabled(true)
+            .with_resolver(Arc::new(CountingResolver {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                ips: vec!["93.184.216.34".parse().unwrap()],
+            }));
+        let app = build_app(state);
+
+        assert_eq!(
+            app_request(&app, empty_request(Method::GET, "/api/egress"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let status: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/egress", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["destination_mode"], "development");
+        assert_eq!(status["proxy_auth_configured"], true);
+        assert_eq!(status["dns_listener_enabled"], true);
+        assert_eq!(status["cached_host_count"], 0);
+        assert!(status.get("proxy_token").is_none());
+
+        let request = serde_json::json!({"url": "https://camoufox.example.test/"});
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("reader"), &request)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let unknown_field = serde_json::json!({
+            "url": "https://camoufox.example.test/",
+            "bypass_policy": true
+        });
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", None, &unknown_field)
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("writer"), &unknown_field,),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/egress",
+                    Some("writer"),
+                    &serde_json::json!({"url": "not-a-url"}),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let evaluated: serde_json::Value = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/egress", Some("writer"), &request),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(evaluated["allowed"], true);
+        assert_eq!(evaluated["host"], "camoufox.example.test");
+        assert_eq!(evaluated["addresses"], serde_json::json!(["93.184.216.34"]));
+
+        let status: serde_json::Value = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/egress", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["cached_host_count"], 1);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "reader"),
+            )
+            .await,
+        )
+        .await;
+        assert!(audit.iter().any(|entry| {
+            entry.action == "evaluate_egress_destination"
+                && entry.resource_id == "camoufox.example.test"
+                && entry.actor == "w"
+        }));
+
+        let unavailable = build_app(
+            AppState::seeded(None)
+                .with_admin_tokens(parse_admin_tokens("writer:w:write"))
+                .with_resolver(Arc::new(PinMapResolver(HashMap::new()))),
+        );
+        assert_eq!(
+            app_request(
+                &unavailable,
+                json_request(
+                    Method::POST,
+                    "/api/egress",
+                    Some("writer"),
+                    &serde_json::json!({"url": "https://unavailable.example.test/"}),
+                ),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_clients_reuse_the_bounded_approved_dns_cache() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = AppState::seeded(None).with_resolver(Arc::new(CountingResolver {
+            calls: Arc::clone(&calls),
+            ips: vec!["93.184.216.34".parse().unwrap()],
+        }));
+
+        state
+            .outbound_client("https://cache-test.invalid/")
+            .await
+            .unwrap();
+        state
+            .outbound_client("https://cache-test.invalid/next")
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sidecar_destination_is_preflighted_before_listener_bind() {
+        let state = AppState::seeded(None)
+            .with_destination_policy(DestinationPolicy::production())
+            .with_proven_engine(ProvenEngineConfig::sidecar(
+                "http://169.254.169.254/".to_string(),
+                true,
+            ));
+        let error = validate_sidecar_destination(&state).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("CORAZA_WAF_URL"));
+        assert!(error.to_string().contains("denied address class"));
+    }
+
+    #[tokio::test]
+    async fn proxy_request_connects_to_pinned_policy_addresses() {
+        let upstream_app = Router::new().route("/", get(|| async { (StatusCode::OK, "pinned") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream_app).into_future());
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "pin-test.invalid".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        );
+        let state = AppState::seeded(None).with_resolver(Arc::new(PinMapResolver(answers)));
+
+        let response = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "pin".to_string(),
+                path_prefix: "/pin".to_string(),
+                upstream: format!("http://pin-test.invalid:{}", addr.port()),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/pin",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .expect("pinned hostname must connect to the evaluated loopback address");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64).await.unwrap();
+        assert_eq!(&bytes[..], b"pinned");
+    }
+
+    #[tokio::test]
+    async fn outbound_http_fails_closed_without_a_preauthorized_pin() {
+        let error = outbound_http_client(Arc::new(destination::DestinationPins::default()))
+            .get("https://pin-test.invalid/")
+            .send()
+            .await
+            .expect_err("unpinned hostname must not hit OS DNS");
+        let mut message = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(err) = source {
+            message.push(' ');
+            message.push_str(&err.to_string());
+            source = err.source();
+        }
+        assert!(
+            message.contains("not pre-authorized"),
+            "fail-closed pin resolver must surface in the reqwest error: {message}"
+        );
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
@@ -6821,6 +10547,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn clearfolio_outbox_submit_times_out() {
+        let slow = Router::new().route(
+            "/api/v1/convert/jobs",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                (
+                    StatusCode::ACCEPTED,
+                    [("content-type", "application/json")],
+                    r#"{"jobId":"J-SLOW","status":"PENDING"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, slow).into_future());
+
+        let state =
+            AppState::seeded(None).with_destination_policy(DestinationPolicy::development());
+        let error = execute_clearfolio_submit(
+            &state,
+            &clearfolio_test_config(&format!("http://{addr}")),
+            "evidence-manifest.json".into(),
+            b"{}".to_vec(),
+        )
+        .await
+        .expect_err("slow clearfolio dispatch must time out");
+        assert!(matches!(error, outbox::DispatchError::Transient(_)));
+    }
+
     fn soc_test_event() -> SecurityEvent {
         SecurityEvent {
             id: 1,
@@ -6837,11 +10593,13 @@ mod tests {
     fn state_with_event_and_llm(base_url: &str) -> AppState {
         let mut data = AppData::seeded();
         data.events.push(soc_test_event());
-        AppState::new(data, AppConfig::memory(None)).with_soc_llm(Some(SocLlmConfig {
-            base_url: base_url.to_string(),
-            token: "test-token".to_string(),
-            model: "contextual-orchestrator".to_string(),
-        }))
+        AppState::new(data, AppConfig::memory(None))
+            .with_destination_policy(DestinationPolicy::development())
+            .with_soc_llm(Some(SocLlmConfig {
+                base_url: base_url.to_string(),
+                token: "test-token".to_string(),
+                model: "contextual-orchestrator".to_string(),
+            }))
     }
 
     async fn spawn_chat_mock(response: &'static str) -> std::net::SocketAddr {
@@ -7048,5 +10806,41 @@ mod tests {
             .status(),
             StatusCode::BAD_GATEWAY
         );
+    }
+
+    #[tokio::test]
+    async fn soc_outbox_dispatch_times_out() {
+        let slow = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"choices":[{"message":{"content":"slow"}}]}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, slow).into_future());
+
+        let state =
+            AppState::seeded(None).with_destination_policy(DestinationPolicy::development());
+        let error = match execute_soc_analyze(
+            &state,
+            &SocLlmConfig {
+                base_url: format!("http://{addr}"),
+                token: "test-token".into(),
+                model: "contextual-orchestrator".into(),
+            },
+            &soc_test_event(),
+        )
+        .await
+        {
+            Ok(_) => panic!("slow SOC dispatch must time out"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, outbox::DispatchError::Transient(_)));
     }
 }

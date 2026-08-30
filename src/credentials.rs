@@ -11,6 +11,12 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 /// Well-known secret keys loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+pub const CRED_CONTROL_PLANE_URL: &str = "control_plane_url";
+pub const CRED_EGRESS_PROXY_TOKEN: &str = "egress_proxy_token";
+pub const CRED_DESTINATION_ALLOWLIST: &str = "destination_allowlist";
+pub const CRED_DESTINATION_DENYLIST: &str = "destination_denylist";
+pub const CRED_SOC_LLM_TOKEN: &str = "soc_llm_token";
+pub const CRED_TAXII_BEARER: &str = "taxii_bearer";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -20,6 +26,8 @@ pub enum CredentialSource {
     File,
     /// Secrets came only from env bootstrap (`ADMIN_TOKEN` / `ADMIN_TOKENS`).
     Env,
+    /// Secrets came from both the credentials file and env bootstrap.
+    Mixed,
     /// No admin secrets configured.
     #[default]
     None,
@@ -30,6 +38,7 @@ impl CredentialSource {
         match self {
             Self::File => "file",
             Self::Env => "env",
+            Self::Mixed => "mixed",
             Self::None => "none",
         }
     }
@@ -73,6 +82,10 @@ impl CredentialRegistry {
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
+        env_control_plane_url: Option<String>,
+        env_egress_proxy_token: Option<String>,
+        env_destination_allowlist: Option<String>,
+        env_destination_denylist: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         let mut from_file = false;
@@ -88,7 +101,16 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_CONTROL_PLANE_URL,
+                        CRED_EGRESS_PROXY_TOKEN,
+                        CRED_DESTINATION_ALLOWLIST,
+                        CRED_DESTINATION_DENYLIST,
+                        CRED_SOC_LLM_TOKEN,
+                        CRED_TAXII_BEARER,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
@@ -120,16 +142,55 @@ impl CredentialRegistry {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             from_env = true;
         }
+        if !values.contains_key(CRED_CONTROL_PLANE_URL)
+            && let Some(url) = env_control_plane_url.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_CONTROL_PLANE_URL.to_string(), url);
+            from_env = true;
+        }
+        if !values.contains_key(CRED_EGRESS_PROXY_TOKEN)
+            && let Some(token) = env_egress_proxy_token.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_EGRESS_PROXY_TOKEN.to_string(), token);
+            from_env = true;
+        }
+        for (key, value) in [
+            (CRED_DESTINATION_ALLOWLIST, env_destination_allowlist),
+            (CRED_DESTINATION_DENYLIST, env_destination_denylist),
+        ] {
+            if !values.contains_key(key)
+                && let Some(value) = value.filter(|value| !value.trim().is_empty())
+            {
+                values.insert(key.to_string(), value);
+                from_env = true;
+            }
+        }
 
-        let source = if from_file {
-            CredentialSource::File
-        } else if from_env {
-            CredentialSource::Env
-        } else {
-            CredentialSource::None
+        let source = match (from_file, from_env) {
+            (true, true) => CredentialSource::Mixed,
+            (true, false) => CredentialSource::File,
+            (false, true) => CredentialSource::Env,
+            (false, false) => CredentialSource::None,
         };
 
         Ok(Self { values, source })
+    }
+
+    /// Fill a missing secret from bootstrap transport. No-op when the key is
+    /// already present or the value is empty. Never logs the value.
+    pub fn load_optional_secret(&mut self, name: &str, env_value: Option<String>) {
+        if self.values.contains_key(name) {
+            return;
+        }
+        let Some(value) = env_value.filter(|value| !value.is_empty()) else {
+            return;
+        };
+        self.values.insert(name.to_string(), value);
+        self.source = match self.source {
+            CredentialSource::File => CredentialSource::Mixed,
+            CredentialSource::None => CredentialSource::Env,
+            source => source,
+        };
     }
 }
 
@@ -159,6 +220,10 @@ mod tests {
             None,
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
+            None,
+            Some("proxy-secret".to_string()),
+            Some("public.example".to_string()),
+            Some("blocked.example".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -167,15 +232,68 @@ mod tests {
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
         );
+        assert_eq!(
+            registry.get_credential(CRED_EGRESS_PROXY_TOKEN),
+            Some("proxy-secret")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_DESTINATION_ALLOWLIST),
+            Some("public.example")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_DESTINATION_DENYLIST),
+            Some("blocked.example")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
-        let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
+        let registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            None,
+            Some(String::new()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
+    }
+
+    #[test]
+    fn load_optional_secret_fills_missing_keys_only() {
+        let mut registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            Some("secret".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("llm-token".into()));
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("ignored".into()));
+        registry.load_optional_secret(CRED_TAXII_BEARER, Some(String::new()));
+        assert_eq!(
+            registry.get_credential(CRED_SOC_LLM_TOKEN),
+            Some("llm-token")
+        );
+        assert!(registry.get_credential(CRED_TAXII_BEARER).is_none());
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("secret"));
+    }
+
+    #[test]
+    fn optional_env_secret_marks_file_registry_mixed() {
+        let mut registry = CredentialRegistry {
+            values: HashMap::from([(CRED_ADMIN_TOKEN.to_string(), "file-secret".into())]),
+            source: CredentialSource::File,
+        };
+        registry.load_optional_secret(CRED_SOC_LLM_TOKEN, Some("env-secret".into()));
+        assert_eq!(registry.source(), CredentialSource::Mixed);
     }
 
     #[test]
@@ -202,6 +320,10 @@ mod tests {
             Some(&path),
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -232,9 +354,13 @@ mod tests {
             Some(&path),
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
-        assert_eq!(registry.source(), CredentialSource::File);
+        assert_eq!(registry.source(), CredentialSource::Mixed);
         assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("file-only"));
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
@@ -258,6 +384,10 @@ mod tests {
             Some(&path),
             Some("env-secret".to_string()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -280,7 +410,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
+        let err =
+            CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None, None, None, None)
+                .unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
     }

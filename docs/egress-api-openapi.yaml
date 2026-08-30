@@ -1,0 +1,82 @@
+openapi: 3.1.0
+info:
+  title: Wardnet egress boundary API
+  version: 0.1.0
+paths:
+  /api/egress:
+    get:
+      summary: Read non-secret egress proxy and DNS resolver status
+      security: [{ AdminToken: [] }]
+      responses:
+        '200':
+          description: Egress boundary status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - destination_mode
+                  - proxy_auth_configured
+                  - dns_listener_enabled
+                  - cached_host_count
+                  - dns_cache_ttl_seconds
+                properties:
+                  destination_mode:
+                    type: string
+                  proxy_auth_configured:
+                    type: boolean
+                  dns_listener_enabled:
+                    type: boolean
+                  cached_host_count:
+                    type: integer
+                    minimum: 0
+                  dns_cache_ttl_seconds:
+                    type: integer
+                    minimum: 0
+        '401': { description: Missing or invalid admin credential }
+    post:
+      summary: Evaluate and pin a destination under the active policy
+      security: [{ AdminToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+      responses:
+        '200':
+          description: Destination allowed, DNS-pinned, persisted and audited
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [allowed, host, addresses, reason]
+                properties:
+                  allowed:
+                    type: boolean
+                  host:
+                    type: string
+                  addresses:
+                    type: array
+                    items:
+                      type: string
+                  reason:
+                    type: string
+        '400': { description: Structurally invalid destination URL }
+        '401': { description: Missing or invalid admin credential }
+        '403': { description: Read-only principal or destination denied }
+        '503': { description: Destination DNS evaluation unavailable }
+        '504': { description: Destination DNS evaluation timed out }
+        '500': { description: Audit persistence failed and was rolled back }
+components:
+  securitySchemes:
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token

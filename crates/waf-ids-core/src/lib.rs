@@ -22,6 +22,9 @@ pub struct AppData {
     pub commercial: CommercialProfile,
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
+    /// Postgres optimistic-concurrency token. File/memory ignore it.
+    #[serde(default, skip)]
+    pub snapshot_version: u64,
 }
 
 impl AppData {
@@ -56,6 +59,7 @@ impl AppData {
             next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
+            snapshot_version: 0,
         }
     }
 }
@@ -1123,12 +1127,16 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
             "Dockerfile".to_string(),
             "deploy/docker-compose.yml".to_string(),
             "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string(),
+            ".github/workflows/release.yml".to_string(),
         ],
         buyer_evidence: vec![
             "docs/commercial/20b-krw-sale-readiness.md".to_string(),
             "docs/commercial/buyer-due-diligence.md".to_string(),
             "docs/security/threat-model.md".to_string(),
             "docs/security/compliance-mapping.md".to_string(),
+            "docs/runbooks/release.md".to_string(),
+            "docs/doctoring/signed-release.md".to_string(),
+            "docs/papers/nist-sp-800-218-ssdf.pdf".to_string(),
         ],
     }
 }
@@ -1165,6 +1173,9 @@ pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenc
             "docs/product-design/enterprise-operator-workflows.md".to_string(),
             "docs/figma/enterprise-product-architecture.md".to_string(),
             "docs/ponytail/2026-07-02-complexity-audit.md".to_string(),
+            "docs/runbooks/release.md".to_string(),
+            "docs/doctoring/signed-release.md".to_string(),
+            "docs/papers/nist-sp-800-218-ssdf.pdf".to_string(),
         ],
         deployment_assets: readiness.deployment_assets,
     }
@@ -1177,7 +1188,7 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "GET",
             "/healthz",
             "application/json",
-            "runtime health, persistence mode, DNSBL origin, and event retention limit",
+            "runtime health, persistence mode, DNSBL origin, event retention, and HASH event partitions",
             true,
         ),
         buyer_evidence_endpoint(
@@ -1258,6 +1269,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "/api/waf/coraza/audit",
             "application/json",
             "Coraza/OWASP CRS WAF audit JSON/NDJSON ingest into SOC security events (admin-auth)",
+            false,
+        ),
+        buyer_evidence_endpoint(
+            "waf_engine_status",
+            "GET",
+            "/api/waf/engine-status",
+            "application/json",
+            "in-path Coraza libcoraza/sidecar vs ingest-hint enforcement status (no library path or sidecar URL)",
             false,
         ),
         buyer_evidence_endpoint(
@@ -1722,5 +1741,15 @@ mod tests {
         assert_eq!(data.audit_logs.len(), 2);
         assert_eq!(data.next_audit_log_id, 3);
         assert_eq!(data.audit_logs[0].resource_id, "edge");
+    }
+
+    #[test]
+    fn snapshot_version_is_runtime_only_in_serialized_state() {
+        let mut data = AppData::seeded();
+        data.snapshot_version = 42;
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(!json.contains("snapshot_version"));
+        let restored: AppData = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.snapshot_version, 0);
     }
 }

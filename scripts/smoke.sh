@@ -34,6 +34,7 @@ start_server() {
       WAF_IDS_STATE_PATH="$STATE_FILE" \
       DNSBL_ORIGIN="dnsbl.test" \
       EVENT_LIMIT="5" \
+      CONTROL_PLANE_DATABASE_URL="" \
       cargo run --quiet
   ) >"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"
@@ -73,12 +74,35 @@ PY
 start_server
 
 health="$(curl -fsS "$BASE_URL/healthz")"
+echo "healthz body: $health"
 assert_json_field "$health" 'data["status"] == "ok"'
 assert_json_field "$health" 'data["persistence"] == "file"'
 assert_json_field "$health" 'data["dnsbl_origin"] == "dnsbl.test"'
 assert_json_field "$health" 'data["event_limit"] == 5'
+assert_json_field "$health" 'data["proven_engine"] == "ingest_hints_only"'
+assert_json_field "$health" 'data["proven_engine_fail_closed"] is False'
+assert_json_field "$health" 'data["destination_mode"] == "development"'
+assert_json_field "$health" 'data["outbox"] == "disabled"'
+assert_json_field "$health" 'data["outbox_pending"] == 0'
+assert_json_field "$health" 'data["event_partitions"] == 0'
 
-curl -fsS "$BASE_URL/admin" | grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway"
+engine_status="$(curl -fsS "$BASE_URL/api/waf/engine-status")"
+assert_json_field "$engine_status" 'data["mode"] == "ingest_hints_only"'
+assert_json_field "$engine_status" 'data["in_path"] is False'
+
+admin_html="$(curl -fsS "$BASE_URL/admin")"
+echo "admin body bytes: ${#admin_html}"
+case "$admin_html" in
+  *"ContextualWisdomLab WAF/IDS/AI SOC Gateway"*) ;;
+  *)
+    echo "admin console body missing designed product title" >&2
+    exit 1
+    ;;
+esac
+readiness="$(curl -fsS "$BASE_URL/api/commercial/readiness")"
+echo "readiness body: $readiness"
+assert_json_field "$readiness" 'data["target_sale_value_krw"] == 2000000000'
+assert_json_field "$readiness" '"readiness_level" in data'
 
 unauthorized_code="$(
   curl -sS -o /dev/null -w '%{http_code}' \
@@ -155,6 +179,7 @@ assert_json_field "$kpis" 'data["stale_threat_feed_count"] == 0'
 assert_json_field "$kpis" 'data["audit_log_count"] >= 3'
 
 readiness="$(curl -fsS "$BASE_URL/api/commercial/readiness")"
+echo "readiness sale-ready body: $readiness"
 assert_json_field "$readiness" 'data["target_sale_value_krw"] == 2000000000'
 assert_json_field "$readiness" 'data["ready_for_enterprise_sale"] is True'
 assert_json_field "$readiness" 'data["readiness_level"] == "sale_ready"'
@@ -187,7 +212,7 @@ assert_json_field "$support_bundle" 'data["kpis"]["fresh_threat_feed_count"] == 
 assert_json_field "$support_bundle" 'data["audit_log_count"] >= 3'
 assert_json_field "$support_bundle" 'data["threat_feed_freshness"][0]["stale"] is False'
 
-audit_logs="$(curl -fsS "$BASE_URL/api/audit-logs")"
+audit_logs="$(curl -fsS -H "x-admin-token: $ADMIN_TOKEN_VALUE" "$BASE_URL/api/audit-logs")"
 assert_json_field "$audit_logs" 'any(log["action"] == "upsert_route" and log["resource_id"] == "block" for log in data)'
 assert_json_field "$audit_logs" 'any(log["action"] == "update_commercial_license" and log["resource_id"] == "cwlab-enterprise" for log in data)'
 assert_json_field "$audit_logs" 'any(log["action"] == "import_threat_feed" and log["resource_id"] == "misp-seoul" for log in data)'
@@ -212,7 +237,7 @@ license="$(curl -fsS "$BASE_URL/api/commercial/license")"
 assert_json_field "$license" 'data["license_status"] == "active"'
 feeds="$(curl -fsS "$BASE_URL/api/threat-feeds")"
 assert_json_field "$feeds" 'len(data) == 1'
-audit_logs="$(curl -fsS "$BASE_URL/api/audit-logs")"
+audit_logs="$(curl -fsS -H "x-admin-token: $ADMIN_TOKEN_VALUE" "$BASE_URL/api/audit-logs")"
 assert_json_field "$audit_logs" 'len(data) >= 3'
 
 echo "smoke ok: $BASE_URL with state $STATE_FILE"
