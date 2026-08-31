@@ -210,3 +210,41 @@ fn oversized_route_id_is_bounded_without_poisoning_the_batch() {
     );
     assert_eq!(events[1].route_id.as_deref(), Some("checkout"));
 }
+
+#[test]
+fn oversized_route_ids_keep_distinct_exported_identities() {
+    let shared_prefix = "r".repeat(MAX_ROUTE_ID_CHARS + 8);
+    let first = serde_json::json!({
+        "id": 15,
+        "timestamp_unix": 1_723_456_794_u64,
+        "client_ip": "203.0.113.9",
+        "route_id": format!("{shared_prefix}-alpha"),
+        "action": "monitor",
+        "reason": "rule match",
+        "score": 55,
+        "path": "/first"
+    })
+    .to_string();
+    let second = serde_json::json!({
+        "id": 16,
+        "timestamp_unix": 1_723_456_795_u64,
+        "client_ip": "203.0.113.9",
+        "route_id": format!("{shared_prefix}-beta"),
+        "action": "monitor",
+        "reason": "rule match",
+        "score": 55,
+        "path": "/second"
+    })
+    .to_string();
+
+    let events = read_events(Cursor::new(format!("{first}\n{second}\n")))
+        .expect("oversized route ids stay exportable");
+    let first_route = events[0].route_id.as_deref().expect("first route id");
+    let second_route = events[1].route_id.as_deref().expect("second route id");
+
+    assert_eq!(first_route.chars().count(), MAX_ROUTE_ID_CHARS);
+    assert_eq!(second_route.chars().count(), MAX_ROUTE_ID_CHARS);
+    assert_ne!(first_route, second_route);
+    assert!(first_route.contains('~'));
+    assert!(second_route.contains('~'));
+}

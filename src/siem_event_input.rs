@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::net::IpAddr;
 use waf_ids_core::MAX_ROUTE_ID_CHARS;
@@ -213,13 +214,36 @@ fn bounded_route_id(value: &str, line_number: usize) -> Result<String, String> {
     if value.is_empty() {
         return Err(format!("line {line_number}: route_id must not be empty"));
     }
-    let sanitized = sanitize_text(value, MAX_ROUTE_ID_CHARS);
+    let sanitized = sanitize_text(value, usize::MAX);
     if sanitized.is_empty() {
         return Err(format!(
             "line {line_number}: route_id contains no exportable text"
         ));
     }
-    Ok(sanitized)
+    if sanitized.chars().count() <= MAX_ROUTE_ID_CHARS {
+        return Ok(sanitized);
+    }
+
+    let suffix = route_id_suffix(value);
+    let prefix_chars = MAX_ROUTE_ID_CHARS.saturating_sub(suffix.chars().count() + 1);
+    Ok(format!(
+        "{}~{suffix}",
+        truncate_chars(&sanitized, prefix_chars)
+    ))
+}
+
+fn route_id_suffix(value: &str) -> String {
+    // Distinguish oversized legacy IDs that share the same visible prefix
+    // without letting the exported identifier exceed the shared route limit.
+    let mut hash = 0x811c9dc5_u32;
+    for byte in value.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+
+    let mut output = String::with_capacity(8);
+    write!(&mut output, "{hash:08x}").expect("write hash");
+    output
 }
 
 fn sanitize_path(value: &str, line_number: usize) -> Result<String, String> {
