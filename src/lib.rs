@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -125,12 +125,10 @@ impl AppState {
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
+            http: outbound_http_client_builder()
                 .build()
                 .expect("failed to build no-redirect outbound client"),
-            feed_http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
+            feed_http: outbound_http_client_builder()
                 .build()
                 .expect("failed to build no-redirect feed client"),
             admin_token: config.admin_token,
@@ -289,6 +287,10 @@ impl AppState {
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
         }
     }
+}
+
+fn outbound_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
 }
 
 #[derive(Debug, Clone)]
@@ -654,17 +656,23 @@ async fn clearfolio_submit(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
-    if let Err(message) =
-        validate_outbound_url_resolution(&endpoint, "Clearfolio submit URL", cfg!(test)).await
+    let client = match validated_outbound_http_client(
+        &state.http,
+        &endpoint,
+        "Clearfolio submit URL",
+        cfg!(test),
+    )
+    .await
     {
-        return error(StatusCode::BAD_GATEWAY, message);
-    }
+        Ok(client) => client,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(filename)
         .mime_str("text/plain")
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
-    let mut request = state.http.post(endpoint).multipart(form);
+    let mut request = client.post(endpoint).multipart(form);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -704,12 +712,18 @@ async fn clearfolio_status(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
-    if let Err(message) =
-        validate_outbound_url_resolution(&endpoint, "Clearfolio status URL", cfg!(test)).await
+    let client = match validated_outbound_http_client(
+        &state.http,
+        &endpoint,
+        "Clearfolio status URL",
+        cfg!(test),
+    )
+    .await
     {
-        return error(StatusCode::BAD_GATEWAY, message);
-    }
-    let mut request = state.http.get(endpoint);
+        Ok(client) => client,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    let mut request = client.get(endpoint);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -878,13 +892,18 @@ async fn soc_analyze(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
     };
-    if let Err(message) =
-        validate_outbound_url_resolution(&endpoint, "SOC LLM endpoint", cfg!(test)).await
+    let client = match validated_outbound_http_client(
+        &state.http,
+        &endpoint,
+        "SOC LLM endpoint",
+        cfg!(test),
+    )
+    .await
     {
-        return error(StatusCode::BAD_GATEWAY, message);
-    }
-    let response = state
-        .http
+        Ok(client) => client,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    let response = client
         .post(endpoint)
         .bearer_auth(&config.token)
         .json(&body)
@@ -1707,10 +1726,11 @@ async fn fetch_taxii_objects(
             allow_loopback_destination: cfg!(test),
         },
     )?;
-    validate_outbound_url_resolution(&parsed, "TAXII objects URL", cfg!(test)).await?;
+    let client =
+        validated_outbound_http_client(&state.feed_http, &parsed, "TAXII objects URL", cfg!(test))
+            .await?;
 
-    let mut request = state
-        .feed_http
+    let mut request = client
         .get(parsed)
         .header(
             "Accept",
@@ -2306,9 +2326,10 @@ async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
             allow_loopback_destination: cfg!(test),
         },
     )?;
-    validate_outbound_url_resolution(&parsed, "KEV catalog URL", cfg!(test)).await?;
-    let response = state
-        .feed_http
+    let client =
+        validated_outbound_http_client(&state.feed_http, &parsed, "KEV catalog URL", cfg!(test))
+            .await?;
+    let response = client
         .get(parsed)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
@@ -2392,33 +2413,49 @@ fn validate_outbound_http_url(
 
 /// Revalidates a parsed outbound hostname at request time so DNS names cannot
 /// resolve into denied private or loopback address space after initial parsing.
-async fn validate_outbound_url_resolution(
+async fn validated_outbound_http_client(
+    shared_client: &reqwest::Client,
     url: &reqwest::Url,
     label: &str,
     allow_loopback_destination: bool,
-) -> Result<(), String> {
+) -> Result<reqwest::Client, String> {
     let host = url
         .host_str()
         .ok_or_else(|| format!("{label} host is required"))?;
     let host = host.trim_end_matches('.');
     if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
+        return Ok(shared_client.clone());
     }
     if host.eq_ignore_ascii_case("localhost") {
-        return validate_outbound_host(host, label, allow_loopback_destination);
+        validate_outbound_host(host, label, allow_loopback_destination)?;
+        return Ok(shared_client.clone());
     }
     let port = url
         .port_or_known_default()
         .ok_or_else(|| format!("{label} port is required"))?;
     let addresses = lookup_host((host, port))
         .await
-        .map_err(|error| format!("{label} host {host} resolution failed: {error}"))?;
+        .map_err(|error| format!("{label} host {host} resolution failed: {error}"))?
+        .collect::<Vec<_>>();
+    pinned_outbound_http_client(host, label, allow_loopback_destination, addresses)
+}
+
+fn pinned_outbound_http_client(
+    host: &str,
+    label: &str,
+    allow_loopback_destination: bool,
+    addresses: Vec<SocketAddr>,
+) -> Result<reqwest::Client, String> {
     validate_resolved_outbound_ips(
         host,
         label,
         allow_loopback_destination,
-        addresses.map(|address| address.ip()),
-    )
+        addresses.iter().map(|address| address.ip()),
+    )?;
+    outbound_http_client_builder()
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|error| format!("failed to build pinned outbound client for {label}: {error}"))
 }
 
 /// Applies the literal IP trust-boundary policy to the resolved address set for
@@ -2766,11 +2803,11 @@ async fn proxy_request(
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
     let parsed = validate_proxy_upstream_base_url(&target)?;
-    validate_outbound_url_resolution(&parsed, "proxy upstream", cfg!(test)).await?;
+    let client =
+        validated_outbound_http_client(&state.http, &parsed, "proxy upstream", cfg!(test)).await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
-    let response = state
-        .http
+    let response = client
         .request(method, parsed)
         .body(body)
         .send()
@@ -3105,11 +3142,10 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
         },
     )
     .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    validate_outbound_url_resolution(&parsed, "feed URL", cfg!(test))
+    let client = validated_outbound_http_client(&state.feed_http, &parsed, "feed URL", cfg!(test))
         .await
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    let response = state
-        .feed_http
+    let response = client
         .get(parsed)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
@@ -7026,6 +7062,34 @@ mod tests {
             .unwrap_err(),
             "feed URL host 127.0.0.1 is not allowed"
         );
+    }
+
+    #[tokio::test]
+    async fn validated_outbound_http_client_pins_prevalidated_hostname_addresses() {
+        let app = Router::new().route(
+            "/pinned",
+            get(|| async { (StatusCode::OK, "pinned-resolution") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+
+        let client = pinned_outbound_http_client(
+            "pinned-resolution.invalid",
+            "feed URL",
+            true,
+            vec![bound_addr],
+        )
+        .unwrap_or_else(|error| panic!("expected pinned client, got error: {error}"));
+        let response = client
+            .get("http://pinned-resolution.invalid/pinned")
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("expected pinned request to succeed: {error}"));
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "pinned-resolution");
+        assert_eq!(bound_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
     #[tokio::test]
