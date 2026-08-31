@@ -7502,6 +7502,47 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn load_surfaces_injected_write_temp_failure_when_rewriting_existing_state() {
+        let state_dir = temp_state_path("write-temp-rewrite-fault");
+        let state_path = state_dir.join("state.json");
+        fs::create_dir_all(&state_dir)
+            .await
+            .expect("state directory should be created");
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&AppData::seeded()).expect("seeded state serializes"),
+        )
+        .await
+        .expect("seed state should be written");
+
+        let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(state_path),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        let error = result
+            .err()
+            .expect("injected write fault must fail rewriting existing state");
+        let temp_prefix = state_dir.join(format!(".state.json.tmp-{}-", std::process::id()));
+        let prefix = format!(
+            "failed to write temporary state file {}",
+            temp_prefix.display()
+        );
+        let unique = error
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(": injected fault"))
+            .expect("write fault must report the exact temporary sibling path and cause");
+        assert!(
+            !unique.is_empty() && unique.bytes().all(|byte| byte.is_ascii_digit()),
+            "temporary sibling suffix must be a nanosecond timestamp: {error}"
+        );
+        let _ = fs::remove_dir_all(state_dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn load_surfaces_injected_rename_failure() {
         let _fault = inject_persist_fault(persist_fault::Fault::Rename);
         let state_dir = temp_state_path("rename-fault");
