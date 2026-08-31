@@ -2143,8 +2143,8 @@ async fn import_kev_feed(
             "KEV import requires a configured write-capable admin credential",
         );
     }
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_kev_import_request(&request) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -2730,7 +2730,10 @@ pub fn parse_admin_tokens_strict(raw: &str) -> Result<HashMap<String, AdminPrinc
     for item in raw.split(',') {
         let item = item.trim();
         if item.is_empty() {
-            continue;
+            return Err(
+                "ADMIN_TOKENS contains a blank entry; remove repeated, leading, or trailing commas"
+                    .to_string(),
+            );
         }
         let mut parts = item.splitn(3, ':').map(str::trim);
         let token = parts.next().unwrap_or("");
@@ -3427,6 +3430,8 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener.local_addr()?;
     let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
@@ -3435,8 +3440,6 @@ pub async fn run_from_env(
         .with_credentials_source(credentials.source())
         .with_listen_loopback(listen_is_loopback_only(&bind_addr))
         .with_max_body_size(max_body_bytes);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    let local_addr = listener.local_addr()?;
     let auth_mode = if listen_is_loopback_only(&bind_addr) && !has_write_capable_admin {
         "development"
     } else {
@@ -3637,6 +3640,41 @@ mod tests {
             "startup must fail closed before readiness: {err}"
         );
         clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_does_not_rewrite_state_when_bind_fails() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = occupied.local_addr().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "wardnet-bind-fail-state-{}-{}.json",
+            std::process::id(),
+            now_unix()
+        ));
+        let seeded = serde_json::to_string(&AppData::seeded()).unwrap();
+        std::fs::write(&path, &seeded).unwrap();
+
+        unsafe {
+            std::env::set_var("BIND_ADDR", addr.to_string());
+            std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
+            std::env::set_var("ADMIN_TOKEN", "startup-secret");
+        }
+        let err = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("address already in use"),
+            "bind failure should surface before state load: {err}"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, seeded, "bind failure must not rewrite state");
+
+        clear_run_env();
+        drop(occupied);
+        std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]
@@ -5254,6 +5292,23 @@ mod tests {
         )
         .await;
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let readonly = build_app(
+            AppState::seeded(None)
+                .with_admin_tokens(parse_admin_tokens("tokW:writer,tokR:reader:readonly"))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let forbidden = app_request(
+            &readonly,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("tokR"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
 
         let invalid_request = KevImportRequest {
             ttl_seconds: 0,
@@ -7849,6 +7904,8 @@ mod tests {
         assert!(role.contains("not recognised"), "{role}");
         let blank = parse_admin_tokens_strict(":noname").unwrap_err();
         assert!(blank.contains("blank token"), "{blank}");
+        let blank_entry = parse_admin_tokens_strict("tokA:alice,,tokB:bob").unwrap_err();
+        assert!(blank_entry.contains("blank entry"), "{blank_entry}");
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {

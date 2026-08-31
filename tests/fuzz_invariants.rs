@@ -20,7 +20,7 @@ proptest! {
 
 
     #[test]
-    fn credentials_json_upholds_file_precedence(raw in ".*") {
+    fn credentials_json_preserves_nonblank_values(raw in ".*") {
         if let Ok(credentials) = parse_credentials_json(&raw) {
             for value in credentials.values() {
                 prop_assert!(!value.trim().is_empty(), "credential value must never be blank");
