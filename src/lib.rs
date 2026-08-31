@@ -22,9 +22,10 @@ use tokio::{
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
     enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
-    select_route, signature_catalog, threat_feed_freshness_snapshot, upsert_dnsbl, upsert_route,
-    upsert_threat, upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
-    validate_threat, validate_threat_feed_import,
+    replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
+    threat_indicator_key, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
+    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
+    validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
@@ -37,6 +38,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod kev_import;
 mod misp_import;
 mod opencti_import;
 pub mod siem_event_input;
@@ -72,6 +74,10 @@ pub struct AppState {
     // Optional LLM SOC-analysis backend (OpenAI-compatible, e.g. the
     // contextual-orchestrator gateway). `None` unless configured.
     soc_llm: Option<SocLlmConfig>,
+    // Non-test runtime always fetches the built-in CISA KEV URL. Tests can
+    // override it to point at a loopback mock server.
+    #[cfg(test)]
+    kev_catalog_url: Option<String>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -136,7 +142,29 @@ impl AppState {
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
+            #[cfg(test)]
+            kev_catalog_url: None,
         }
+    }
+
+    /// Override the CISA KEV catalog URL (default: the real CISA feed).
+    /// Deployment-time config only, for pointing at a local mock server in
+    /// tests -- see `validate_kev_catalog_url`, which restricts the fetch to
+    /// CISA's own host (or loopback) with no mirror override. Builder-style.
+    #[cfg(test)]
+    pub fn with_kev_catalog_url(mut self, url: impl Into<String>) -> Self {
+        self.kev_catalog_url = Some(url.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn kev_catalog_url(&self) -> &str {
+        self.kev_catalog_url.as_deref().unwrap_or(KEV_DEFAULT_URL)
+    }
+
+    #[cfg(not(test))]
+    fn kev_catalog_url(&self) -> &str {
+        KEV_DEFAULT_URL
     }
 
     /// Set the maximum accepted request body size in bytes; larger requests are
@@ -425,6 +453,27 @@ fn phishing_database_default_severity() -> Severity {
     Severity::High
 }
 
+const KEV_DEFAULT_FEED_ID: &str = "cisa-kev";
+const KEV_DEFAULT_SOURCE: &str = "feed:cisa-kev";
+const KEV_DEFAULT_URL: &str =
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+const KEV_DEFAULT_TTL_SECONDS: u64 = 86_400;
+// Runtime fetches stay fixed to the official CISA endpoint. Loopback remains
+// allowed so integration tests can point AppState at a local mock server.
+const KEV_ALLOWED_HOSTS: &[&str] = &["www.cisa.gov"];
+
+fn kev_default_feed_id() -> String {
+    KEV_DEFAULT_FEED_ID.to_string()
+}
+
+fn kev_default_source() -> String {
+    KEV_DEFAULT_SOURCE.to_string()
+}
+
+fn kev_default_ttl_seconds() -> u64 {
+    KEV_DEFAULT_TTL_SECONDS
+}
+
 fn default_true() -> bool {
     true
 }
@@ -474,6 +523,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/threat-intel/misp", post(import_misp_document))
         .route("/api/threat-intel/taxii/poll", post(poll_taxii_collection))
         .route("/api/threat-intel/opencti", post(import_opencti_document))
+        .route("/api/threat-intel/cisa-kev", post(import_kev_feed))
         .route("/api/clearfolio/config", get(clearfolio_config))
         .route("/api/clearfolio/documents/{kind}", post(clearfolio_submit))
         .route("/api/clearfolio/jobs/{job_id}", get(clearfolio_status))
@@ -728,6 +778,25 @@ struct PhishingDatabaseImportRequest {
     allow_non_default_hosts: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct KevImportRequest {
+    #[serde(default = "kev_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "kev_default_source")]
+    source: String,
+    #[serde(default = "kev_default_ttl_seconds")]
+    ttl_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct KevImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_entries: usize,
+    last_updated_unix: u64,
+}
+
 #[derive(Serialize)]
 struct SocAnalyzeResponse {
     event_id: u64,
@@ -891,6 +960,7 @@ async fn create_threat(
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_threat(&mut data.threats, indicator.clone());
+            mark_operator_threat_key(data, &saved);
             record_successful_audit_log(
                 data,
                 actor,
@@ -2019,6 +2089,93 @@ fn validate_phishing_database_import_request(
     Ok(())
 }
 
+fn validate_kev_import_request(request: &KevImportRequest) -> Result<(), &'static str> {
+    if request.feed_id.trim().is_empty() {
+        return Err("feed_id is required");
+    }
+    if request.source.trim().is_empty() {
+        return Err("source is required");
+    }
+    if request.ttl_seconds == 0 {
+        return Err("ttl_seconds must be greater than zero");
+    }
+    Ok(())
+}
+
+async fn import_kev_feed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<KevImportRequest>,
+) -> Response {
+    if !has_write_admin_credential(&state) {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "KEV import requires a configured write-capable admin credential",
+        );
+    }
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_kev_import_request(&request) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    // Always fetches the deployment-configured CISA KEV URL (default: the
+    // real CISA feed; overridable only via server-side config, never by the
+    // request body) -- there is no request-controlled URL construction here
+    // at all, unlike the operator-URL adapters (phishing-database, TAXII).
+    // Uses its own fetch_kev_catalog rather than the shared fetch_text_feed
+    // so this config-only path never shares a function with (and can't be
+    // conflated by static analysis with) phishing-database's request-URL fetch.
+    let body_text = match fetch_kev_catalog(&state).await {
+        Ok(text) => text,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    let material = match kev_import::parse_kev_document(
+        &body_text,
+        request.source.trim(),
+        request.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("invalid fetched KEV catalog: {message}"),
+            );
+        }
+    };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id.trim().to_string(),
+        source: request.source.trim().to_string(),
+        ttl_seconds: request.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            format!("invalid fetched feed data: {message}"),
+        );
+    }
+    let skipped_entries = material.skipped_entries;
+    match apply_threat_feed_import(&state, actor, "import_kev_feed", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(KevImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_entries,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
 fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
     let host = parsed.host_str().ok_or("feed URL host is required")?;
@@ -2036,6 +2193,71 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &
         return Err("feed URL host is not allowed");
     }
     Ok(())
+}
+
+// Deliberately separate from `fetch_text_feed`: that helper's `url` argument is
+// fed by operator-supplied request URLs for phishing-database imports. KEV does
+// not support a runtime URL override, so this fetch path stays structurally
+// independent and fixed to the built-in CISA host; loopback is allowed only for
+// tests that inject a local mock via `with_kev_catalog_url`.
+fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
+    let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid KEV catalog URL {url}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("invalid KEV catalog URL {url}: host is required"))?;
+    if !KEV_ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        && !is_loopback_host(host)
+    {
+        return Err(format!(
+            "KEV catalog URL {url} host is not on the CISA KEV allowlist"
+        ));
+    }
+    Ok(())
+}
+
+async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
+    use futures_util::StreamExt;
+
+    let url = state.kev_catalog_url();
+    validate_kev_catalog_url(url)?;
+    let response = state
+        .feed_http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch KEV catalog {url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("KEV catalog {url} returned HTTP {status}"));
+    }
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "KEV catalog {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| format!("failed to read KEV catalog body from {url}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "KEV catalog {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("KEV catalog {url} is not valid UTF-8 text: {error}"))
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -2375,6 +2597,19 @@ fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     presented.is_some_and(|actual| actual == expected)
 }
 
+fn has_write_admin_credential(state: &AppState) -> bool {
+    if !state.admin_tokens.is_empty() {
+        return state
+            .admin_tokens
+            .values()
+            .any(|principal| principal.can_write);
+    }
+    state
+        .admin_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+}
+
 fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
     // Prefer the actor bound to the presented RBAC token, then an explicit
     // actor header, then a generic label. The token itself is never logged.
@@ -2461,6 +2696,13 @@ fn threat_resource_id(indicator: &ThreatIndicator) -> String {
     )
 }
 
+fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) {
+    let key = threat_indicator_key(indicator);
+    if !data.operator_threat_keys.contains(&key) {
+        data.operator_threat_keys.push(key);
+    }
+}
+
 async fn apply_threat_feed_import(
     state: &AppState,
     actor: String,
@@ -2470,8 +2712,42 @@ async fn apply_threat_feed_import(
     let imported_at = now_unix();
     state
         .mutate_and_persist(|data| {
+            let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect();
+            let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
+            let previous_keys: HashSet<_> = replace_threat_feed_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                threat_keys,
+            )
+            .into_iter()
+            .collect();
+            if !previous_keys.is_empty() {
+                // A key this feed is dropping might still be owned by another
+                // feed (e.g. two feeds importing the same CVE under a shared
+                // `source`) -- only reap it once no feed's ownership record
+                // claims it any more, so a refresh on one feed can't make a
+                // still-relevant indicator vanish from enforcement. Also keep
+                // indicators an operator independently upserted via /api/threats.
+                let still_owned: HashSet<_> = data
+                    .threat_feed_ownership
+                    .iter()
+                    .filter(|ownership| ownership.feed_id != feed.feed_id)
+                    .flat_map(|ownership| ownership.threat_keys.iter().cloned())
+                    .collect();
+                data.threats.retain(|threat| {
+                    let key = threat_indicator_key(threat);
+                    !previous_keys.contains(&key)
+                        || still_owned.contains(&key)
+                        || operator_owned.contains(&key)
+                });
+            }
+            let mut upserted_threats = 0usize;
             for threat in feed.threats.iter().cloned() {
+                if operator_owned.contains(&threat_indicator_key(&threat)) {
+                    continue;
+                }
                 upsert_threat(&mut data.threats, threat);
+                upserted_threats += 1;
             }
             for entry in feed.dnsbl.iter().cloned() {
                 upsert_dnsbl(&mut data.dnsbl, entry);
@@ -2489,7 +2765,7 @@ async fn apply_threat_feed_import(
             );
             let result = ThreatFeedImportResult {
                 feed_id: feed.feed_id.clone(),
-                upserted_threats: feed.threats.len(),
+                upserted_threats,
                 upserted_dnsbl: feed.dnsbl.len(),
                 last_updated_unix: imported_at,
             };
@@ -2788,6 +3064,9 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>OpenCTI threat intelligence</h2>
       <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
+    </section>
+    <section class="card"><h2>CISA KEV catalog</h2>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/cisa-kev</code> with optional <code>feed_id</code>, <code>source</code>, and <code>ttl_seconds</code>. Fetches the deployment-configured CISA Known Exploited Vulnerabilities catalog URL (server-side config only, not part of this request) and upserts a <code>cve</code> threat indicator per entry (severity escalated to critical when CISA has tied the CVE to a known ransomware campaign).</p>
     </section>
     <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
       <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
@@ -3222,6 +3501,23 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[tokio::test]
+    async fn run_from_env_ignores_kev_catalog_url_env_override() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("ADMIN_TOKENS", "tok:operator");
+            std::env::set_var("KEV_CATALOG_URL", "://not-a-valid-url");
+        }
+        // KEV imports now always use the built-in runtime endpoint; an ambient
+        // KEV_CATALOG_URL must not influence process startup at all.
+        run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap();
+        clear_run_env();
+    }
+
     fn route() -> RouteConfig {
         RouteConfig {
             id: "api".to_string(),
@@ -3290,6 +3586,14 @@ mod tests {
             import_domains: true,
             import_ips: true,
             allow_non_default_hosts: true,
+        }
+    }
+
+    fn kev_import_request() -> KevImportRequest {
+        KevImportRequest {
+            feed_id: "cisa-kev-seoul".to_string(),
+            source: "feed:cisa-kev".to_string(),
+            ttl_seconds: 900,
         }
     }
 
@@ -4704,6 +5008,718 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kev_feed_import_endpoint_maps_catalog_to_cve_indicators() {
+        let catalog = serde_json::json!({
+            "title": "CISA Catalog of Known Exploited Vulnerabilities",
+            "catalogVersion": "2026.08.27",
+            "dateReleased": "2026-08-27T17:00:36.6632Z",
+            "count": 2,
+            "vulnerabilities": [
+                {
+                    "cveID": "CVE-2023-49105",
+                    "vendorProject": "ownCloud",
+                    "product": "ownCloud",
+                    "vulnerabilityName": "ownCloud Improper Authentication Vulnerability",
+                    "dateAdded": "2026-08-27",
+                    "shortDescription": "desc",
+                    "requiredAction": "action",
+                    "dueDate": "2026-08-30",
+                    "knownRansomwareCampaignUse": "Unknown",
+                    "notes": "",
+                    "cwes": ["CWE-287"]
+                },
+                {
+                    "cveID": "CVE-2021-44228",
+                    "vendorProject": "Apache",
+                    "product": "Log4j2",
+                    "vulnerabilityName": "Apache Log4j2 RCE",
+                    "dateAdded": "2021-12-10",
+                    "shortDescription": "desc",
+                    "requiredAction": "action",
+                    "dueDate": "2021-12-24",
+                    "knownRansomwareCampaignUse": "Known",
+                    "notes": "",
+                    "cwes": ["CWE-917"]
+                }
+            ]
+        });
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let body = catalog.to_string();
+                async move { (StatusCode::OK, body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/threat-intel/cisa-kev", None, &payload),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_request = KevImportRequest {
+            ttl_seconds: 0,
+            ..payload.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &invalid_request,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-intel/cisa-kev",
+                    Some("secret"),
+                    &payload,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "cisa-kev-seoul");
+        assert_eq!(import_result.upserted_threats, 2);
+        assert_eq!(import_result.upserted_dnsbl, 0);
+
+        let audit_logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|item| item.action == "import_kev_feed")
+        );
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        let owncloud = threat_entries
+            .iter()
+            .find(|entry| entry.value == "CVE-2023-49105")
+            .expect("ownCloud CVE upserted");
+        assert_eq!(owncloud.indicator_type, "cve");
+        assert_eq!(owncloud.severity, Severity::High);
+        assert_eq!(owncloud.source, "feed:cisa-kev");
+        let log4j = threat_entries
+            .iter()
+            .find(|entry| entry.value == "CVE-2021-44228")
+            .expect("Log4j CVE upserted");
+        assert_eq!(
+            log4j.severity,
+            Severity::Critical,
+            "ransomware-linked CVE escalates to critical"
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|feed| feed.feed_id == "cisa-kev-seoul" && !feed.stale)
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/cisa-kev")
+        );
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_requires_configured_write_credential() {
+        let app = build_app(
+            AppState::seeded(None).with_kev_catalog_url("http://127.0.0.1:9/kev.json".to_string()),
+        );
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                None,
+                &kev_import_request(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_text(response).await;
+        assert!(body.contains("configured write-capable admin credential"));
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_rejects_redirected_feed_fetches() {
+        let target_feed = Router::new().route(
+            "/kev.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"vulnerabilities":[{"cveID":"CVE-2024-0001"}]}"#,
+                )
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_target = format!("http://{target_addr}/kev.json");
+        let redirect_feed = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let location = redirect_target.clone();
+                async move { (StatusCode::FOUND, [("location", location)]) }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{redirect_addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn validate_kev_import_request_checks_feed_metadata_only() {
+        // The request no longer carries a URL at all (see import_kev_feed:
+        // it always fetches AppState::kev_catalog_url, server-side config
+        // only), so validation is limited to the feed metadata fields.
+        assert!(validate_kev_import_request(&kev_import_request()).is_ok());
+
+        let blank_feed_id = KevImportRequest {
+            feed_id: "  ".to_string(),
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&blank_feed_id).is_err());
+
+        let blank_source = KevImportRequest {
+            source: "".to_string(),
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&blank_source).is_err());
+
+        let zero_ttl = KevImportRequest {
+            ttl_seconds: 0,
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&zero_ttl).is_err());
+    }
+
+    #[tokio::test]
+    async fn kev_cve_indicators_never_block_legitimate_requests() {
+        // A CVE identifier tracked from a KEV import is vulnerability
+        // metadata, not a request-content attack signature. A legitimate
+        // request that happens to reference a cataloged CVE (e.g. a
+        // vulnerability-management dashboard proxied through the gateway)
+        // must not be blocked just because the identifier appears in it.
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"vulnerabilities":[{"cveID":"CVE-2021-44228","knownRansomwareCampaignUse":"Known"}]}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let block_route = RouteConfig {
+            id: "cve-lookup".to_string(),
+            path_prefix: "/cve-lookup".to_string(),
+            upstream: "mock://cve-lookup".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: None,
+        };
+        let route_response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/cve-lookup?id=CVE-2021-44228"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn kev_feed_refresh_removes_withdrawn_cves() {
+        let initial_catalog = serde_json::json!({
+            "vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2021-44228", "knownRansomwareCampaignUse": "Known"}
+            ]
+        });
+        let refreshed_catalog = serde_json::json!({
+            "vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"}
+            ]
+        });
+        let catalogs = Arc::new(Mutex::new(vec![
+            initial_catalog.to_string(),
+            refreshed_catalog.to_string(),
+        ]));
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let catalogs = catalogs.clone();
+                async move {
+                    let body = catalogs.lock().await.remove(0);
+                    (StatusCode::OK, body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let first_import = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(first_import.status(), StatusCode::CREATED);
+
+        let second_import = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(second_import.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == "CVE-2023-49105")
+        );
+        assert!(
+            threat_entries
+                .iter()
+                .all(|entry| entry.value != "CVE-2021-44228"),
+            "withdrawn CVEs should be removed on refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_indicators_still_owned_by_another_feed() {
+        // Two independently-managed feeds can legitimately report the same
+        // indicator_type+value+source. Refreshing one feed without it must
+        // not delete it while the other feed still claims it.
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let shared = ThreatIndicator {
+            value: "198.51.100.77".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::High,
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+        };
+        let feed_a = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        let feed_b = ThreatFeedImport {
+            feed_id: "feed-b".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        for feed in [&feed_a, &feed_b] {
+            let imported = app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    feed,
+                ),
+            )
+            .await;
+            assert_eq!(imported.status(), StatusCode::CREATED);
+        }
+
+        // validate_threat_feed_import requires at least one threat or DNSBL
+        // entry, so refreshes carry an unrelated DNSBL row to stay valid
+        // while genuinely dropping the shared indicator from `threats`.
+        let placeholder_dnsbl = DnsblEntry {
+            address: "203.0.113.9".parse().unwrap(),
+            code: "127.0.0.5".to_string(),
+            reason: "refresh placeholder".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            prefix_len: None,
+        };
+
+        // Feed A refreshes and drops the shared indicator; feed B still owns it.
+        let feed_a_refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl.clone()],
+            ..feed_a.clone()
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed_a_refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == shared.value),
+            "an indicator still owned by feed-b must survive feed-a's refresh"
+        );
+
+        // Feed B now also drops it -- no feed owns it any more, so it's reaped.
+        let feed_b_refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl],
+            ..feed_b.clone()
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed_b_refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .all(|entry| entry.value != shared.value),
+            "an indicator no feed owns any more should be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_indicators_independently_upserted_by_operator() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let shared = ThreatIndicator {
+            value: "198.51.100.88".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::High,
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+        };
+        let feed = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let operator_upsert = app_request(
+            &app,
+            json_request(Method::POST, "/api/threats", Some("secret"), &shared),
+        )
+        .await;
+        assert_eq!(operator_upsert.status(), StatusCode::CREATED);
+
+        let placeholder_dnsbl = DnsblEntry {
+            address: "203.0.113.10".parse().unwrap(),
+            code: "127.0.0.5".to_string(),
+            reason: "refresh placeholder".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            prefix_len: None,
+        };
+        let refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl],
+            ..feed
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == shared.value),
+            "operator-managed indicator must survive feed withdrawal"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_operator_managed_indicator_payload() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let operator_indicator = ThreatIndicator {
+            value: "198.51.100.89".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::Critical,
+            source: "shared-source".to_string(),
+            ttl_seconds: 86_400,
+        };
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &operator_indicator,
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let feed = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 60,
+            threats: vec![ThreatIndicator {
+                severity: Severity::Low,
+                ttl_seconds: 60,
+                ..operator_indicator.clone()
+            }],
+            dnsbl: Vec::new(),
+        };
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![DnsblEntry {
+                address: "203.0.113.19".parse().unwrap(),
+                code: "127.0.0.19".to_string(),
+                reason: "refresh placeholder".to_string(),
+                source: "shared-source".to_string(),
+                ttl_seconds: 60,
+                prefix_len: None,
+            }],
+            ..feed
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        let stored = threat_entries
+            .iter()
+            .find(|entry| {
+                entry.value == operator_indicator.value
+                    && entry.indicator_type == operator_indicator.indicator_type
+                    && entry.source == operator_indicator.source
+            })
+            .expect("operator-managed indicator should remain present");
+        assert_eq!(stored.severity, Severity::Critical);
+        assert_eq!(stored.ttl_seconds, 86_400);
+    }
+
+    #[tokio::test]
+    async fn import_result_excludes_operator_owned_threats_from_upserted_count() {
+        // apply_threat_feed_import skips upserting threats whose key is
+        // operator-owned (see feed_refresh_preserves_operator_managed_indicator_payload),
+        // so the reported upserted_threats count must reflect what was
+        // actually applied, not the feed's full submitted set.
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let operator_indicator = ThreatIndicator {
+            value: "198.51.100.90".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::Critical,
+            source: "shared-source".to_string(),
+            ttl_seconds: 86_400,
+        };
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &operator_indicator,
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let feed = ThreatFeedImport {
+            feed_id: "feed-b".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 60,
+            threats: vec![
+                ThreatIndicator {
+                    severity: Severity::Low,
+                    ttl_seconds: 60,
+                    ..operator_indicator.clone()
+                },
+                ThreatIndicator {
+                    value: "198.51.100.91".to_string(),
+                    indicator_type: "ip".to_string(),
+                    severity: Severity::Low,
+                    source: "shared-source".to_string(),
+                    ttl_seconds: 60,
+                },
+            ],
+            dnsbl: Vec::new(),
+        };
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    &feed,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            import_result.upserted_threats, 1,
+            "only the non-operator-owned threat should count as upserted"
+        );
+    }
+
+    #[tokio::test]
     async fn suricata_eve_ingest_maps_alerts_to_security_events() {
         let app = build_app(AppState::seeded(Some("secret".to_string())));
         let unauthorized = app_request(
@@ -5547,6 +6563,7 @@ mod tests {
                     },
                 ],
                 threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
@@ -5554,6 +6571,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
             },
             AppConfig {
                 admin_token: None,
@@ -6422,6 +7440,7 @@ mod tests {
                     block_threshold: None,
                 }],
                 threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
@@ -6429,6 +7448,7 @@ mod tests {
                 next_audit_log_id: 1,
                 commercial: CommercialProfile::seeded(),
                 threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
             },
             AppConfig {
                 admin_token: None,
