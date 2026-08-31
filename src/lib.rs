@@ -2568,9 +2568,15 @@ fn trusted_forwarded_client_ip(
     peer_ip: IpAddr,
     trusted_proxies: &HashSet<IpAddr>,
 ) -> Option<IpAddr> {
-    let value = headers
+    let Some(value) = headers
         .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())?;
+        .and_then(|value| value.to_str().ok())
+    else {
+        return headers
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+    };
 
     let mut current_hop = peer_ip;
     for hop in value.rsplit(',').map(str::trim) {
@@ -4090,7 +4096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_ignores_real_ip_from_trusted_proxy_for_rate_limiting() {
+    async fn gateway_uses_real_ip_from_trusted_proxy_when_forwarded_for_is_absent() {
         let app = build_app(
             AppState::seeded(None)
                 .with_rate_limit(1, 60)
@@ -4114,7 +4120,7 @@ mod tests {
             .unwrap();
         insert_peer(&mut second, "198.51.100.10".parse::<IpAddr>().unwrap());
         let second = app_request(&app, second).await;
-        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second.status(), StatusCode::OK);
     }
 
     #[tokio::test]
