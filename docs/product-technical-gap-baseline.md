@@ -6,8 +6,8 @@ Snapshot date: 2026-08-31T14:25:00+09:00 (live exact-head GitHub inventory for `
 
 `main` is at commit `b2bcee3bf2c63f26c48e3be879e5349ef23fafcd`. The product direction remains the Rust-first Wardnet gateway described in the current PRD/TRD and ADR set:
 
-- PRD/TRD: [docs/superpowers/specs/2026-07-02-waf-ids-ai-soc-design.md](docs/superpowers/specs/2026-07-02-waf-ids-ai-soc-design.md), [docs/superpowers/specs/2026-07-02-commercial-sale-readiness-design.md](docs/superpowers/specs/2026-07-02-commercial-sale-readiness-design.md), and [docs/superpowers/specs/2026-07-02-program-completion-baseline-design.md](docs/superpowers/specs/2026-07-02-program-completion-baseline-design.md)
-- ADR: [docs/adr/0010-adaptive-contextual-orchestrator-default.md](docs/adr/0010-adaptive-contextual-orchestrator-default.md)
+- PRD/TRD: [superpowers/specs/2026-07-02-waf-ids-ai-soc-design.md](superpowers/specs/2026-07-02-waf-ids-ai-soc-design.md), [superpowers/specs/2026-07-02-commercial-sale-readiness-design.md](superpowers/specs/2026-07-02-commercial-sale-readiness-design.md), and [superpowers/specs/2026-07-02-program-completion-baseline-design.md](superpowers/specs/2026-07-02-program-completion-baseline-design.md)
+- ADR: [adr/0010-adaptive-contextual-orchestrator-default.md](adr/0010-adaptive-contextual-orchestrator-default.md)
 
 Commercial-readiness progress is real, but protected-branch evidence does not yet support a merge-ready claim for the open delivery stack. The current blockers are not hypothetical: they are live GitHub branch-protection requirements, unresolved review findings on the exact current heads, and missing independent approval.
 
