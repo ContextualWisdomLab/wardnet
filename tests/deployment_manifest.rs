@@ -16,18 +16,36 @@ fn leading_spaces(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
-/// Parse a single-line YAML scalar and normalize matching quote wrappers.
+/// Parse a single-line YAML scalar, ignoring trailing comments and normalizing
+/// matching quote wrappers.
 fn normalized_yaml_scalar(value: &str) -> &str {
     let trimmed = value.trim();
-    if trimmed.len() >= 2 {
-        let bytes = trimmed.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut previous = None;
+    let mut end = trimmed.len();
+    for (index, ch) in trimmed.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single && previous != Some('\\') => in_double = !in_double,
+            '#' if !in_single && !in_double && previous.is_none_or(char::is_whitespace) => {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+        previous = Some(ch);
+    }
+    let scalar = trimmed[..end].trim_end();
+    if scalar.len() >= 2 {
+        let bytes = scalar.as_bytes();
         let first = bytes[0];
-        let last = bytes[trimmed.len() - 1];
+        let last = bytes[scalar.len() - 1];
         if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return &trimmed[1..trimmed.len() - 1];
+            return &scalar[1..scalar.len() - 1];
         }
     }
-    trimmed
+    scalar
 }
 
 /// Whether a `- name:` YAML line names the expected entry, with quote tolerance.
@@ -447,6 +465,32 @@ spec:
 
     assert_eq!(external_admin_secret_ref(double_quoted_duplicate), None);
     assert_eq!(external_admin_secret_ref(single_quoted_duplicate), None);
+}
+
+#[test]
+fn commented_quoted_duplicate_admin_token_entries_fail_closed() {
+    let commented_duplicate = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+            - name: "ADMIN_TOKEN" # duplicated fallback entry
+              value: another-repository-visible-fallback
+"#;
+
+    assert_eq!(external_admin_secret_ref(commented_duplicate), None);
 }
 
 #[test]
