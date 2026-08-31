@@ -43,6 +43,7 @@ Coverage-guided fuzzing needs a nightly toolchain:
 rustup toolchain install nightly
 cargo install cargo-fuzz
 cargo +nightly fuzz run fuzz_score_request -- -max_total_time=60
+cargo +nightly fuzz run fuzz_siem_event_batch -- -max_total_time=60
 ```
 
 The stable property-test mirror needs no extra setup:

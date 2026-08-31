@@ -6838,6 +6838,17 @@ mod tests {
         );
         assert_eq!(
             validate_route(&RouteConfig {
+                id: "r".repeat(257),
+                path_prefix: "/api".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route id exceeds the 256-character limit")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
                 id: "bad-query".to_string(),
                 path_prefix: "/api?debug=true".to_string(),
                 upstream: "mock://api".to_string(),

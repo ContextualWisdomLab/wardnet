@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::io::Read;
 use std::net::IpAddr;
+use waf_ids_core::MAX_ROUTE_ID_CHARS;
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -17,7 +18,6 @@ const MAX_EVENTS: usize = 100_000;
 const MAX_ACTION_CHARS: usize = 64;
 const MAX_REASON_CHARS: usize = 2_048;
 const MAX_PATH_CHARS: usize = 2_048;
-const MAX_ROUTE_CHARS: usize = 256;
 
 #[derive(Debug, Deserialize)]
 struct SourceEvent {
@@ -140,7 +140,7 @@ fn normalize_event(source: SourceEvent, line_number: usize) -> Result<Normalized
     let route_id = source
         .route_id
         .as_deref()
-        .map(|route| required_sanitized("route_id", route, MAX_ROUTE_CHARS, line_number))
+        .map(|route| bounded_route_id(route, line_number))
         .transpose()?;
     let trace_context = validate_trace_context(
         source.trace_id.as_deref(),
@@ -209,20 +209,34 @@ fn bounded_reason(value: &str, line_number: usize) -> Result<String, String> {
     ))
 }
 
+fn bounded_route_id(value: &str, line_number: usize) -> Result<String, String> {
+    if value.is_empty() {
+        return Err(format!("line {line_number}: route_id must not be empty"));
+    }
+    let sanitized = sanitize_text(value, MAX_ROUTE_ID_CHARS);
+    if sanitized.is_empty() {
+        return Err(format!(
+            "line {line_number}: route_id contains no exportable text"
+        ));
+    }
+    Ok(sanitized)
+}
+
 fn sanitize_path(value: &str, line_number: usize) -> Result<String, String> {
     if value.is_empty() {
         return Err(format!("line {line_number}: path must not be empty"));
-    }
-    if value.chars().count() > MAX_PATH_CHARS {
-        return Err(format!(
-            "line {line_number}: path exceeds the {MAX_PATH_CHARS}-character limit"
-        ));
     }
     let end = value
         .char_indices()
         .find_map(|(index, character)| matches!(character, '?' | '#').then_some(index))
         .unwrap_or(value.len());
-    let path = sanitize_text(&value[..end], MAX_PATH_CHARS);
+    let path_value = &value[..end];
+    if path_value.chars().count() > MAX_PATH_CHARS {
+        return Err(format!(
+            "line {line_number}: path exceeds the {MAX_PATH_CHARS}-character limit"
+        ));
+    }
+    let path = sanitize_text(path_value, MAX_PATH_CHARS);
     if path.is_empty() {
         Ok("/".to_string())
     } else {

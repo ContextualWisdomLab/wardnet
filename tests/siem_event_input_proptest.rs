@@ -3,6 +3,7 @@
 use proptest::prelude::*;
 use std::io::Cursor;
 use waf_ids_ai_soc::siem_event_input::read_events;
+use waf_ids_core::MAX_ROUTE_ID_CHARS;
 
 fn event(id: u64, timestamp_unix: u64, action: &str, reason: &str, path: &str) -> String {
     serde_json::json!({
@@ -162,4 +163,50 @@ fn oversized_reason_is_bounded_without_poisoning_the_batch() {
             .ends_with("[TRUNCATED; original_chars=2800]")
     );
     assert_eq!(events[1].reason, "rule match");
+}
+
+#[test]
+fn long_query_is_stripped_before_path_limit() {
+    let input = event(
+        12,
+        1_723_456_791,
+        "monitor",
+        "rule match",
+        &format!("/checkout?{}", "a".repeat(5_000)),
+    );
+
+    let events = read_events(Cursor::new(input)).expect("query-only overflow stays exportable");
+    assert_eq!(events[0].path, "/checkout");
+}
+
+#[test]
+fn oversized_route_id_is_bounded_without_poisoning_the_batch() {
+    let first = serde_json::json!({
+        "id": 13,
+        "timestamp_unix": 1_723_456_792_u64,
+        "client_ip": "203.0.113.9",
+        "route_id": "r".repeat(MAX_ROUTE_ID_CHARS + 32),
+        "action": "monitor",
+        "reason": "rule match",
+        "score": 55,
+        "path": "/first"
+    })
+    .to_string();
+    let input = format!(
+        "{first}\n{}",
+        event(14, 1_723_456_793, "monitor", "rule match", "/second")
+    );
+
+    let events = read_events(Cursor::new(input)).expect("oversized route ids stay exportable");
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0]
+            .route_id
+            .as_deref()
+            .expect("route id should remain present")
+            .chars()
+            .count(),
+        MAX_ROUTE_ID_CHARS
+    );
+    assert_eq!(events[1].route_id.as_deref(), Some("checkout"));
 }
