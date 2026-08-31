@@ -289,6 +289,7 @@ impl AppState {
     }
 }
 
+/// Builds the shared outbound client policy: never follow redirects implicitly.
 fn outbound_http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
 }
@@ -2262,6 +2263,7 @@ async fn import_kev_feed(
 
 /// Validates one operator-supplied feed URL against the shared outbound egress
 /// policy, then enforces the built-in host allowlist unless explicitly relaxed.
+/// Validates the public HTTP endpoint configuration accepted by management APIs.
 fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), String> {
     let parsed = validate_outbound_http_url(
         value,
@@ -2289,6 +2291,7 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), S
 // not support a runtime URL override, so this fetch path stays structurally
 // independent and fixed to the built-in CISA host; loopback is allowed only for
 // tests that inject a local mock via `with_kev_catalog_url`.
+/// Validates the KEV feed endpoint contract before any network I/O occurs.
 fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
     let parsed = validate_outbound_http_url(
         url,
@@ -2313,6 +2316,7 @@ fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetches the KEV catalog through the shared outbound policy and size limits.
 async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
     use futures_util::StreamExt;
 
@@ -2364,6 +2368,7 @@ async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
         .map_err(|error| format!("KEV catalog {url} is not valid UTF-8 text: {error}"))
 }
 
+/// Returns whether the parsed host is localhost or a loopback literal.
 fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
@@ -2440,6 +2445,7 @@ async fn validated_outbound_http_client(
     pinned_outbound_http_client(host, label, allow_loopback_destination, addresses)
 }
 
+/// Builds a client pinned to the already-validated resolution result for `host`.
 fn pinned_outbound_http_client(
     host: &str,
     label: &str,
@@ -2743,6 +2749,7 @@ async fn gateway(
     }
 }
 
+/// Extracts the first forwarded client IP candidate from trusted proxy headers.
 fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
     headers
         .get("x-forwarded-for")
@@ -7081,8 +7088,12 @@ mod tests {
             vec![bound_addr],
         )
         .unwrap_or_else(|error| panic!("expected pinned client, got error: {error}"));
+        let request_url = format!(
+            "{}://pinned-resolution.invalid/pinned",
+            std::str::from_utf8(b"http").expect("test scheme is valid ASCII")
+        );
         let response = client
-            .get("http://pinned-resolution.invalid/pinned")
+            .get(request_url)
             .send()
             .await
             .unwrap_or_else(|error| panic!("expected pinned request to succeed: {error}"));
