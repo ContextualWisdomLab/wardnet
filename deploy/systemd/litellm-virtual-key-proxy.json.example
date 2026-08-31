@@ -1,0 +1,8 @@
+{
+  "configuration_version": "1",
+  "litellm_proxy_upstream_url": "https://gateway.example.invalid",
+  "litellm_proxy_bind_address": "127.0.0.1:8090",
+  "litellm_proxy_max_body_bytes": 16777216,
+  "litellm_proxy_connect_timeout_seconds": 10,
+  "litellm_proxy_idle_timeout_seconds": 60
+}
