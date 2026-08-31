@@ -16,6 +16,31 @@ fn leading_spaces(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
+/// Parse a single-line YAML scalar and normalize matching quote wrappers.
+fn normalized_yaml_scalar(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let first = bytes[0];
+        let last = bytes[trimmed.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+/// Whether a `- name:` YAML line names the expected entry, with quote tolerance.
+fn yaml_named_entry_matches(line: &str, item_indent: usize, expected_name: &str) -> bool {
+    if leading_spaces(line) != item_indent {
+        return false;
+    }
+    let Some(raw_name) = line.trim().strip_prefix("- name:") else {
+        return false;
+    };
+    normalized_yaml_scalar(raw_name) == expected_name
+}
+
 /// Read `child_key` from the mapping that starts at `parent_key`/`parent_indent`.
 fn mapping_value<'a>(
     lines: &[&'a str],
@@ -102,7 +127,7 @@ fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_
         let env = nested_block(&gateway, "env:", 10);
         let admin_token_entries = env
             .iter()
-            .filter(|line| leading_spaces(line) == 12 && line.trim() == "- name: ADMIN_TOKEN")
+            .filter(|line| yaml_named_entry_matches(line, 12, "ADMIN_TOKEN"))
             .count();
         if admin_token_entries != 1 {
             return None;
@@ -375,6 +400,53 @@ spec:
 "#;
 
     assert_eq!(external_admin_secret_ref(duplicate_admin_token), None);
+}
+
+#[test]
+fn quoted_duplicate_admin_token_entries_fail_closed() {
+    let double_quoted_duplicate = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+            - name: "ADMIN_TOKEN"
+              value: another-repository-visible-fallback
+"#;
+    let single_quoted_duplicate = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+            - name: 'ADMIN_TOKEN'
+              value: another-repository-visible-fallback
+"#;
+
+    assert_eq!(external_admin_secret_ref(double_quoted_duplicate), None);
+    assert_eq!(external_admin_secret_ref(single_quoted_duplicate), None);
 }
 
 #[test]
