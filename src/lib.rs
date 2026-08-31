@@ -53,7 +53,7 @@ pub struct AppState {
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
     feed_http: reqwest::Client,
-    outbound_pinned_clients: Arc<StdMutex<HashMap<String, reqwest::Client>>>,
+    outbound_pinned_clients: Arc<StdMutex<PinnedOutboundClientCache>>,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
@@ -104,6 +104,65 @@ pub struct ClearfolioConfig {
     pub permissions: String,
 }
 
+const MAX_PINNED_OUTBOUND_CLIENTS: usize = 64;
+
+#[derive(Clone)]
+struct PinnedOutboundClientEntry {
+    addresses: Vec<SocketAddr>,
+    client: reqwest::Client,
+    last_used_tick: u64,
+}
+
+#[derive(Default)]
+struct PinnedOutboundClientCache {
+    entries: HashMap<String, PinnedOutboundClientEntry>,
+    next_tick: u64,
+}
+
+impl PinnedOutboundClientCache {
+    fn get(&mut self, host: &str, addresses: &[SocketAddr]) -> Option<reqwest::Client> {
+        let tick = self.bump_tick();
+        let entry = self.entries.get_mut(host)?;
+        if entry.addresses != addresses {
+            return None;
+        }
+        entry.last_used_tick = tick;
+        Some(entry.client.clone())
+    }
+
+    fn insert(&mut self, host: String, addresses: Vec<SocketAddr>, client: reqwest::Client) {
+        let tick = self.bump_tick();
+        self.entries.insert(
+            host.clone(),
+            PinnedOutboundClientEntry {
+                addresses,
+                client,
+                last_used_tick: tick,
+            },
+        );
+        while self.entries.len() > MAX_PINNED_OUTBOUND_CLIENTS {
+            let Some(oldest_host) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used_tick)
+                .map(|(host, _)| host.clone())
+            else {
+                break;
+            };
+            if oldest_host == host {
+                break;
+            }
+            self.entries.remove(&oldest_host);
+        }
+    }
+
+    fn bump_tick(&mut self) -> u64 {
+        let tick = self.next_tick;
+        self.next_tick = self.next_tick.saturating_add(1);
+        tick
+    }
+}
+
 impl AppState {
     pub fn seeded(admin_token: Option<String>) -> Self {
         Self::new(AppData::seeded(), AppConfig::memory(admin_token))
@@ -132,7 +191,7 @@ impl AppState {
             feed_http: outbound_http_client_builder()
                 .build()
                 .expect("failed to build no-redirect feed client"),
-            outbound_pinned_clients: Arc::new(StdMutex::new(HashMap::new())),
+            outbound_pinned_clients: Arc::new(StdMutex::new(PinnedOutboundClientCache::default())),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
@@ -2437,7 +2496,7 @@ fn validate_outbound_http_url(
 /// resolve into denied private or loopback address space after initial parsing.
 async fn validated_outbound_http_client(
     shared_client: &reqwest::Client,
-    client_cache: &Arc<StdMutex<HashMap<String, reqwest::Client>>>,
+    client_cache: &Arc<StdMutex<PinnedOutboundClientCache>>,
     url: &reqwest::Url,
     label: &str,
     allow_loopback_destination: bool,
@@ -2472,7 +2531,7 @@ async fn validated_outbound_http_client(
 
 /// Builds a client pinned to the already-validated resolution result for `host`.
 fn pinned_outbound_http_client(
-    client_cache: &Arc<StdMutex<HashMap<String, reqwest::Client>>>,
+    client_cache: &Arc<StdMutex<PinnedOutboundClientCache>>,
     override_host: &str,
     host: &str,
     label: &str,
@@ -2487,12 +2546,11 @@ fn pinned_outbound_http_client(
     )?;
     addresses.sort_unstable();
     addresses.dedup();
-    let cache_key = pinned_outbound_client_cache_key(override_host, &addresses);
+    let cache_host_key = override_host.to_ascii_lowercase();
     if let Some(client) = client_cache
         .lock()
         .expect("pinned client cache poisoned")
-        .get(&cache_key)
-        .cloned()
+        .get(&cache_host_key, &addresses)
     {
         return Ok(client);
     }
@@ -2503,18 +2561,8 @@ fn pinned_outbound_http_client(
     client_cache
         .lock()
         .expect("pinned client cache poisoned")
-        .insert(cache_key, client.clone());
+        .insert(cache_host_key, addresses, client.clone());
     Ok(client)
-}
-
-fn pinned_outbound_client_cache_key(host: &str, addresses: &[SocketAddr]) -> String {
-    let mut key = host.to_ascii_lowercase();
-    key.push('|');
-    for address in addresses {
-        key.push_str(&address.to_string());
-        key.push(',');
-    }
-    key
 }
 
 /// Applies the literal IP trust-boundary policy to the resolved address set for
@@ -7147,7 +7195,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bound_addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
-        let cache = Arc::new(StdMutex::new(HashMap::new()));
+        let cache = Arc::new(StdMutex::new(PinnedOutboundClientCache::default()));
 
         let client = pinned_outbound_http_client(
             &cache,
@@ -7171,7 +7219,7 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "pinned-resolution");
         assert_eq!(bound_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(cache.lock().unwrap().len(), 1);
+        assert_eq!(cache.lock().unwrap().entries.len(), 1);
 
         let second = pinned_outbound_http_client(
             &cache,
@@ -7191,7 +7239,35 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("expected cached pinned request to succeed: {error}"));
         assert_eq!(second_response.status(), reqwest::StatusCode::OK);
-        assert_eq!(cache.lock().unwrap().len(), 1);
+        assert_eq!(cache.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn pinned_outbound_http_client_cache_evicts_oldest_hosts_past_capacity() {
+        let cache = Arc::new(StdMutex::new(PinnedOutboundClientCache::default()));
+        let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 443));
+
+        for index in 0..=MAX_PINNED_OUTBOUND_CLIENTS {
+            let host = format!("pinned-{index}.invalid.");
+            pinned_outbound_http_client(
+                &cache,
+                &host,
+                host.trim_end_matches('.'),
+                "feed URL",
+                true,
+                vec![loopback],
+            )
+            .unwrap_or_else(|error| panic!("expected bounded pinned client, got error: {error}"));
+        }
+
+        let cache = cache.lock().unwrap();
+        assert_eq!(cache.entries.len(), MAX_PINNED_OUTBOUND_CLIENTS);
+        assert!(!cache.entries.contains_key("pinned-0.invalid."));
+        assert!(
+            cache
+                .entries
+                .contains_key(&format!("pinned-{MAX_PINNED_OUTBOUND_CLIENTS}.invalid."))
+        );
     }
 
     #[test]
