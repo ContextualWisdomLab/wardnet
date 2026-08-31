@@ -1,4 +1,5 @@
-//! Secret-bearing and trust-boundary configuration via a process-local registry.
+//! Secret-bearing and fetch-sensitive configuration via a process-local
+//! credential registry.
 //!
 //! Org guidance: runtime code must not treat raw environment variables as the
 //! source of runtime secrets. Environment (and optional credentials file) are
@@ -8,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::ErrorKind, path::Path};
 
-/// Well-known secret keys loaded into the registry at bootstrap.
+/// Well-known credentials loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
 pub const CRED_TRUSTED_PROXY_CIDRS: &str = "trusted_proxy_cidrs";
@@ -79,11 +80,13 @@ impl CredentialRegistry {
                 .is_some_and(|v| !v.trim().is_empty())
     }
 
-    /// Bootstrap secret-bearing credentials.
+    /// Bootstrap secret-bearing credentials plus the optional KEV fetch override.
     ///
     /// Precedence: JSON credentials file (when present) wins per-key; missing
     /// keys are filled from the env bootstrap values. Operational non-secret
-    /// config (bind address, limits, DNSBL origin) stays on env.
+    /// config (bind address, limits, DNSBL origin) stays on env. The KEV URL
+    /// defaults to the built-in CISA endpoint and is accepted here only as a
+    /// server-side override that must still satisfy the runtime allowlist.
     pub fn bootstrap_secrets(
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
@@ -91,8 +94,10 @@ impl CredentialRegistry {
         env_trusted_proxy_cidrs: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
-        let mut from_file = false;
-        let mut from_env = false;
+        // CredentialSource is documented (and reported via HealthStatus/support
+        // bundle) as admin-secret provenance specifically.
+        let mut admin_from_file = false;
+        let mut admin_from_env = false;
 
         if let Some(path) = credentials_path {
             match std::fs::read_to_string(path) {
@@ -113,7 +118,7 @@ impl CredentialRegistry {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
                                 values.insert(key.to_string(), text);
-                                from_file = true;
+                                admin_from_file = true;
                             }
                         }
                     }
@@ -132,24 +137,22 @@ impl CredentialRegistry {
             && let Some(token) = env_admin_token.filter(|value| !value.is_empty())
         {
             values.insert(CRED_ADMIN_TOKEN.to_string(), token);
-            from_env = true;
+            admin_from_env = true;
         }
         if !values.contains_key(CRED_ADMIN_TOKENS)
             && let Some(tokens) = env_admin_tokens.filter(|value| !value.is_empty())
         {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
-            from_env = true;
+            admin_from_env = true;
         }
         if !values.contains_key(CRED_TRUSTED_PROXY_CIDRS)
             && let Some(cidr_list) = env_trusted_proxy_cidrs.filter(|value| !value.is_empty())
         {
             values.insert(CRED_TRUSTED_PROXY_CIDRS.to_string(), cidr_list);
-            from_env = true;
         }
-
-        let source = if from_file {
+        let source = if admin_from_file {
             CredentialSource::File
-        } else if from_env {
+        } else if admin_from_env {
             CredentialSource::Env
         } else {
             CredentialSource::None
