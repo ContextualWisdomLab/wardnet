@@ -1,6 +1,7 @@
 //! Regression contracts for the production Kubernetes deployment manifest.
 
 const MANIFEST: &str = include_str!("../deploy/kubernetes/waf-ids-ai-soc.yaml");
+const PRODUCTION_GUIDE: &str = include_str!("../docs/deployment/production.md");
 
 /// Secret coordinates the gateway Deployment must consume for `ADMIN_TOKEN`.
 #[derive(Debug, PartialEq, Eq)]
@@ -332,5 +333,47 @@ spec:
             secret_name: "waf-ids-ai-soc-admin",
             secret_key: "ADMIN_TOKEN",
         })
+    );
+}
+
+#[test]
+fn duplicate_admin_token_entries_fail_closed() {
+    let duplicate_admin_token = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+            - name: ADMIN_TOKEN
+              value: another-repository-visible-fallback
+"#;
+
+    assert_eq!(external_admin_secret_ref(duplicate_admin_token), None);
+}
+
+#[test]
+fn fresh_install_bootstraps_namespace_before_secret_provisioning() {
+    let namespace_bootstrap = "kubectl create namespace waf-ids-ai-soc --dry-run=client -o yaml | kubectl apply -f -";
+    let bootstrap_index = PRODUCTION_GUIDE
+        .find(namespace_bootstrap)
+        .expect("fresh-install instructions must create the namespace idempotently first");
+    let secret_index = PRODUCTION_GUIDE
+        .find("secret-management control plane")
+        .expect("production guide must retain external secret provisioning");
+
+    assert!(
+        bootstrap_index < secret_index,
+        "namespace bootstrap must precede namespaced Secret provisioning"
     );
 }
