@@ -225,8 +225,8 @@ mod tests {
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
-        let registry = CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()))
-            .unwrap();
+        let registry =
+            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
