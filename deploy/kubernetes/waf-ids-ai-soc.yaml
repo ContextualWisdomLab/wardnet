@@ -4,10 +4,11 @@ metadata:
   name: waf-ids-ai-soc
 ---
 # The administrator Secret is intentionally not distributed with Wardnet.
-# Provision `waf-ids-ai-soc-admin` in this namespace through the organization's
-# secret-management control plane before applying this manifest. The Deployment
-# below has no fallback value and therefore fails closed when the Secret or
-# `ADMIN_TOKEN` key is absent.
+# For a fresh install, create this Namespace idempotently first, provision
+# `waf-ids-ai-soc-admin` through the organization's secret-management control
+# plane, wait for synchronization, then apply this complete manifest. The
+# Deployment has no fallback value and therefore fails closed when the Secret
+# or `ADMIN_TOKEN` key is absent.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
