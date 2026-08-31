@@ -12,7 +12,7 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -53,6 +53,7 @@ pub struct AppState {
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
     feed_http: reqwest::Client,
+    outbound_pinned_clients: Arc<StdMutex<HashMap<String, reqwest::Client>>>,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
@@ -131,6 +132,7 @@ impl AppState {
             feed_http: outbound_http_client_builder()
                 .build()
                 .expect("failed to build no-redirect feed client"),
+            outbound_pinned_clients: Arc::new(StdMutex::new(HashMap::new())),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
@@ -291,7 +293,9 @@ impl AppState {
 
 /// Builds the shared outbound client policy: never follow redirects implicitly.
 fn outbound_http_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
 }
 
 #[derive(Debug, Clone)]
@@ -659,6 +663,7 @@ async fn clearfolio_submit(
     };
     let client = match validated_outbound_http_client(
         &state.http,
+        &state.outbound_pinned_clients,
         &endpoint,
         "Clearfolio submit URL",
         cfg!(test),
@@ -715,6 +720,7 @@ async fn clearfolio_status(
     };
     let client = match validated_outbound_http_client(
         &state.http,
+        &state.outbound_pinned_clients,
         &endpoint,
         "Clearfolio status URL",
         cfg!(test),
@@ -895,6 +901,7 @@ async fn soc_analyze(
     };
     let client = match validated_outbound_http_client(
         &state.http,
+        &state.outbound_pinned_clients,
         &endpoint,
         "SOC LLM endpoint",
         cfg!(test),
@@ -1727,9 +1734,14 @@ async fn fetch_taxii_objects(
             allow_loopback_destination: cfg!(test),
         },
     )?;
-    let client =
-        validated_outbound_http_client(&state.feed_http, &parsed, "TAXII objects URL", cfg!(test))
-            .await?;
+    let client = validated_outbound_http_client(
+        &state.feed_http,
+        &state.outbound_pinned_clients,
+        &parsed,
+        "TAXII objects URL",
+        cfg!(test),
+    )
+    .await?;
 
     let mut request = client
         .get(parsed)
@@ -2330,9 +2342,14 @@ async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
             allow_loopback_destination: cfg!(test),
         },
     )?;
-    let client =
-        validated_outbound_http_client(&state.feed_http, &parsed, "KEV catalog URL", cfg!(test))
-            .await?;
+    let client = validated_outbound_http_client(
+        &state.feed_http,
+        &state.outbound_pinned_clients,
+        &parsed,
+        "KEV catalog URL",
+        cfg!(test),
+    )
+    .await?;
     let response = client
         .get(parsed)
         .timeout(std::time::Duration::from_secs(
@@ -2420,14 +2437,15 @@ fn validate_outbound_http_url(
 /// resolve into denied private or loopback address space after initial parsing.
 async fn validated_outbound_http_client(
     shared_client: &reqwest::Client,
+    client_cache: &Arc<StdMutex<HashMap<String, reqwest::Client>>>,
     url: &reqwest::Url,
     label: &str,
     allow_loopback_destination: bool,
 ) -> Result<reqwest::Client, String> {
-    let host = url
+    let original_host = url
         .host_str()
         .ok_or_else(|| format!("{label} host is required"))?;
-    let host = host.trim_end_matches('.');
+    let host = original_host.trim_end_matches('.');
     if host.parse::<IpAddr>().is_ok() {
         return Ok(shared_client.clone());
     }
@@ -2442,15 +2460,24 @@ async fn validated_outbound_http_client(
         .await
         .map_err(|error| format!("{label} host {host} resolution failed: {error}"))?
         .collect::<Vec<_>>();
-    pinned_outbound_http_client(host, label, allow_loopback_destination, addresses)
+    pinned_outbound_http_client(
+        client_cache,
+        original_host,
+        host,
+        label,
+        allow_loopback_destination,
+        addresses,
+    )
 }
 
 /// Builds a client pinned to the already-validated resolution result for `host`.
 fn pinned_outbound_http_client(
+    client_cache: &Arc<StdMutex<HashMap<String, reqwest::Client>>>,
+    override_host: &str,
     host: &str,
     label: &str,
     allow_loopback_destination: bool,
-    addresses: Vec<SocketAddr>,
+    mut addresses: Vec<SocketAddr>,
 ) -> Result<reqwest::Client, String> {
     validate_resolved_outbound_ips(
         host,
@@ -2458,10 +2485,36 @@ fn pinned_outbound_http_client(
         allow_loopback_destination,
         addresses.iter().map(|address| address.ip()),
     )?;
-    outbound_http_client_builder()
-        .resolve_to_addrs(host, &addresses)
+    addresses.sort_unstable();
+    addresses.dedup();
+    let cache_key = pinned_outbound_client_cache_key(override_host, &addresses);
+    if let Some(client) = client_cache
+        .lock()
+        .expect("pinned client cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(client);
+    }
+    let client = outbound_http_client_builder()
+        .resolve_to_addrs(override_host, &addresses)
         .build()
-        .map_err(|error| format!("failed to build pinned outbound client for {label}: {error}"))
+        .map_err(|error| format!("failed to build pinned outbound client for {label}: {error}"))?;
+    client_cache
+        .lock()
+        .expect("pinned client cache poisoned")
+        .insert(cache_key, client.clone());
+    Ok(client)
+}
+
+fn pinned_outbound_client_cache_key(host: &str, addresses: &[SocketAddr]) -> String {
+    let mut key = host.to_ascii_lowercase();
+    key.push('|');
+    for address in addresses {
+        key.push_str(&address.to_string());
+        key.push(',');
+    }
+    key
 }
 
 /// Applies the literal IP trust-boundary policy to the resolved address set for
@@ -2530,6 +2583,8 @@ fn is_denied_ipv4(ip: Ipv4Addr, allow_loopback_destination: bool) -> bool {
         || ip.is_link_local()
         || ip.is_multicast()
         || ip.is_unspecified()
+        || ip.octets()[0] == 0
+        || ip.octets()[0] >= 240
         || ip_in_network(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 0)), 10, IpAddr::V4(ip))
         || ip_in_network(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, IpAddr::V4(ip))
         || ip_in_network(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 0)), 15, IpAddr::V4(ip))
@@ -2810,8 +2865,14 @@ async fn proxy_request(
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
     let parsed = validate_proxy_upstream_base_url(&target)?;
-    let client =
-        validated_outbound_http_client(&state.http, &parsed, "proxy upstream", cfg!(test)).await?;
+    let client = validated_outbound_http_client(
+        &state.http,
+        &state.outbound_pinned_clients,
+        &parsed,
+        "proxy upstream",
+        cfg!(test),
+    )
+    .await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = client
@@ -3149,9 +3210,15 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
         },
     )
     .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
-    let client = validated_outbound_http_client(&state.feed_http, &parsed, "feed URL", cfg!(test))
-        .await
-        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    let client = validated_outbound_http_client(
+        &state.feed_http,
+        &state.outbound_pinned_clients,
+        &parsed,
+        "feed URL",
+        cfg!(test),
+    )
+    .await
+    .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = client
         .get(parsed)
         .timeout(std::time::Duration::from_secs(
@@ -7080,8 +7147,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bound_addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
+        let cache = Arc::new(StdMutex::new(HashMap::new()));
 
         let client = pinned_outbound_http_client(
+            &cache,
+            "pinned-resolution.invalid.",
             "pinned-resolution.invalid",
             "feed URL",
             true,
@@ -7089,7 +7159,7 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("expected pinned client, got error: {error}"));
         let request_url = format!(
-            "{}://pinned-resolution.invalid/pinned",
+            "{}://pinned-resolution.invalid./pinned",
             std::str::from_utf8(b"http").expect("test scheme is valid ASCII")
         );
         let response = client
@@ -7101,6 +7171,41 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "pinned-resolution");
         assert_eq!(bound_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(cache.lock().unwrap().len(), 1);
+
+        let second = pinned_outbound_http_client(
+            &cache,
+            "pinned-resolution.invalid.",
+            "pinned-resolution.invalid",
+            "feed URL",
+            true,
+            vec![bound_addr],
+        )
+        .unwrap_or_else(|error| panic!("expected cached pinned client, got error: {error}"));
+        let second_response = second
+            .get(format!(
+                "{}://pinned-resolution.invalid./pinned",
+                std::str::from_utf8(b"http").expect("test scheme is valid ASCII")
+            ))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("expected cached pinned request to succeed: {error}"));
+        assert_eq!(second_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(cache.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn outbound_url_resolution_rejects_reserved_ipv4_ranges() {
+        for address in [
+            Ipv4Addr::new(0, 1, 2, 3),
+            Ipv4Addr::new(240, 0, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 255),
+        ] {
+            assert_eq!(
+                validate_outbound_ip(IpAddr::V4(address), "feed URL", false).unwrap_err(),
+                format!("feed URL host {address} is not allowed")
+            );
+        }
     }
 
     #[tokio::test]
