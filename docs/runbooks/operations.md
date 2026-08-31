@@ -99,7 +99,7 @@ When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling fil
 This baseline is suitable for local and controlled lab deployments. Internet-facing use still requires:
 
 - TLS termination and identity-aware admin access
-- upstream allowlists and egress controls
+- DNS-aware allowlists and request-time egress revalidation beyond the current literal-host fail-closed checks
 - durable database storage with backups
 - SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
@@ -107,3 +107,5 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement
+
+Current outbound guardrails reject destination URLs that include embedded credentials or fragments, and they fail closed on localhost/private/link-local/documentation literal IP targets before proxying gateway traffic or calling feed, Clearfolio, or SOC-LLM upstreams. Hostname allowlisting, DNS rebinding defense, and audited proxy configuration remain follow-up controls.

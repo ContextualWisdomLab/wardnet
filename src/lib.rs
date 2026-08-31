@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -639,15 +639,23 @@ async fn clearfolio_submit(
             format!("unknown document kind: {kind}"),
         );
     };
+    let endpoint = clearfolio_submit_url(&config.base_url);
+    if let Err(message) = validate_outbound_http_url(
+        &endpoint,
+        "Clearfolio submit URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    ) {
+        return error(StatusCode::BAD_GATEWAY, message);
+    }
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(filename)
         .mime_str("text/plain")
         .expect("text/plain is a valid MIME type");
     let form = reqwest::multipart::Form::new().part("file", part);
-    let mut request = state
-        .http
-        .post(clearfolio_submit_url(&config.base_url))
-        .multipart(form);
+    let mut request = state.http.post(endpoint).multipart(form);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -676,9 +684,18 @@ async fn clearfolio_status(
             "Clearfolio integration is not configured",
         );
     };
-    let mut request = state
-        .http
-        .get(clearfolio_status_url(&config.base_url, &job_id));
+    let endpoint = clearfolio_status_url(&config.base_url, &job_id);
+    if let Err(message) = validate_outbound_http_url(
+        &endpoint,
+        "Clearfolio status URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    ) {
+        return error(StatusCode::BAD_GATEWAY, message);
+    }
+    let mut request = state.http.get(endpoint);
     for (name, value) in clearfolio_tenant_headers(&config) {
         request = request.header(name, value);
     }
@@ -837,6 +854,16 @@ async fn soc_analyze(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
     );
+    if let Err(message) = validate_outbound_http_url(
+        &endpoint,
+        "SOC LLM endpoint",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    ) {
+        return error(StatusCode::BAD_GATEWAY, message);
+    }
     let response = state
         .http
         .post(endpoint)
@@ -923,6 +950,11 @@ async fn create_route(
     }
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
+    }
+    if !route.upstream.starts_with("mock://") {
+        if let Err(message) = validate_proxy_upstream_base_url(&route.upstream) {
+            return error(StatusCode::BAD_REQUEST, message);
+        }
     }
 
     let actor = audit_actor(&state, &headers);
@@ -2060,28 +2092,32 @@ async fn import_phishing_database_feed(
 
 fn validate_phishing_database_import_request(
     request: &PhishingDatabaseImportRequest,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     if request.feed_id.trim().is_empty() {
-        return Err("feed_id is required");
+        return Err("feed_id is required".to_string());
     }
     if request.source.trim().is_empty() {
-        return Err("source is required");
+        return Err("source is required".to_string());
     }
     if request.ttl_seconds == 0 {
-        return Err("ttl_seconds must be greater than zero");
+        return Err("ttl_seconds must be greater than zero".to_string());
     }
     if !request.import_domains && !request.import_ips {
-        return Err("at least one of import_domains or import_ips must be true");
+        return Err("at least one of import_domains or import_ips must be true".to_string());
     }
     if request.import_domains {
         if request.domain_limit == 0 {
-            return Err("domain_limit must be greater than zero when import_domains is enabled");
+            return Err(
+                "domain_limit must be greater than zero when import_domains is enabled".to_string(),
+            );
         }
         validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
     }
     if request.import_ips {
         if request.ip_limit == 0 {
-            return Err("ip_limit must be greater than zero when import_ips is enabled");
+            return Err(
+                "ip_limit must be greater than zero when import_ips is enabled".to_string(),
+            );
         }
         validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
     }
@@ -2175,21 +2211,24 @@ async fn import_kev_feed(
     }
 }
 
-fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
-    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
-    let host = parsed.host_str().ok_or("feed URL host is required")?;
-    match parsed.scheme() {
-        "https" => {}
-        "http" if is_loopback_host(host) => {}
-        "http" => return Err("feed URL scheme must be https unless host is loopback"),
-        _ => return Err("feed URL scheme must be http or https"),
-    }
+fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), String> {
+    let parsed = validate_outbound_http_url(
+        value,
+        "feed URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    )?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "feed URL host is required".to_string())?;
     if !allow_non_default_hosts
         && !PHISHING_DATABASE_ALLOWED_HOSTS
             .iter()
             .any(|allowed| host.eq_ignore_ascii_case(allowed))
     {
-        return Err("feed URL host is not allowed");
+        return Err("feed URL host is not allowed".to_string());
     }
     Ok(())
 }
@@ -2200,12 +2239,17 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &
 // independent and fixed to the built-in CISA host; loopback is allowed only for
 // tests that inject a local mock via `with_kev_catalog_url`.
 fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
-    validate_http_url(url, /* allow_non_default_hosts */ true)
-        .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
-    let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid KEV catalog URL {url}"))?;
+    let parsed = validate_outbound_http_url(
+        url,
+        "KEV catalog URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    )?;
     let host = parsed
         .host_str()
-        .ok_or_else(|| format!("invalid KEV catalog URL {url}: host is required"))?;
+        .ok_or_else(|| format!("KEV catalog URL {url} host is required"))?;
     if !KEV_ALLOWED_HOSTS
         .iter()
         .any(|allowed| host.eq_ignore_ascii_case(allowed))
@@ -2265,6 +2309,116 @@ fn is_loopback_host(host: &str) -> bool {
             .parse::<IpAddr>()
             .map(|ip| ip.is_loopback())
             .unwrap_or(false)
+}
+
+#[derive(Clone, Copy)]
+struct OutboundHttpPolicy {
+    allow_insecure_http_for_loopback: bool,
+    allow_loopback_destination: bool,
+}
+
+fn validate_outbound_http_url(
+    value: &str,
+    label: &str,
+    policy: OutboundHttpPolicy,
+) -> Result<reqwest::Url, String> {
+    let parsed =
+        reqwest::Url::parse(value).map_err(|_| format!("{label} must be an absolute URL"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{label} must not include credentials"));
+    }
+    if parsed.fragment().is_some() {
+        return Err(format!("{label} must not include a fragment"));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("{label} host is required"))?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if policy.allow_insecure_http_for_loopback && is_loopback_host(host) => {}
+        "http" => {}
+        _ => return Err(format!("{label} scheme must be http or https")),
+    }
+    validate_outbound_host(host, label, policy.allow_loopback_destination)?;
+    Ok(parsed)
+}
+
+fn validate_outbound_host(
+    host: &str,
+    label: &str,
+    allow_loopback_destination: bool,
+) -> Result<(), String> {
+    if host.eq_ignore_ascii_case("localhost") && !allow_loopback_destination {
+        return Err(format!("{label} host localhost is not allowed"));
+    }
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return Ok(());
+    };
+    validate_outbound_ip(ip, label, allow_loopback_destination)
+}
+
+fn validate_outbound_ip(
+    ip: IpAddr,
+    label: &str,
+    allow_loopback_destination: bool,
+) -> Result<(), String> {
+    let denied = match ip {
+        IpAddr::V4(ipv4) => is_denied_ipv4(ipv4, allow_loopback_destination),
+        IpAddr::V6(ipv6) => is_denied_ipv6(ipv6, allow_loopback_destination),
+    };
+    if denied {
+        Err(format!("{label} host {ip} is not allowed"))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_denied_ipv4(ip: Ipv4Addr, allow_loopback_destination: bool) -> bool {
+    (ip.is_loopback() && !allow_loopback_destination)
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_unspecified()
+        || ip_in_network(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 0)), 10, IpAddr::V4(ip))
+        || ip_in_network(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)), 24, IpAddr::V4(ip))
+        || ip_in_network(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 0)), 15, IpAddr::V4(ip))
+        || ip_in_network(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 0)),
+            24,
+            IpAddr::V4(ip),
+        )
+        || ip_in_network(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
+            24,
+            IpAddr::V4(ip),
+        )
+}
+
+fn is_denied_ipv6(ip: Ipv6Addr, allow_loopback_destination: bool) -> bool {
+    if let Some(ipv4) = ip.to_ipv4() {
+        return is_denied_ipv4(ipv4, allow_loopback_destination);
+    }
+    (ip.is_loopback() && !allow_loopback_destination)
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip_in_network(
+            IpAddr::V6("2001:db8::".parse().expect("valid documentation prefix")),
+            32,
+            IpAddr::V6(ip),
+        )
+}
+
+fn validate_proxy_upstream_base_url(value: &str) -> Result<reqwest::Url, String> {
+    validate_outbound_http_url(
+        value,
+        "proxy upstream",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    )
 }
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
@@ -2502,6 +2656,7 @@ pub fn upstream_target(
         target.push('?');
         target.push_str(query);
     }
+    validate_proxy_upstream_base_url(&target)?;
     Ok(target)
 }
 
@@ -6640,6 +6795,23 @@ mod tests {
         assert!(result.err().unwrap().contains("upstream must use http://"));
     }
 
+    #[test]
+    fn outbound_url_policy_rejects_private_and_credentialed_destinations() {
+        assert_eq!(
+            validate_proxy_upstream_base_url("http://10.0.0.5/api").unwrap_err(),
+            "proxy upstream host 10.0.0.5 is not allowed"
+        );
+        assert_eq!(
+            validate_http_url("https://user:pass@example.com/feed.txt", true).unwrap_err(),
+            "feed URL must not include credentials"
+        );
+        assert_eq!(
+            validate_http_url("https://example.com/feed.txt#frag", true).unwrap_err(),
+            "feed URL must not include a fragment"
+        );
+        assert!(validate_proxy_upstream_base_url("https://origin.example").is_ok());
+    }
+
     fn temp_state_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7839,6 +8011,20 @@ mod tests {
                 .status(),
             StatusCode::BAD_GATEWAY
         );
+
+        let denied = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config("http://10.0.0.8:8080"))),
+        );
+        assert_eq!(
+            app_request(
+                &denied,
+                empty_request(Method::POST, "/api/clearfolio/documents/soc-export")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
     }
 
     fn soc_test_event() -> SecurityEvent {
@@ -8063,6 +8249,22 @@ mod tests {
                     None,
                     &serde_json::json!({"event_id": 1})
                 )
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        let denied = build_app(state_with_event_and_llm("http://10.0.0.9:8080"));
+        assert_eq!(
+            app_request(
+                &denied,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1}),
+                ),
             )
             .await
             .status(),
