@@ -34,6 +34,11 @@ operator documentation (OpenCTI, n.d.).
    `POST /api/threat-intel/taxii/poll`: receive a TAXII 2.1 objects URL
    (or API root plus collection id) and optional credentials, fetch the
    external endpoint, normalize its response to STIX, then upsert it.
+   That remote-fetch path remains bounded by the shared outbound policy:
+   absolute URLs only, no embedded credentials or fragments, HTTPS off
+   loopback, and no automatic redirect following while credentials are
+   in scope. Deeper DNS-aware egress validation remains production
+   hardening work until it lands on protected `main`.
 3. Map supported IP, domain, URL, and hash material into
    `ThreatIndicator` and `DnsblEntry` rows and update feed freshness.
 4. **Live MISP REST pull** and **live OpenCTI GraphQL pull** remain
@@ -54,6 +59,12 @@ operator documentation (OpenCTI, n.d.).
 - TAXII poll still performs an outbound HTTP GET of objects the
   operator named; that is document transport, not a live MISP/OpenCTI
   product puller.
+- Mavroeidis and Bromander (2021) argue that CTI-sharing formats must
+  remain machine-readable and unambiguous to support interoperable
+  analysis, while Arikkat et al. (2024) emphasize provenance,
+  trustworthiness, and quality controls around shared CTI. Wardnet uses
+  that boundary to justify validation, source labeling, and the rule
+  that TAXII or admin credentials must never be copied into audit logs.
 
 ## References
 
@@ -74,3 +85,12 @@ https://www.misp-standard.org/
 
 OpenCTI. (n.d.). *OpenCTI documentation*.
 https://docs.opencti.io/latest/
+
+Mavroeidis, V., & Bromander, S. (2021). *Cyber threat intelligence
+model: An evaluation of taxonomies, sharing standards, and ontologies
+within cyber threat intelligence* [Preprint]. arXiv.
+https://arxiv.org/abs/2103.03530
+
+Arikkat, D. R., Cihangiroglu, M., Conti, M., Rehiman K. A., R., Nicolazzo,
+S., Nocera, A., & Vinod P. (2024). *SeCTIS: A framework to secure CTI
+sharing* [Preprint]. arXiv. https://arxiv.org/abs/2406.14102

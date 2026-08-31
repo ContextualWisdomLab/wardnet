@@ -35,6 +35,12 @@ Coraza/CRS **audit** documents; it does not embed Coraza in-process.
    supplemental local heuristics for first-pass triage and blocking;
    they are **not** presented as WAF authority, CRS parity, or a
    substitute for Coraza-backed enforcement.
+   Bitussi and Doriguzzi-Corin (2026) show why HTTP anomaly detection
+   benefits from explainable, model-backed request analysis but also
+   why detector quality depends on trustworthy training data and
+   calibration. Wardnet therefore keeps its lightweight scoring path
+   explicitly bounded and subordinate to CRS authority rather than
+   claiming heuristic parity with a maintained WAF rule set.
 
 Related accepted ingest on the same `main` (IDS, not WAF authority):
 admin-authenticated Suricata EVE JSON/NDJSON at
@@ -61,3 +67,7 @@ https://coreruleset.org/
 
 Eve JSON output. (n.d.). In *Suricata documentation*.
 https://docs.suricata.io/en/latest/output/eve/eve-json-output.html
+
+Bitussi, M., & Doriguzzi-Corin, R. (2026). *X-WAD: eXplainable web
+anomaly detection* [Preprint]. arXiv.
+https://arxiv.org/abs/2608.27172
