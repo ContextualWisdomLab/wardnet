@@ -81,7 +81,13 @@ impl CredentialRegistry {
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
     ) -> Result<Self, String> {
-        Self::bootstrap_runtime_registry(credentials_path, env_admin_token, env_admin_tokens)
+        Self::bootstrap_with_runtime_overrides(
+            credentials_path,
+            env_admin_token,
+            env_admin_tokens,
+            None,
+            None,
+        )
     }
 
     /// Bootstrap secret-bearing credentials plus env-transported runtime
@@ -239,6 +245,23 @@ mod tests {
             CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
+    }
+
+    #[test]
+    fn bootstrap_secrets_excludes_runtime_policy_overrides() {
+        let registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            Some("secret".to_string()),
+            Some("tok:alice".to_string()),
+        )
+        .unwrap();
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("secret"));
+        assert_eq!(
+            registry.get_credential(CRED_ADMIN_TOKENS),
+            Some("tok:alice")
+        );
+        assert_eq!(registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS), None);
+        assert_eq!(registry.get_credential(CRED_TRUSTED_PROXY_IPS), None);
     }
 
     #[test]
