@@ -36,8 +36,10 @@ not a product certification.
 3. When enabled, delegate workflow depth and model selection through
    the explicit adaptive orchestration contract in ADR 0010. Wardnet
    retains authorization, evidence collection, and enforcement.
-4. Leave the LLM backend **optional**. If `SOC_LLM_BASE_URL` is
-   unset, assist is unavailable; the gateway still enforces
+4. Leave the LLM backend **optional**. Current `main` exposes the
+   `SocLlmConfig` runtime hook, but `run_from_env` does **not** yet
+   wire `SOC_LLM_BASE_URL`; absent explicit in-process configuration,
+   assist is unavailable and the gateway still enforces
    operator-written policy.
 5. Do not treat cancelled scanner runs, unmerged drafts, or coverage
    stubs as evidence that assist is safe to auto-enforce.

@@ -38,7 +38,9 @@ Clearfolio) are optional HTTP or contract callers, not required checkouts.
 References use APA 7th. Every external locator was fetched live on
 2026-08-25. Informational RFCs stay labeled informational. Drafts,
 unmerged pull requests, and unpublished scans are not cited as papers or
-standards.
+standards. Local PDF copies are attached only when redistribution is
+permissible; otherwise the ADR cites, links, and summarizes the source
+without vendoring the full text.
 
 ## Template
 

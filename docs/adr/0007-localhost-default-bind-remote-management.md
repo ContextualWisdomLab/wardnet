@@ -23,10 +23,11 @@ from one mistaken write.
 ## Decision
 
 1. Default `BIND_ADDR` is **`127.0.0.1:8080`** (localhost).
-2. **Remote management** requires a configured **`ADMIN_TOKEN`** (or
-   `ADMIN_TOKENS` / credential-registry equivalent) **and** external
-   TLS plus identity controls in front of the process. This binary
-   does not terminate public TLS or SSO by itself.
+2. **Remote management** is accepted only with a configured
+   **`ADMIN_TOKEN`** (or `ADMIN_TOKENS` / credential-registry
+   equivalent) **and** external TLS plus identity controls in front of
+   the process. This binary does not terminate public TLS or SSO by
+   itself.
 3. **Block mode is route-scoped.** A route's `mode` applies to that
    route's path prefix only.
 4. Public clients enter through `/gateway/{path}`. Management writes
@@ -36,6 +37,12 @@ from one mistaken write.
 
 - `cargo run` without extra config is a local lab listener, not an
   internet-facing deployment.
+- Current `main` does **not** yet fail closed when an operator binds to
+  a non-loopback address without admin credentials: the fallback
+  `admin_authorized` path still treats missing credentials as auth
+  disabled. That insecure configuration is therefore outside this
+  accepted deployment boundary and remains an implementation gap rather
+  than accepted evidence of safe remote management.
 - Operators who bind to a non-loopback address must supply TLS,
   identity-aware access, upstream allowlists, and rollback procedures
   before production traffic (`README.md` completion baseline).

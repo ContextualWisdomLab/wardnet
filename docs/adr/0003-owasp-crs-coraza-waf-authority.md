@@ -20,7 +20,8 @@ Coraza/CRS **audit** documents; it does not embed Coraza in-process.
 ## Decision
 
 1. **OWASP CRS remains the WAF rule authority.** Do not replace CRS
-   with hand-rolled gateway rules.
+   with a hand-rolled rule engine or claim that Wardnet's local
+   signatures are equivalent to CRS.
 2. Accept admin-authenticated Coraza / OWASP CRS **audit JSON/NDJSON**
    at `POST /api/waf/coraza/audit`. Interrupted transactions and CRS
    rule messages become `SecurityEvent` rows. Block-grade hits may seed
@@ -29,6 +30,11 @@ Coraza/CRS **audit** documents; it does not embed Coraza in-process.
 3. Run Coraza **outside** this process for now. **In-process Coraza
    embedding is a follow-up**, not an accepted replacement of CRS and
    not an accepted replacement of the audit ingest path.
+4. Current `main` may still apply bounded built-in signatures and a
+   lightweight anomaly heuristic during gateway scoring. Those are
+   supplemental local heuristics for first-pass triage and blocking;
+   they are **not** presented as WAF authority, CRS parity, or a
+   substitute for Coraza-backed enforcement.
 
 Related accepted ingest on the same `main` (IDS, not WAF authority):
 admin-authenticated Suricata EVE JSON/NDJSON at

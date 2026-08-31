@@ -34,10 +34,15 @@ Cargo workspaces keep multiple packages on one lockfile and one
    callers** over HTTP or documented contracts:
    - **naruon** and **gyeot** may call or be called when an operator
      wires them; they are not required tree members.
-   - **contextual-orchestrator** may front the optional SOC LLM
-     (`SOC_LLM_BASE_URL`); absent configuration, SOC assist is off.
-   - **Clearfolio** may receive optional document-viewer relays
-     (`CLEARFOLIO_BASE_URL`); absent configuration, that surface stays
+   - **contextual-orchestrator** is the intended front door for the
+     optional SOC LLM path. Current `main` exposes the `SocLlmConfig`
+     runtime hook, but `run_from_env` does **not** yet wire
+     `SOC_LLM_BASE_URL`; absent explicit in-process configuration, SOC
+     assist stays off.
+   - **Clearfolio** is an optional document-viewer relay target.
+     Current `main` exposes the `ClearfolioConfig` runtime hook, but
+     `run_from_env` does **not** yet wire `CLEARFOLIO_BASE_URL`;
+     absent explicit in-process configuration, that surface stays
      disabled.
    Existing optional caller links stay in place. Do not require those
    services to start the gateway.
