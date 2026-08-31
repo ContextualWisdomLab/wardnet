@@ -41,6 +41,7 @@ spec:
       labels:
         app.kubernetes.io/name: waf-ids-ai-soc
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         fsGroup: 10001
