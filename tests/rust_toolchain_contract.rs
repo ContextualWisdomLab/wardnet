@@ -3,6 +3,7 @@
 const RUST_TOOLCHAIN: &str = include_str!("../rust-toolchain.toml");
 const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const DEPENDABOT: &str = include_str!("../.github/dependabot.yml");
+const DOCKERFILE: &str = include_str!("../Dockerfile");
 
 fn pinned_channel() -> String {
     RUST_TOOLCHAIN
@@ -16,12 +17,23 @@ fn pinned_channel() -> String {
 
 #[test]
 fn pinned_toolchain_is_consistent_in_local_and_ci_contracts() {
-    let pinned_channel = pinned_channel();
-    assert_eq!(pinned_channel, "1.97.1");
+    let _pinned_channel = pinned_channel();
     assert!(!RUST_TOOLCHAIN.contains("channel = \"stable\""));
     assert!(CI_WORKFLOW.contains("id: pinned-toolchain"));
     assert!(CI_WORKFLOW.contains("sed -n 's/^channel = "));
     assert!(CI_WORKFLOW.contains("toolchain: ${{ steps.pinned-toolchain.outputs.version }}"));
+    assert!(CI_WORKFLOW.contains("components: llvm-tools-preview, rustfmt, clippy"));
+    assert!(DOCKERFILE.contains("COPY rust-toolchain.toml ./"));
+    assert!(DOCKERFILE.contains("RUN cargo build --locked --release"));
+    assert!(!DOCKERFILE.contains("FROM rust:1."));
+    assert!(
+        DOCKERFILE.contains("FROM rust:bookworm@sha256:"),
+        "container build must consume rust-toolchain.toml instead of pinning a separate Rust version"
+    );
+    assert!(
+        DEPENDABOT.contains("- package-ecosystem: rust-toolchain"),
+        "toolchain bumps must remain automated from rust-toolchain.toml"
+    );
 }
 
 #[test]
