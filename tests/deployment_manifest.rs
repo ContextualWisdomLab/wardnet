@@ -80,7 +80,8 @@ fn named_list_item_block<'a>(
 
 /// Locate `ADMIN_TOKEN` on the `waf-ids-ai-soc` gateway container only.
 ///
-/// `secretKeyRef.optional: true` is treated as absent (fail closed).
+/// Duplicate entries, literal fallback values, and `secretKeyRef.optional: true`
+/// are treated as absent (fail closed).
 fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_>> {
     manifest.split("\n---\n").find_map(|document| {
         let lines = document.lines().collect::<Vec<_>>();
@@ -99,7 +100,18 @@ fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_
         let containers = nested_block(&pod_spec, "containers:", 6);
         let gateway = named_list_item_block(&containers, "gateway", 8);
         let env = nested_block(&gateway, "env:", 10);
+        let admin_token_entries = env
+            .iter()
+            .filter(|line| leading_spaces(line) == 12 && line.trim() == "- name: ADMIN_TOKEN")
+            .count();
+        if admin_token_entries != 1 {
+            return None;
+        }
+
         let env_block = named_list_item_block(&env, "ADMIN_TOKEN", 12);
+        if env_block.iter().any(|line| line.trim().starts_with("value:")) {
+            return None;
+        }
         let secret_ref_index = env_block
             .iter()
             .position(|line| line.trim() == "secretKeyRef:")?;
