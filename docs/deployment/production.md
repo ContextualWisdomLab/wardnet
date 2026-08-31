@@ -29,11 +29,24 @@ ADMIN_TOKEN=replace-me docker compose up --build
 
 ## Kubernetes
 
-Review `deploy/kubernetes/waf-ids-ai-soc.yaml` before applying. Replace the placeholder admin secret with a secret-manager synchronization flow.
+The distributable manifest does not create an administrator Secret. Before applying `deploy/kubernetes/waf-ids-ai-soc.yaml`, use the organization's secret-management control plane to provision an Opaque Secret named `waf-ids-ai-soc-admin` in namespace `waf-ids-ai-soc` with key `ADMIN_TOKEN`. Keep access to that Secret limited to the workload and operational identities that require it.
+
+The Deployment binds `ADMIN_TOKEN` only through that `secretKeyRef` with `optional: false`. If the Secret or key is absent, the workload does not start; there is no repository-provided fallback credential.
+
+After the external secret controller reports successful synchronization, apply the manifest:
 
 ```bash
 kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
 ```
+
+When rotating `ADMIN_TOKEN`, wait for the updated Secret to synchronize, then restart the Deployment because environment-variable-backed Secret values are fixed when a container starts. Verify the rollout and readiness before revoking the previous token:
+
+```bash
+kubectl -n waf-ids-ai-soc rollout restart deployment/waf-ids-ai-soc
+kubectl -n waf-ids-ai-soc rollout status deployment/waf-ids-ai-soc
+```
+
+Failure, recovery, verification, and evidence requirements are documented in [`../doctoring/kubernetes-admin-secret-boundary.md`](../doctoring/kubernetes-admin-secret-boundary.md).
 
 ## Production Requirements
 
