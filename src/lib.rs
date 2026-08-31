@@ -124,7 +124,10 @@ impl AppState {
         Self {
             inner: Arc::new(RwLock::new(data)),
             persist_lock: Arc::new(Mutex::new(())),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("failed to build no-redirect outbound client"),
             feed_http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -2211,6 +2214,8 @@ async fn import_kev_feed(
     }
 }
 
+/// Validates one operator-supplied feed URL against the shared outbound egress
+/// policy, then enforces the built-in host allowlist unless explicitly relaxed.
 fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), String> {
     let parsed = validate_outbound_http_url(
         value,
@@ -2311,12 +2316,15 @@ fn is_loopback_host(host: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Per-call exceptions for the shared outbound HTTP policy.
 #[derive(Clone, Copy)]
 struct OutboundHttpPolicy {
     allow_insecure_http_for_loopback: bool,
     allow_loopback_destination: bool,
 }
 
+/// Parses and validates one outbound URL before Wardnet sends credentials,
+/// tenant headers, or proxied bodies to it.
 fn validate_outbound_http_url(
     value: &str,
     label: &str,
@@ -2336,18 +2344,25 @@ fn validate_outbound_http_url(
     match parsed.scheme() {
         "https" => {}
         "http" if policy.allow_insecure_http_for_loopback && is_loopback_host(host) => {}
-        "http" => {}
+        "http" => {
+            return Err(format!(
+                "{label} scheme must be https unless host is loopback"
+            ));
+        }
         _ => return Err(format!("{label} scheme must be http or https")),
     }
     validate_outbound_host(host, label, policy.allow_loopback_destination)?;
     Ok(parsed)
 }
 
+/// Validates one outbound host string, normalizing a trailing root dot before
+/// literal localhost and IP-space checks.
 fn validate_outbound_host(
     host: &str,
     label: &str,
     allow_loopback_destination: bool,
 ) -> Result<(), String> {
+    let host = host.trim_end_matches('.');
     if host.eq_ignore_ascii_case("localhost") && !allow_loopback_destination {
         return Err(format!("{label} host localhost is not allowed"));
     }
@@ -2357,6 +2372,7 @@ fn validate_outbound_host(
     validate_outbound_ip(ip, label, allow_loopback_destination)
 }
 
+/// Rejects literal IP targets that leave Wardnet's trust boundary.
 fn validate_outbound_ip(
     ip: IpAddr,
     label: &str,
@@ -2373,6 +2389,8 @@ fn validate_outbound_ip(
     }
 }
 
+/// Denies IPv4 ranges that are loopback-only, non-routable, or reserved for
+/// private/internal/documentation use.
 fn is_denied_ipv4(ip: Ipv4Addr, allow_loopback_destination: bool) -> bool {
     (ip.is_loopback() && !allow_loopback_destination)
         || ip.is_private()
@@ -2394,6 +2412,8 @@ fn is_denied_ipv4(ip: Ipv4Addr, allow_loopback_destination: bool) -> bool {
         )
 }
 
+/// Denies IPv6 ranges that are loopback-only, non-routable, or reserved for
+/// private/internal/documentation use.
 fn is_denied_ipv6(ip: Ipv6Addr, allow_loopback_destination: bool) -> bool {
     if let Some(ipv4) = ip.to_ipv4() {
         return is_denied_ipv4(ipv4, allow_loopback_destination);
@@ -2410,6 +2430,8 @@ fn is_denied_ipv6(ip: Ipv6Addr, allow_loopback_destination: bool) -> bool {
         )
 }
 
+/// Validates one proxy upstream target against the shared outbound egress
+/// policy used by request-time proxying.
 fn validate_proxy_upstream_base_url(value: &str) -> Result<reqwest::Url, String> {
     validate_outbound_http_url(
         value,
@@ -6799,7 +6821,7 @@ mod tests {
     fn outbound_url_policy_rejects_private_and_credentialed_destinations() {
         assert_eq!(
             validate_proxy_upstream_base_url("http://10.0.0.5/api").unwrap_err(),
-            "proxy upstream host 10.0.0.5 is not allowed"
+            "proxy upstream scheme must be https unless host is loopback"
         );
         assert_eq!(
             validate_http_url("https://user:pass@example.com/feed.txt", true).unwrap_err(),
@@ -6809,7 +6831,71 @@ mod tests {
             validate_http_url("https://example.com/feed.txt#frag", true).unwrap_err(),
             "feed URL must not include a fragment"
         );
+        assert_eq!(
+            validate_outbound_http_url(
+                "http://example.com/feed.txt",
+                "feed URL",
+                OutboundHttpPolicy {
+                    allow_insecure_http_for_loopback: true,
+                    allow_loopback_destination: cfg!(test),
+                },
+            )
+            .unwrap_err(),
+            "feed URL scheme must be https unless host is loopback"
+        );
+        assert_eq!(
+            validate_proxy_upstream_base_url("http://LOCALHOST./api").unwrap_err(),
+            "proxy upstream scheme must be https unless host is loopback"
+        );
+        assert_eq!(
+            validate_outbound_http_url(
+                "https://LOCALHOST./api",
+                "proxy upstream",
+                OutboundHttpPolicy {
+                    allow_insecure_http_for_loopback: true,
+                    allow_loopback_destination: false,
+                },
+            )
+            .unwrap_err(),
+            "proxy upstream host localhost is not allowed"
+        );
         assert!(validate_proxy_upstream_base_url("https://origin.example").is_ok());
+    }
+
+    #[tokio::test]
+    async fn proxy_request_does_not_follow_redirects_to_second_hop_destinations() {
+        let redirect_target = "http://10.0.0.8/private".to_string();
+        let redirect_app = Router::new().route(
+            "/start",
+            get(move || {
+                let location = redirect_target.clone();
+                async move { (StatusCode::FOUND, [("location", location)]) }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_app).into_future());
+
+        let state = AppState::seeded(None);
+        let response = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "redirect".to_string(),
+                path_prefix: "/redirect".to_string(),
+                upstream: format!("http://{redirect_addr}"),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/redirect/start",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
     }
 
     fn temp_state_path(name: &str) -> PathBuf {
