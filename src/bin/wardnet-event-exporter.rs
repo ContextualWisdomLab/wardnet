@@ -409,7 +409,7 @@ fn otlp_int_attribute(key: &str, value: u64) -> Value {
 
 fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
     let mut output = String::new();
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         let severity = severity(event.score);
         let priority = 16_u16 * 8 + u16::from(severity.syslog_code);
         let ip_parameter = event
@@ -423,8 +423,15 @@ fn render_rfc5424(events: &[NormalizedEvent]) -> Result<String, String> {
             escape_structured_data(env!("CARGO_PKG_VERSION"))
         );
         let timestamp = rfc5424_timestamp(event.timestamp_unix)?;
-        let meta_data = if event.id <= i32::MAX as u64 {
-            format!("[meta sequenceId=\"{}\"]", event.id)
+        // RFC 5424's `meta.sequenceId` is the transmission sequence number
+        // of this syslog function invocation (starting at 1, incrementing
+        // per message sent) -- not an application-level record identifier.
+        // The batch is capped well below `i32::MAX`, so `index + 1` always
+        // fits; `event.id` (the Wardnet event identifier) is still carried
+        // in the JSON message body as `event_id`.
+        let sequence_id = index as u64 + 1;
+        let meta_data = if sequence_id <= i32::MAX as u64 {
+            format!("[meta sequenceId=\"{sequence_id}\"]")
         } else {
             String::new()
         };

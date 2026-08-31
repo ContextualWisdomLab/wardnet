@@ -123,6 +123,28 @@ fn normalization_redacts_whitespace_delimited_assignments() {
 }
 
 #[test]
+fn normalization_redacts_quoted_credential_values_containing_whitespace() {
+    let input = event(
+        2,
+        1_723_456_789,
+        "monitor",
+        r#"password="kilo lima" api_key='mike november' done"#,
+        "/",
+    );
+    let events = read_events(Cursor::new(input)).expect("valid sanitized event");
+    let reason = &events[0].reason;
+
+    for fragment in ["kilo", "lima", "mike", "november"] {
+        assert!(
+            !reason.contains(fragment),
+            "leaked a fixture secret fragment in {reason}"
+        );
+    }
+    assert!(reason.contains("[REDACTED]"));
+    assert!(reason.ends_with("done"));
+}
+
+#[test]
 fn oversized_reason_is_bounded_without_poisoning_the_batch() {
     let oversized = "signal ".repeat(400);
     let input = format!(

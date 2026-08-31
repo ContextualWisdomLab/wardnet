@@ -244,9 +244,23 @@ fn sanitize_text(value: &str, maximum: usize) -> String {
 
     let mut output = String::new();
     let mut redact_next = false;
+    let mut quote_pending: Option<char> = None;
     for token in normalized.split_whitespace() {
         if !output.is_empty() {
             output.push(' ');
+        }
+        if let Some(quote) = quote_pending {
+            // A quoted credential value (e.g. `password="hunter two"`)
+            // opened in an earlier whitespace-delimited token and has not
+            // closed yet. Redact this whole token rather than re-parsing it
+            // as an unrelated key/value pair, so the space inside the quoted
+            // value cannot leak a trailing fragment in plaintext.
+            output.push_str("[REDACTED]");
+            if token.contains(quote) {
+                quote_pending = None;
+            }
+            redact_next = false;
+            continue;
         }
         let (redacted, keep_redacting) = if redact_next && matches!(token, ":" | "=") {
             // Operators commonly render assignments with whitespace around
@@ -268,10 +282,24 @@ fn sanitize_text(value: &str, maximum: usize) -> String {
             let redacted = redact_token(token);
             (redacted, is_authorization_marker(token))
         };
+        if redacted != token
+            && let Some(quote) = unclosed_quote(token)
+        {
+            quote_pending = Some(quote);
+        }
         output.push_str(&redacted);
         redact_next = keep_redacting;
     }
     truncate_chars(&output, maximum)
+}
+
+/// Returns the quote character if `token` contains an odd number of `"` or
+/// `'`, meaning a quoted value inside it was opened but not closed within
+/// this single whitespace-delimited token.
+fn unclosed_quote(token: &str) -> Option<char> {
+    ['"', '\'']
+        .into_iter()
+        .find(|quote| token.matches(*quote).count() % 2 == 1)
 }
 
 /// Marker names that indicate the following token (or an `=`/`:` assignment

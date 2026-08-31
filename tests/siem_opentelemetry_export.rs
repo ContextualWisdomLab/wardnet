@@ -187,7 +187,9 @@ fn rfc5424_uses_standard_structured_data_and_single_line_json_message() {
     assert_eq!(body.lines().count(), 1);
     assert!(body.starts_with("<131>1 2024-08-12T09:59:51Z - wardnet - WARDNET_EVENT "));
     assert!(body.contains("[origin ip=\"203.0.113.8\" software=\"Wardnet\""));
-    assert!(body.contains("[meta sequenceId=\"9\"]"));
+    // sequenceId is the 1-based transmission sequence number of this
+    // exporter invocation, not the Wardnet event id (which is 9 here).
+    assert!(body.contains("[meta sequenceId=\"1\"]"));
     assert!(body.contains(&format!(
         "[OpenTelemetry trace_id=\"{TRACE_ID}\" span_id=\"{SPAN_ID}\" trace_flags=\"01\"]"
     )));
