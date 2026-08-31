@@ -17,8 +17,17 @@ fn pinned_channel() -> String {
 
 #[test]
 fn pinned_toolchain_is_consistent_in_local_and_ci_contracts() {
-    let _pinned_channel = pinned_channel();
-    assert!(!RUST_TOOLCHAIN.contains("channel = \"stable\""));
+    let pinned_channel = pinned_channel();
+    let parts: Vec<_> = pinned_channel.split('.').collect();
+    assert!(
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| { !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()) }),
+        "toolchain channel must be an exact numeric version"
+    );
+    assert_ne!(pinned_channel, "stable");
+    assert_ne!(pinned_channel, "nightly");
     assert!(CI_WORKFLOW.contains("id: pinned-toolchain"));
     assert!(CI_WORKFLOW.contains("sed -n 's/^channel = "));
     assert!(CI_WORKFLOW.contains("toolchain: ${{ steps.pinned-toolchain.outputs.version }}"));
