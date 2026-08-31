@@ -111,7 +111,10 @@ fn normalization_redacts_whitespace_delimited_assignments() {
     let reason = &events[0].reason;
 
     for secret in ["alpha", "bravo", "charlie", "delta"] {
-        assert!(!reason.contains(secret), "leaked {secret} in {reason}");
+        assert!(
+            !reason.contains(secret),
+            "leaked a fixture secret in {reason}"
+        );
     }
     assert!(reason.contains("token = [REDACTED]"));
     assert!(reason.contains("password :[REDACTED]"));

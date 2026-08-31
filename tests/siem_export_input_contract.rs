@@ -144,7 +144,7 @@ fn hyphenated_credential_markers_are_redacted() {
     );
     let body = String::from_utf8(output.stdout).expect("UTF-8 OCSF output");
     for secret in ["abc123", "hunter2"] {
-        assert!(!body.contains(secret), "leaked {secret} in {body}");
+        assert!(!body.contains(secret), "leaked a fixture secret in {body}");
     }
     assert!(body.contains("[REDACTED]"));
 }
@@ -167,7 +167,10 @@ fn whitespace_delimited_credentials_never_reach_any_export_format() {
         );
         let body = String::from_utf8(output.stdout).expect("UTF-8 export");
         for secret in ["alpha", "bravo", "charlie"] {
-            assert!(!body.contains(secret), "{format} leaked {secret}: {body}");
+            assert!(
+                !body.contains(secret),
+                "{format} leaked a fixture secret: {body}"
+            );
         }
     }
 }
