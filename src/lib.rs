@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderName, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -954,10 +954,10 @@ async fn create_route(
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
     }
-    if !route.upstream.starts_with("mock://") {
-        if let Err(message) = validate_proxy_upstream_base_url(&route.upstream) {
-            return error(StatusCode::BAD_REQUEST, message);
-        }
+    if !route.upstream.starts_with("mock://")
+        && let Err(message) = validate_proxy_upstream_base_url(&route.upstream)
+    {
+        return error(StatusCode::BAD_REQUEST, message);
     }
 
     let actor = audit_actor(&state, &headers);
@@ -2630,6 +2630,24 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(|value| value.parse().ok())
 }
 
+/// Returns whether an upstream response header is safe to replay to the client.
+fn forward_proxy_response_header(name: &HeaderName) -> bool {
+    !matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
+    )
+}
+
+/// Proxies one gateway request to the validated upstream and returns the first
+/// hop response verbatim enough for clients to consume redirects safely.
 async fn proxy_request(
     state: &AppState,
     route: &RouteConfig,
@@ -2650,11 +2668,19 @@ async fn proxy_request(
         .map_err(|error| format!("upstream request failed: {error}"))?;
     let status = StatusCode::from_u16(response.status().as_u16())
         .expect("reqwest upstream status codes are valid axum status codes");
+    let upstream_headers = response.headers().clone();
     let bytes = response
         .bytes()
         .await
         .map_err(|error| format!("upstream body read failed: {error}"))?;
-    Ok((status, bytes).into_response())
+    let mut proxied = (status, bytes).into_response();
+    let headers = proxied.headers_mut();
+    for (name, value) in &upstream_headers {
+        if forward_proxy_response_header(name) {
+            headers.append(name, value.clone());
+        }
+    }
+    Ok(proxied)
 }
 
 pub fn upstream_target(
@@ -6864,7 +6890,26 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_request_does_not_follow_redirects_to_second_hop_destinations() {
-        let redirect_target = "http://10.0.0.8/private".to_string();
+        let second_hop_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_hop_app = {
+            let second_hop_hits = Arc::clone(&second_hop_hits);
+            Router::new().route(
+                "/private",
+                get(move || {
+                    let second_hop_hits = Arc::clone(&second_hop_hits);
+                    async move {
+                        second_hop_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+        };
+        let second_hop_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_hop_addr = second_hop_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(second_hop_listener, second_hop_app).into_future());
+
+        let redirect_target = format!("http://{second_hop_addr}/private");
+        let expected_location = redirect_target.clone();
         let redirect_app = Router::new().route(
             "/start",
             get(move || {
@@ -6896,6 +6941,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get("location").unwrap(),
+            &HeaderValue::from_str(&expected_location).unwrap()
+        );
+        assert_eq!(second_hop_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     fn temp_state_path(name: &str) -> PathBuf {
