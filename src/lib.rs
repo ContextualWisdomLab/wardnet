@@ -17,6 +17,7 @@ use std::{
 };
 use tokio::{
     fs,
+    net::lookup_host,
     sync::{Mutex, RwLock},
 };
 use waf_ids_core::{
@@ -642,15 +643,20 @@ async fn clearfolio_submit(
             format!("unknown document kind: {kind}"),
         );
     };
-    let endpoint = clearfolio_submit_url(&config.base_url);
-    if let Err(message) = validate_outbound_http_url(
-        &endpoint,
+    let endpoint = match validate_outbound_http_url(
+        &clearfolio_submit_url(&config.base_url),
         "Clearfolio submit URL",
         OutboundHttpPolicy {
             allow_insecure_http_for_loopback: true,
             allow_loopback_destination: cfg!(test),
         },
     ) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    if let Err(message) =
+        validate_outbound_url_resolution(&endpoint, "Clearfolio submit URL", cfg!(test)).await
+    {
         return error(StatusCode::BAD_GATEWAY, message);
     }
     let part = reqwest::multipart::Part::bytes(bytes)
@@ -687,15 +693,20 @@ async fn clearfolio_status(
             "Clearfolio integration is not configured",
         );
     };
-    let endpoint = clearfolio_status_url(&config.base_url, &job_id);
-    if let Err(message) = validate_outbound_http_url(
-        &endpoint,
+    let endpoint = match validate_outbound_http_url(
+        &clearfolio_status_url(&config.base_url, &job_id),
         "Clearfolio status URL",
         OutboundHttpPolicy {
             allow_insecure_http_for_loopback: true,
             allow_loopback_destination: cfg!(test),
         },
     ) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    if let Err(message) =
+        validate_outbound_url_resolution(&endpoint, "Clearfolio status URL", cfg!(test)).await
+    {
         return error(StatusCode::BAD_GATEWAY, message);
     }
     let mut request = state.http.get(endpoint);
@@ -853,18 +864,23 @@ async fn soc_analyze(
         );
     };
     let body = soc_llm_chat_body(&config.model, &event);
-    let endpoint = format!(
-        "{}/v1/chat/completions",
-        config.base_url.trim_end_matches('/')
-    );
-    if let Err(message) = validate_outbound_http_url(
-        &endpoint,
+    let endpoint = match validate_outbound_http_url(
+        &format!(
+            "{}/v1/chat/completions",
+            config.base_url.trim_end_matches('/')
+        ),
         "SOC LLM endpoint",
         OutboundHttpPolicy {
             allow_insecure_http_for_loopback: true,
             allow_loopback_destination: cfg!(test),
         },
     ) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    if let Err(message) =
+        validate_outbound_url_resolution(&endpoint, "SOC LLM endpoint", cfg!(test)).await
+    {
         return error(StatusCode::BAD_GATEWAY, message);
     }
     let response = state
@@ -1683,9 +1699,19 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let parsed = validate_outbound_http_url(
+        url,
+        "TAXII objects URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    )?;
+    validate_outbound_url_resolution(&parsed, "TAXII objects URL", cfg!(test)).await?;
+
     let mut request = state
         .feed_http
-        .get(url)
+        .get(parsed)
         .header(
             "Accept",
             "application/taxii+json;version=2.1, application/stix+json;version=2.1, application/json",
@@ -2272,9 +2298,18 @@ async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
 
     let url = state.kev_catalog_url();
     validate_kev_catalog_url(url)?;
+    let parsed = validate_outbound_http_url(
+        url,
+        "KEV catalog URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    )?;
+    validate_outbound_url_resolution(&parsed, "KEV catalog URL", cfg!(test)).await?;
     let response = state
         .feed_http
-        .get(url)
+        .get(parsed)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ))
@@ -2353,6 +2388,61 @@ fn validate_outbound_http_url(
     }
     validate_outbound_host(host, label, policy.allow_loopback_destination)?;
     Ok(parsed)
+}
+
+/// Revalidates a parsed outbound hostname at request time so DNS names cannot
+/// resolve into denied private or loopback address space after initial parsing.
+async fn validate_outbound_url_resolution(
+    url: &reqwest::Url,
+    label: &str,
+    allow_loopback_destination: bool,
+) -> Result<(), String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| format!("{label} host is required"))?;
+    let host = host.trim_end_matches('.');
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return validate_outbound_host(host, label, allow_loopback_destination);
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| format!("{label} port is required"))?;
+    let addresses = lookup_host((host, port))
+        .await
+        .map_err(|error| format!("{label} host {host} resolution failed: {error}"))?;
+    validate_resolved_outbound_ips(
+        host,
+        label,
+        allow_loopback_destination,
+        addresses.map(|address| address.ip()),
+    )
+}
+
+/// Applies the literal IP trust-boundary policy to the resolved address set for
+/// a hostname, failing closed when resolution returns no usable addresses.
+fn validate_resolved_outbound_ips<I>(
+    host: &str,
+    label: &str,
+    allow_loopback_destination: bool,
+    addresses: I,
+) -> Result<(), String>
+where
+    I: IntoIterator<Item = IpAddr>,
+{
+    let mut resolved_any = false;
+    for address in addresses {
+        resolved_any = true;
+        validate_outbound_ip(address, label, allow_loopback_destination)?;
+    }
+    if !resolved_any {
+        return Err(format!(
+            "{label} host {host} did not resolve to any address"
+        ));
+    }
+    Ok(())
 }
 
 /// Validates one outbound host string, normalizing a trailing root dot before
@@ -2630,20 +2720,38 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(|value| value.parse().ok())
 }
 
+/// Returns the normalized hop-by-hop headers nominated by upstream
+/// `Connection` fields so they can be stripped before replay.
+fn proxy_connection_header_nominations(headers: &HeaderMap) -> HashSet<String> {
+    headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
 /// Returns whether an upstream response header is safe to replay to the client.
-fn forward_proxy_response_header(name: &HeaderName) -> bool {
-    !matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "content-length"
-    )
+fn forward_proxy_response_header(
+    name: &HeaderName,
+    connection_nominations: &HashSet<String>,
+) -> bool {
+    !connection_nominations.contains(name.as_str())
+        && !matches!(
+            name.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+                | "content-length"
+        )
 }
 
 /// Proxies one gateway request to the validated upstream and returns the first
@@ -2657,11 +2765,13 @@ async fn proxy_request(
     body: Bytes,
 ) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
+    let parsed = validate_proxy_upstream_base_url(&target)?;
+    validate_outbound_url_resolution(&parsed, "proxy upstream", cfg!(test)).await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = state
         .http
-        .request(method, target)
+        .request(method, parsed)
         .body(body)
         .send()
         .await
@@ -2673,10 +2783,14 @@ async fn proxy_request(
         .bytes()
         .await
         .map_err(|error| format!("upstream body read failed: {error}"))?;
-    let mut proxied = (status, bytes).into_response();
+    let connection_nominations = proxy_connection_header_nominations(&upstream_headers);
+    let mut proxied = Response::builder()
+        .status(status)
+        .body(axum::body::Body::from(bytes))
+        .expect("proxy response body is valid");
     let headers = proxied.headers_mut();
     for (name, value) in &upstream_headers {
-        if forward_proxy_response_header(name) {
+        if forward_proxy_response_header(name, &connection_nominations) {
             headers.append(name, value.clone());
         }
     }
@@ -2982,9 +3096,21 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
 
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    let parsed = validate_outbound_http_url(
+        url,
+        "feed URL",
+        OutboundHttpPolicy {
+            allow_insecure_http_for_loopback: true,
+            allow_loopback_destination: cfg!(test),
+        },
+    )
+    .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    validate_outbound_url_resolution(&parsed, "feed URL", cfg!(test))
+        .await
+        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = state
         .feed_http
-        .get(url)
+        .get(parsed)
         .timeout(std::time::Duration::from_secs(
             PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
         ))
@@ -6889,6 +7015,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_url_resolution_rejects_hostnames_that_resolve_to_loopback() {
+        assert_eq!(
+            validate_resolved_outbound_ips(
+                "public.example",
+                "feed URL",
+                false,
+                [IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            )
+            .unwrap_err(),
+            "feed URL host 127.0.0.1 is not allowed"
+        );
+    }
+
+    #[tokio::test]
     async fn proxy_request_does_not_follow_redirects_to_second_hop_destinations() {
         let second_hop_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let second_hop_app = {
@@ -6946,6 +7086,57 @@ mod tests {
             &HeaderValue::from_str(&expected_location).unwrap()
         );
         assert_eq!(second_hop_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn proxy_request_strips_connection_nominated_headers_and_keeps_one_content_type() {
+        let upstream = Router::new().route(
+            "/items",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "text/plain; charset=utf-8"),
+                        ("connection", "x-hop"),
+                        ("x-hop", "debug-only"),
+                    ],
+                    "proxied",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, upstream).into_future());
+
+        let state = AppState::seeded(None);
+        let response = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "proxy".to_string(),
+                path_prefix: "/proxy".to_string(),
+                upstream: format!("http://{addr}"),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/proxy/items",
+            None,
+            Bytes::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("connection").is_none());
+        assert!(response.headers().get("x-hop").is_none());
+        let content_types = response.headers().get_all("content-type");
+        assert_eq!(content_types.iter().count(), 1);
+        assert_eq!(
+            content_types.iter().next().unwrap(),
+            &HeaderValue::from_static("text/plain; charset=utf-8")
+        );
+        assert_eq!(body_text(response).await, "proxied");
     }
 
     fn temp_state_path(name: &str) -> PathBuf {
