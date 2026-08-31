@@ -109,7 +109,10 @@ fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_
         }
 
         let env_block = named_list_item_block(&env, "ADMIN_TOKEN", 12);
-        if env_block.iter().any(|line| line.trim().starts_with("value:")) {
+        if env_block
+            .iter()
+            .any(|line| line.trim().starts_with("value:"))
+        {
             return None;
         }
         let secret_ref_index = env_block
@@ -376,7 +379,8 @@ spec:
 
 #[test]
 fn fresh_install_bootstraps_namespace_before_secret_provisioning() {
-    let namespace_bootstrap = "kubectl create namespace waf-ids-ai-soc --dry-run=client -o yaml | kubectl apply -f -";
+    let namespace_bootstrap =
+        "kubectl create namespace waf-ids-ai-soc --dry-run=client -o yaml | kubectl apply -f -";
     let bootstrap_index = PRODUCTION_GUIDE
         .find(namespace_bootstrap)
         .expect("fresh-install instructions must create the namespace idempotently first");
