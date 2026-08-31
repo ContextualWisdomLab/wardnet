@@ -13,6 +13,7 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
 pub const CRED_RATE_LIMIT_MAX_CLIENTS: &str = "rate_limit_max_clients";
+pub const CRED_TRUSTED_PROXY_IPS: &str = "trusted_proxy_ips";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -80,6 +81,7 @@ impl CredentialRegistry {
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
         env_rate_limit_max_clients: Option<String>,
+        env_trusted_proxy_ips: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         let mut from_file = false;
@@ -99,6 +101,7 @@ impl CredentialRegistry {
                         CRED_ADMIN_TOKEN,
                         CRED_ADMIN_TOKENS,
                         CRED_RATE_LIMIT_MAX_CLIENTS,
+                        CRED_TRUSTED_PROXY_IPS,
                     ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
@@ -137,6 +140,11 @@ impl CredentialRegistry {
             && let Some(max_clients) = env_rate_limit_max_clients.filter(|value| !value.is_empty())
         {
             values.insert(CRED_RATE_LIMIT_MAX_CLIENTS.to_string(), max_clients);
+        }
+        if !values.contains_key(CRED_TRUSTED_PROXY_IPS)
+            && let Some(trusted_proxy_ips) = env_trusted_proxy_ips.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_TRUSTED_PROXY_IPS.to_string(), trusted_proxy_ips);
         }
 
         let source = if from_file {
@@ -179,6 +187,7 @@ mod tests {
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
             Some("2048".to_string()),
+            Some("198.51.100.10,198.51.100.11".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -191,13 +200,18 @@ mod tests {
             registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
             Some("2048")
         );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10,198.51.100.11")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
         let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
+            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None, None)
+                .unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
@@ -227,6 +241,7 @@ mod tests {
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
             Some("1024".to_string()),
+            Some("198.51.100.10".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -238,6 +253,10 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
             Some("1024")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -262,6 +281,7 @@ mod tests {
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
             Some("3072".to_string()),
+            Some("198.51.100.10".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -273,6 +293,10 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
             Some("3072")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -291,6 +315,7 @@ mod tests {
         let registry = CredentialRegistry::bootstrap_secrets(
             Some(&path),
             Some("env-secret".to_string()),
+            None,
             None,
             None,
         )
@@ -315,7 +340,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None).unwrap_err();
+        let err =
+            CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -339,12 +365,17 @@ mod tests {
             None,
             None,
             Some("2048".to_string()),
+            Some("198.51.100.10".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert_eq!(
             registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
             Some("512")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

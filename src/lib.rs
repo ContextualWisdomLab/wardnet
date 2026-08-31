@@ -43,8 +43,8 @@ mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{
-    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_RATE_LIMIT_MAX_CLIENTS, CredentialRegistry,
-    CredentialSource,
+    CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CRED_RATE_LIMIT_MAX_CLIENTS, CRED_TRUSTED_PROXY_IPS,
+    CredentialRegistry, CredentialSource,
 };
 
 const DEFAULT_RATE_LIMIT_MAX_CLIENTS: usize = 4_096;
@@ -2348,9 +2348,15 @@ fn trusted_forwarded_client_ip(
     peer_ip: IpAddr,
     trusted_proxies: &HashSet<IpAddr>,
 ) -> Option<IpAddr> {
-    let value = headers
+    let Some(value) = headers
         .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())?;
+        .and_then(|value| value.to_str().ok())
+    else {
+        return headers
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+    };
 
     let mut current_hop = peer_ip;
     for hop in value.rsplit(',').map(str::trim) {
@@ -3229,10 +3235,11 @@ pub async fn run_from_env(
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
         std::env::var("RATE_LIMIT_MAX_CLIENTS").ok(),
+        std::env::var("TRUSTED_PROXY_IPS").ok(),
     )?;
     let trusted_proxies = parse_ip_set_env(
         "TRUSTED_PROXY_IPS",
-        std::env::var("TRUSTED_PROXY_IPS").ok().as_deref(),
+        credentials.get_credential(CRED_TRUSTED_PROXY_IPS),
     )?;
     let config = AppConfig {
         admin_token: credentials
@@ -3658,6 +3665,17 @@ mod tests {
         request
     }
 
+    fn gateway_get_via_proxy_real_ip(uri: &str, real_ip: &str, proxy_ip: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-real-ip", real_ip)
+            .body(Body::empty())
+            .unwrap();
+        insert_peer(&mut request, proxy_ip.parse::<IpAddr>().unwrap());
+        request
+    }
+
     #[test]
     fn rate_limit_step_enforces_fixed_window() {
         // limit 0 disables limiting entirely.
@@ -3783,6 +3801,28 @@ mod tests {
         let second = app_request(
             &app,
             gateway_get_via_proxy("/gateway/demo", "203.0.113.11", "198.51.100.10"),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn gateway_uses_real_ip_from_trusted_proxy_for_rate_limiting() {
+        let app = build_app(
+            AppState::seeded(None)
+                .with_rate_limit(1, 60)
+                .with_trusted_proxies(HashSet::from(["198.51.100.10".parse().unwrap()])),
+        );
+        let first = app_request(
+            &app,
+            gateway_get_via_proxy_real_ip("/gateway/demo", "203.0.113.9", "198.51.100.10"),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app_request(
+            &app,
+            gateway_get_via_proxy_real_ip("/gateway/demo", "203.0.113.11", "198.51.100.10"),
         )
         .await;
         assert_eq!(second.status(), StatusCode::OK);
