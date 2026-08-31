@@ -81,13 +81,16 @@ impl CredentialRegistry {
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
     ) -> Result<Self, String> {
-        Self::bootstrap_with_runtime_overrides(
+        let mut registry = Self::bootstrap_with_runtime_overrides(
             credentials_path,
             env_admin_token,
             env_admin_tokens,
             None,
             None,
-        )
+        )?;
+        registry.values.remove(CRED_RATE_LIMIT_MAX_CLIENTS);
+        registry.values.remove(CRED_TRUSTED_PROXY_IPS);
+        Ok(registry)
     }
 
     /// Bootstrap secret-bearing credentials plus env-transported runtime
@@ -422,6 +425,35 @@ mod tests {
             registry.get_credential(CRED_TRUSTED_PROXY_IPS),
             Some("198.51.100.10")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_secrets_ignores_policy_keys_from_credentials_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-secret-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"admin_token":"file-secret","rate_limit_max_clients":"512","trusted_proxy_ips":"198.51.100.10"}"#,
+        )
+        .unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap();
+        assert_eq!(
+            registry.get_credential(CRED_ADMIN_TOKEN),
+            Some("file-secret")
+        );
+        assert_eq!(registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS), None);
+        assert_eq!(registry.get_credential(CRED_TRUSTED_PROXY_IPS), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

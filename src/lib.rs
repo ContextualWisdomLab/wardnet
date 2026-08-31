@@ -2568,12 +2568,9 @@ fn trusted_forwarded_client_ip(
     peer_ip: IpAddr,
     trusted_proxies: &HashSet<IpAddr>,
 ) -> Option<IpAddr> {
-    let Some(value) = headers
+    let value = headers
         .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-    else {
-        return None;
-    };
+        .and_then(|value| value.to_str().ok())?;
 
     let mut current_hop = peer_ip;
     for hop in value.rsplit(',').map(str::trim) {
