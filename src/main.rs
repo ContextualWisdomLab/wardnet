@@ -24,10 +24,12 @@ fn install_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + '
     }
 }
 
-#[cfg(all(not(test), not(unix)))]
+#[cfg(all(not(test), windows))]
 fn install_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
     // Mirrors the Unix path: `tokio::signal::windows::ctrl_c` registers the
     // handler synchronously, so only `.recv()` is deferred to the future.
+    // Scoped to `windows` specifically (not `not(unix)`) since that API only
+    // exists on Windows -- a broader non-Unix target would fail to compile.
     let mut ctrl_c = tokio::signal::windows::ctrl_c().expect("install Ctrl-C handler");
     async move {
         ctrl_c.recv().await;
