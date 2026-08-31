@@ -3507,12 +3507,10 @@ pub async fn run_from_env(
     let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
         .ok()
         .map(PathBuf::from);
-    let credentials = CredentialRegistry::bootstrap_with_runtime_overrides(
+    let credentials = CredentialRegistry::bootstrap_runtime_registry(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
         std::env::var("ADMIN_TOKENS").ok(),
-        std::env::var("RATE_LIMIT_MAX_CLIENTS").ok(),
-        std::env::var("TRUSTED_PROXY_IPS").ok(),
     )?;
     let trusted_proxies = parse_ip_set_env(
         "TRUSTED_PROXY_IPS",

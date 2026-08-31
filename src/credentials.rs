@@ -81,12 +81,22 @@ impl CredentialRegistry {
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
     ) -> Result<Self, String> {
+        Self::bootstrap_runtime_registry(credentials_path, env_admin_token, env_admin_tokens)
+    }
+
+    /// Bootstrap secret-bearing credentials plus env-transported runtime
+    /// policy overrides, keeping env access localized to registry bootstrap.
+    pub fn bootstrap_runtime_registry(
+        credentials_path: Option<&Path>,
+        env_admin_token: Option<String>,
+        env_admin_tokens: Option<String>,
+    ) -> Result<Self, String> {
         Self::bootstrap_with_runtime_overrides(
             credentials_path,
             env_admin_token,
             env_admin_tokens,
-            None,
-            None,
+            std::env::var("RATE_LIMIT_MAX_CLIENTS").ok(),
+            std::env::var("TRUSTED_PROXY_IPS").ok(),
         )
     }
 
