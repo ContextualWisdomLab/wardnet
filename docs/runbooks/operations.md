@@ -86,10 +86,11 @@ client buckets the process will retain; stale buckets age out after one full
 window. When the map is full, unseen clients receive `429 Too Many Requests`
 with `Retry-After` and reason
 `local_rate_limiter_capacity_exceeded` until older buckets expire.
-By default the limiter keys on the connected peer IP. `X-Forwarded-For` and
-`X-Real-IP` are considered only when the peer IP is listed in
-`TRUSTED_PROXY_IPS`, which prevents direct clients from manufacturing new local
-limiter buckets with spoofed forwarding headers.
+By default the limiter keys on the connected peer IP. `X-Forwarded-For` is
+considered only when the peer IP is listed in `TRUSTED_PROXY_IPS`, which
+prevents direct clients from manufacturing new local limiter buckets with
+spoofed forwarding headers. `X-Real-IP` is not trusted for limiter identity
+because the header does not carry a verifiable proxy chain.
 
 This is a local emergency guard, not the distributed quota authority described
 in issue `#83`. The contract follows RFC 6585's guidance that `429` responses

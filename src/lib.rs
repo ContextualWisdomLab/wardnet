@@ -2572,10 +2572,7 @@ fn trusted_forwarded_client_ip(
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
     else {
-        return headers
-            .get("x-real-ip")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok());
+        return None;
     };
 
     let mut current_hop = peer_ip;
@@ -3965,17 +3962,6 @@ mod tests {
         request
     }
 
-    fn gateway_get_via_proxy_real_ip(uri: &str, real_ip: &str, proxy_ip: &str) -> Request<Body> {
-        let mut request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .header("x-real-ip", real_ip)
-            .body(Body::empty())
-            .unwrap();
-        insert_peer(&mut request, proxy_ip.parse::<IpAddr>().unwrap());
-        request
-    }
-
     #[test]
     fn rate_limit_step_enforces_fixed_window() {
         // limit 0 disables limiting entirely.
@@ -4107,25 +4093,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_uses_real_ip_from_trusted_proxy_for_rate_limiting() {
+    async fn gateway_ignores_real_ip_from_trusted_proxy_for_rate_limiting() {
         let app = build_app(
             AppState::seeded(None)
                 .with_rate_limit(1, 60)
                 .with_trusted_proxies(HashSet::from(["198.51.100.10".parse().unwrap()])),
         );
-        let first = app_request(
-            &app,
-            gateway_get_via_proxy_real_ip("/gateway/demo", "203.0.113.9", "198.51.100.10"),
-        )
-        .await;
+        let mut first = Request::builder()
+            .method(Method::GET)
+            .uri("/gateway/demo")
+            .header("x-real-ip", "203.0.113.9")
+            .body(Body::empty())
+            .unwrap();
+        insert_peer(&mut first, "198.51.100.10".parse::<IpAddr>().unwrap());
+        let first = app_request(&app, first).await;
         assert_eq!(first.status(), StatusCode::OK);
 
-        let second = app_request(
-            &app,
-            gateway_get_via_proxy_real_ip("/gateway/demo", "203.0.113.11", "198.51.100.10"),
-        )
-        .await;
-        assert_eq!(second.status(), StatusCode::OK);
+        let mut second = Request::builder()
+            .method(Method::GET)
+            .uri("/gateway/demo")
+            .header("x-real-ip", "203.0.113.11")
+            .body(Body::empty())
+            .unwrap();
+        insert_peer(&mut second, "198.51.100.10".parse::<IpAddr>().unwrap());
+        let second = app_request(&app, second).await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

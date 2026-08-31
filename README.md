@@ -72,7 +72,7 @@ Useful environment variables:
 - `RATE_LIMIT`: optional per-client gateway request budget; `0` disables local limiting
 - `RATE_LIMIT_WINDOW`: fixed-window length in seconds for `RATE_LIMIT`, default `60`
 - `RATE_LIMIT_MAX_CLIENTS`: maximum in-memory client buckets retained by the local limiter, default `4096`; may also be bootstrapped via `WAF_IDS_CREDENTIALS_PATH` as `rate_limit_max_clients`
-- `TRUSTED_PROXY_IPS`: optional comma-separated proxy peer IPs allowed to supply `X-Forwarded-For` and `X-Real-IP`
+- `TRUSTED_PROXY_IPS`: optional comma-separated proxy peer IPs allowed to supply `X-Forwarded-For`
 
 When the local limiter returns HTTP `429`, the response includes a `Retry-After`
 header plus JSON `reason` codes that distinguish per-client quota exhaustion
