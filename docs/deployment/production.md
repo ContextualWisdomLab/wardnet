@@ -29,11 +29,17 @@ ADMIN_TOKEN=replace-me docker compose up --build
 
 ## Kubernetes
 
-The distributable manifest does not create an administrator Secret. Before applying `deploy/kubernetes/waf-ids-ai-soc.yaml`, use the organization's secret-management control plane to provision an Opaque Secret named `waf-ids-ai-soc-admin` in namespace `waf-ids-ai-soc` with key `ADMIN_TOKEN`. Keep access to that Secret limited to the workload and operational identities that require it.
+The distributable manifest does not create an administrator Secret. A fresh cluster must create the namespace before any namespaced Secret or ExternalSecret can exist. Bootstrap the namespace idempotently first:
+
+```bash
+kubectl create namespace waf-ids-ai-soc --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Then use the organization's secret-management control plane to provision an Opaque Secret named `waf-ids-ai-soc-admin` in namespace `waf-ids-ai-soc` with key `ADMIN_TOKEN`. Keep access to that Secret limited to the workload and operational identities that require it. Existing installations may run the same namespace-bootstrap command safely; it converges on the existing Namespace rather than replacing it.
 
 The Deployment binds `ADMIN_TOKEN` only through that `secretKeyRef` with `optional: false`. If the Secret or key is absent, the workload does not start; there is no repository-provided fallback credential.
 
-After the external secret controller reports successful synchronization, apply the manifest:
+After the external secret controller reports successful synchronization, apply the complete manifest. Its Namespace object remains in the declarative asset so later applies retain the same ownership boundary:
 
 ```bash
 kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
