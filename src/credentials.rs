@@ -136,8 +136,13 @@ fn parse_credentials_json(content: &str) -> Result<HashMap<String, String>, Stri
     let mut values = HashMap::new();
     for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
         if let Some(raw) = file_map.get(key) {
-            let text = json_value_as_nonempty_string(raw)
-                .ok_or_else(|| format!("{key} must not be blank or null"))?;
+            let text = match json_value_as_nonempty_string(raw) {
+                Ok(Some(text)) => text,
+                Ok(None) => return Err(format!("{key} must not be blank or null")),
+                Err(kind) => {
+                    return Err(format!("{key} must be a non-empty JSON string, not {kind}"));
+                }
+            };
             values.insert(key.to_string(), text);
         }
     }
@@ -205,24 +210,23 @@ pub fn require_write_auth_for_bind(
     }
 }
 
-fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
+fn json_value_as_nonempty_string(
+    value: &serde_json::Value,
+) -> Result<Option<String>, &'static str> {
     match value {
-        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
-        serde_json::Value::Null | serde_json::Value::String(_) => None,
-        other => {
-            let text = other.to_string();
-            if text.trim().is_empty() || text == "null" {
-                None
-            } else {
-                Some(text)
-            }
-        }
+        serde_json::Value::String(text) if !text.trim().is_empty() => Ok(Some(text.clone())),
+        serde_json::Value::Null | serde_json::Value::String(_) => Ok(None),
+        serde_json::Value::Bool(_) => Err("a boolean"),
+        serde_json::Value::Number(_) => Err("a number"),
+        serde_json::Value::Array(_) => Err("an array"),
+        serde_json::Value::Object(_) => Err("an object"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Write;
 
     #[test]
@@ -397,9 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn non_string_file_value_preserves_existing_serialization_policy() {
-        let values = parse_credentials_json(r#"{"admin_token":42}"#).unwrap();
-        assert_eq!(values.get(CRED_ADMIN_TOKEN).map(String::as_str), Some("42"));
+    fn non_string_file_admin_token_is_invalid() {
+        for value in ["42", "true", "[]", "{}"] {
+            let error =
+                parse_credentials_json(&format!(r#"{{"admin_token":{value}}}"#)).unwrap_err();
+            assert!(error.contains("non-empty JSON string"), "{error}");
+        }
     }
 
     #[test]
@@ -450,5 +457,23 @@ mod tests {
         assert!(err.contains("ADMIN_TOKEN"), "{err}");
         let err = require_write_auth_for_bind("[::]:8080", false).unwrap_err();
         assert!(err.contains("refusing to bind [::]:8080"), "{err}");
+    }
+
+    proptest! {
+        #[test]
+        fn credentials_json_rejects_non_string_admin_values(
+            value in prop_oneof![
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                any::<i64>().prop_map(|n| serde_json::Value::Number(n.into())),
+                proptest::collection::vec(any::<bool>(), 0..4).prop_map(|items| {
+                    serde_json::Value::Array(items.into_iter().map(serde_json::Value::Bool).collect())
+                }),
+            ]
+        ) {
+            let mut payload = serde_json::Map::new();
+            payload.insert(CRED_ADMIN_TOKEN.to_string(), value);
+            let error = parse_credentials_json(&serde_json::Value::Object(payload).to_string()).unwrap_err();
+            prop_assert!(error.contains("non-empty JSON string"), "{error}");
+        }
     }
 }

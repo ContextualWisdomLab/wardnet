@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -2592,6 +2592,12 @@ fn presented_admin_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
 }
 
+/// Startup should only trust secrets that can be presented back through the
+/// `X-Admin-Token` header without wire-format rejection.
+fn admin_secret_supports_header_auth(token: &str) -> bool {
+    !token.trim().is_empty() && HeaderValue::from_str(token).is_ok()
+}
+
 /// Scan every configured RBAC secret with constant-time comparison so a miss
 /// does not reveal which slot matched.
 fn matching_rbac_principal<'a>(state: &'a AppState, presented: &str) -> Option<&'a AdminPrincipal> {
@@ -2649,15 +2655,14 @@ fn reject_management_write(state: &AppState, headers: &HeaderMap) -> Option<Resp
 
 fn has_write_admin_credential(state: &AppState) -> bool {
     if !state.admin_tokens.is_empty() {
-        return state
-            .admin_tokens
-            .values()
-            .any(|principal| principal.can_write);
+        return state.admin_tokens.iter().any(|(token, principal)| {
+            principal.can_write && admin_secret_supports_header_auth(token)
+        });
     }
     state
         .admin_token
         .as_deref()
-        .is_some_and(|token| !token.is_empty())
+        .is_some_and(admin_secret_supports_header_auth)
 }
 
 fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
@@ -3409,11 +3414,13 @@ pub async fn run_from_env(
         _ => HashMap::new(),
     };
     let has_write_capable_admin = if !admin_tokens.is_empty() {
-        admin_tokens.values().any(|principal| principal.can_write)
+        admin_tokens.iter().any(|(token, principal)| {
+            principal.can_write && admin_secret_supports_header_auth(token)
+        })
     } else {
         credentials
             .get_credential(CRED_ADMIN_TOKEN)
-            .is_some_and(|token| !token.trim().is_empty())
+            .is_some_and(admin_secret_supports_header_auth)
     };
     require_write_auth_for_bind(&bind_addr, has_write_capable_admin)?;
     let max_body_bytes = parse_u64_env(
@@ -3428,10 +3435,6 @@ pub async fn run_from_env(
     } else {
         "production"
     };
-    println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
-    // Flush so a supervising parent process (the e2e test) sees the readiness
-    // line immediately even though stdout is block-buffered when piped.
-    std::io::Write::flush(&mut std::io::stdout())?;
     let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
@@ -3440,6 +3443,10 @@ pub async fn run_from_env(
         .with_credentials_source(credentials.source())
         .with_listen_loopback(listen_loopback)
         .with_max_body_size(max_body_bytes);
+    println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;
@@ -3573,6 +3580,22 @@ mod tests {
         run_from_env(Box::pin(std::future::ready(())))
             .await
             .unwrap();
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_fail_closes_non_loopback_with_unpresentable_admin_token() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::set_var("ADMIN_TOKEN", "line\nbreak");
+        }
+        let err = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to bind 0.0.0.0:0"), "{err}");
         clear_run_env();
     }
 
@@ -3936,6 +3959,24 @@ mod tests {
         let mut named = HeaderMap::new();
         named.insert("x-admin-actor", "carol".parse().unwrap());
         assert_eq!(audit_actor(&state, &named), "carol");
+    }
+
+    #[test]
+    fn reject_management_write_distinguishes_authentication_from_authorization() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("write:ops:admin,read:auditor:readonly"));
+
+        let unauthenticated = reject_management_write(&state, &HeaderMap::new()).unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let mut readonly = HeaderMap::new();
+        readonly.insert("x-admin-token", "read".parse().unwrap());
+        let unauthorized = reject_management_write(&state, &readonly).unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+
+        let mut writer = HeaderMap::new();
+        writer.insert("x-admin-token", "write".parse().unwrap());
+        assert!(reject_management_write(&state, &writer).is_none());
     }
 
     #[tokio::test]
@@ -7822,6 +7863,16 @@ mod tests {
         assert!(blank.contains("blank token"), "{blank}");
         let blank_entry = parse_admin_tokens_strict("tokA:alice,,tokB:bob").unwrap_err();
         assert!(blank_entry.contains("blank entry"), "{blank_entry}");
+    }
+
+    #[test]
+    fn has_write_admin_credential_ignores_unpresentable_tokens() {
+        let state = AppState::seeded(Some("line\nbreak".to_string()));
+        assert!(!has_write_admin_credential(&state));
+
+        let rbac_state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("good:ops:readonly,bad\nwrite:ops:admin"));
+        assert!(!has_write_admin_credential(&rbac_state));
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {

@@ -1,5 +1,6 @@
 #![no_main]
-//! Fuzz the admin-token config parser: `waf_ids_ai_soc::parse_admin_tokens`.
+//! Fuzz the admin-token config parser: `waf_ids_ai_soc::parse_admin_tokens`
+//! and the strict startup mirror.
 //!
 //! This parses the `ADMIN_TOKENS` operator config string
 //! (`token:actor[:role],...`) into an RBAC principal map. Malformed or
@@ -7,9 +8,11 @@
 //! must hold for every input:
 //!   * no empty token key ever ends up in the map;
 //!   * every actor value is non-empty (defaults to "admin").
+//!   * the strict startup parser either rejects ambiguous input or yields the
+//!     same non-empty token/actor invariants.
 
 use libfuzzer_sys::fuzz_target;
-use waf_ids_ai_soc::parse_admin_tokens;
+use waf_ids_ai_soc::{parse_admin_tokens, parse_admin_tokens_strict};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(raw) = std::str::from_utf8(data) else {
@@ -23,5 +26,15 @@ fuzz_target!(|data: &[u8]| {
             !principal.actor.is_empty(),
             "actor value must never be empty"
         );
+    }
+
+    if let Ok(tokens) = parse_admin_tokens_strict(raw) {
+        for (token, principal) in &tokens {
+            assert!(!token.is_empty(), "strict token key must never be empty");
+            assert!(
+                !principal.actor.is_empty(),
+                "strict actor value must never be empty"
+            );
+        }
     }
 });

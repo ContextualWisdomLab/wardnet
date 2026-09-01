@@ -16,8 +16,12 @@
 - Operators use management APIs and the embedded admin console.
 - Upstream services are outside the process trust boundary.
 - The state file is trusted only after JSON deserialization succeeds.
-- A non-loopback listener is untrusted until a write-capable admin principal exists in the credential registry.
+- A non-loopback listener is untrusted until a write-capable admin principal exists in the credential registry. This follows the fail-secure and authenticator-management posture documented in the production guide and runbook: start closed, bootstrap secrets into the registry, then expose the listener only after a usable write credential exists.
 - Threat feed import payloads are untrusted operator-supplied data.
+
+## Security Grounding
+
+The startup gate and secret-handling path in this PR are aligned with NIST guidance that authentication secrets need lifecycle control and protected handling, and that authenticators should fail securely instead of silently degrading to weaker access. Wardnet applies that by preferring `WAF_IDS_CREDENTIALS_PATH`, allowing env only as bootstrap transport, and refusing non-loopback readiness when no usable write credential can be presented through `X-Admin-Token`. The operator recovery path is documented in [docs/deployment/production.md](../deployment/production.md), and the accepted bootstrap sources and RBAC shapes are documented in [docs/runbooks/operations.md](../runbooks/operations.md).
 
 ## Primary Threats
 
@@ -34,3 +38,9 @@
 ## Human Approval Boundary
 
 AI SOC recommendations may explain, summarize, or suggest actions, but enforcement-changing decisions must remain human-approved until audit trails, rollback, and policy simulation are implemented.
+
+## References
+
+Barker, E. (2020). *Recommendation for key management: Part 1 - General* (NIST SP 800-57 Part 1 Rev. 5). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-57pt1r5
+
+Grassi, P. A., Garcia, M. E., & Fenton, J. L. (2020). *Digital identity guidelines: Authentication and lifecycle management* (NIST SP 800-63B). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-63b
