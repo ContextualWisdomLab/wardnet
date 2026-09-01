@@ -10,3 +10,4 @@
 ### Operations
 
 - Documented administrator credential provisioning, rotation, rollout verification, rollback, evidence handling, and the boundary with the separate runtime-authentication fail-closed work tracked in issue #78.
+- Added buyer-facing readiness gauges to `GET /metrics`, including enterprise sale readiness, readiness check pass/fail counts, enabled-route readiness, and admin-auth configuration.
