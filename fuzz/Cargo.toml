@@ -53,6 +53,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_trusted_forwarded_client_ip"
+path = "fuzz_targets/fuzz_trusted_forwarded_client_ip.rs"
+test = false
+doc = false
+bench = false
+
 # Empty table => this crate is its own workspace root, isolated from the
 # repository's primary workspace. Do not remove.
 [workspace]

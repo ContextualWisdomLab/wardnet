@@ -53,6 +53,32 @@ cargo run
 Health reports `credentials_source` (`file` / `env` / `none`) and
 `admin_auth_configured` (boolean) without exposing secret values.
 
+### Trusted proxy client IP attribution
+
+Wardnet now treats forwarded client IP headers as untrusted by default. Gateway
+rate limiting, DNSBL matching, and event attribution use the direct peer
+address unless that peer matches `TRUSTED_PROXY_CIDRS`.
+
+```bash
+TRUSTED_PROXY_CIDRS=192.0.2.0/24,2001:db8::/32 \
+cargo run
+```
+
+When a peer is in that allowlist, Wardnet honors the first `X-Forwarded-For`
+chain element that is not itself another trusted proxy, scanning the chain from
+right to left, and falls back to `X-Real-IP` only from that trusted proxy
+context. Trusted ingress proxies must normalize inbound forwarding headers
+before appending their own hop so attacker-supplied leading values cannot
+survive unchanged. If no trusted proxy range is configured, spoofed forwarded
+headers are ignored.
+
+Operational references:
+
+- Petersson, A., & Nilsson, M. (2014). *Forwarded HTTP Extension* (RFC 7239). IETF. https://www.rfc-editor.org/info/rfc7239
+  This standard defines proxy-disclosed client/address chain metadata and warns that forwarded headers cannot be assumed correct without trusted intermediary policy.
+- MDN contributors. (2025, July 4). *Forwarded header*. MDN Web Docs. https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Forwarded
+  MDN documents the comma-appended proxy chain model and the de facto relationship between `Forwarded` and `X-Forwarded-For`, which is the operational shape Wardnet validates here.
+
 ## Health Check
 
 ```bash
