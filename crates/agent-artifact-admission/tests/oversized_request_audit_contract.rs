@@ -46,10 +46,7 @@ async fn oversized_authenticated_request_is_audited_before_payload_too_large_res
     let decision: AdmissionDecision =
         serde_json::from_slice(&bytes).expect("oversized response must be a decision receipt");
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert_eq!(
-        decision.reason_codes,
-        vec![ReasonCode::RequestBodyTooLarge]
-    );
+    assert_eq!(decision.reason_codes, vec![ReasonCode::RequestBodyTooLarge]);
 
     let records = sink.records().expect("audit snapshot must succeed");
     assert_eq!(records.len(), 1);
