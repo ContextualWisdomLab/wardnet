@@ -32,7 +32,7 @@ proptest! {
     }
 
     #[test]
-    fn trusted_forwarded_client_ip_matches_right_to_left_trust_model(
+    fn trusted_forwarded_client_ip_matches_fail_closed_trust_model(
         trusted_proxy in prop_oneof![any::<u32>().prop_map(Ipv4Addr::from).prop_map(IpAddr::V4), any::<u128>().prop_map(Ipv6Addr::from).prop_map(IpAddr::V6)],
         peer_ip in prop::option::of(prop_oneof![any::<u32>().prop_map(Ipv4Addr::from).prop_map(IpAddr::V4), any::<u128>().prop_map(Ipv6Addr::from).prop_map(IpAddr::V6)]),
         trust_peer in any::<bool>(),
@@ -83,18 +83,25 @@ proptest! {
                 return Some(peer_ip);
             }
             if let Some(forwarded) = x_forwarded_for.as_deref() {
-                for hop in forwarded.split(',').rev() {
-                    let hop = hop.trim();
-                    if hop.is_empty() {
-                        continue;
-                    }
-                    let Ok(ip) = hop.parse::<IpAddr>() else {
-                        continue;
-                    };
-                    if is_trusted_single_host(ip, trusted_proxy_ip) {
-                        continue;
-                    }
-                    return Some(ip);
+                let parsed = forwarded
+                    .split(',')
+                    .map(|hop| {
+                        let hop = hop.trim();
+                        if hop.is_empty() {
+                            return Err(());
+                        }
+                        hop.parse::<IpAddr>().map_err(|_| ())
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(hops) = parsed else {
+                    return Some(peer_ip);
+                };
+                if let Some(client_ip) = hops
+                    .into_iter()
+                    .rev()
+                    .find(|ip| !is_trusted_single_host(*ip, trusted_proxy_ip))
+                {
+                    return Some(client_ip);
                 }
             }
             x_real_ip
