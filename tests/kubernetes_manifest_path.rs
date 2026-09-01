@@ -132,31 +132,39 @@ fn kubernetes_manifest_uses_the_wardnet_filename_only() {
 #[test]
 fn production_guide_allows_only_explicit_legacy_path_history() {
     let relative = Path::new("docs/deployment/production.md");
-    let legacy_reference = "deploy/kubernetes/waf-ids-ai-soc.yaml";
-    let canonical_reference = "deploy/kubernetes/wardnet.yaml";
+    let legacy_reference = ["deploy/kubernetes/", "waf-ids-ai-soc", ".yaml"].concat();
+    let canonical_reference = ["deploy/kubernetes/", "wardnet", ".yaml"].concat();
+    let migration_history = format!(
+        "The repository path changed from `{legacy_reference}` to `{canonical_reference}`."
+    );
+    let rollback_history = format!(
+        "Rollback to a repository version before this path migration uses `{legacy_reference}`."
+    );
+    let stale_apply_command = format!("kubectl apply -f {legacy_reference}");
+    let stale_gitops_instruction = format!("Copy {legacy_reference} into the GitOps repository.");
 
     assert!(legacy_reference_is_allowed(
         relative,
-        "The repository path changed from `deploy/kubernetes/waf-ids-ai-soc.yaml` to `deploy/kubernetes/wardnet.yaml`.",
-        legacy_reference,
-        canonical_reference,
+        &migration_history,
+        &legacy_reference,
+        &canonical_reference,
     ));
     assert!(legacy_reference_is_allowed(
         relative,
-        "Rollback to a repository version before this path migration uses `deploy/kubernetes/waf-ids-ai-soc.yaml`.",
-        legacy_reference,
-        canonical_reference,
+        &rollback_history,
+        &legacy_reference,
+        &canonical_reference,
     ));
     assert!(!legacy_reference_is_allowed(
         relative,
-        "kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml",
-        legacy_reference,
-        canonical_reference,
+        &stale_apply_command,
+        &legacy_reference,
+        &canonical_reference,
     ));
     assert!(!legacy_reference_is_allowed(
         relative,
-        "Copy deploy/kubernetes/waf-ids-ai-soc.yaml into the GitOps repository.",
-        legacy_reference,
-        canonical_reference,
+        &stale_gitops_instruction,
+        &legacy_reference,
+        &canonical_reference,
     ));
 }
