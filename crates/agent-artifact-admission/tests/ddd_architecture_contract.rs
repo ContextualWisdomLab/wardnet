@@ -54,7 +54,12 @@ fn bounded_context_does_not_gain_ambiguous_dumping_modules() {
 #[test]
 fn domain_policy_remains_independent_of_http_and_audit_adapters() {
     let policy = include_str!("../src/policy.rs");
-    for adapter in ["crate::http", "crate::config", "FileAuditSink", "MemoryAuditSink"] {
+    for adapter in [
+        "crate::http",
+        "crate::config",
+        "FileAuditSink",
+        "MemoryAuditSink",
+    ] {
         assert!(
             !policy.contains(adapter),
             "policy.rs must not depend on adapter concern `{adapter}`"
