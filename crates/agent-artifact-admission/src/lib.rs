@@ -12,7 +12,7 @@ pub use admission::{
 };
 pub use audit::{
     AuditArtifact, AuditError, AuditRecord, AuditSink, FileAuditSink, MemoryAuditSink,
-    build_audit_record, build_malformed_audit_record,
+    build_audit_record, build_malformed_audit_record, build_unavailable_request_audit_record,
 };
 pub use config::{
     AdmissionServiceConfig, CliArgs, ConfigError, CredentialFile, load_admin_token, load_config,
