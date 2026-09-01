@@ -63,7 +63,7 @@ impl AuditArtifact {
 pub struct AuditRecord {
     /// Milliseconds since the Unix epoch when the record was constructed.
     pub timestamp_unix_ms: u128,
-    /// Caller-supplied stable request identifier or a malformed-body surrogate.
+    /// Caller-supplied stable request identifier or a rejection surrogate.
     pub request_id: String,
     /// Identity of the requesting agent or broker when available.
     pub actor_id: String,
@@ -87,7 +87,7 @@ pub struct AuditRecord {
     pub source_content_sha256: Option<String>,
     /// SHA-256 digest of the structured command vector or malformed body.
     pub command_sha256: String,
-    /// SHA-256 digest of a malformed authenticated request body when parsing failed.
+    /// SHA-256 digest of a malformed authenticated request body when materialized.
     pub request_body_sha256: Option<String>,
     /// Reviewed dependency-manifest digest supplied with a parsed request.
     pub manifest_sha256: Option<String>,
@@ -268,6 +268,32 @@ pub fn build_malformed_audit_record(
         source_content_sha256: None,
         command_sha256: digest.clone(),
         request_body_sha256: Some(digest),
+        manifest_sha256: None,
+        artifacts: Vec::new(),
+    })
+}
+
+/// Build minimized evidence when an authenticated body cannot be materialized safely.
+pub fn build_unavailable_request_audit_record(
+    policy: &AdmissionPolicy,
+    reason: ReasonCode,
+) -> Result<AuditRecord, AuditError> {
+    let reason_name = reason.as_str();
+    Ok(AuditRecord {
+        timestamp_unix_ms: unix_timestamp_ms()?,
+        request_id: format!("unavailable:{reason_name}"),
+        actor_id: "unavailable".to_string(),
+        workspace_id: "unavailable".to_string(),
+        operation: "unavailable".to_string(),
+        decision: DecisionKind::Block,
+        reason_codes: vec![reason],
+        policy_id: auditable_identifier("policy", &policy.policy_id, 256),
+        policy_revision: auditable_identifier("policy_revision", &policy.policy_revision, 256),
+        source_kind: None,
+        normalized_source_uri: None,
+        source_content_sha256: None,
+        command_sha256: sha256_hex(reason_name.as_bytes()),
+        request_body_sha256: None,
         manifest_sha256: None,
         artifacts: Vec::new(),
     })
