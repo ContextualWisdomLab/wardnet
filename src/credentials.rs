@@ -114,6 +114,14 @@ impl CredentialRegistry {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             admin_from_env = true;
         }
+
+        if let Some(token) = values.get(CRED_ADMIN_TOKEN) {
+            validate_admin_header_secret(CRED_ADMIN_TOKEN, token)?;
+        }
+        if let Some(tokens) = values.get(CRED_ADMIN_TOKENS) {
+            validate_admin_token_list_header_secrets(tokens)?;
+        }
+
         let source = if admin_from_file {
             CredentialSource::File
         } else if admin_from_env {
@@ -147,6 +155,38 @@ fn parse_credentials_json(content: &str) -> Result<HashMap<String, String>, Stri
         }
     }
     Ok(values)
+}
+
+/// Reject secrets whose configured bytes cannot be presented unchanged in an
+/// HTTP header. Normalizing a secret at the transport boundary would make the
+/// startup credential differ from the value a caller can actually authenticate.
+fn validate_admin_header_secret(name: &str, secret: &str) -> Result<(), String> {
+    if secret.is_empty() || secret != secret.trim() {
+        return Err(format!(
+            "{name} must not contain leading or trailing whitespace"
+        ));
+    }
+    if !secret.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+        return Err(format!(
+            "{name} must contain only visible ASCII header characters"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the secret field of each structured `ADMIN_TOKENS` item without
+/// rejecting ordinary whitespace used between comma-separated items. The
+/// strict role/parser layer remains responsible for item shape and role names.
+fn validate_admin_token_list_header_secrets(raw: &str) -> Result<(), String> {
+    for item in raw.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let secret = item.split(':').next().unwrap_or_default();
+        validate_admin_header_secret(CRED_ADMIN_TOKENS, secret)?;
+    }
+    Ok(())
 }
 
 /// Return a credentials path only when it contains a non-whitespace path value.
@@ -261,6 +301,43 @@ mod tests {
         assert_eq!(registry.source(), CredentialSource::None);
         assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), None);
         assert!(require_write_auth_for_bind("0.0.0.0:0", false).is_err());
+    }
+
+    #[test]
+    fn boundary_whitespace_admin_token_is_rejected() {
+        for value in [" secret", "secret ", "\tsecret", "secret\t"] {
+            let error =
+                CredentialRegistry::bootstrap_secrets(None, Some(value.to_string()), None)
+                    .unwrap_err();
+            assert!(error.contains("admin_token"), "{error}");
+        }
+    }
+
+    #[test]
+    fn non_visible_admin_token_is_rejected() {
+        for value in ["sec\tret", "sec\u{7f}ret", "sec\u{00e9}ret"] {
+            let error =
+                CredentialRegistry::bootstrap_secrets(None, Some(value.to_string()), None)
+                    .unwrap_err();
+            assert!(error.contains("visible ASCII"), "{error}");
+        }
+    }
+
+    #[test]
+    fn admin_token_list_allows_separator_spacing_but_rejects_ambiguous_secret_bytes() {
+        CredentialRegistry::bootstrap_secrets(
+            None,
+            None,
+            Some("token-a:operator, token-b:readonly".to_string()),
+        )
+        .unwrap();
+
+        for value in ["token-a :operator", "token\tb:readonly", "token\u{7f}:operator"] {
+            let error =
+                CredentialRegistry::bootstrap_secrets(None, None, Some(value.to_string()))
+                    .unwrap_err();
+            assert!(error.contains("admin_tokens"), "{error}");
+        }
     }
 
     #[test]
@@ -474,6 +551,20 @@ mod tests {
             payload.insert(CRED_ADMIN_TOKEN.to_string(), value);
             let error = parse_credentials_json(&serde_json::Value::Object(payload).to_string()).unwrap_err();
             prop_assert!(error.contains("non-empty JSON string"), "{error}");
+        }
+
+        #[test]
+        fn bootstrap_rejects_boundary_whitespace_around_header_safe_admin_tokens(
+            token in "[!-~]{1,32}",
+            leading in any::<bool>(),
+        ) {
+            let configured = if leading {
+                format!(" {token}")
+            } else {
+                format!("{token} ")
+            };
+            let error = CredentialRegistry::bootstrap_secrets(None, Some(configured), None).unwrap_err();
+            prop_assert!(error.contains("leading or trailing whitespace"), "{error}");
         }
     }
 }
