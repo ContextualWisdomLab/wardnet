@@ -9,13 +9,12 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "yaml", "yml",
 ];
 
-/// Files allowed to mention the retired path as migration history or a negative
-/// regression fixture. Operational source and documentation must use the new path.
-const LEGACY_REFERENCE_ALLOWLIST: &[&str] = &[
-    "CHANGELOG.md",
-    "docs/deployment/production.md",
-    "tests/deployment_manifest.rs",
-];
+/// Files whose legacy-path references are necessarily historical or negative fixtures.
+///
+/// Operational documentation is intentionally excluded from this file-level allowlist:
+/// migration guidance must justify each legacy-path occurrence on the exact line where it
+/// appears so a later copy/paste command cannot silently escape the repository contract.
+const LEGACY_REFERENCE_FILE_ALLOWLIST: &[&str] = &["CHANGELOG.md", "tests/deployment_manifest.rs"];
 
 /// Walk text-bearing source files without relying on platform-specific tooling.
 fn text_source_files(root: &Path) -> Vec<PathBuf> {
@@ -48,6 +47,36 @@ fn text_source_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Decide whether one legacy-path occurrence is explicit migration history rather than
+/// an operational reference that could be copied into a deployment command.
+fn legacy_reference_is_allowed(
+    relative: &Path,
+    line: &str,
+    legacy_reference: &str,
+    canonical_reference: &str,
+) -> bool {
+    if LEGACY_REFERENCE_FILE_ALLOWLIST
+        .iter()
+        .any(|allowed| relative == Path::new(allowed))
+    {
+        return true;
+    }
+
+    if relative != Path::new("docs/deployment/production.md") {
+        return false;
+    }
+
+    let normalized = line.to_ascii_lowercase();
+    let explicit_migration = normalized.contains("path changed from")
+        && line.contains(legacy_reference)
+        && line.contains(canonical_reference);
+    let explicit_rollback = normalized.contains("rollback")
+        && normalized.contains("repository version before this path migration")
+        && line.contains(legacy_reference);
+
+    explicit_migration || explicit_rollback
+}
+
 #[test]
 fn kubernetes_manifest_uses_the_wardnet_filename_only() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -65,26 +94,69 @@ fn kubernetes_manifest_uses_the_wardnet_filename_only() {
     );
 
     let legacy_reference = ["deploy/kubernetes/", legacy_name.as_str()].concat();
+    let canonical_reference = ["deploy/kubernetes/", canonical_name.as_str()].concat();
     let stale_references = text_source_files(repository)
         .into_iter()
-        .filter_map(|path| {
-            let relative = path.strip_prefix(repository).unwrap_or(&path);
-            if LEGACY_REFERENCE_ALLOWLIST
-                .iter()
-                .any(|allowed| relative == Path::new(allowed))
-            {
-                return None;
-            }
-            let content = fs::read_to_string(&path).ok()?;
+        .flat_map(|path| {
+            let relative = path
+                .strip_prefix(repository)
+                .unwrap_or(&path)
+                .to_path_buf();
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let legacy_reference = legacy_reference.clone();
+            let canonical_reference = canonical_reference.clone();
+
             content
-                .contains(&legacy_reference)
-                .then(|| relative.display().to_string())
+                .lines()
+                .enumerate()
+                .filter_map(move |(index, line)| {
+                    (line.contains(&legacy_reference)
+                        && !legacy_reference_is_allowed(
+                            &relative,
+                            line,
+                            &legacy_reference,
+                            &canonical_reference,
+                        ))
+                    .then(|| format!("{}:{}", relative.display(), index + 1))
+                })
         })
         .collect::<Vec<_>>();
 
     assert!(
         stale_references.is_empty(),
-        "the legacy Kubernetes manifest path is still referenced by: {}",
+        "the legacy Kubernetes manifest path is still referenced outside explicit migration history by: {}",
         stale_references.join(", ")
     );
+}
+
+#[test]
+fn production_guide_allows_only_explicit_legacy_path_history() {
+    let relative = Path::new("docs/deployment/production.md");
+    let legacy_reference = "deploy/kubernetes/waf-ids-ai-soc.yaml";
+    let canonical_reference = "deploy/kubernetes/wardnet.yaml";
+
+    assert!(legacy_reference_is_allowed(
+        relative,
+        "The repository path changed from `deploy/kubernetes/waf-ids-ai-soc.yaml` to `deploy/kubernetes/wardnet.yaml`.",
+        legacy_reference,
+        canonical_reference,
+    ));
+    assert!(legacy_reference_is_allowed(
+        relative,
+        "Rollback to a repository version before this path migration uses `deploy/kubernetes/waf-ids-ai-soc.yaml`.",
+        legacy_reference,
+        canonical_reference,
+    ));
+    assert!(!legacy_reference_is_allowed(
+        relative,
+        "kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml",
+        legacy_reference,
+        canonical_reference,
+    ));
+    assert!(!legacy_reference_is_allowed(
+        relative,
+        "Copy deploy/kubernetes/waf-ids-ai-soc.yaml into the GitOps repository.",
+        legacy_reference,
+        canonical_reference,
+    ));
 }
