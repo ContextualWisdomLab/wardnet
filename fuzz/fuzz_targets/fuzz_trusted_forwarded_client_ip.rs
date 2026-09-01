@@ -4,8 +4,9 @@
 //! `effective_client_ip` is a trust-boundary parser: it decides whether
 //! attacker-controlled forwarding headers can influence rate limiting, DNSBL
 //! checks, and audit/event attribution. Arbitrary chains, invalid hops, IPv4,
-//! IPv6, trusted peers, and untrusted peers must never panic, and the trusted
-//! peer path must match the documented right-to-left selection rule.
+//! IPv6, trusted peers, and untrusted peers must never panic. Trusted peers may
+//! supply an `X-Forwarded-For` identity only when every hop parses; malformed
+//! chains fail closed to the direct peer.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -85,18 +86,25 @@ fn expected_client_ip(
     }
 
     if let Some(forwarded) = x_forwarded_for {
-        for hop in forwarded.split(',').rev() {
-            let hop = hop.trim();
-            if hop.is_empty() {
-                continue;
-            }
-            let Ok(ip) = hop.parse::<IpAddr>() else {
-                continue;
-            };
-            if is_trusted_single_host(ip, trusted_proxy_ip) {
-                continue;
-            }
-            return Some(ip);
+        let parsed = forwarded
+            .split(',')
+            .map(|hop| {
+                let hop = hop.trim();
+                if hop.is_empty() {
+                    return Err(());
+                }
+                hop.parse::<IpAddr>().map_err(|_| ())
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(hops) = parsed else {
+            return Some(peer_ip);
+        };
+        if let Some(client_ip) = hops
+            .into_iter()
+            .rev()
+            .find(|ip| !is_trusted_single_host(*ip, trusted_proxy_ip))
+        {
+            return Some(client_ip);
         }
     }
 
@@ -135,7 +143,12 @@ fuzz_target!(|input: Input| {
         )
     };
     let x_real_ip = input.x_real_ip.map(Hop::into_text);
-    let resolved = effective_client_ip(peer_ip, x_forwarded_for.as_deref(), x_real_ip.as_deref(), &trusted_proxies);
+    let resolved = effective_client_ip(
+        peer_ip,
+        x_forwarded_for.as_deref(),
+        x_real_ip.as_deref(),
+        &trusted_proxies,
+    );
     let expected = expected_client_ip(
         peer_ip,
         x_forwarded_for.as_deref(),
@@ -145,6 +158,6 @@ fuzz_target!(|input: Input| {
     );
     assert_eq!(
         resolved, expected,
-        "trusted client attribution must match the right-to-left trust model"
+        "trusted client attribution must fail closed on malformed forwarding metadata"
     );
 });
