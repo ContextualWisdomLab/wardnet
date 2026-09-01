@@ -42,8 +42,10 @@ paths:
       description: >-
         Returns a durable allow/block decision. A policy block is HTTP 200 because
         the domain decision completed successfully. Structurally invalid authenticated
-        JSON is audited and returned as HTTP 400. An allow is not returned until the
-        audit record has been durably appended. Audit failure returns HTTP 503 and a
+        JSON is audited and returned as HTTP 400. An authenticated body that exceeds
+        the configured materialization limit is audited with a content-unavailable
+        surrogate and returned as HTTP 413. An allow is not returned until the audit
+        record has been durably appended. Audit failure returns HTTP 503 and a
         fail-closed block decision.
       security:
         - AdminToken: []
@@ -69,11 +71,11 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '413':
-          description: Request body exceeded the configured Axum body limit before a complete admission intent could be materialized.
+          description: Authenticated request body exceeded the configured limit; a minimized rejection audit was durably appended before this response.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/AdmissionDecision'
         '503':
           description: Audit durability was unavailable; execution must not proceed.
           content:
@@ -288,6 +290,7 @@ components:
             type: string
             enum:
               - malformed_request
+              - request_body_too_large
               - invalid_request
               - invalid_operation
               - invalid_manifest_digest
