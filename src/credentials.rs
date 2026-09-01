@@ -1,5 +1,5 @@
-//! Secret-bearing and fetch-sensitive configuration via a process-local
-//! credential registry.
+//! Secret-bearing configuration plus narrowly scoped runtime bootstrap values
+//! via a process-local credential registry.
 //!
 //! Org guidance: runtime code must not treat raw environment variables as the
 //! source of secrets. Environment (and optional credentials file) are bootstrap
@@ -12,6 +12,8 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 /// Well-known credentials loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+pub const CRED_RATE_LIMIT_MAX_CLIENTS: &str = "rate_limit_max_clients";
+pub const CRED_TRUSTED_PROXY_IPS: &str = "trusted_proxy_ips";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -27,6 +29,7 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
+    /// Return the stable telemetry label exposed in health/support surfaces.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -37,7 +40,7 @@ impl CredentialSource {
 }
 
 /// In-process map of secret credentials. Values are never logged or serialized
-/// into health/support surfaces — only the source label is exposed.
+/// into health/support surfaces; only the source label is exposed.
 #[derive(Debug, Clone, Default)]
 pub struct CredentialRegistry {
     values: HashMap<String, String>,
@@ -45,41 +48,77 @@ pub struct CredentialRegistry {
 }
 
 impl CredentialRegistry {
+    /// Construct an empty registry with no bootstrapped credentials.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Read a previously bootstrapped credential or config override by name.
     pub fn get_credential(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
+    /// Report where secret-bearing bootstrap values came from.
     pub fn source(&self) -> CredentialSource {
         self.source
     }
 
+    /// True when at least one admin authentication path is configured.
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
-            .is_some_and(|v| !v.is_empty())
+            .is_some_and(|value| !value.is_empty())
             || self
                 .get_credential(CRED_ADMIN_TOKENS)
-                .is_some_and(|v| !v.trim().is_empty())
+                .is_some_and(|value| !value.trim().is_empty())
     }
 
-    /// Bootstrap secret-bearing credentials plus the optional KEV fetch override.
+    /// Bootstrap secret-bearing credentials.
     ///
     /// Precedence: JSON credentials file (when present) wins per-key; missing
-    /// keys are filled from the env bootstrap values. Operational non-secret
-    /// config (bind address, limits, DNSBL origin) stays on env. The KEV URL
-    /// defaults to the built-in CISA endpoint and is accepted here only as a
-    /// server-side override that must still satisfy the runtime allowlist.
+    /// keys are filled from the env bootstrap values.
     pub fn bootstrap_secrets(
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
     ) -> Result<Self, String> {
+        let mut registry = Self::bootstrap_with_runtime_overrides(
+            credentials_path,
+            env_admin_token,
+            env_admin_tokens,
+            None,
+            None,
+        )?;
+        registry.values.remove(CRED_RATE_LIMIT_MAX_CLIENTS);
+        registry.values.remove(CRED_TRUSTED_PROXY_IPS);
+        Ok(registry)
+    }
+
+    /// Bootstrap secret-bearing credentials plus env-transported runtime
+    /// policy overrides, keeping env access localized to registry bootstrap.
+    pub fn bootstrap_runtime_registry(
+        credentials_path: Option<&Path>,
+        env_admin_token: Option<String>,
+        env_admin_tokens: Option<String>,
+    ) -> Result<Self, String> {
+        Self::bootstrap_with_runtime_overrides(
+            credentials_path,
+            env_admin_token,
+            env_admin_tokens,
+            std::env::var("RATE_LIMIT_MAX_CLIENTS").ok(),
+            std::env::var("TRUSTED_PROXY_IPS").ok(),
+        )
+    }
+
+    /// Bootstrap secret-bearing credentials plus runtime policy overrides that
+    /// must flow through the registry before handlers consume them.
+    pub fn bootstrap_with_runtime_overrides(
+        credentials_path: Option<&Path>,
+        env_admin_token: Option<String>,
+        env_admin_tokens: Option<String>,
+        env_rate_limit_max_clients: Option<String>,
+        env_trusted_proxy_ips: Option<String>,
+    ) -> Result<Self, String> {
         let mut values = HashMap::new();
-        // CredentialSource is documented (and reported via HealthStatus/support
-        // bundle) as admin-secret provenance specifically.
         let mut admin_from_file = false;
         let mut admin_from_env = false;
 
@@ -93,12 +132,19 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_RATE_LIMIT_MAX_CLIENTS,
+                        CRED_TRUSTED_PROXY_IPS,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
                                 values.insert(key.to_string(), text);
-                                admin_from_file = true;
+                                if matches!(key, CRED_ADMIN_TOKEN | CRED_ADMIN_TOKENS) {
+                                    admin_from_file = true;
+                                }
                             }
                         }
                     }
@@ -125,6 +171,17 @@ impl CredentialRegistry {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             admin_from_env = true;
         }
+        if !values.contains_key(CRED_RATE_LIMIT_MAX_CLIENTS)
+            && let Some(max_clients) = env_rate_limit_max_clients.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_RATE_LIMIT_MAX_CLIENTS.to_string(), max_clients);
+        }
+        if !values.contains_key(CRED_TRUSTED_PROXY_IPS)
+            && let Some(trusted_proxy_ips) = env_trusted_proxy_ips.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_TRUSTED_PROXY_IPS.to_string(), trusted_proxy_ips);
+        }
+
         let source = if admin_from_file {
             CredentialSource::File
         } else if admin_from_env {
@@ -137,6 +194,7 @@ impl CredentialRegistry {
     }
 }
 
+/// Convert supported JSON credential values into non-empty strings.
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
@@ -159,10 +217,12 @@ mod tests {
 
     #[test]
     fn bootstrap_from_env_only() {
-        let registry = CredentialRegistry::bootstrap_secrets(
+        let registry = CredentialRegistry::bootstrap_with_runtime_overrides(
             None,
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
+            Some("2048".to_string()),
+            Some("198.51.100.10,198.51.100.11".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -170,6 +230,14 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("2048")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10,198.51.100.11")
         );
         assert!(registry.has_admin_auth());
     }
@@ -180,6 +248,23 @@ mod tests {
             CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
+    }
+
+    #[test]
+    fn bootstrap_secrets_excludes_runtime_policy_overrides() {
+        let registry = CredentialRegistry::bootstrap_secrets(
+            None,
+            Some("secret".to_string()),
+            Some("tok:alice".to_string()),
+        )
+        .unwrap();
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("secret"));
+        assert_eq!(
+            registry.get_credential(CRED_ADMIN_TOKENS),
+            Some("tok:alice")
+        );
+        assert_eq!(registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS), None);
+        assert_eq!(registry.get_credential(CRED_TRUSTED_PROXY_IPS), None);
     }
 
     #[test]
@@ -202,10 +287,12 @@ mod tests {
         .unwrap();
         drop(file);
 
-        let registry = CredentialRegistry::bootstrap_secrets(
+        let registry = CredentialRegistry::bootstrap_with_runtime_overrides(
             Some(&path),
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
+            Some("1024".to_string()),
+            Some("198.51.100.10".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -213,6 +300,14 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("filetok:operator")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("1024")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -232,10 +327,12 @@ mod tests {
         let path = dir.join("credentials.json");
         std::fs::write(&path, r#"{"admin_token":"file-only"}"#).unwrap();
 
-        let registry = CredentialRegistry::bootstrap_secrets(
+        let registry = CredentialRegistry::bootstrap_with_runtime_overrides(
             Some(&path),
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
+            Some("3072".to_string()),
+            Some("198.51.100.10".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -243,6 +340,14 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("envtok:bob")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("3072")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -286,6 +391,70 @@ mod tests {
         std::fs::write(&path, "not-json").unwrap();
         let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_overrides_rate_limit_max_clients_without_affecting_secret_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"rate_limit_max_clients":"512"}"#).unwrap();
+
+        let registry = CredentialRegistry::bootstrap_with_runtime_overrides(
+            Some(&path),
+            None,
+            None,
+            Some("2048".to_string()),
+            Some("198.51.100.10".to_string()),
+        )
+        .unwrap();
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert_eq!(
+            registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS),
+            Some("512")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_IPS),
+            Some("198.51.100.10")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_secrets_ignores_policy_keys_from_credentials_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-secret-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"admin_token":"file-secret","rate_limit_max_clients":"512","trusted_proxy_ips":"198.51.100.10"}"#,
+        )
+        .unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap();
+        assert_eq!(
+            registry.get_credential(CRED_ADMIN_TOKEN),
+            Some("file-secret")
+        );
+        assert_eq!(registry.get_credential(CRED_RATE_LIMIT_MAX_CLIENTS), None);
+        assert_eq!(registry.get_credential(CRED_TRUSTED_PROXY_IPS), None);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
