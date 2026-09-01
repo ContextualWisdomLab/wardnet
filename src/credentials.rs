@@ -306,9 +306,8 @@ mod tests {
     #[test]
     fn boundary_whitespace_admin_token_is_rejected() {
         for value in [" secret", "secret ", "\tsecret", "secret\t"] {
-            let error =
-                CredentialRegistry::bootstrap_secrets(None, Some(value.to_string()), None)
-                    .unwrap_err();
+            let error = CredentialRegistry::bootstrap_secrets(None, Some(value.to_string()), None)
+                .unwrap_err();
             assert!(error.contains("admin_token"), "{error}");
         }
     }
@@ -316,9 +315,8 @@ mod tests {
     #[test]
     fn non_visible_admin_token_is_rejected() {
         for value in ["sec\tret", "sec\u{7f}ret", "sec\u{00e9}ret"] {
-            let error =
-                CredentialRegistry::bootstrap_secrets(None, Some(value.to_string()), None)
-                    .unwrap_err();
+            let error = CredentialRegistry::bootstrap_secrets(None, Some(value.to_string()), None)
+                .unwrap_err();
             assert!(error.contains("visible ASCII"), "{error}");
         }
     }
@@ -332,10 +330,13 @@ mod tests {
         )
         .unwrap();
 
-        for value in ["token-a :operator", "token\tb:readonly", "token\u{7f}:operator"] {
-            let error =
-                CredentialRegistry::bootstrap_secrets(None, None, Some(value.to_string()))
-                    .unwrap_err();
+        for value in [
+            "token-a :operator",
+            "token\tb:readonly",
+            "token\u{7f}:operator",
+        ] {
+            let error = CredentialRegistry::bootstrap_secrets(None, None, Some(value.to_string()))
+                .unwrap_err();
             assert!(error.contains("admin_tokens"), "{error}");
         }
     }

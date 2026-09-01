@@ -220,15 +220,7 @@ impl AppState {
     }
 
     fn has_write_capable_admin(&self) -> bool {
-        if !self.admin_tokens.is_empty() {
-            self.admin_tokens
-                .values()
-                .any(|principal| principal.can_write)
-        } else {
-            self.admin_token
-                .as_deref()
-                .is_some_and(|token| !token.trim().is_empty())
-        }
+        has_write_admin_credential(self)
     }
 
     /// The principal mapped to the request's `X-Admin-Token`, if configured.
@@ -2645,12 +2637,15 @@ fn reject_management_write(state: &AppState, headers: &HeaderMap) -> Option<Resp
     if admin_authorized(state, headers) {
         return None;
     }
-    let status = if admin_authenticated(state, headers) {
-        StatusCode::FORBIDDEN
+    let (status, message) = if admin_authenticated(state, headers) {
+        (
+            StatusCode::FORBIDDEN,
+            "X-Admin-Token is not authorized for management writes",
+        )
     } else {
-        StatusCode::UNAUTHORIZED
+        (StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token")
     };
-    Some(error(status, "missing or invalid X-Admin-Token"))
+    Some(error(status, message))
 }
 
 fn has_write_admin_credential(state: &AppState) -> bool {
@@ -3595,7 +3590,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("refusing to bind 0.0.0.0:0"), "{err}");
+        assert!(
+            err.contains("admin_token must contain only visible ASCII header characters"),
+            "{err}"
+        );
         clear_run_env();
     }
 
@@ -3973,6 +3971,15 @@ mod tests {
         readonly.insert("x-admin-token", "read".parse().unwrap());
         let unauthorized = reject_management_write(&state, &readonly).unwrap();
         assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = runtime.block_on(body_text(unauthorized));
+        assert!(
+            body.contains("not authorized for management writes"),
+            "{body}"
+        );
 
         let mut writer = HeaderMap::new();
         writer.insert("x-admin-token", "write".parse().unwrap());
@@ -7848,6 +7855,15 @@ mod tests {
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
         assert_eq!(health.auth_mode, "production");
+
+        let unpresentable = state
+            .clone()
+            .with_admin_tokens(parse_admin_tokens("bad\nwrite:ops:admin"))
+            .with_credentials_source(CredentialSource::Env);
+        let health = unpresentable.health_status();
+        assert_eq!(health.credentials_source, "env");
+        assert!(health.admin_auth_configured);
+        assert_eq!(health.auth_mode, "development");
     }
 
     #[test]

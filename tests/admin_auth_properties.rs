@@ -7,15 +7,15 @@
 
 use axum::{
     body::Body,
-    http::{header::CONTENT_TYPE, Method, Request, StatusCode},
+    http::{Method, Request, StatusCode, header::CONTENT_TYPE},
 };
 use proptest::prelude::*;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tower::ServiceExt;
 use waf_ids_ai_soc::{
-    build_app, parse_admin_tokens_strict, AppState, CredentialRegistry, CRED_ADMIN_TOKEN,
-    CRED_ADMIN_TOKENS,
+    AppState, CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, build_app,
+    parse_admin_tokens_strict,
 };
 
 static NEXT_CREDENTIAL_FILE_ID: AtomicU64 = AtomicU64::new(1);
