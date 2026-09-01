@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, State, rejection::BytesRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -18,8 +18,8 @@ use tokio::net::TcpListener;
 use crate::{
     AdmissionDecision, AdmissionPolicy, AdmissionServiceConfig, AuditRecord, AuditSink,
     DecisionKind, FileAuditSink, InstallIntent, ReasonCode, admission_decision, build_audit_record,
-    build_malformed_audit_record, load_admin_token, load_config, parse_cli_args, sha256_hex,
-    validate_install_intent,
+    build_malformed_audit_record, build_unavailable_request_audit_record, load_admin_token,
+    load_config, parse_cli_args, sha256_hex, validate_install_intent,
 };
 
 const MAX_ADMIN_TOKEN_BYTES: usize = 4096;
@@ -161,11 +161,16 @@ async fn get_policy(State(state): State<AdmissionState>, headers: HeaderMap) -> 
 async fn create_admission(
     State(state): State<AdmissionState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if !authenticated(&headers, &state.admin_token) {
         return unauthorized();
     }
+
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return body_rejection_response(&state, rejection).await,
+    };
 
     let intent = match serde_json::from_slice::<InstallIntent>(&body) {
         Ok(intent) => intent,
@@ -184,6 +189,21 @@ async fn create_admission(
         Err(_) => return audit_unavailable_response(&decision),
     };
     append_before_response(&state, record, decision, response_status).await
+}
+
+async fn body_rejection_response(state: &AdmissionState, rejection: BytesRejection) -> Response {
+    let rejection_status = rejection.into_response().status();
+    let (reason, response_status) = if rejection_status == StatusCode::PAYLOAD_TOO_LARGE {
+        (ReasonCode::RequestBodyTooLarge, StatusCode::PAYLOAD_TOO_LARGE)
+    } else {
+        (ReasonCode::MalformedRequest, StatusCode::BAD_REQUEST)
+    };
+    let decision = unavailable_request_decision(&state.policy, reason);
+    let record = match build_unavailable_request_audit_record(&state.policy, reason) {
+        Ok(record) => record,
+        Err(_) => return audit_unavailable_response(&decision),
+    };
+    append_before_response(state, record, decision, response_status).await
 }
 
 async fn malformed_request_response(state: &AdmissionState, body: &[u8]) -> Response {
@@ -219,6 +239,20 @@ fn malformed_decision(policy: &AdmissionPolicy, body_digest: &str) -> AdmissionD
         policy_revision: policy.policy_revision.clone(),
         normalized_source_uri: None,
         command_sha256: body_digest.to_string(),
+        artifact_count: 0,
+    }
+}
+
+fn unavailable_request_decision(policy: &AdmissionPolicy, reason: ReasonCode) -> AdmissionDecision {
+    let reason_name = reason.as_str();
+    AdmissionDecision {
+        request_id: format!("unavailable:{reason_name}"),
+        decision: DecisionKind::Block,
+        reason_codes: vec![reason],
+        policy_id: policy.policy_id.clone(),
+        policy_revision: policy.policy_revision.clone(),
+        normalized_source_uri: None,
+        command_sha256: sha256_hex(reason_name.as_bytes()),
         artifact_count: 0,
     }
 }
