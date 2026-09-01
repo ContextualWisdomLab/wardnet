@@ -282,7 +282,7 @@ impl AppState {
             dnsbl_origin: self.dnsbl_origin.clone(),
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
-            admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+            admin_auth_configured: has_write_admin_credential(self),
         }
     }
 }
@@ -3787,6 +3787,10 @@ mod tests {
         let readonly_app = build_app(
             AppState::seeded(None).with_admin_tokens(parse_admin_tokens("read:auditor:readonly")),
         );
+        let readonly_health: HealthStatus =
+            json_body(app_request(&readonly_app, empty_request(Method::GET, "/healthz")).await)
+                .await;
+        assert!(!readonly_health.admin_auth_configured);
         let readonly_body =
             body_text(app_request(&readonly_app, empty_request(Method::GET, "/metrics")).await)
                 .await;
@@ -3795,6 +3799,9 @@ mod tests {
         let writer_app = build_app(
             AppState::seeded(None).with_admin_tokens(parse_admin_tokens("write:operator:write")),
         );
+        let writer_health: HealthStatus =
+            json_body(app_request(&writer_app, empty_request(Method::GET, "/healthz")).await).await;
+        assert!(writer_health.admin_auth_configured);
         let writer_body =
             body_text(app_request(&writer_app, empty_request(Method::GET, "/metrics")).await).await;
         assert!(writer_body.contains("waf_ids_admin_auth_configured 1"));
@@ -7736,6 +7743,14 @@ mod tests {
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
+
+        let readonly = state
+            .clone()
+            .with_admin_tokens(parse_admin_tokens("tok:auditor:readonly"))
+            .with_credentials_source(CredentialSource::File);
+        let health = readonly.health_status();
+        assert_eq!(health.credentials_source, "file");
+        assert!(!health.admin_auth_configured);
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
