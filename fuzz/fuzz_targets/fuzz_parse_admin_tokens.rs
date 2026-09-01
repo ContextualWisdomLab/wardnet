@@ -11,7 +11,8 @@
 //!   * the strict startup parser either rejects ambiguous input or yields the
 //!     same non-empty token/actor invariants;
 //!   * strict startup always rejects duplicate secrets, blank list entries, and
-//!     unknown roles, matching the stable proptest mirror.
+//!     unknown roles, matching the stable proptest mirror;
+//!   * accepted write/readonly aliases preserve their authorization semantics.
 
 use libfuzzer_sys::fuzz_target;
 use std::fmt::Write as _;
@@ -66,5 +67,25 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         parse_admin_tokens_strict(&unknown_role).is_err(),
         "strict startup must reject unknown roles"
+    );
+
+    let writer = format!("{seed}:alice:operator");
+    let writer_tokens =
+        parse_admin_tokens_strict(&writer).expect("operator role must remain accepted");
+    assert!(
+        writer_tokens
+            .get(&seed)
+            .is_some_and(|principal| principal.can_write),
+        "operator role must remain write-capable"
+    );
+
+    let reader = format!("{seed}:alice:readonly");
+    let reader_tokens =
+        parse_admin_tokens_strict(&reader).expect("readonly role must remain accepted");
+    assert!(
+        reader_tokens
+            .get(&seed)
+            .is_some_and(|principal| !principal.can_write),
+        "readonly role must remain non-writing"
     );
 });
