@@ -1169,7 +1169,7 @@ fn operational_prometheus_exposition(state: &AppState, data: &AppData, now_unix:
     append_prometheus_gauge(
         &mut out,
         "waf_ids_admin_auth_configured",
-        "Admin write authentication configured (1=yes, 0=auth disabled).",
+        "Admin write authentication configured (1=write-capable credential configured, 0=no write-capable credential configured; readonly auth may still exist).",
         usize::from(has_write_admin_credential(state)),
     );
     out
@@ -3795,6 +3795,9 @@ mod tests {
             body_text(app_request(&readonly_app, empty_request(Method::GET, "/metrics")).await)
                 .await;
         assert!(readonly_body.contains("waf_ids_admin_auth_configured 0"));
+        assert!(readonly_body.contains(
+            "# HELP waf_ids_admin_auth_configured Admin write authentication configured (1=write-capable credential configured, 0=no write-capable credential configured; readonly auth may still exist)."
+        ));
 
         let writer_app = build_app(
             AppState::seeded(None).with_admin_tokens(parse_admin_tokens("write:operator:write")),
