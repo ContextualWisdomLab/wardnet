@@ -1170,7 +1170,7 @@ fn operational_prometheus_exposition(state: &AppState, data: &AppData, now_unix:
         &mut out,
         "waf_ids_admin_auth_configured",
         "Admin write authentication configured (1=yes, 0=auth disabled).",
-        usize::from(state.health_status().admin_auth_configured),
+        usize::from(has_write_admin_credential(state)),
     );
     out
 }
@@ -3780,6 +3780,24 @@ mod tests {
         assert!(body.contains("waf_ids_gateway_ready 1"));
         assert!(body.contains("waf_ids_gateway_routes_enabled 1"));
         assert!(body.contains("waf_ids_admin_auth_configured 0"));
+    }
+
+    #[tokio::test]
+    async fn admin_auth_metric_requires_a_write_capable_credential() {
+        let readonly_app = build_app(
+            AppState::seeded(None).with_admin_tokens(parse_admin_tokens("read:auditor:readonly")),
+        );
+        let readonly_body =
+            body_text(app_request(&readonly_app, empty_request(Method::GET, "/metrics")).await)
+                .await;
+        assert!(readonly_body.contains("waf_ids_admin_auth_configured 0"));
+
+        let writer_app = build_app(
+            AppState::seeded(None).with_admin_tokens(parse_admin_tokens("write:operator:write")),
+        );
+        let writer_body =
+            body_text(app_request(&writer_app, empty_request(Method::GET, "/metrics")).await).await;
+        assert!(writer_body.contains("waf_ids_admin_auth_configured 1"));
     }
 
     #[tokio::test]
