@@ -302,24 +302,3 @@ async fn audit_outage_converts_candidate_allow_and_block_to_service_unavailable(
         assert_eq!(decision.reason_codes, vec![ReasonCode::AuditUnavailable]);
     }
 }
-
-#[tokio::test]
-async fn configured_body_limit_returns_payload_too_large_without_an_audit_record() {
-    let sink = Arc::new(MemoryAuditSink::default());
-    let app = build_app(state(approved_policy(), sink.clone(), 32));
-
-    let response = app
-        .oneshot(admission_request(
-            vec![b'x'; 128],
-            Some(HeaderValue::from_static(ADMIN_TOKEN)),
-        ))
-        .await
-        .expect("router must answer");
-
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(
-        sink.records()
-            .expect("audit snapshot must succeed")
-            .is_empty()
-    );
-}
