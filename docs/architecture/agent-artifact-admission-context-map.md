@@ -15,7 +15,7 @@ Wardnet treats pre-execution package admission as a distinct bounded context rat
 
 **Install Intent** is the structured request presented before a package manager runs. **Admission Policy** is reviewed immutable policy for one process revision. **Approved Manifest** identifies one reviewed workspace dependency manifest by workspace and SHA-256. **Approved Artifact** identifies one exact artifact by ecosystem, name, version, registry, owner, digest, and the argv token that names it. **Admission Decision** is the deterministic allow/block domain result. **Admission Receipt** is the response representation of that decision. **Audit Record** is minimized durable evidence written before an authenticated admission response is returned. **Instruction Source** records where the install suggestion came from without granting that source authority. **Execution Broker** is an external caller that must require an allow receipt before invoking a package manager.
 
-The terms `service`, `manager`, `helper`, `common`, `shared`, and `model` are not bounded-context concepts and must not become new responsibility containers. Existing `model.rs` is a source-file name for the admission vocabulary only; new domain concepts belong under names taken from this glossary rather than a generic catch-all module.
+The terms `service`, `manager`, `helper`, `common`, `shared`, and `model` are not bounded-context concepts and must not become new responsibility containers. The domain vocabulary now lives in `admission.rs`; new domain concepts should continue to use names from this glossary rather than a generic catch-all module.
 
 ## Context map
 
@@ -56,7 +56,7 @@ The transaction boundary for an authenticated admission request is: evaluate the
 
 ## Dependency direction
 
-`model.rs` and `policy.rs` form the domain kernel and must remain independent of Axum, Tokio, filesystem, listener, and deployment concerns. `audit.rs` defines the evidence contract and its current local-file adapter; this mixed file is acceptable only while the adapter remains small and the domain never depends on its concrete sink. If additional audit backends arrive, move concrete sinks behind an adapter module before adding them. `config.rs` and `http.rs` are adapter/delivery concerns and may depend inward on domain contracts. `main.rs` is composition only.
+`admission.rs` and `policy.rs` form the domain kernel and must remain independent of Axum, Tokio, filesystem, listener, and deployment concerns. `audit.rs` defines the evidence contract and its current local-file adapter; this mixed file is acceptable only while the adapter remains small and the domain never depends on its concrete sink. If additional audit backends arrive, move concrete sinks behind an adapter module before adding them. `config.rs` and `http.rs` are adapter/delivery concerns and may depend inward on domain contracts. `main.rs` is composition only.
 
 `crates/agent-artifact-admission/tests/ddd_architecture_contract.rs` is the first architectural fitness gate for this context. Extend it whenever a new provider, persistence backend, or delivery surface is introduced.
 
