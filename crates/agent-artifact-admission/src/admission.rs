@@ -217,6 +217,8 @@ impl DecisionKind {
 pub enum ReasonCode {
     /// The request body could not be parsed as the strict install-intent schema.
     MalformedRequest,
+    /// The authenticated request body exceeded the configured materialization limit.
+    RequestBodyTooLarge,
     /// A bounded identifier, argument vector, source field, or count was invalid.
     InvalidRequest,
     /// The structured operation was not the supported install operation.
@@ -256,6 +258,7 @@ impl ReasonCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MalformedRequest => "malformed_request",
+            Self::RequestBodyTooLarge => "request_body_too_large",
             Self::InvalidRequest => "invalid_request",
             Self::InvalidOperation => "invalid_operation",
             Self::InvalidManifestDigest => "invalid_manifest_digest",
