@@ -25,7 +25,7 @@ The startup gate and secret-handling path in this PR are aligned with NIST guida
 
 ### Research artifact redistribution assessment
 
-The two sources below are linked to their authoritative NIST publication records and summarized here. No PDF copy is committed in this PR because redistribution rights for the exact retrieved publication artifacts were not independently verified during this change. Repository guidance permits citation, link, and summary when redistribution permission has not been established; Wardnet therefore avoids republishing a binary merely to satisfy an evidence-format preference. If a future release process records a redistribution-permissible artifact and its provenance, it can be added under `docs/papers/` without changing this authentication decision.
+The authentication-specific NIST SP 800-57 Part 1 Rev. 5 and NIST SP 800-63B sources below remain linked to their authoritative publication records and summarized here; this PR does not republish copies of those two PDFs because the exact retrieved artifacts were not independently assessed for redistribution during this change. Separately, the branch retains `docs/papers/nist-sp-800-218-ssdf.pdf` as redistributable NIST SP 800-218 Version 1.1 evidence for the secure-development and credential-bootstrap boundary. Its authoritative source, redistribution basis, attribution, and final-versus-draft status are recorded in [docs/doctoring/fail-closed-management-auth.md](../doctoring/fail-closed-management-auth.md). The repository copy is evidence only and does not supersede NIST's publication.
 
 ## Primary Threats
 
@@ -48,3 +48,5 @@ AI SOC recommendations may explain, summarize, or suggest actions, but enforceme
 Barker, E. (2020). *Recommendation for key management: Part 1 - General* (NIST SP 800-57 Part 1 Rev. 5). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-57pt1r5
 
 Grassi, P. A., Garcia, M. E., & Fenton, J. L. (2020). *Digital identity guidelines: Authentication and lifecycle management* (NIST SP 800-63B). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-63b
+
+National Institute of Standards and Technology. (2022). *Secure Software Development Framework (SSDF) version 1.1* (NIST SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
