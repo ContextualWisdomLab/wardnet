@@ -31,7 +31,7 @@ kubectl create namespace waf-ids-ai-soc --dry-run=client -o yaml | kubectl apply
 
 The deployment authority must then confirm that its external secret manager/controller has materialized `waf-ids-ai-soc-admin` in that namespace with a non-empty `ADMIN_TOKEN` key. The repository does not prescribe a vendor-specific controller; the integration boundary is the Kubernetes Secret coordinates above.
 
-Apply `deploy/kubernetes/waf-ids-ai-soc.yaml` only after synchronization succeeds. The manifest retains its Namespace object so fresh installs and upgrades converge on the same declarative namespace ownership. Kubernetes resolves the `secretKeyRef` when creating the container. Because the reference is explicitly non-optional, absence of the Secret or key is an operator-visible startup failure instead of an authentication downgrade.
+Apply `deploy/kubernetes/wardnet.yaml` only after synchronization succeeds. The repository-path rename does not rename namespace, Deployment, Service, PVC, image, labels, ports, probes, security context, or Secret coordinates. The manifest retains its Namespace object so fresh installs and upgrades converge on the same declarative namespace ownership. Kubernetes resolves the `secretKeyRef` when creating the container. Because the reference is explicitly non-optional, absence of the Secret or key is an operator-visible startup failure instead of an authentication downgrade.
 
 ## Rotation
 
@@ -48,7 +48,7 @@ If rollout or authentication verification fails, keep or restore the previous cr
 
 ## Verification contract
 
-`tests/deployment_manifest.rs` is the permanent regression boundary. It fails if the shipped manifest contains a `kind: Secret` document or the historical placeholder value. It structurally selects Deployment `waf-ids-ai-soc`, scopes the lookup to the `gateway` runtime container, requires exactly one `ADMIN_TOKEN` environment entry, rejects literal fallback values and duplicate `ADMIN_TOKEN` entries, and validates the expected namespace, Secret name, key, and non-optional reference. Decoy Deployments, `initContainers`, comments, duplicate environment entries, literal fallbacks, and `optional: true` cannot satisfy the contract. The same regression suite requires the production guide to bootstrap the namespace before namespaced Secret provisioning.
+`tests/deployment_manifest.rs` is the permanent regression boundary. It fails if the shipped manifest contains a `kind: Secret` document or the historical placeholder value. It structurally selects Deployment `waf-ids-ai-soc`, scopes the lookup to the `gateway` runtime container, requires exactly one `ADMIN_TOKEN` environment entry, rejects literal fallback values and duplicate `ADMIN_TOKEN` entries, and validates the expected namespace, Secret name, key, and non-optional reference. Decoy Deployments, `initContainers`, comments, duplicate environment entries, literal fallbacks, and `optional: true` cannot satisfy the contract. The same regression suite requires the production guide to bootstrap the namespace before namespaced Secret provisioning and rejects restoration of the legacy `deploy/kubernetes/waf-ids-ai-soc.yaml` path.
 
 For release evidence, run the repository's normal formatting, workspace test, Clippy, fuzz, SAST, and Security Scan gates on the exact PR head. A predecessor-head success, skipped required job, or security scan from another merge tree is not evidence for the current artifact.
 
