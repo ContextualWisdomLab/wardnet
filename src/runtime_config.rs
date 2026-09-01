@@ -5,58 +5,88 @@
 //! across application code.
 
 use crate::{AppConfig, CRED_ADMIN_TOKEN, CredentialRegistry};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use std::sync::Mutex;
-
+/// Immutable bootstrap snapshot for non-secret Wardnet runtime settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfiguration {
+    /// Socket address the gateway binds during process startup.
     pub bind_addr: String,
+    /// Optional secret-registry bootstrap file selected at the process edge.
     pub credentials_path: Option<PathBuf>,
+    /// Optional standalone state file used by the gateway process.
     pub state_path: Option<PathBuf>,
+    /// DNSBL zone origin published by the gateway.
     pub dnsbl_origin: String,
+    /// Maximum retained security-event count.
     pub event_limit: usize,
+    /// Per-client request allowance for the local limiter; zero disables it.
     pub rate_limit: u32,
+    /// Local limiter fixed-window duration in seconds.
     pub rate_limit_window: u64,
+    /// Maximum accepted HTTP request body size in bytes.
     pub max_body_bytes: usize,
 }
 
 impl RuntimeConfiguration {
+    /// Default loopback listener for standalone operation.
     pub const DEFAULT_BIND_ADDR: &'static str = "127.0.0.1:8080";
+    /// Default local limiter allowance; zero keeps rate limiting disabled.
     pub const DEFAULT_RATE_LIMIT: u32 = 0;
+    /// Default local limiter fixed-window duration in seconds.
     pub const DEFAULT_RATE_LIMIT_WINDOW: u64 = 60;
+    /// Default maximum accepted request body size in bytes.
     pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 
+    /// Load the process-edge runtime snapshot from environment bootstrap input.
+    ///
+    /// Environment variables are deliberately restricted to this delivery
+    /// adapter. They are bootstrap transport, not an application/domain
+    /// configuration authority; callers receive the validated snapshot below.
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let bind_addr = lookup("BIND_ADDR")
+            .unwrap_or_else(|| Self::DEFAULT_BIND_ADDR.to_string());
+        let credentials_path = lookup("WAF_IDS_CREDENTIALS_PATH").map(PathBuf::from);
+        let state_path = lookup("WAF_IDS_STATE_PATH").map(PathBuf::from);
+        let dnsbl_origin = lookup("DNSBL_ORIGIN")
+            .unwrap_or_else(|| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string());
+        let event_limit_raw = lookup("EVENT_LIMIT");
+        let rate_limit_raw = lookup("RATE_LIMIT");
+        let rate_limit_window_raw = lookup("RATE_LIMIT_WINDOW");
+        let max_body_bytes_raw = lookup("MAX_BODY_BYTES");
+
         Ok(Self {
-            bind_addr: std::env::var("BIND_ADDR")
-                .unwrap_or_else(|_| Self::DEFAULT_BIND_ADDR.to_string()),
-            credentials_path: std::env::var("WAF_IDS_CREDENTIALS_PATH")
-                .ok()
-                .map(PathBuf::from),
-            state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
-            dnsbl_origin: std::env::var("DNSBL_ORIGIN")
-                .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
-            event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
+            bind_addr,
+            credentials_path,
+            state_path,
+            dnsbl_origin,
+            event_limit: parse_event_limit(event_limit_raw.as_deref())?,
             rate_limit: parse_u32_env(
                 "RATE_LIMIT",
-                std::env::var("RATE_LIMIT").ok().as_deref(),
+                rate_limit_raw.as_deref(),
                 Self::DEFAULT_RATE_LIMIT,
             )?,
             rate_limit_window: parse_u64_env(
                 "RATE_LIMIT_WINDOW",
-                std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
+                rate_limit_window_raw.as_deref(),
                 Self::DEFAULT_RATE_LIMIT_WINDOW,
             )?,
             max_body_bytes: parse_u64_env(
                 "MAX_BODY_BYTES",
-                std::env::var("MAX_BODY_BYTES").ok().as_deref(),
+                max_body_bytes_raw.as_deref(),
                 Self::DEFAULT_MAX_BODY_BYTES as u64,
             )? as usize,
         })
     }
 
+    /// Derive the application configuration from this non-secret snapshot and
+    /// the independently bootstrapped secret registry.
     pub fn app_config(&self, credentials: &CredentialRegistry) -> AppConfig {
         AppConfig {
             admin_token: credentials
@@ -129,35 +159,53 @@ pub fn parse_u64_env(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{CRED_ADMIN_TOKENS, CredentialRegistry};
-
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-
-    fn clear_runtime_env() {
-        for name in [
-            "BIND_ADDR",
-            "WAF_IDS_CREDENTIALS_PATH",
-            "WAF_IDS_STATE_PATH",
-            "DNSBL_ORIGIN",
-            "EVENT_LIMIT",
-            "RATE_LIMIT",
-            "RATE_LIMIT_WINDOW",
-            "MAX_BODY_BYTES",
-            "ADMIN_TOKEN",
-            "ADMIN_TOKENS",
-        ] {
-            unsafe { std::env::remove_var(name) };
+fn direct_runtime_env_read_offenders(root: &Path) -> Vec<PathBuf> {
+    fn visit(root: &Path, current: &Path, offenders: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, offenders);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            let source = std::fs::read_to_string(&path).unwrap();
+            if (source.contains("std::env::var(") || source.contains("std::env::var_os("))
+                && rel != Path::new("credentials.rs")
+                && rel != Path::new("runtime_config.rs")
+            {
+                offenders.push(rel);
+            }
         }
     }
 
-    #[test]
-    fn runtime_configuration_defaults_when_env_is_unset() {
-        let _guard = ENV_GUARD.lock().unwrap();
-        clear_runtime_env();
+    let mut offenders = Vec::new();
+    visit(root, root, &mut offenders);
+    offenders.sort();
+    offenders
+}
 
-        let config = RuntimeConfiguration::from_env().unwrap();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CRED_ADMIN_TOKENS, CredentialRegistry};
+    use std::collections::HashMap;
+
+    fn runtime_from_pairs(
+        pairs: &[(&str, &str)],
+    ) -> Result<RuntimeConfiguration, Box<dyn std::error::Error>> {
+        let values = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<HashMap<_, _>>();
+        RuntimeConfiguration::from_lookup(|name| values.get(name).cloned())
+    }
+
+    #[test]
+    fn runtime_configuration_defaults_when_bootstrap_input_is_unset() {
+        let config = runtime_from_pairs(&[]).unwrap();
         assert_eq!(config.bind_addr, RuntimeConfiguration::DEFAULT_BIND_ADDR);
         assert_eq!(config.credentials_path, None);
         assert_eq!(config.state_path, None);
@@ -175,21 +223,19 @@ mod tests {
     }
 
     #[test]
-    fn runtime_configuration_reads_current_env_snapshot() {
-        let _guard = ENV_GUARD.lock().unwrap();
-        clear_runtime_env();
-        unsafe {
-            std::env::set_var("BIND_ADDR", "127.0.0.1:9090");
-            std::env::set_var("WAF_IDS_CREDENTIALS_PATH", "/tmp/creds.json");
-            std::env::set_var("WAF_IDS_STATE_PATH", "/tmp/state.json");
-            std::env::set_var("DNSBL_ORIGIN", "wardnet.example.");
-            std::env::set_var("EVENT_LIMIT", "25");
-            std::env::set_var("RATE_LIMIT", "5");
-            std::env::set_var("RATE_LIMIT_WINDOW", "30");
-            std::env::set_var("MAX_BODY_BYTES", "4096");
-        }
+    fn runtime_configuration_reads_one_bootstrap_snapshot() {
+        let config = runtime_from_pairs(&[
+            ("BIND_ADDR", "127.0.0.1:9090"),
+            ("WAF_IDS_CREDENTIALS_PATH", "/tmp/creds.json"),
+            ("WAF_IDS_STATE_PATH", "/tmp/state.json"),
+            ("DNSBL_ORIGIN", "wardnet.example."),
+            ("EVENT_LIMIT", "25"),
+            ("RATE_LIMIT", "5"),
+            ("RATE_LIMIT_WINDOW", "30"),
+            ("MAX_BODY_BYTES", "4096"),
+        ])
+        .unwrap();
 
-        let config = RuntimeConfiguration::from_env().unwrap();
         assert_eq!(config.bind_addr, "127.0.0.1:9090");
         assert_eq!(
             config.credentials_path,
@@ -204,15 +250,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_configuration_rejects_malformed_bounds() {
-        let _guard = ENV_GUARD.lock().unwrap();
-        clear_runtime_env();
-        unsafe { std::env::set_var("EVENT_LIMIT", "0") };
-        assert!(RuntimeConfiguration::from_env().is_err());
-
-        clear_runtime_env();
-        unsafe { std::env::set_var("RATE_LIMIT_WINDOW", "abc") };
-        assert!(RuntimeConfiguration::from_env().is_err());
+    fn runtime_configuration_rejects_malformed_bounds_without_mutating_process_env() {
+        assert!(runtime_from_pairs(&[("EVENT_LIMIT", "0")]).is_err());
+        assert!(runtime_from_pairs(&[("RATE_LIMIT_WINDOW", "abc")]).is_err());
     }
 
     #[test]
@@ -246,30 +286,29 @@ mod tests {
     }
 
     #[test]
-    fn runtime_env_reads_stay_in_bootstrap_adapters() {
+    fn runtime_env_reads_stay_in_bootstrap_adapters_recursively() {
         let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut offenders = Vec::new();
-        for entry in std::fs::read_dir(&src_dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            let source = std::fs::read_to_string(&path).unwrap();
-            if (source.contains("std::env::var(") || source.contains("std::env::var_os("))
-                && rel != "src/credentials.rs"
-                && rel != "src/runtime_config.rs"
-            {
-                offenders.push(rel);
-            }
-        }
+        let offenders = direct_runtime_env_read_offenders(&src_dir);
         assert!(
             offenders.is_empty(),
             "direct runtime env reads escaped bootstrap adapters: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn nested_runtime_env_read_is_detected_by_architecture_fitness_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("gateway").join("delivery");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("leak.rs"),
+            "fn bypass() { let _ = std::env::var(\"BIND_ADDR\"); }",
+        )
+        .unwrap();
+
+        assert_eq!(
+            direct_runtime_env_read_offenders(temp.path()),
+            vec![PathBuf::from("gateway/delivery/leak.rs")]
         );
     }
 }
