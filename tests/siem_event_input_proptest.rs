@@ -248,3 +248,44 @@ fn oversized_route_ids_keep_distinct_exported_identities() {
     assert!(first_route.contains('~'));
     assert!(second_route.contains('~'));
 }
+
+#[test]
+fn known_fnv32_collision_does_not_merge_oversized_route_identities() {
+    // These two 286-byte identifiers have the same FNV-1a 32-bit digest under
+    // the previous suffix scheme. A lossy export suffix must not collapse them.
+    let shared_prefix = "x".repeat(270);
+    let first_route_id = format!("{shared_prefix}jj6zaguV0ehgXFcM");
+    let second_route_id = format!("{shared_prefix}q5agj1Noy7ppK930");
+    let first = serde_json::json!({
+        "id": 17,
+        "timestamp_unix": 1_723_456_796_u64,
+        "client_ip": "203.0.113.9",
+        "route_id": first_route_id,
+        "action": "monitor",
+        "reason": "rule match",
+        "score": 55,
+        "path": "/first"
+    })
+    .to_string();
+    let second = serde_json::json!({
+        "id": 18,
+        "timestamp_unix": 1_723_456_797_u64,
+        "client_ip": "203.0.113.9",
+        "route_id": second_route_id,
+        "action": "monitor",
+        "reason": "rule match",
+        "score": 55,
+        "path": "/second"
+    })
+    .to_string();
+
+    let events = read_events(Cursor::new(format!("{first}\n{second}\n")))
+        .expect("collision fixture remains exportable");
+    let first_exported = events[0].route_id.as_deref().expect("first route id");
+    let second_exported = events[1].route_id.as_deref().expect("second route id");
+
+    assert_ne!(
+        first_exported, second_exported,
+        "lossy route-id bounding must preserve distinct identities even for a known old-hash collision"
+    );
+}
