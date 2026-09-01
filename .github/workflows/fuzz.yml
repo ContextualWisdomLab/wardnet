@@ -32,6 +32,7 @@ jobs:
           - fuzz_appdata_json
           - fuzz_parse_admin_tokens
           - fuzz_dnsbl_zone
+          - fuzz_trusted_forwarded_client_ip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
