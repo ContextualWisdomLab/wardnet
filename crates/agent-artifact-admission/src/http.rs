@@ -194,7 +194,10 @@ async fn create_admission(
 async fn body_rejection_response(state: &AdmissionState, rejection: BytesRejection) -> Response {
     let rejection_status = rejection.into_response().status();
     let (reason, response_status) = if rejection_status == StatusCode::PAYLOAD_TOO_LARGE {
-        (ReasonCode::RequestBodyTooLarge, StatusCode::PAYLOAD_TOO_LARGE)
+        (
+            ReasonCode::RequestBodyTooLarge,
+            StatusCode::PAYLOAD_TOO_LARGE,
+        )
     } else {
         (ReasonCode::MalformedRequest, StatusCode::BAD_REQUEST)
     };
