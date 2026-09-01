@@ -3,15 +3,12 @@ kind: Namespace
 metadata:
   name: waf-ids-ai-soc
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: waf-ids-ai-soc-admin
-  namespace: waf-ids-ai-soc
-type: Opaque
-stringData:
-  ADMIN_TOKEN: replace-with-secret-manager-sync
----
+# The administrator Secret is intentionally not distributed with Wardnet.
+# For a fresh install, create this Namespace idempotently first, provision
+# `waf-ids-ai-soc-admin` through the organization's secret-management control
+# plane, wait for synchronization, then apply this complete manifest. The
+# Deployment has no fallback value and therefore fails closed when the Secret
+# or `ADMIN_TOKEN` key is absent.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -68,6 +65,7 @@ spec:
                 secretKeyRef:
                   name: waf-ids-ai-soc-admin
                   key: ADMIN_TOKEN
+                  optional: false
           volumeMounts:
             - name: state
               mountPath: /var/lib/waf-ids-ai-soc
