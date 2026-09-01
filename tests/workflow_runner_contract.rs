@@ -42,9 +42,7 @@ fn runner_backed_workflows_pin_the_hosted_ubuntu_image() {
             "{relative} must define at least one runs-on value"
         );
         assert!(
-            runners
-                .iter()
-                .all(|runner| *runner == PINNED_UBUNTU_RUNNER),
+            runners.iter().all(|runner| *runner == PINNED_UBUNTU_RUNNER),
             "{relative} must use {PINNED_UBUNTU_RUNNER} for every runs-on value; found {runners:?}"
         );
     }
