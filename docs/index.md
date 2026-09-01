@@ -20,7 +20,7 @@ Wardnet owns its gateway and SOC control-plane surface: route policy, current lo
 
 - [README](https://github.com/ContextualWisdomLab/wardnet#readme) — product overview, quick start, maturity, security and verification.
 - [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/architecture.md) — system boundaries and integration responsibilities.
-- [Product and technical gap baseline](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/product-technical-gap-baseline.md) — current gaps and evidence status when present on protected `main`.
+- [Buyer due diligence](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/commercial/buyer-due-diligence.md) — current buyer-facing evidence surfaces and their verification boundaries.
 - [Operations](https://github.com/ContextualWisdomLab/wardnet/tree/main/docs/runbooks) — operator and recovery guidance.
 - [Releases](https://github.com/ContextualWisdomLab/wardnet/releases) — immutable release evidence when published.
 - [Ask DeepWiki](https://deepwiki.com/ContextualWisdomLab/wardnet) — repository-grounded navigation and questions.
