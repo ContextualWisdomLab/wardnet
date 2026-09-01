@@ -1,0 +1,227 @@
+name: Source fix PR151 trusted-proxy findings
+
+on:
+  push:
+    branches:
+      - feat/trusted-proxy-admission-v3
+    paths:
+      - .github/source-fix-151-trusted-proxy-findings.trigger
+
+concurrency:
+  group: source-fix-pr151-trusted-proxy-findings
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    permissions:
+      contents: write
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout@v7
+        with:
+          ref: feat/trusted-proxy-admission-v3
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Apply exact-head production repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/lib.rs")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = {
+          '''    let peer_ip = match connect_info.as_ref().map(|peer| peer.0.ip()) {
+                  Some(peer_ip) => peer_ip,
+                  None => {
+                      return error(
+                          StatusCode::INTERNAL_SERVER_ERROR,
+                          "gateway requires peer address metadata; serve with `serve(...)` or `into_make_service_with_connect_info::<SocketAddr>()`",
+                      );
+                  }
+              };''': '''    let peer_ip = connect_info.as_ref().map(|peer| peer.0.ip());''',
+          '''    let client_ip = client_ip_from_request(&headers, Some(peer_ip), &state.trusted_proxies);''': '''    let client_ip = client_ip_from_request(&headers, peer_ip, &state.trusted_proxies);''',
+          '''/// Build the HTTP application surface for management, DNSBL, and gateway
+          /// traffic. Gateway requests still require peer metadata via
+          /// `ConnectInfo<SocketAddr>`; use [`serve`] or
+          /// `Router::into_make_service_with_connect_info::<SocketAddr>()`.''': '''/// Build the HTTP application surface for management, DNSBL, and gateway
+          /// traffic. Direct router use without `ConnectInfo<SocketAddr>` remains
+          /// compatible: forwarded identity is ignored and the existing shared
+          /// unknown-client limiter bucket is used. [`serve`] preserves real peer
+          /// attribution for production TCP traffic.''',
+          '''    match peer_ip {
+                  Some(peer_ip) if trusted_proxies.iter().any(|proxy| proxy.contains(peer_ip)) => {
+                      trusted_forwarded_chain_client_ip(x_forwarded_for, trusted_proxies)
+                          .or_else(|| trusted_real_ip_value(x_real_ip))
+                          .or(Some(peer_ip))
+                  }
+                  Some(peer_ip) => Some(peer_ip),
+                  None => None,
+              }''': '''    match peer_ip {
+                  Some(peer_ip) if trusted_proxies.iter().any(|proxy| proxy.contains(peer_ip)) => {
+                      match trusted_forwarded_chain_client_ip_checked(
+                          x_forwarded_for,
+                          trusted_proxies,
+                      ) {
+                          Ok(Some(client_ip)) => Some(client_ip),
+                          Ok(None) => trusted_real_ip_value(x_real_ip).or(Some(peer_ip)),
+                          Err(()) => Some(peer_ip),
+                      }
+                  }
+                  Some(peer_ip) => Some(peer_ip),
+                  None => None,
+              }''',
+          '''pub fn trusted_forwarded_chain_client_ip(
+              x_forwarded_for: Option<&str>,
+              trusted_proxies: &[IpNet],
+          ) -> Option<IpAddr> {
+              let forwarded = x_forwarded_for?;
+              let mut client_ip = None;
+              for candidate in forwarded.split(',').rev() {
+                  let candidate = candidate.trim();
+                  if candidate.is_empty() {
+                      continue;
+                  }
+                  let ip = match candidate.parse::<IpAddr>() {
+                      Ok(ip) => ip,
+                      Err(_) => continue,
+                  };
+                  if trusted_proxies.iter().any(|proxy| proxy.contains(ip)) {
+                      continue;
+                  }
+                  client_ip = Some(ip);
+                  break;
+              }
+              client_ip
+          }''': '''pub fn trusted_forwarded_chain_client_ip(
+              x_forwarded_for: Option<&str>,
+              trusted_proxies: &[IpNet],
+          ) -> Option<IpAddr> {
+              trusted_forwarded_chain_client_ip_checked(x_forwarded_for, trusted_proxies)
+                  .ok()
+                  .flatten()
+          }
+
+          /// Parse the complete forwarded chain before selecting an identity. Any
+          /// empty or unparsable hop invalidates the entire chain so callers can
+          /// fall back to the direct peer without consulting `X-Real-IP`.
+          fn trusted_forwarded_chain_client_ip_checked(
+              x_forwarded_for: Option<&str>,
+              trusted_proxies: &[IpNet],
+          ) -> Result<Option<IpAddr>, ()> {
+              let Some(forwarded) = x_forwarded_for else {
+                  return Ok(None);
+              };
+              let hops = forwarded
+                  .split(',')
+                  .map(|candidate| {
+                      let candidate = candidate.trim();
+                      if candidate.is_empty() {
+                          return Err(());
+                      }
+                      candidate.parse::<IpAddr>().map_err(|_| ())
+                  })
+                  .collect::<Result<Vec<_>, _>>()?;
+              Ok(hops
+                  .into_iter()
+                  .rev()
+                  .find(|ip| !trusted_proxies.iter().any(|proxy| proxy.contains(*ip))))
+          }''',
+          '''    #[tokio::test]
+              async fn gateway_rejects_missing_connect_info_instead_of_silently_sharing_unknown_ip() {
+                  let app = build_app(AppState::seeded(None).with_rate_limit(1, 60));
+
+                  let response = app_request(
+                      &app,
+                      Request::builder()
+                          .method(Method::GET)
+                          .uri("/gateway/demo")
+                          .body(Body::empty())
+                          .unwrap(),
+                  )
+                  .await;
+
+                  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                  assert!(
+                      body_text(response)
+                          .await
+                          .contains("gateway requires peer address metadata")
+                  );
+              }''': '''    #[tokio::test]
+              async fn gateway_missing_connect_info_uses_unknown_bucket_without_trusting_headers() {
+                  let app = build_app(AppState::seeded(None).with_rate_limit(1, 60));
+
+                  let first = app_request(
+                      &app,
+                      Request::builder()
+                          .method(Method::GET)
+                          .uri("/gateway/demo")
+                          .header("x-forwarded-for", "203.0.113.9")
+                          .header("x-real-ip", "203.0.113.10")
+                          .body(Body::empty())
+                          .unwrap(),
+                  )
+                  .await;
+                  assert_eq!(first.status(), StatusCode::OK);
+
+                  let second = app_request(
+                      &app,
+                      Request::builder()
+                          .method(Method::GET)
+                          .uri("/gateway/demo")
+                          .header("x-forwarded-for", "198.51.100.7")
+                          .header("x-real-ip", "198.51.100.8")
+                          .body(Body::empty())
+                          .unwrap(),
+                  )
+                  .await;
+                  assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+              }''',
+          }
+
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one repair target, found {count}: {old[:80]!r}")
+              text = text.replace(old, new)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Verify exact regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --test trusted_forwarded_fail_closed
+          cargo test --test trusted_proxy_admission_regressions
+          cargo test gateway_missing_connect_info_uses_unknown_bucket_without_trusting_headers
+          cargo test trusted_forwarded_chain_client_ip
+      - name: Self-remove and publish non-force repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/source-fix-151-trusted-proxy-findings.yml \
+            .github/source-fix-151-trusted-proxy-findings.trigger
+          git add -A
+          git diff --cached --check
+          git config user.name 'opencode-agent[bot]'
+          git config user.email '219766164+opencode-agent[bot]@users.noreply.github.com'
+          git commit -m 'fix(gateway): fail closed on forwarded identity races'
+          git fetch --no-tags origin feat/trusted-proxy-admission-v3
+          remote_head="$(git rev-parse FETCH_HEAD)"
+          if ! git merge-base --is-ancestor "$remote_head" HEAD; then
+            echo "writer branch moved concurrently; refusing to overwrite" >&2
+            exit 1
+          fi
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:feat/trusted-proxy-admission-v3
