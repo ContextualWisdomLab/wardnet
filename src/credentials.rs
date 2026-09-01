@@ -391,10 +391,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(registry.source(), CredentialSource::Env);
-        assert_eq!(
-            registry.get_credential(CRED_ADMIN_TOKEN),
-            Some("env-admin")
-        );
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("env-admin"));
         assert_eq!(
             registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
             Some("192.0.2.0/24")
