@@ -2,7 +2,8 @@
 //!
 //! Environment variables remain an outer delivery concern. The runtime crate
 //! consumes one validated snapshot instead of scattering `std::env::var` reads
-//! across application code.
+//! across application code. Secret values and their credentials-file locator
+//! remain owned by the separate credential-bootstrap boundary.
 
 use crate::{AppConfig, CRED_ADMIN_TOKEN, CredentialRegistry};
 use std::path::{Path, PathBuf};
@@ -12,8 +13,6 @@ use std::path::{Path, PathBuf};
 pub struct RuntimeConfiguration {
     /// Socket address the gateway binds during process startup.
     pub bind_addr: String,
-    /// Optional secret-registry bootstrap file selected at the process edge.
-    pub credentials_path: Option<PathBuf>,
     /// Optional standalone state file used by the gateway process.
     pub state_path: Option<PathBuf>,
     /// DNSBL zone origin published by the gateway.
@@ -43,6 +42,8 @@ impl RuntimeConfiguration {
     /// Environment variables are deliberately restricted to this delivery
     /// adapter. They are bootstrap transport, not an application/domain
     /// configuration authority; callers receive the validated snapshot below.
+    /// Secret bootstrap, including `WAF_IDS_CREDENTIALS_PATH`, is deliberately
+    /// excluded and remains solely owned by [`CredentialRegistry`].
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
@@ -52,7 +53,6 @@ impl RuntimeConfiguration {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let bind_addr = lookup("BIND_ADDR")
             .unwrap_or_else(|| Self::DEFAULT_BIND_ADDR.to_string());
-        let credentials_path = lookup("WAF_IDS_CREDENTIALS_PATH").map(PathBuf::from);
         let state_path = lookup("WAF_IDS_STATE_PATH").map(PathBuf::from);
         let dnsbl_origin = lookup("DNSBL_ORIGIN")
             .unwrap_or_else(|| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string());
@@ -63,7 +63,6 @@ impl RuntimeConfiguration {
 
         Ok(Self {
             bind_addr,
-            credentials_path,
             state_path,
             dnsbl_origin,
             event_limit: parse_event_limit(event_limit_raw.as_deref())?,
@@ -207,7 +206,6 @@ mod tests {
     fn runtime_configuration_defaults_when_bootstrap_input_is_unset() {
         let config = runtime_from_pairs(&[]).unwrap();
         assert_eq!(config.bind_addr, RuntimeConfiguration::DEFAULT_BIND_ADDR);
-        assert_eq!(config.credentials_path, None);
         assert_eq!(config.state_path, None);
         assert_eq!(config.dnsbl_origin, AppConfig::DEFAULT_DNSBL_ORIGIN);
         assert_eq!(config.event_limit, AppConfig::DEFAULT_EVENT_LIMIT);
@@ -223,10 +221,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_configuration_reads_one_bootstrap_snapshot() {
+    fn runtime_configuration_reads_one_non_secret_bootstrap_snapshot() {
         let config = runtime_from_pairs(&[
             ("BIND_ADDR", "127.0.0.1:9090"),
-            ("WAF_IDS_CREDENTIALS_PATH", "/tmp/creds.json"),
             ("WAF_IDS_STATE_PATH", "/tmp/state.json"),
             ("DNSBL_ORIGIN", "wardnet.example."),
             ("EVENT_LIMIT", "25"),
@@ -237,16 +234,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.bind_addr, "127.0.0.1:9090");
-        assert_eq!(
-            config.credentials_path,
-            Some(PathBuf::from("/tmp/creds.json"))
-        );
         assert_eq!(config.state_path, Some(PathBuf::from("/tmp/state.json")));
         assert_eq!(config.dnsbl_origin, "wardnet.example.");
         assert_eq!(config.event_limit, 25);
         assert_eq!(config.rate_limit, 5);
         assert_eq!(config.rate_limit_window, 30);
         assert_eq!(config.max_body_bytes, 4096);
+    }
+
+    #[test]
+    fn runtime_configuration_never_reads_secret_bootstrap_locator() {
+        let config = RuntimeConfiguration::from_lookup(|name| {
+            assert_ne!(
+                name, "WAF_IDS_CREDENTIALS_PATH",
+                "credential-file selection belongs exclusively to CredentialRegistry bootstrap"
+            );
+            None
+        })
+        .unwrap();
+        assert_eq!(config.bind_addr, RuntimeConfiguration::DEFAULT_BIND_ADDR);
     }
 
     #[test]
@@ -259,7 +265,6 @@ mod tests {
     fn runtime_configuration_builds_app_config_from_registry() {
         let runtime = RuntimeConfiguration {
             bind_addr: RuntimeConfiguration::DEFAULT_BIND_ADDR.to_string(),
-            credentials_path: None,
             state_path: Some(PathBuf::from("state.json")),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 42,
