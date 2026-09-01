@@ -124,11 +124,11 @@ fn push_escaped_codepoint(
         hex.push(ch);
     }
 
-    if let Ok(value) = u32::from_str_radix(&hex, 16) {
-        if let Some(codepoint) = char::from_u32(value) {
-            decoded.push(codepoint);
-            return;
-        }
+    if let Ok(value) = u32::from_str_radix(&hex, 16)
+        && let Some(codepoint) = char::from_u32(value)
+    {
+        decoded.push(codepoint);
+        return;
     }
 
     decoded.push_str(marker);
