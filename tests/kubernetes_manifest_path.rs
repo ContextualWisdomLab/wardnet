@@ -9,6 +9,14 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "yaml", "yml",
 ];
 
+/// Files allowed to mention the retired path as migration history or a negative
+/// regression fixture. Operational source and documentation must use the new path.
+const LEGACY_REFERENCE_ALLOWLIST: &[&str] = &[
+    "CHANGELOG.md",
+    "docs/deployment/production.md",
+    "tests/deployment_manifest.rs",
+];
+
 /// Walk text-bearing source files without relying on platform-specific tooling.
 fn text_source_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -60,10 +68,17 @@ fn kubernetes_manifest_uses_the_wardnet_filename_only() {
     let stale_references = text_source_files(repository)
         .into_iter()
         .filter_map(|path| {
+            let relative = path.strip_prefix(repository).unwrap_or(&path);
+            if LEGACY_REFERENCE_ALLOWLIST
+                .iter()
+                .any(|allowed| relative == Path::new(allowed))
+            {
+                return None;
+            }
             let content = fs::read_to_string(&path).ok()?;
             content
                 .contains(&legacy_reference)
-                .then(|| path.strip_prefix(repository).unwrap_or(&path).display().to_string())
+                .then(|| relative.display().to_string())
         })
         .collect::<Vec<_>>();
 
