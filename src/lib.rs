@@ -106,6 +106,7 @@ pub struct ClearfolioConfig {
 
 const MAX_PINNED_OUTBOUND_CLIENTS: usize = 64;
 
+/// One cached no-redirect client pinned to a validated host/address set.
 #[derive(Clone)]
 struct PinnedOutboundClientEntry {
     addresses: Vec<SocketAddr>,
@@ -113,6 +114,7 @@ struct PinnedOutboundClientEntry {
     last_used_tick: u64,
 }
 
+/// Bounded LRU-style cache for pinned outbound HTTP clients.
 #[derive(Default)]
 struct PinnedOutboundClientCache {
     entries: HashMap<String, PinnedOutboundClientEntry>,
@@ -120,6 +122,7 @@ struct PinnedOutboundClientCache {
 }
 
 impl PinnedOutboundClientCache {
+    /// Reuses a pinned client only when the validated address set still matches.
     fn get(&mut self, host: &str, addresses: &[SocketAddr]) -> Option<reqwest::Client> {
         let tick = self.bump_tick();
         let entry = self.entries.get_mut(host)?;
@@ -130,6 +133,7 @@ impl PinnedOutboundClientCache {
         Some(entry.client.clone())
     }
 
+    /// Inserts one pinned client and evicts the least-recently-used host past capacity.
     fn insert(&mut self, host: String, addresses: Vec<SocketAddr>, client: reqwest::Client) {
         let tick = self.bump_tick();
         self.entries.insert(
@@ -156,6 +160,7 @@ impl PinnedOutboundClientCache {
         }
     }
 
+    /// Monotonic access counter used to approximate LRU ordering without wall time.
     fn bump_tick(&mut self) -> u64 {
         let tick = self.next_tick;
         self.next_tick = self.next_tick.saturating_add(1);
