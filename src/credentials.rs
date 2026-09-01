@@ -118,7 +118,9 @@ impl CredentialRegistry {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
                                 values.insert(key.to_string(), text);
-                                admin_from_file = true;
+                                if matches!(key, CRED_ADMIN_TOKEN | CRED_ADMIN_TOKENS) {
+                                    admin_from_file = true;
+                                }
                             }
                         }
                     }
@@ -357,10 +359,45 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(registry.source(), CredentialSource::File);
+        assert_eq!(registry.source(), CredentialSource::None);
         assert_eq!(
             registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
             Some("192.0.2.0/24,2001:db8::/32")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_proxy_file_config_does_not_mask_env_admin_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-source-proxy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"trusted_proxy_cidrs":"192.0.2.0/24"}"#).unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            Some("env-admin".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(registry.source(), CredentialSource::Env);
+        assert_eq!(
+            registry.get_credential(CRED_ADMIN_TOKEN),
+            Some("env-admin")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
