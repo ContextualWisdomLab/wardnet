@@ -59,7 +59,7 @@ impl CredentialRegistry {
 
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
-            .is_some_and(|v| !v.is_empty())
+            .is_some_and(|v| !v.trim().is_empty())
             || self
                 .get_credential(CRED_ADMIN_TOKENS)
                 .is_some_and(|v| !v.trim().is_empty())
@@ -83,25 +83,14 @@ impl CredentialRegistry {
         let mut admin_from_file = false;
         let mut admin_from_env = false;
 
-        if let Some(path) = credentials_path {
+        if let Some(path) = credentials_path.and_then(nonempty_credentials_path) {
             match std::fs::read_to_string(path) {
                 Ok(content) => {
-                    let file_map: HashMap<String, serde_json::Value> =
-                        serde_json::from_str(&content).map_err(|error| {
-                            format!(
-                                "credentials file {} is not valid JSON: {error}",
-                                path.display()
-                            )
-                        })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
-                        if let Some(raw) = file_map.get(key) {
-                            let text = json_value_as_nonempty_string(raw);
-                            if let Some(text) = text {
-                                values.insert(key.to_string(), text);
-                                admin_from_file = true;
-                            }
-                        }
-                    }
+                    let file_values = parse_credentials_json(&content).map_err(|error| {
+                        format!("credentials file {} is invalid: {error}", path.display())
+                    })?;
+                    admin_from_file = !file_values.is_empty();
+                    values.extend(file_values);
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => {
@@ -114,13 +103,13 @@ impl CredentialRegistry {
         }
 
         if !values.contains_key(CRED_ADMIN_TOKEN)
-            && let Some(token) = env_admin_token.filter(|value| !value.is_empty())
+            && let Some(token) = env_admin_token.filter(|value| !value.trim().is_empty())
         {
             values.insert(CRED_ADMIN_TOKEN.to_string(), token);
             admin_from_env = true;
         }
         if !values.contains_key(CRED_ADMIN_TOKENS)
-            && let Some(tokens) = env_admin_tokens.filter(|value| !value.is_empty())
+            && let Some(tokens) = env_admin_tokens.filter(|value| !value.trim().is_empty())
         {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             admin_from_env = true;
@@ -137,13 +126,92 @@ impl CredentialRegistry {
     }
 }
 
+/// Parse the secret-bearing keys from credentials JSON.
+///
+/// Missing keys may use bootstrap transport fallback, but an explicitly null or
+/// blank key is invalid and cannot be silently replaced by another source.
+fn parse_credentials_json(content: &str) -> Result<HashMap<String, String>, String> {
+    let file_map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(content).map_err(|error| format!("not valid JSON: {error}"))?;
+    let mut values = HashMap::new();
+    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+        if let Some(raw) = file_map.get(key) {
+            let text = json_value_as_nonempty_string(raw)
+                .ok_or_else(|| format!("{key} must not be blank or null"))?;
+            values.insert(key.to_string(), text);
+        }
+    }
+    Ok(values)
+}
+
+/// Return a credentials path only when it contains a non-whitespace path value.
+fn nonempty_credentials_path(path: &Path) -> Option<&Path> {
+    if path.as_os_str().to_string_lossy().trim().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// Constant-time equality for presented admin secrets.
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max = left.len().max(right.len());
+    let mut diff = u8::from(left.len() != right.len());
+    for i in 0..max {
+        let l = left.get(i).copied().unwrap_or(0);
+        let r = right.get(i).copied().unwrap_or(0);
+        diff |= l ^ r;
+    }
+    diff == 0
+}
+
+/// True when `bind_addr` is a numeric loopback-only listener.
+pub fn listen_is_loopback_only(bind_addr: &str) -> bool {
+    let trimmed = bind_addr.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    let Some(host) = bind_host(trimmed) else {
+        return false;
+    };
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn bind_host(bind_addr: &str) -> Option<&str> {
+    if let Some(rest) = bind_addr.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(&rest[..end]);
+    }
+    bind_addr.rsplit_once(':').map(|(host, _)| host)
+}
+
+/// Fail closed before readiness when a non-loopback listener has no
+/// write-capable admin principal.
+pub fn require_write_auth_for_bind(
+    bind_addr: &str,
+    has_write_capable_admin: bool,
+) -> Result<(), String> {
+    if has_write_capable_admin || listen_is_loopback_only(bind_addr) {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to bind {bind_addr} without a write-capable admin credential: set ADMIN_TOKEN, ADMIN_TOKENS, or WAF_IDS_CREDENTIALS_PATH before listening on a non-loopback address"
+        ))
+    }
+}
+
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
+        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
         serde_json::Value::Null | serde_json::Value::String(_) => None,
         other => {
             let text = other.to_string();
-            if text.is_empty() || text == "null" {
+            if text.trim().is_empty() || text == "null" {
                 None
             } else {
                 Some(text)
@@ -180,6 +248,15 @@ mod tests {
             CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
+    }
+
+    #[test]
+    fn whitespace_env_admin_token_does_not_authorize_public_bind() {
+        let registry =
+            CredentialRegistry::bootstrap_secrets(None, Some("   \t".to_string()), None).unwrap();
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), None);
+        assert!(require_write_auth_for_bind("0.0.0.0:0", false).is_err());
     }
 
     #[test]
@@ -287,5 +364,91 @@ mod tests {
         let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whitespace_file_admin_token_cannot_fall_back_to_env() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-whitespace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"admin_token":"   \t"}"#).unwrap();
+
+        let error = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            Some("must-not-replace-file-value".to_string()),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("admin_token must not be blank or null"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_null_file_admin_token_is_invalid() {
+        assert!(parse_credentials_json(r#"{"admin_token":null}"#).is_err());
+    }
+
+    #[test]
+    fn non_string_file_value_preserves_existing_serialization_policy() {
+        let values = parse_credentials_json(r#"{"admin_token":42}"#).unwrap();
+        assert_eq!(values.get(CRED_ADMIN_TOKEN).map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn nonempty_credentials_path_filters_blank_values() {
+        assert!(nonempty_credentials_path(Path::new("")).is_none());
+        assert!(nonempty_credentials_path(Path::new("   ")).is_none());
+        let path = Path::new("credentials.json");
+        assert_eq!(nonempty_credentials_path(path), Some(path));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equal_secrets_and_rejects_others() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret!"));
+        assert!(!constant_time_eq(b"secret", b""));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_lengths_differing_by_256_with_zero_suffix() {
+        let short = vec![0_u8; 1];
+        let long = vec![0_u8; 257];
+        assert!(!constant_time_eq(&short, &long));
+    }
+
+    #[test]
+    fn listen_is_loopback_only_classifies_bind_addresses() {
+        assert!(listen_is_loopback_only("127.0.0.1:0"));
+        assert!(listen_is_loopback_only("127.0.0.1:8080"));
+        assert!(listen_is_loopback_only("[::1]:8080"));
+        assert!(!listen_is_loopback_only("localhost:8080"));
+        assert!(!listen_is_loopback_only("LOCALHOST:9"));
+        assert!(!listen_is_loopback_only("0.0.0.0:0"));
+        assert!(!listen_is_loopback_only("0.0.0.0:8080"));
+        assert!(!listen_is_loopback_only("[::]:8080"));
+        assert!(!listen_is_loopback_only("192.0.2.10:8080"));
+        assert!(!listen_is_loopback_only(""));
+        assert!(!listen_is_loopback_only("not-an-address"));
+    }
+
+    #[test]
+    fn require_write_auth_for_bind_fail_closes_public_listeners() {
+        require_write_auth_for_bind("127.0.0.1:0", false).unwrap();
+        require_write_auth_for_bind("0.0.0.0:0", true).unwrap();
+        let err = require_write_auth_for_bind("0.0.0.0:0", false).unwrap_err();
+        assert!(err.contains("refusing to bind 0.0.0.0:0"), "{err}");
+        assert!(err.contains("ADMIN_TOKEN"), "{err}");
+        let err = require_write_auth_for_bind("[::]:8080", false).unwrap_err();
+        assert!(err.contains("refusing to bind [::]:8080"), "{err}");
     }
 }

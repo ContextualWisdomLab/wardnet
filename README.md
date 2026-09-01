@@ -65,7 +65,7 @@ Open `http://127.0.0.1:8080/admin`.
 Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
-- `ADMIN_TOKEN`: optional write token for management writes via `X-Admin-Token`
+- `ADMIN_TOKEN`: write token for management writes via `X-Admin-Token`. Optional only for numeric loopback binds (`127.0.0.0/8` or `::1`). Required before readiness on any other `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public).
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
