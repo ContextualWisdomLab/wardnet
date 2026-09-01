@@ -35,12 +35,14 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 `GET /api/commercial/evidence-manifest` returns the buyer validation map:
 
 - current readiness state and blockers
-- the same `readyz` route-readiness snapshot that operators and load balancers consume
-- the same Prometheus text currently served by `GET /metrics`
+- a required-endpoint entry for `GET /readyz`, including its method, path, content type, and buyer-validation purpose
+- a required-endpoint entry for `GET /metrics`, including its method, path, content type, and buyer-validation purpose
 - runtime counts for routes, indicators, DNSBL entries, feeds, fresh/stale feeds, and events
 - required evidence endpoints with method, path, content type, and what each endpoint proves
 - management audit-log count and the `GET /api/audit-logs` endpoint for successful admin writes
 - committed document paths and deployment assets that should be reviewed during procurement
+
+The live `/readyz` snapshot and Prometheus exposition text are included in `GET /api/support-bundle`; the evidence manifest identifies the endpoints but does not duplicate those payloads.
 
 ## Required Passing Checks
 
