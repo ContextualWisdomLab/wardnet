@@ -34,7 +34,7 @@ Those models cross the boundary only through explicit adapters or Anti-Corruptio
 
 ## Dependency direction
 
-The domain kernel (`model.rs`, `policy.rs`) must remain free of Axum, Tokio, filesystem, listener, provider SDK, and deployment dependencies. HTTP/process/configuration concerns depend inward on the domain contracts. Concrete audit storage may implement the audit port but must not be imported by the policy evaluator.
+The domain kernel (`admission.rs`, `policy.rs`) must remain free of Axum, Tokio, filesystem, listener, provider SDK, and deployment dependencies. HTTP/process/configuration concerns depend inward on the domain contracts. Concrete audit storage may implement the audit port but must not be imported by the policy evaluator.
 
 The current crate is a modular deployment boundary, not a mandate to create another microservice for every protocol. A split requires an independently evolving responsibility, persistence authority, policy lifecycle, reuse boundary, or deployment cadence. Additional HTTP, SIEM, Sigstore, or registry adapters alone do not justify a new service.
 
