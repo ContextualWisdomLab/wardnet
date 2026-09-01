@@ -18,13 +18,13 @@ Organization ruleset `18156473` targets `~DEFAULT_BRANCH`. Its pull-request rule
 
 The bare approval-count requirement is structurally inconsistent with the declared solo-maintainer operating model when no eligible independent human exists. That is a central `.github` governance defect, not a Wardnet product gap and not a request to invent a human reviewer. Self-approval and bot/model-as-human approval remain forbidden. Central owner path `.github#772` owns the minimum repair of the unsatisfiable approval-count condition while preserving deterministic workflow/security/coverage/package/SBOM/provenance/thread/branch-integrity gates.
 
-Required jobs that remain queued before any runner step are central control-plane evidence rather than Wardnet source failures. `.github#712` has fresh Wardnet reproductions where `ubuntu-latest` jobs remain `runner_id: 0` with no executed steps; the latest exact reproduction is PR #144 head `57386f0ef5ee5beeb8995003fdbfd584eb6ce950`, CI run `33526583284`, job `99918865509`. Queue starvation is non-passing evidence, but it is not a reason to mutate a clean Wardnet head or stop independent Wardnet work.
+Runner acquisition now has a repository-owned causal repair as well as a central/provider lane. Protected `main` still used the floating `ubuntu-latest` alias in CI, fuzz, and Scorecard. PR #145 added a RED workflow contract and pinned those runner-backed jobs to explicit `ubuntu-24.04`. On exact head `2d41c4079f9a4465c3142a0aa2dd5895cb11f793`, CI run `33535958878`, job `99950209851`, acquired GitHub-hosted runner `1001594621` with label `ubuntu-24.04`, completed checkout/toolchain/formatting, and proceeded through the repository tests. Security Scan also completed successfully. This proves the floating selector was a real Wardnet-owned control-plane defect rather than merely a reporting symptom. Fuzz matrix jobs initially remained `runner_id: 0` even with explicit `ubuntu-24.04`, so `.github#712` retains ownership of the independent central/provider capacity/dispatch class. Queue starvation is always non-passing evidence, but it is not a reason to mutate unrelated clean product source or stop independent Wardnet work.
 
 ## Live delivery queue
 
-The fresh inventory contains 21 open PRs including this baseline PR:
+The fresh inventory contains 22 open PRs including this baseline PR:
 
-`#77, #88, #90, #93, #95, #111, #112, #114, #115, #127, #129, #130, #131, #134, #135, #136, #138, #140, #141, #142, #144`.
+`#77, #88, #90, #93, #95, #111, #112, #114, #115, #127, #129, #130, #131, #134, #135, #136, #138, #140, #141, #142, #144, #145`.
 
 PR #126 is closed and superseded by #141's current CodeQL SARIF uploader update. PR #137 is merged into protected `main`. PR #94 was previously closed as superseded after its unique issue-#78 doctoring artifact was preserved on successor work.
 
@@ -33,14 +33,15 @@ Key exact-current candidates verified during this refresh:
 | PR | Exact head | Current classification | Evidence / next causal action |
 | --- | --- | --- | --- |
 | #129 Agent Artifact Admission | `704e222a5d0e3f2951486eda46fa1ae6b5b0e9e6` | Draft | Feature branch is synchronized with protected `main`; regenerate every applicable exact-head repository/security/coverage/package/review-policy gate and keep Draft until terminal evidence is clean. |
-| #131 trusted proxy attribution | `97d9c4b93ecc478c12c6529eae2366831d5ff9e5` | Ready, mergeable | Current review threads are resolved. CI/Fuzz/Security/SAST remain queued, so the candidate is non-passing until exact-head execution evidence terminates. |
+| #131 trusted proxy attribution | `97d9c4b93ecc478c12c6529eae2366831d5ff9e5` | Ready, mergeable | Current review threads are resolved. Existing exact-head jobs were queued under the pre-#145 workflow source; after the runner repair reaches protected truth, regenerate exact-head evidence without transferring predecessor results. |
 | #134 support-bundle regression | `2b236057d6811cb7ca2ff4f01038796128f4fb6a` | Ready, mergeable | Unique delta is a test-only support-evidence consistency/secret-redaction contract; fresh exact-head gates remain required. |
 | #136 outbound destination hardening | `b07d0d734fc41ec9f38beec7834bea78fa70cd6a` | Ready, mergeable | Shared URL validation, DNS-address validation/pinning, no ambient proxy, no automatic redirects, and bounded pinned-client lifecycle remain partial progress toward #79; explicit versioned allowlist/deny-precedence and complete connector parity remain open. |
-| #138 fail-closed management auth | `e6f05d77858e91c176cff25c4b11e790bc5dcdd1` | Ready, mergeable | Review findings are resolved; exact-head CI/Fuzz/Security/SAST are queued and remain non-passing pending runner acquisition. |
-| #140 runtime configuration snapshot | `492fba145b2b501b3fffcf9e664f40d3ae9c12fa` | Ready, mergeable | Current review threads are resolved; exact-head repository workflows remain queued. |
+| #138 fail-closed management auth | `e6f05d77858e91c176cff25c4b11e790bc5dcdd1` | Ready, mergeable | Review findings are resolved; exact-head runs remain non-passing until regenerated under protected runner/governance truth. |
+| #140 runtime configuration snapshot | `492fba145b2b501b3fffcf9e664f40d3ae9c12fa` | Ready, mergeable | Current review threads are resolved; fresh exact-head repository evidence remains required. |
 | #141 CodeQL SARIF uploader | `fea3796a723080068cdc02e064065d6d53eeb3e0` | Ready, mergeable | Replaces stale #126 with the v4.37.9 immutable action pin; exact-head repository and central gates remain required. |
 | #142 readiness metrics | `021d51dc18448964fb4aab8ea119bf37825af036` | Ready, mergeable | One current review finding remains: the Prometheus HELP text says `0=auth disabled` even though readonly-only authentication can be enabled while no write-capable credential exists. The owning review path has been asked for the minimal wording/test repair; do not classify merge-ready until the exact head moves or the thread is resolved. |
-| #144 Kubernetes manifest path | `57386f0ef5ee5beeb8995003fdbfd584eb6ce950` | Ready, mergeable | The repository path migration preserves #137's hardened manifest. A newly added path-regression false positive was repaired by excluding only migration-history/negative-fixture files while retaining fail-closed scans for operational stale references. Fresh CI/Fuzz/Security/SAST are queued before runner assignment. |
+| #144 Kubernetes manifest path | `6cd0b16052fb8c35487c9da8ce96a3d17462371b` | Ready, mergeable | The path-regression review defect was repaired by replacing a whole-file documentation exemption with line-level migration-history/rollback rules plus negative operational examples. Security Scan and SAST are GREEN on this exact head; CI/Fuzz remain non-passing until terminal. |
+| #145 explicit hosted runner | `2d41c4079f9a4465c3142a0aa2dd5895cb11f793` | Ready, blocked by remaining gates/policy | RED contract rejects floating `ubuntu-latest`; CI/Fuzz/Scorecard now pin `ubuntu-24.04`. Exact-head CI has acquired a real hosted runner and executed checkout/tests, establishing causal runner-selection progress. Merge only after all exact-head repository/security/review-policy gates terminate under then-live governance. |
 
 Do not transfer checks, reviews, approvals, artifacts, or source-review conclusions across a head, base, retarget, restack, replacement PR, or protected-base movement. `queued`, `pending`, `skipped`, `cancelled`, `absent`, stale, predecessor-head, status-only, model-only, or synthetic evidence is non-passing.
 
@@ -56,7 +57,7 @@ The production-risk order remains:
 4. **Identity and overload:** #82 Keyverse-backed identity/authorization/approval and #83 distributed/global admission authority with bounded local protection.
 5. **Proven security engines:** #86 Coraza/CRS and Suricata production enforcement with reproducible false-positive/detection evidence.
 6. **Immutable delivery and operation:** #84 signed/SBOM/provenance release promotion and rollback, then #85 OpenTelemetry/SLO/incident/restore evidence.
-7. **Supporting correctness:** #74 deterministic persistence-failure testing, #77 pinned compiler, #139 coherent runtime configuration boundary, and #75 post-hardening Kubernetes filename migration.
+7. **Supporting correctness:** #74 deterministic persistence-failure testing, #77 pinned compiler, #139 coherent runtime configuration boundary, #75 post-hardening Kubernetes filename migration, and #145 deterministic hosted-runner selection.
 
 Do not close an issue from predecessor evidence. Close only after the owning protected merge satisfies the issue acceptance contract.
 
@@ -91,10 +92,11 @@ A release is not authorized. Wardnet has no GitHub release at this snapshot and 
 
 ## Next execution order
 
-1. Continue exact-current-head repair before waiting on central provider lanes; #142's HELP-text correctness finding is the immediate current review defect, while #144's repository-owned regression false positive is already repaired on its latest head.
-2. Let `.github` repair runner acquisition through #712 and the structurally impossible solo-maintainer approval count through #772. Revalidate unchanged Wardnet heads afterward rather than changing source merely to retrigger infrastructure.
-3. Integrate immediate security roots in dependency-safe order as their exact gates become valid: #138 fail-closed runtime authentication and #136 destination-policy slice, while #144 completes the already-hardened #75 path migration. #137 is protected truth and is no longer an open dependency.
-4. Finish #129 as one Agent Artifact Admission bounded context without absorbing hostile execution isolation or Agent/LLM orchestration.
-5. Drain clean supporting PRs such as #77, #90, #93, #131, #134, #135, #140, and #141 when normal protected merge becomes available under current exact evidence.
-6. Continue production-readiness work through #80/#81/#82/#83/#86/#84/#85 rather than widening unrelated feature scope.
-7. Keep this baseline current when live queue topology, protected truth, release state, or responsibility boundaries materially change.
+1. Drive #145 through exact-head CI/Fuzz/Security/SAST and current review-policy evidence because it repairs the repository-owned runner selector and unblocks trustworthy regeneration of the older queue. Do not bypass the separate approval-count defect.
+2. Continue exact-current-head repairs while #145/provider lanes execute; #142's HELP-text correctness finding is the immediate current review defect, while #144's line-level legacy-path review defect is repaired on its latest head.
+3. Let `.github` continue independent central/provider runner acquisition work through #712 and the structurally impossible solo-maintainer approval count through #772. Revalidate unchanged Wardnet heads afterward rather than changing product source merely to retrigger infrastructure.
+4. Integrate immediate security roots in dependency-safe order as their exact gates become valid: #138 fail-closed runtime authentication and #136 destination-policy slice, while #144 completes the already-hardened #75 path migration. #137 is protected truth and is no longer an open dependency.
+5. Finish #129 as one Agent Artifact Admission bounded context without absorbing hostile execution isolation or Agent/LLM orchestration.
+6. Drain clean supporting PRs such as #77, #90, #93, #131, #134, #135, #140, and #141 when normal protected merge becomes available under current exact evidence.
+7. Continue production-readiness work through #80/#81/#82/#83/#86/#84/#85 rather than widening unrelated feature scope.
+8. Keep this baseline current when live queue topology, protected truth, release state, or responsibility boundaries materially change.
