@@ -1,5 +1,7 @@
 //! Regression contracts for the production Kubernetes deployment manifest.
 
+use std::borrow::Cow;
+
 const MANIFEST: &str = include_str!("../deploy/kubernetes/waf-ids-ai-soc.yaml");
 const PRODUCTION_GUIDE: &str = include_str!("../docs/deployment/production.md");
 
@@ -18,7 +20,7 @@ fn leading_spaces(line: &str) -> usize {
 
 /// Parse a single-line YAML scalar, ignoring trailing comments and normalizing
 /// matching quote wrappers.
-fn normalized_yaml_scalar(value: &str) -> &str {
+fn normalized_yaml_scalar(value: &str) -> Cow<'_, str> {
     let trimmed = value.trim();
     let mut in_single = false;
     let mut in_double = false;
@@ -41,11 +43,96 @@ fn normalized_yaml_scalar(value: &str) -> &str {
         let bytes = scalar.as_bytes();
         let first = bytes[0];
         let last = bytes[scalar.len() - 1];
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return &scalar[1..scalar.len() - 1];
+        if first == b'"' && last == b'"' {
+            return decode_double_quoted_yaml_scalar(&scalar[1..scalar.len() - 1]);
+        }
+        if first == b'\'' && last == b'\'' {
+            return Cow::Owned(scalar[1..scalar.len() - 1].replace("''", "'"));
         }
     }
-    scalar
+    Cow::Borrowed(scalar)
+}
+
+/// Decode the YAML escape sequences relevant to duplicate env-name detection.
+fn decode_double_quoted_yaml_scalar(value: &str) -> Cow<'_, str> {
+    if !value.contains('\\') {
+        return Cow::Borrowed(value);
+    }
+
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+
+        let Some(escape) = chars.next() else {
+            decoded.push('\\');
+            break;
+        };
+        match escape {
+            '0' => decoded.push('\0'),
+            'a' => decoded.push('\u{0007}'),
+            'b' => decoded.push('\u{0008}'),
+            't' | '\t' => decoded.push('\t'),
+            'n' => decoded.push('\n'),
+            'v' => decoded.push('\u{000B}'),
+            'f' => decoded.push('\u{000C}'),
+            'r' => decoded.push('\r'),
+            'e' => decoded.push('\u{001B}'),
+            ' ' => decoded.push(' '),
+            '"' => decoded.push('"'),
+            '/' => decoded.push('/'),
+            '\\' => decoded.push('\\'),
+            'N' => decoded.push('\u{0085}'),
+            '_' => decoded.push('\u{00A0}'),
+            'L' => decoded.push('\u{2028}'),
+            'P' => decoded.push('\u{2029}'),
+            'x' => push_escaped_codepoint(&mut decoded, &mut chars, 2, "\\x"),
+            'u' => push_escaped_codepoint(&mut decoded, &mut chars, 4, "\\u"),
+            'U' => push_escaped_codepoint(&mut decoded, &mut chars, 8, "\\U"),
+            other => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+        }
+    }
+
+    Cow::Owned(decoded)
+}
+
+fn push_escaped_codepoint(
+    decoded: &mut String,
+    chars: &mut std::str::Chars<'_>,
+    digits: usize,
+    marker: &str,
+) {
+    let mut hex = String::with_capacity(digits);
+    for _ in 0..digits {
+        let Some(ch) = chars.next() else {
+            decoded.push_str(marker);
+            decoded.push_str(&hex);
+            return;
+        };
+        if !ch.is_ascii_hexdigit() {
+            decoded.push_str(marker);
+            decoded.push_str(&hex);
+            decoded.push(ch);
+            return;
+        }
+        hex.push(ch);
+    }
+
+    if let Ok(value) = u32::from_str_radix(&hex, 16) {
+        if let Some(codepoint) = char::from_u32(value) {
+            decoded.push(codepoint);
+            return;
+        }
+    }
+
+    decoded.push_str(marker);
+    decoded.push_str(&hex);
 }
 
 /// Whether a `- name:` YAML line names the expected entry, with quote tolerance.
@@ -491,6 +578,58 @@ spec:
 "#;
 
     assert_eq!(external_admin_secret_ref(commented_duplicate), None);
+}
+
+#[test]
+fn hex_escaped_duplicate_admin_token_entries_fail_closed() {
+    let escaped_duplicate = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+            - name: "\x41DMIN_TOKEN"
+              value: another-repository-visible-fallback
+"#;
+
+    assert_eq!(external_admin_secret_ref(escaped_duplicate), None);
+}
+
+#[test]
+fn unicode_escaped_duplicate_admin_token_entries_fail_closed() {
+    let escaped_duplicate = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+            - name: "\u0041DMIN_TOKEN"
+              value: another-repository-visible-fallback
+"#;
+
+    assert_eq!(external_admin_secret_ref(escaped_duplicate), None);
 }
 
 #[test]
