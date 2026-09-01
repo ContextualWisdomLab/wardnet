@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BLOCK_SCORE: u16 = 50;
 pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
+pub const MAX_ROUTE_ID_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppData {
@@ -344,6 +345,9 @@ pub struct ScoredRequest {
 pub fn validate_route(route: &RouteConfig) -> Result<(), &'static str> {
     if route.id.trim().is_empty() {
         return Err("route id is required");
+    }
+    if route.id.chars().count() > MAX_ROUTE_ID_CHARS {
+        return Err("route id exceeds the 256-character limit");
     }
     if !route.path_prefix.starts_with('/') {
         return Err("route path_prefix must start with /");

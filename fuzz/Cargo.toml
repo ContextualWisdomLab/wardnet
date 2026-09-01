@@ -53,6 +53,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_siem_event_batch"
+path = "fuzz_targets/fuzz_siem_event_batch.rs"
+test = false
+doc = false
+bench = false
+
 # Empty table => this crate is its own workspace root, isolated from the
 # repository's primary workspace. Do not remove.
 [workspace]

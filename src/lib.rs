@@ -41,6 +41,7 @@ mod credentials;
 mod kev_import;
 mod misp_import;
 mod opencti_import;
+pub mod siem_event_input;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
@@ -6834,6 +6835,17 @@ mod tests {
                 block_threshold: None,
             }),
             Err("route path_prefix must start with /")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "r".repeat(257),
+                path_prefix: "/api".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route id exceeds the 256-character limit")
         );
         assert_eq!(
             validate_route(&RouteConfig {
