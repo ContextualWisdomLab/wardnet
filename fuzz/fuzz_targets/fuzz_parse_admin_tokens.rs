@@ -19,33 +19,10 @@ use std::fmt::Write as _;
 use waf_ids_ai_soc::{parse_admin_tokens, parse_admin_tokens_strict};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(raw) = std::str::from_utf8(data) else {
-        return;
-    };
-
-    let tokens = parse_admin_tokens(raw);
-    for (token, principal) in &tokens {
-        assert!(!token.is_empty(), "token key must never be empty");
-        assert!(
-            !principal.actor.is_empty(),
-            "actor value must never be empty"
-        );
-    }
-
-    if let Ok(tokens) = parse_admin_tokens_strict(raw) {
-        for (token, principal) in &tokens {
-            assert!(!token.is_empty(), "strict token key must never be empty");
-            assert!(
-                !principal.actor.is_empty(),
-                "strict actor value must never be empty"
-            );
-        }
-    }
-
-    // Use fuzz bytes to vary a header-safe token while deterministically driving
-    // the strict parser's security-relevant rejection branches. These mirrors
-    // remain intentionally simple so a parser change cannot silently make the
-    // startup grammar more permissive than its stable property tests.
+    // Derive a header-safe token from arbitrary bytes before UTF-8 decoding so
+    // every libFuzzer execution reaches the deterministic security invariants.
+    // The arbitrary parser path below remains limited to valid UTF-8 because
+    // ADMIN_TOKENS is a string-valued configuration contract.
     let mut seed = String::from("fuzz");
     for byte in data.iter().take(8) {
         write!(&mut seed, "{byte:02x}").expect("writing to String cannot fail");
@@ -88,4 +65,27 @@ fuzz_target!(|data: &[u8]| {
             .is_some_and(|principal| !principal.can_write),
         "readonly role must remain non-writing"
     );
+
+    let Ok(raw) = std::str::from_utf8(data) else {
+        return;
+    };
+
+    let tokens = parse_admin_tokens(raw);
+    for (token, principal) in &tokens {
+        assert!(!token.is_empty(), "token key must never be empty");
+        assert!(
+            !principal.actor.is_empty(),
+            "actor value must never be empty"
+        );
+    }
+
+    if let Ok(tokens) = parse_admin_tokens_strict(raw) {
+        for (token, principal) in &tokens {
+            assert!(!token.is_empty(), "strict token key must never be empty");
+            assert!(
+                !principal.actor.is_empty(),
+                "strict actor value must never be empty"
+            );
+        }
+    }
 });
