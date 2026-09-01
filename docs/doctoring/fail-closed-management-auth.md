@@ -20,6 +20,12 @@ MITRE. (n.d.). *CWE-306: Missing authentication for critical function*. https://
 
 - **Design impact:** Management APIs that mutate routes, threat indicators, DNSBL entries, license state, or feeds are critical functions. The runtime gate rejects the unsafe combination of a reachable non-loopback listener and missing write-capable authentication.
 
+## Redistributable research artifact
+
+`docs/papers/nist-sp-800-218-ssdf.pdf` is the NIST SP 800-218 Version 1.1 PDF published by the National Institute of Standards and Technology. Authoritative source: https://doi.org/10.6028/NIST.SP.800-218 (NIST publication record and official PDF). NIST states that SP 800-series publications are not subject to copyright in the United States and that attribution is appreciated; NIST's Technical Series policy also grants a worldwide royalty-free right to reprint covered NIST works. The repository therefore retains the exact PDF as research evidence with this attribution: “Republished courtesy of the National Institute of Standards and Technology.” The publication remains authoritative at NIST; the repository copy is evidence only and does not supersede the official source.
+
+NIST SP 800-218 Rev. 1 / SSDF 1.2 is still an Initial Public Draft as of this doctoring update, so the implemented control continues to cite final SP 800-218 Version 1.1 rather than presenting the draft as a final standard.
+
 ## Implementation binding
 
 | Decision | Implementation boundary |
