@@ -23,6 +23,10 @@
 
 The startup gate and secret-handling path in this PR are aligned with NIST guidance that authentication secrets need lifecycle control and protected handling, and that authenticators should fail securely instead of silently degrading to weaker access. Wardnet applies that by preferring `WAF_IDS_CREDENTIALS_PATH`, allowing env only as bootstrap transport, and refusing non-loopback readiness when no usable write credential can be presented through `X-Admin-Token`. The operator recovery path is documented in [docs/deployment/production.md](../deployment/production.md), and the accepted bootstrap sources and RBAC shapes are documented in [docs/runbooks/operations.md](../runbooks/operations.md).
 
+### Research artifact redistribution assessment
+
+The two sources below are linked to their authoritative NIST publication records and summarized here. No PDF copy is committed in this PR because redistribution rights for the exact retrieved publication artifacts were not independently verified during this change. Repository guidance permits citation, link, and summary when redistribution permission has not been established; Wardnet therefore avoids republishing a binary merely to satisfy an evidence-format preference. If a future release process records a redistribution-permissible artifact and its provenance, it can be added under `docs/papers/` without changing this authentication decision.
+
 ## Primary Threats
 
 | Threat | Impact | Current Control | Required Hardening |
