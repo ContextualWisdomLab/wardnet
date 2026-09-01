@@ -325,6 +325,59 @@ async fn load_or_seed_state(path: &Path) -> Result<AppData, String> {
     }
 }
 
+/// Test-only deterministic fault injection for [`persist_state`]'s two
+/// failure points. POSIX file permissions are not a reliable failure
+/// injector for this: a root or DAC-ignoring test runner writes through
+/// `0o500` directories, turning the intended error-path regression into a
+/// flake (or a silent non-test) depending on the CI user. Injecting the
+/// exact failure instead makes the regression deterministic on every
+/// environment. See `CLAUDE.md`'s Tests section for the deterministic-testing
+/// research basis and its applicability boundary.
+#[cfg(test)]
+pub(crate) mod persist_fault {
+    use std::cell::Cell;
+    use tokio::runtime::{Handle, RuntimeFlavor};
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum Fault {
+        WriteTemp,
+        Rename,
+    }
+
+    thread_local! {
+        /// Thread-local, not global: the `#[tokio::test(flavor = "current_thread")]`
+        /// tests this crate uses run each test's entire async call tree
+        /// (including every nested `persist_state` call) on the one OS thread the
+        /// test harness assigned to that test function. A thread-local flag
+        /// therefore can't leak into, or be clobbered by, a concurrently
+        /// running test on another thread -- no cross-test lock needed.
+        ///
+        /// Fault injection is guarded by a runtime-flavor check in
+        /// `inject_persist_fault`; a `multi_thread` runtime would silently drop
+        /// the fault because the worker thread running `persist_state` differs
+        /// from the test thread, so the guard panics instead of silently
+        /// skipping coverage.
+        pub(crate) static ACTIVE: Cell<Option<Fault>> = const { Cell::new(None) };
+    }
+
+    /// Panic if the current Tokio runtime is not `current_thread`.
+    ///
+    /// The thread-local `ACTIVE` flag is only visible on the OS thread that set
+    /// it. In a `multi_thread` runtime, `persist_state` may run on a different
+    /// worker thread, which would see `None` and silently miss the injected
+    /// failure. Guarding at call time turns that silent coverage loss into a
+    /// loud test failure.
+    pub(crate) fn assert_current_thread_runtime() {
+        let handle = Handle::current();
+        assert_eq!(
+            handle.runtime_flavor(),
+            RuntimeFlavor::CurrentThread,
+            "persist_fault injection requires a `#[tokio::test(flavor = \"current_thread\")]` runtime; \
+             a multi-thread runtime would drop the injected fault on a worker thread"
+        );
+    }
+}
+
 async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
     if let Some(parent) = path
         .parent()
@@ -340,12 +393,27 @@ async fn persist_state(path: &Path, data: &AppData) -> Result<(), String> {
     let json =
         serde_json::to_vec_pretty(data).expect("AppData contains only JSON-serializable fields");
     let temp_path = temporary_state_path(path);
+    #[cfg(test)]
+    if persist_fault::ACTIVE.with(std::cell::Cell::get) == Some(persist_fault::Fault::WriteTemp) {
+        return Err(format!(
+            "failed to write temporary state file {}: injected fault",
+            temp_path.display()
+        ));
+    }
     fs::write(&temp_path, json).await.map_err(|error| {
         format!(
             "failed to write temporary state file {}: {error}",
             temp_path.display()
         )
     })?;
+    #[cfg(test)]
+    if persist_fault::ACTIVE.with(std::cell::Cell::get) == Some(persist_fault::Fault::Rename) {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(format!(
+            "failed to replace state file {}: injected fault",
+            path.display()
+        ));
+    }
     if let Err(error) = fs::rename(&temp_path, path).await {
         let _ = fs::remove_file(&temp_path).await;
         return Err(format!(
@@ -7371,57 +7439,131 @@ mod tests {
         let _ = fs::remove_dir_all(write_dir).await;
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_surfaces_state_rewrite_failures() {
-        use std::os::unix::fs::PermissionsExt;
+    /// Injects `fault` into every `persist_state` call made from this test's
+    /// thread for as long as the returned guard lives, and resets it back
+    /// to "no fault" when the guard drops (including on an assertion panic
+    /// mid-test). Thread-local (see `persist_fault::ACTIVE`'s doc comment),
+    /// so this never needs to coordinate with any other test.
+    ///
+    /// Panics if the test runtime is `multi_thread`, because the thread-local
+    /// flag would not be visible to the worker thread that actually runs
+    /// `persist_state`.
+    ///
+    /// Deterministic replacement for permission-based fault injection
+    /// (`chmod 0o500`): a root or DAC-ignoring test runner writes straight
+    /// through a read-only directory, so the previous approach was
+    /// environment-dependent -- it exercised the intended
+    /// `persist_state` error path only on some CI users/filesystems and
+    /// silently didn't on others. See issue #74 and `CLAUDE.md`'s Tests
+    /// section.
+    struct FaultGuard;
 
-        let read_only_parent = temp_state_path("read-only-parent");
-        fs::create_dir_all(&read_only_parent).await.unwrap();
-        let read_only_file = read_only_parent.join("state.json");
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            persist_fault::ACTIVE.with(|cell| cell.set(None));
+        }
+    }
+
+    fn inject_persist_fault(fault: persist_fault::Fault) -> FaultGuard {
+        persist_fault::assert_current_thread_runtime();
+        persist_fault::ACTIVE.with(|cell| cell.set(Some(fault)));
+        FaultGuard
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_surfaces_injected_write_temp_failure() {
+        let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
+        let state_dir = temp_state_path("write-temp-fault");
+        let state_path = state_dir.join("state.json");
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(state_path),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        let error = result
+            .err()
+            .expect("injected write fault must fail loading");
+        let temp_prefix = state_dir.join(format!(".state.json.tmp-{}-", std::process::id()));
+        let prefix = format!(
+            "failed to write temporary state file {}",
+            temp_prefix.display()
+        );
+        let unique = error
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(": injected fault"))
+            .expect("write fault must report the exact temporary sibling path and cause");
+        assert!(
+            !unique.is_empty() && unique.bytes().all(|byte| byte.is_ascii_digit()),
+            "temporary sibling suffix must be a nanosecond timestamp: {error}"
+        );
+        let _ = fs::remove_dir_all(state_dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_surfaces_injected_write_temp_failure_when_rewriting_existing_state() {
+        let state_dir = temp_state_path("write-temp-rewrite-fault");
+        let state_path = state_dir.join("state.json");
+        fs::create_dir_all(&state_dir)
+            .await
+            .expect("state directory should be created");
         fs::write(
-            &read_only_file,
-            serde_json::to_vec_pretty(&AppData::seeded()).unwrap(),
+            &state_path,
+            serde_json::to_vec_pretty(&AppData::seeded()).expect("seeded state serializes"),
         )
         .await
-        .unwrap();
-        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o500))
-            .unwrap();
-        let result = AppState::load(AppConfig {
-            admin_token: None,
-            state_path: Some(read_only_file.clone()),
-            dnsbl_origin: "dnsbl.example".to_string(),
-            event_limit: 10,
-        })
-        .await;
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .contains("failed to write temporary state file")
-        );
-        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o700))
-            .unwrap();
-        let _ = fs::remove_dir_all(read_only_parent).await;
+        .expect("seed state should be written");
 
-        let read_only_dir = temp_state_path("read-only-dir");
-        fs::create_dir_all(&read_only_dir).await.unwrap();
-        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let _fault = inject_persist_fault(persist_fault::Fault::WriteTemp);
         let result = AppState::load(AppConfig {
             admin_token: None,
-            state_path: Some(read_only_dir.join("state.json")),
+            state_path: Some(state_path),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
         })
         .await;
+        let error = result
+            .err()
+            .expect("injected write fault must fail rewriting existing state");
+        let temp_prefix = state_dir.join(format!(".state.json.tmp-{}-", std::process::id()));
+        let prefix = format!(
+            "failed to write temporary state file {}",
+            temp_prefix.display()
+        );
+        let unique = error
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(": injected fault"))
+            .expect("write fault must report the exact temporary sibling path and cause");
         assert!(
+            !unique.is_empty() && unique.bytes().all(|byte| byte.is_ascii_digit()),
+            "temporary sibling suffix must be a nanosecond timestamp: {error}"
+        );
+        let _ = fs::remove_dir_all(state_dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_surfaces_injected_rename_failure() {
+        let _fault = inject_persist_fault(persist_fault::Fault::Rename);
+        let state_dir = temp_state_path("rename-fault");
+        let state_path = state_dir.join("state.json");
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(state_path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert_eq!(
             result
                 .err()
-                .unwrap()
-                .contains("failed to write temporary state file")
+                .expect("injected rename fault must fail loading"),
+            format!(
+                "failed to replace state file {}: injected fault",
+                state_path.display()
+            )
         );
-        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = fs::remove_dir_all(read_only_dir).await;
+        let _ = fs::remove_dir_all(state_dir).await;
     }
 
     #[tokio::test]
