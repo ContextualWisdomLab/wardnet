@@ -41,10 +41,12 @@ mod credentials;
 mod kev_import;
 mod misp_import;
 mod opencti_import;
+mod runtime_config;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use runtime_config::{RuntimeConfiguration, parse_event_limit, parse_u32_env, parse_u64_env};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -3208,66 +3210,6 @@ initSocLlm();
 </body>
 </html>"##;
 
-/// Parse the `EVENT_LIMIT` value (already read from the environment as an
-/// optional string). Absent falls back to [`AppConfig::DEFAULT_EVENT_LIMIT`]; a
-/// non-integer or zero value is a hard configuration error. Kept in the library
-/// (rather than the binary) so it is exercised by unit tests.
-pub fn parse_event_limit(raw: Option<&str>) -> Result<usize, Box<dyn std::error::Error>> {
-    let value = match raw {
-        Some(raw) => raw.parse::<usize>().map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("EVENT_LIMIT must be a positive integer, got {raw:?}: {error}"),
-            )
-        })?,
-        None => AppConfig::DEFAULT_EVENT_LIMIT,
-    };
-    if value == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "EVENT_LIMIT must be greater than 0",
-        )
-        .into());
-    }
-    Ok(value)
-}
-
-/// Parse a `u32` environment value (already read as an optional string),
-/// returning `default` when absent and a configuration error when malformed.
-pub fn parse_u32_env(
-    name: &str,
-    raw: Option<&str>,
-    default: u32,
-) -> Result<u32, Box<dyn std::error::Error>> {
-    match raw {
-        Some(raw) => Ok(raw.parse::<u32>().map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{name} must be a non-negative integer, got {raw:?}: {error}"),
-            )
-        })?),
-        None => Ok(default),
-    }
-}
-
-/// Parse a `u64` environment value (already read as an optional string),
-/// returning `default` when absent and a configuration error when malformed.
-pub fn parse_u64_env(
-    name: &str,
-    raw: Option<&str>,
-    default: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    match raw {
-        Some(raw) => Ok(raw.parse::<u64>().map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{name} must be a positive integer, got {raw:?}: {error}"),
-            )
-        })?),
-        None => Ok(default),
-    }
-}
-
 /// Read gateway configuration from the process environment, bind the listener,
 /// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
 /// over this function so every branch is reachable from tests (the parse/error
@@ -3276,43 +3218,15 @@ pub fn parse_u64_env(
 pub async fn run_from_env(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    // Secret-bearing values go through the credential registry (env/file are
-    // bootstrap transports only). Operational config remains env for now.
-    let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
-        .ok()
-        .map(PathBuf::from);
-    let credentials = CredentialRegistry::bootstrap_secrets(
-        credentials_path.as_deref(),
-        std::env::var("ADMIN_TOKEN").ok(),
-        std::env::var("ADMIN_TOKENS").ok(),
-    )?;
-    let config = AppConfig {
-        admin_token: credentials
-            .get_credential(CRED_ADMIN_TOKEN)
-            .map(str::to_owned),
-        state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
-        dnsbl_origin: std::env::var("DNSBL_ORIGIN")
-            .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
-        event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
-    };
-    let rate_limit = parse_u32_env("RATE_LIMIT", std::env::var("RATE_LIMIT").ok().as_deref(), 0)?;
-    let rate_limit_window = parse_u64_env(
-        "RATE_LIMIT_WINDOW",
-        std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
-        60,
-    )?;
+    let runtime = RuntimeConfiguration::from_env()?;
+    let (credentials, _) = CredentialRegistry::bootstrap_from_env()?;
+    let config = runtime.app_config(&credentials);
     let admin_tokens = parse_admin_tokens(
         credentials
             .get_credential(CRED_ADMIN_TOKENS)
             .unwrap_or_default(),
     );
-    let max_body_bytes = parse_u64_env(
-        "MAX_BODY_BYTES",
-        std::env::var("MAX_BODY_BYTES").ok().as_deref(),
-        1_048_576,
-    )? as usize;
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&runtime.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     println!("waf-ids-ai-soc listening on http://{local_addr}");
     // Flush so a supervising parent process (the e2e test) sees the readiness
@@ -3321,10 +3235,10 @@ pub async fn run_from_env(
     let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
-        .with_rate_limit(rate_limit, rate_limit_window)
+        .with_rate_limit(runtime.rate_limit, runtime.rate_limit_window)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
-        .with_max_body_size(max_body_bytes);
+        .with_max_body_size(runtime.max_body_bytes);
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;

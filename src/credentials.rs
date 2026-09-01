@@ -7,7 +7,11 @@
 //! [`CredentialRegistry::get_credential`].
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::ErrorKind, path::Path};
+use std::{
+    collections::HashMap,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 /// Well-known credentials loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
@@ -63,6 +67,18 @@ impl CredentialRegistry {
             || self
                 .get_credential(CRED_ADMIN_TOKENS)
                 .is_some_and(|v| !v.trim().is_empty())
+    }
+
+    pub fn bootstrap_from_env() -> Result<(Self, Option<PathBuf>), String> {
+        let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
+            .ok()
+            .map(PathBuf::from);
+        let registry = Self::bootstrap_secrets(
+            credentials_path.as_deref(),
+            std::env::var("ADMIN_TOKEN").ok(),
+            std::env::var("ADMIN_TOKENS").ok(),
+        )?;
+        Ok((registry, credentials_path))
     }
 
     /// Bootstrap secret-bearing credentials plus the optional KEV fetch override.
