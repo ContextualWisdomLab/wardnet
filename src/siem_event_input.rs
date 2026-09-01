@@ -233,16 +233,20 @@ fn bounded_route_id(value: &str, line_number: usize) -> Result<String, String> {
 }
 
 fn route_id_suffix(value: &str) -> String {
-    // Distinguish oversized legacy IDs that share the same visible prefix
-    // without letting the exported identifier exceed the shared route limit.
-    let mut hash = 0x811c9dc5_u32;
+    // The suffix is a stable display disambiguator, not an authentication or
+    // integrity digest. FNV-1a 128 keeps accidental collisions negligible at
+    // the parser's 100,000-event batch bound without adding a crypto dependency.
+    const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
+
+    let mut hash = FNV1A_128_OFFSET;
     for byte in value.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(FNV1A_128_PRIME);
     }
 
-    let mut output = String::with_capacity(8);
-    write!(&mut output, "{hash:08x}").expect("write hash");
+    let mut output = String::with_capacity(32);
+    write!(&mut output, "{hash:032x}").expect("write hash");
     output
 }
 
