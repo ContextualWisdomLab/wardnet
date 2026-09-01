@@ -170,7 +170,7 @@ Deployment assets:
 
 - `Dockerfile`
 - `deploy/docker-compose.yml`
-- `deploy/kubernetes/waf-ids-ai-soc.yaml`
+- `deploy/kubernetes/wardnet.yaml`
 
 ## Workspace
 

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-const MANIFEST: &str = include_str!("../deploy/kubernetes/waf-ids-ai-soc.yaml");
+const MANIFEST: &str = include_str!("../deploy/kubernetes/wardnet.yaml");
 const PRODUCTION_GUIDE: &str = include_str!("../docs/deployment/production.md");
 
 /// Secret coordinates the gateway Deployment must consume for `ADMIN_TOKEN`.
@@ -646,5 +646,15 @@ fn fresh_install_bootstraps_namespace_before_secret_provisioning() {
     assert!(
         bootstrap_index < secret_index,
         "namespace bootstrap must precede namespaced Secret provisioning"
+    );
+}
+
+#[test]
+fn legacy_manifest_path_is_absent() {
+    let legacy_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("deploy/kubernetes/waf-ids-ai-soc.yaml");
+    assert!(
+        !legacy_manifest.exists(),
+        "the pre-rename Kubernetes manifest path must not remain in the distributable tree"
     );
 }
