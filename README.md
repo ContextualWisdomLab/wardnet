@@ -37,7 +37,7 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
 - `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
 - `GET /api/commercial/evidence-manifest` returns the buyer-verifiable runtime, document, and deployment evidence map.
-- `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
+- `GET /api/support-bundle` returns health, gateway readiness, KPIs, license, readiness, Prometheus metrics text, and evidence counts without admin secrets.
 
 The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
 

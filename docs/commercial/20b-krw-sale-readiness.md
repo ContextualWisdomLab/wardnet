@@ -13,7 +13,7 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 7. The product must expose SOC event export through `GET /api/events.ndjson`.
 8. The product must retain threat feed status, imported HTTP indicators, DNSBL entries, gateway routes, and security events across restart when `WAF_IDS_STATE_PATH` is configured.
 9. The readiness API must report blockers instead of returning a vague success state.
-10. The support bundle API must return health, KPIs, license metadata, readiness checks, feed freshness, and evidence counts without secrets.
+10. The support bundle API must return health, gateway readiness, KPIs, license metadata, readiness checks, Prometheus metrics text, feed freshness, and evidence counts without secrets.
 11. The product must expose a buyer evidence manifest through `GET /api/commercial/evidence-manifest` so evaluators can verify required runtime APIs, committed documents, and deployment assets from one contract.
 12. The product must expose management write audit logs through `GET /api/audit-logs` without persisting admin tokens or request bodies.
 13. Docker, Compose, and Kubernetes deployment assets must exist for buyer lab validation.
@@ -35,6 +35,8 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 `GET /api/commercial/evidence-manifest` returns the buyer validation map:
 
 - current readiness state and blockers
+- the same `readyz` route-readiness snapshot that operators and load balancers consume
+- the same Prometheus text currently served by `GET /metrics`
 - runtime counts for routes, indicators, DNSBL entries, feeds, fresh/stale feeds, and events
 - required evidence endpoints with method, path, content type, and what each endpoint proves
 - management audit-log count and the `GET /api/audit-logs` endpoint for successful admin writes
