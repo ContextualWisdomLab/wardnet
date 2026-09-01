@@ -31,9 +31,21 @@ fn runner_backed_workflows_pin_the_hosted_ubuntu_image() {
             !workflow.contains(FLOATING_UBUNTU_RUNNER),
             "{relative} must not use the floating {FLOATING_UBUNTU_RUNNER} runner alias"
         );
+
+        let runners = workflow
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("runs-on:"))
+            .map(str::trim)
+            .collect::<Vec<_>>();
         assert!(
-            workflow.contains(&format!("runs-on: {PINNED_UBUNTU_RUNNER}")),
-            "{relative} must pin runner-backed jobs to {PINNED_UBUNTU_RUNNER}"
+            !runners.is_empty(),
+            "{relative} must define at least one runs-on value"
+        );
+        assert!(
+            runners
+                .iter()
+                .all(|runner| *runner == PINNED_UBUNTU_RUNNER),
+            "{relative} must use {PINNED_UBUNTU_RUNNER} for every runs-on value; found {runners:?}"
         );
     }
 }
