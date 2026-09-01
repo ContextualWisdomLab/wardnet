@@ -2,10 +2,10 @@
 //!
 //! These tests intentionally inspect module imports and module names. They are not
 //! behavior tests; they protect the dependency direction that keeps the domain
-//! model usable without Axum, Tokio, filesystem, or deployment concerns.
+//! vocabulary usable without Axum, Tokio, filesystem, or deployment concerns.
 
 const DOMAIN_SOURCES: &[(&str, &str)] = &[
-    ("model.rs", include_str!("../src/model.rs")),
+    ("admission.rs", include_str!("../src/admission.rs")),
     ("policy.rs", include_str!("../src/policy.rs")),
 ];
 
@@ -42,6 +42,7 @@ fn bounded_context_does_not_gain_ambiguous_dumping_modules() {
         "mod shared;",
         "mod misc;",
         "mod legacy;",
+        "mod model;",
     ] {
         assert!(
             !crate_root.contains(ambiguous),
