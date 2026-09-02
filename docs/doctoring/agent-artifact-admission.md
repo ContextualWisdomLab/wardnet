@@ -1,6 +1,6 @@
 # Agent Artifact Admission research and standards traceability
 
-Verified 2026-09-02. This note records the primary sources that justify the admission controller's trust boundary. It does not claim certification or conformance beyond the tests and controls present in Wardnet.
+Verified 2026-09-03. This note records the primary sources that justify the admission controller's trust boundary. It does not claim certification or conformance beyond the tests and controls present in Wardnet.
 
 ## Decision trace
 
@@ -18,6 +18,7 @@ Verified 2026-09-02. This note records the primary sources that justify the admi
 | Reject uv index and environment overrides | uv documents `--index`/`--default-index` as command-line package-index selectors, `--python` as an arbitrary target-environment selector, and `--system` as permission to mutate system Python | `requests_alternate_trust_root`, `requests_alternate_install_root`, `uv_index_selection_cannot_override_the_approved_registry`, and `uv_environment_selection_cannot_escape_the_broker_selected_install_root` |
 | Reject Cargo source, install-root and inline configuration overrides | Cargo documents `--git`, `--path`, `--registry`, and `--index` as package-source selectors, `--root`/`install.root` as installation-root authorities, and `--config KEY=VALUE or PATH` as a command-line configuration override | `requests_alternate_trust_root`, `requests_alternate_install_root`, `cargo_source_selection_cannot_override_the_approved_registry`, and `cargo_inline_configuration_cannot_override_install_root` |
 | Reject npm workspace scope overrides | npm documents `--workspace` as selecting named or path-addressed workspaces and `--workspaces` as running the command in all configured workspaces; install commands respect those selectors | `requests_alternate_install_root`; `npm_workspace_selection_cannot_expand_the_broker_selected_install_scope` |
+| Reject Yarn Classic workspace-root escape overrides | Yarn Classic documents `yarn add ... --ignore-workspace-root-check` / `-W` as allowing installation at the workspaces root, widening the broker-selected package scope | `requests_alternate_install_root`; `yarn_workspace_root_contract.rs` |
 | Require an unambiguous install-script suppression flag | npm documents `ignore-scripts` as a Boolean whose safe state is `true`; npm CLI Boolean options can be explicitly set back to false, so a contradictory argv must not satisfy admission merely because a safe token also appears | `has_unambiguous_boolean_safety_flag`; hostile `--ignore-scripts=false` and `--no-ignore-scripts` regressions |
 | Loopback-only v0.1 | minimizes exposed trust boundary until authenticated transport is owned by a separate deployment layer | `validate_service_config` and service bind validation |
 
@@ -63,6 +64,10 @@ npm's current workspace documentation defines workspaces as nested packages in t
 
 npm also documents `ignore-scripts` as a Boolean configuration with default `false`; when true, lifecycle scripts from package manifests are not executed. Wardnet's admission contract therefore requires the explicit safe token and rejects contradictory Boolean spellings in the same argv rather than attempting to reproduce npm's full precedence parser. This is deliberately fail-closed: the controller proves that the submitted command cannot negate the required safety flag before execution, while the executor and quarantine runtime remain responsible for environment and filesystem isolation.
 
+### Yarn Classic workspace-root override
+
+Yarn Classic's `yarn add` reference documents `--ignore-workspace-root-check` and its `-W` alias as allowing a package to be installed at the workspaces root. Wardnet's artifact-admission policy treats the reviewed workspace scope as part of the authorization boundary, so a caller may not use either flag to widen a reviewed package installation from the broker-selected workspace to the root workspace. Both spellings therefore map to `alternate_install_root`. Wardnet does not attempt to infer a Yarn major version from argv; supporting a generic `yarn` executable means the admission boundary must remain safe for the documented Yarn Classic spelling unless a future versioned package-manager capability contract narrows that surface.
+
 ## APA 7 references
 
 Astral Software, Inc. (2026). *Package indexes: uv documentation.* https://docs.astral.sh/uv/configuration/indexes/
@@ -94,6 +99,8 @@ Sigstore. (2026). *Overview.* https://docs.sigstore.dev/
 Sigstore. (2026). *Security model.* https://docs.sigstore.dev/about/security/
 
 The Update Framework. (2026). *Specification.* https://theupdateframework.io/spec/
+
+Yarn Contributors. (2026). *yarn add: Yarn Classic documentation.* https://classic.yarnpkg.com/lang/en/docs/cli/add/
 
 ## Evidence limitations
 
