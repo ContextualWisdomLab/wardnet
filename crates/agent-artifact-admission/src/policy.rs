@@ -38,6 +38,7 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     validate_source(intent, &mut reason_codes);
     validate_command_path(intent, &mut reason_codes);
     validate_safety_flags(intent, &mut reason_codes);
+    validate_artifact_operands(intent, &mut reason_codes);
 
     if !policy.approved_manifests.iter().any(|manifest| {
         manifest.workspace_id == intent.workspace_id && manifest.sha256 == intent.manifest_sha256
@@ -225,6 +226,46 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     };
     if missing {
         push_reason(reason_codes, ReasonCode::MissingSafetyFlag);
+    }
+}
+
+fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCode>) {
+    let Some(executable) = intent.argv.first().map(String::as_str) else {
+        return;
+    };
+    let arguments = &intent.argv[1..];
+    let command_prefix_len = match executable {
+        "uv"
+            if arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "install") =>
+        {
+            2
+        }
+        "npm" | "pnpm" | "yarn" | "bun" | "pip" | "pip3" | "cargo" | "docker"
+        | "podman" => 1,
+        _ => return,
+    };
+
+    let declared_arguments: BTreeSet<&str> = intent
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.artifact_argument.as_str())
+        .collect();
+    let positional_arguments: Vec<&str> = arguments
+        .iter()
+        .skip(command_prefix_len)
+        .filter(|argument| !argument.starts_with('-'))
+        .map(String::as_str)
+        .collect();
+
+    if positional_arguments.len() != declared_arguments.len()
+        || positional_arguments
+            .iter()
+            .any(|argument| !declared_arguments.contains(argument))
+    {
+        push_reason(reason_codes, ReasonCode::ArtifactNotApproved);
     }
 }
 
