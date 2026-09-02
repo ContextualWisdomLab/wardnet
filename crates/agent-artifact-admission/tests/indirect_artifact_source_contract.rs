@@ -68,6 +68,7 @@ fn uv_pip_cannot_source_undeclared_artifacts_from_files_groups_or_editable_paths
             "--editable=./unreviewed",
         ],
         &["pip", "install", "cwl-example==1.2.3", "--require-hashes", "--group", "unreviewed"],
+        &["pip", "install", "cwl-example==1.2.3", "--require-hashes", "--group=unreviewed"],
         &[
             "pip",
             "install",
@@ -77,6 +78,14 @@ fn uv_pip_cannot_source_undeclared_artifacts_from_files_groups_or_editable_paths
             "./unreviewed",
             "--group",
             "runtime",
+        ],
+        &[
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "--project=./unreviewed",
+            "--group=runtime",
         ],
     ];
 
