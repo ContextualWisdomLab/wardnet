@@ -260,12 +260,48 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
         .map(String::as_str)
         .collect();
 
-    if positional_arguments.len() != declared_arguments.len()
+    if requests_indirect_artifact_source(executable, arguments)
+        || positional_arguments.len() != declared_arguments.len()
         || positional_arguments
             .iter()
             .any(|argument| !declared_arguments.contains(argument))
     {
         push_reason(reason_codes, ReasonCode::ArtifactNotApproved);
+    }
+}
+
+fn requests_indirect_artifact_source(executable: &str, arguments: &[String]) -> bool {
+    let contains_flag = |flags: &[&str]| {
+        arguments
+            .iter()
+            .any(|argument| flags.iter().any(|flag| matches_cli_flag(argument, flag)))
+    };
+
+    match executable {
+        "pip" | "pip3" => contains_flag(&[
+            "-r",
+            "--requirement",
+            "-e",
+            "--editable",
+            "--requirements-from-script",
+        ]),
+        "uv"
+            if arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "install") =>
+        {
+            contains_flag(&[
+                "-r",
+                "--requirement",
+                "--requirements",
+                "-e",
+                "--editable",
+                "--group",
+                "--project",
+            ])
+        }
+        _ => false,
     }
 }
 
