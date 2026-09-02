@@ -186,9 +186,9 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     };
     let arguments = &intent.argv[1..];
     let missing = match executable {
-        "npm" | "pnpm" | "yarn" | "bun" => !arguments
-            .iter()
-            .any(|argument| argument == "--ignore-scripts"),
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            !has_unambiguous_boolean_safety_flag(arguments, "--ignore-scripts")
+        }
         "pip" | "pip3" => !arguments
             .iter()
             .any(|argument| argument == "--require-hashes"),
@@ -226,6 +226,19 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     if missing {
         push_reason(reason_codes, ReasonCode::MissingSafetyFlag);
     }
+}
+
+fn has_unambiguous_boolean_safety_flag(arguments: &[String], flag: &str) -> bool {
+    let Some(flag_name) = flag.strip_prefix("--") else {
+        return false;
+    };
+    let negated = format!("--no-{flag_name}");
+    let assigned = format!("{flag}=");
+
+    arguments.iter().any(|argument| argument == flag)
+        && !arguments
+            .iter()
+            .any(|argument| argument == &negated || argument.starts_with(&assigned))
 }
 
 fn artifact_is_approved(
