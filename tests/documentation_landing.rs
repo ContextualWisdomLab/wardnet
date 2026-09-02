@@ -3,10 +3,8 @@
 use std::fs;
 use std::path::Path;
 
-const REPOSITORY_BLOB_PREFIX: &str =
-    "https://github.com/ContextualWisdomLab/wardnet/blob/main/";
-const REPOSITORY_TREE_PREFIX: &str =
-    "https://github.com/ContextualWisdomLab/wardnet/tree/main/";
+const REPOSITORY_BLOB_PREFIX: &str = "https://github.com/ContextualWisdomLab/wardnet/blob/main/";
+const REPOSITORY_TREE_PREFIX: &str = "https://github.com/ContextualWisdomLab/wardnet/tree/main/";
 
 #[test]
 fn pages_landing_repository_links_resolve_in_source_tree() {
