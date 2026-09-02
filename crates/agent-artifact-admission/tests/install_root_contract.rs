@@ -79,20 +79,51 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
     ];
 
     for (policy, intent, label) in cases {
-        let decision = admission_decision(&policy, &intent);
+        assert_alternate_root_blocked(&policy, &intent, &label);
+    }
+}
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{label} must not turn an approved artifact into a global or alternate-root install"
+#[test]
+fn uv_environment_selection_cannot_escape_the_broker_selected_install_root() {
+    for extra_arguments in [
+        vec!["--system"],
+        vec!["--python=/tmp/escape/bin/python"],
+        vec!["--python", "/tmp/escape/bin/python"],
+        vec!["-p", "/tmp/escape/bin/python"],
+    ] {
+        let mut arguments = vec!["pip", "install", "cwl-example==1.2.3", "--require-hashes"];
+        arguments.extend(extra_arguments);
+        let (policy, intent, label) = install_case(
+            "uv",
+            "pypi",
+            "cwl-example",
+            "cwl-example==1.2.3",
+            "https://pypi.org/simple",
+            &arguments,
         );
-        assert!(
-            decision
-                .reason_codes
-                .iter()
-                .any(|reason| reason.as_str() == "alternate_install_root"),
-            "{label} must produce the stable alternate_install_root reason"
+
+        assert_alternate_root_blocked(&policy, &intent, &label);
+    }
+}
+
+#[test]
+fn cargo_inline_configuration_cannot_override_install_root() {
+    for extra_arguments in [
+        vec!["--config=install.root='/tmp/escape'"],
+        vec!["--config", "install.root='/tmp/escape'"],
+    ] {
+        let mut arguments = vec!["install", "cwl-example@1.2.3", "--locked"];
+        arguments.extend(extra_arguments);
+        let (policy, intent, label) = install_case(
+            "cargo",
+            "cargo",
+            "cwl-example",
+            "cwl-example@1.2.3",
+            "https://crates.io",
+            &arguments,
         );
+
+        assert_alternate_root_blocked(&policy, &intent, &label);
     }
 }
 
@@ -113,15 +144,7 @@ fn npm_location_global_spellings_are_blocked() {
             &arguments,
         );
 
-        let decision = admission_decision(&policy, &intent);
-
-        assert_eq!(decision.decision, DecisionKind::Block, "{label}");
-        assert!(
-            decision
-                .reason_codes
-                .iter()
-                .any(|reason| reason.as_str() == "alternate_install_root")
-        );
+        assert_alternate_root_blocked(&policy, &intent, &label);
     }
 }
 
@@ -145,6 +168,23 @@ fn container_pull_is_not_misclassified_as_an_install_root_escape() {
         .reason_codes
         .iter()
         .any(|reason| reason.as_str() == "alternate_install_root"));
+}
+
+fn assert_alternate_root_blocked(policy: &AdmissionPolicy, intent: &InstallIntent, label: &str) {
+    let decision = admission_decision(policy, intent);
+
+    assert_eq!(
+        decision.decision,
+        DecisionKind::Block,
+        "{label} must not turn an approved artifact into a global or alternate-root install"
+    );
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "alternate_install_root"),
+        "{label} must produce the stable alternate_install_root reason"
+    );
 }
 
 fn install_case(
