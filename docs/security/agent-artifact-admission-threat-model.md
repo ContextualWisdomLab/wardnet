@@ -26,6 +26,7 @@ The credential file, policy/configuration file and audit file are local deployme
 | Unpinned or mutable dependency | Version range, missing digest or changed artifact is admitted | Exact version and SHA-256 are mandatory | `decision=block` |
 | Registry substitution | Look-alike or alternate registry serves a package with the same name | Exact HTTPS registry identity is part of the approved artifact coordinate | `decision=block` |
 | Direct download-and-execute | Agent bypasses package policy using curl/wget/shell/runtime evaluation | Structured `argv`; shells, direct downloaders, package executors and runtime inline evaluation remain blocked by invariant | `decision=block` |
+| Alternate install-root escape | An otherwise approved package-manager command adds global, user, prefix, target or root flags so writes escape the broker-selected workspace boundary | Reject explicit package-manager install-root overrides before returning `allow`; runtime filesystem isolation remains the execution broker/quarantine responsibility | `decision=block`, reason `alternate_install_root` |
 | Malformed or missing provenance | Remote instruction source lacks HTTPS or content digest | Strict source-kind validation and SHA-256 requirement | `400` with audited block receipt |
 | Authentication bypass | Caller omits, duplicates or manipulates the admin token | One bounded visible-ASCII token from the credentials file; constant-time comparison; no environment-variable secret path | `401` |
 | Oversized request | Memory/CPU pressure or parser bypass using excessive body size | Axum body limit plus bounded configuration | `413`, and the rejection must be audited before response |
@@ -39,7 +40,7 @@ The credential file, policy/configuration file and audit file are local deployme
 
 A document can legitimately mention `npm install`, a package name, a CVE, or a URL. Those strings are not executable instructions at this boundary. An agent must first construct a structured intent, and the intent must independently satisfy policy. A package with valid Sigstore/SLSA evidence is still not locally authorized unless the reviewed policy allows its exact coordinates. Conversely, an approved coordinate without the required digest or provenance remains blocked.
 
-The controller must not repair typos, prepend package scopes, infer maintainers, search for a similarly named package, downgrade HTTPS, or transform a blocked command into an allowed one. Any such behavior would convert untrusted input into authority.
+The controller must not repair typos, prepend package scopes, infer maintainers, search for a similarly named package, downgrade HTTPS, transform a blocked command into an allowed one, or reinterpret an approved workspace install as permission to write into a global/user/alternate install root. Any such behavior would convert untrusted input into authority or widen the reviewed command capability.
 
 ## Operational security invariants
 
@@ -49,10 +50,11 @@ The controller must not repair typos, prepend package scopes, infer maintainers,
 - Audit records are append-only from this process's point of view. Corruption, write failure or task failure cannot be converted into an allow response.
 - Policy is immutable for the lifetime of the v0.1 process. Runtime mutation requires a future explicit policy-lifecycle aggregate and authorization contract; it must not be smuggled into the current HTTP adapter.
 - Domain modules remain independent of Axum, Tokio, filesystem paths, provider SDKs and concrete storage adapters. `ddd_architecture_contract.rs` is the executable fitness gate.
+- Package-manager destination overrides are admission capability changes, not ordinary argument detail. The admission kernel rejects explicit alternate-root flags, while the downstream execution broker/quarantine runtime still owns actual filesystem, mount and process isolation.
 
 ## Residual risk and future adapters
 
-SHA-256 equality proves byte identity, not publisher trust. Registry and owner strings in a reviewed policy are local assertions until backed by independently verified provenance. Future Sigstore, TUF and SLSA support should verify external evidence and translate only the verified properties needed by the admission domain. The controller also does not sandbox an allowed installer; the execution broker remains responsible for process isolation, filesystem/network capability limits, least privilege and post-install verification.
+SHA-256 equality proves byte identity, not publisher trust. Registry and owner strings in a reviewed policy are local assertions until backed by independently verified provenance. Future Sigstore, TUF and SLSA support should verify external evidence and translate only the verified properties needed by the admission domain. The controller also does not sandbox an allowed installer; the execution broker remains responsible for process isolation, filesystem/network capability limits, least privilege and post-install verification. Rejecting explicit alternate-root flags narrows the command capability but does not substitute for that runtime isolation boundary.
 
 ## Primary references
 
