@@ -8,6 +8,7 @@ Verified 2026-09-02. This note records the primary sources that justify the admi
 | --- | --- | --- |
 | Treat model/web/tool text as untrusted input, not execution authority | NIST SP 800-218A extends SSDF practices to generative-AI systems and their development lifecycle | Issue #128 threat model; `InstallIntent` must independently satisfy policy |
 | Require reviewed, exact artifact identity and digest | NIST SSDF 1.1 emphasizes protecting software and verifying integrity; SLSA 1.2 formalizes provenance/verified properties | `ApprovedArtifact`, exact version/registry/owner/SHA-256 matching |
+| Bind the submitted package-manager executable to the reviewed artifact ecosystem | npm documents `<name>@<version>` install operands and Cargo documents `crate[@version]`; the same token shape therefore cannot establish which registry ecosystem an approval authorizes | `artifact_ecosystem_matches_executable`; `ecosystem_binding_contract.rs` cross-ecosystem RED plus same-ecosystem Cargo control |
 | Keep provenance provider schemas outside the domain model | SLSA, Sigstore and TUF have independent schemas, trust roots and lifecycle rules | ADR-0012 and DDD architecture fitness test require adapters/ACLs |
 | Bind an allow decision to immutable reviewed policy | TUF's signed metadata model and SLSA source/build provenance both separate producer evidence from consumer verification policy | immutable v0.1 `AdmissionPolicy`; deny-all default |
 | Do not infer publisher trust from registry presence | Sigstore verifies signing identity, certificate trust and Rekor inclusion; registry naming alone is not that evidence | exact reviewed owner is a local policy assertion, not an inferred identity |
@@ -40,6 +41,10 @@ The TUF specification page lists v1.0.33 as latest at verification time. TUF's m
 
 Sigstore's verification flow validates an artifact signature, the signing identity bound into the certificate, the certificate chain/trust root, and Rekor transparency-log evidence. That makes it suitable as a future external publisher/integrity authority. Wardnet must not reduce those semantics to a registry-owner string or silently copy Sigstore DTOs into the domain kernel.
 
+### Package-manager executable and ecosystem identity
+
+An approved argv token is not by itself a package-registry identity. npm documents package install operands such as `name@version`; Cargo's current `cargo install` synopsis independently accepts `crate[@version]`. A reviewed token such as `ripgrep@1.2.3` can therefore be syntactically meaningful to both package managers while naming artifacts from different registries, publisher namespaces, and byte streams. Wardnet binds the executable family to the declared artifact ecosystem before exact artifact matching: npm-family commands may authorize only `npm`, pip/uv pip only `pypi`, Cargo only `cargo`, and Docker/Podman pulls only `oci`. The executor still verifies retrieved bytes/provenance; this admission check prevents an approval from being reinterpreted across ecosystems before execution.
+
 ### pip command trust and installation roots
 
 The current stable pip 26.2.1 command reference defines `-i`/`--index-url` and `-f`/`--find-links` as inputs that change where package candidates are obtained. It also defines `-t`/`--target`, `--root`, and `--prefix` as controls that redirect where installation output is placed. Those are capability-expanding inputs relative to a reviewed artifact/registry/workspace intent, so Wardnet rejects them rather than silently widening an approved install. The parser recognizes both the documented short-option identity and attached short-option values; the latter is treated fail-closed because otherwise a short spelling can evade a policy that already forbids its long-form capability.
@@ -66,7 +71,7 @@ Astral Software, Inc. (2026). *Using environments: uv documentation.* https://do
 
 Booth, H., Souppaya, M., Vassilev, A., Ogata, M., Stanley, M., & Scarfone, K. (2024). *Secure software development practices for generative AI and dual-use foundation models: An SSDF community profile (NIST SP 800-218A).* National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218A
 
-National Institute of Standards and Technology. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities (NIST SP 800-218).* https://doi.org/10.6028/NIST.SP.800-218
+National Institute of Standards and Technology. (2022). *Secure Software Development Framework (SSDF) Version 1.1: Recommendations for Mitigating the Risk of Software Vulnerabilities (NIST SP 800-218).* https://doi.org/10.6028/NIST.SP.800-218
 
 National Institute of Standards and Technology. (2026). *Secure Software Development Framework: Publications.* https://csrc.nist.gov/Projects/ssdf/publications
 
