@@ -107,6 +107,29 @@ fn uv_environment_selection_cannot_escape_the_broker_selected_install_root() {
 }
 
 #[test]
+fn uv_index_selection_cannot_override_the_approved_registry() {
+    for extra_arguments in [
+        vec!["--index", "https://packages.example.invalid/simple"],
+        vec!["--index=https://packages.example.invalid/simple"],
+        vec!["--default-index", "https://packages.example.invalid/simple"],
+        vec!["--default-index=https://packages.example.invalid/simple"],
+    ] {
+        let mut arguments = vec!["pip", "install", "cwl-example==1.2.3", "--require-hashes"];
+        arguments.extend(extra_arguments);
+        let (policy, intent, label) = install_case(
+            "uv",
+            "pypi",
+            "cwl-example",
+            "cwl-example==1.2.3",
+            "https://pypi.org/simple",
+            &arguments,
+        );
+
+        assert_alternate_trust_root_blocked(&policy, &intent, &label);
+    }
+}
+
+#[test]
 fn cargo_inline_configuration_cannot_override_install_root() {
     for extra_arguments in [
         vec!["--config=install.root='/tmp/escape'"],
@@ -184,6 +207,27 @@ fn assert_alternate_root_blocked(policy: &AdmissionPolicy, intent: &InstallInten
             .iter()
             .any(|reason| reason.as_str() == "alternate_install_root"),
         "{label} must produce the stable alternate_install_root reason"
+    );
+}
+
+fn assert_alternate_trust_root_blocked(
+    policy: &AdmissionPolicy,
+    intent: &InstallIntent,
+    label: &str,
+) {
+    let decision = admission_decision(policy, intent);
+
+    assert_eq!(
+        decision.decision,
+        DecisionKind::Block,
+        "{label} must not replace or supplement the reviewed artifact registry"
+    );
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "alternate_trust_root"),
+        "{label} must produce the stable alternate_trust_root reason"
     );
 }
 
