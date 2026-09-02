@@ -5,48 +5,64 @@ use wardnet_agent_artifact_admission::{
 
 #[test]
 fn bun_working_directory_and_filter_cannot_escape_the_broker_selected_scope() {
-    for scope_flag in ["--cwd=/tmp/unreviewed", "--filter=./packages/unreviewed"] {
+    for scope_arguments in [
+        vec!["--cwd=/tmp/unreviewed"],
+        vec!["--cwd", "/tmp/unreviewed"],
+        vec!["--filter=./packages/unreviewed"],
+        vec!["--filter", "./packages/unreviewed"],
+        vec!["-F=./packages/unreviewed"],
+        vec!["-F", "./packages/unreviewed"],
+    ] {
+        let label = scope_arguments.join(" ");
         let (policy, mut intent) = bun_install_case();
-        intent.argv.push(scope_flag.to_string());
+        intent
+            .argv
+            .extend(scope_arguments.into_iter().map(str::to_string));
 
         let decision = admission_decision(&policy, &intent);
 
         assert_eq!(
             decision.decision,
             DecisionKind::Block,
-            "Bun {scope_flag} must not move an approved install into an unreviewed workspace scope"
+            "Bun {label} must not move an approved install into an unreviewed workspace scope"
         );
         assert!(
             decision
                 .reason_codes
                 .iter()
                 .any(|reason| reason.as_str() == "alternate_install_root"),
-            "Bun {scope_flag} must produce alternate_install_root"
+            "Bun {label} must produce alternate_install_root"
         );
     }
 }
 
 #[test]
 fn bun_explicit_config_cannot_replace_the_reviewed_registry_context() {
-    let (policy, mut intent) = bun_install_case();
-    intent
-        .argv
-        .push("--config=/tmp/unreviewed-bunfig.toml".to_string());
+    for config_arguments in [
+        vec!["--config=/tmp/unreviewed-bunfig.toml"],
+        vec!["--config", "/tmp/unreviewed-bunfig.toml"],
+    ] {
+        let label = config_arguments.join(" ");
+        let (policy, mut intent) = bun_install_case();
+        intent
+            .argv
+            .extend(config_arguments.into_iter().map(str::to_string));
 
-    let decision = admission_decision(&policy, &intent);
+        let decision = admission_decision(&policy, &intent);
 
-    assert_eq!(
-        decision.decision,
-        DecisionKind::Block,
-        "Bun --config must not load an unreviewed registry or scope configuration"
-    );
-    assert!(
-        decision
-            .reason_codes
-            .iter()
-            .any(|reason| reason.as_str() == "alternate_trust_root"),
-        "Bun --config must produce alternate_trust_root"
-    );
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "Bun {label} must not load an unreviewed registry or scope configuration"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "alternate_trust_root"),
+            "Bun {label} must produce alternate_trust_root"
+        );
+    }
 }
 
 fn bun_install_case() -> (AdmissionPolicy, InstallIntent) {
