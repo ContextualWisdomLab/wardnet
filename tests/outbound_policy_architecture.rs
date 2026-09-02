@@ -7,21 +7,13 @@ fn production_lib_source() -> String {
     })
 }
 
-fn function_body<'a>(source: &'a str, function_name: &str, next_function_name: &str) -> &'a str {
-    let start_marker = format!("fn {function_name}(");
-    let async_start_marker = format!("async fn {function_name}(");
+fn source_section<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
     let start = source
-        .find(&async_start_marker)
-        .or_else(|| source.find(&start_marker))
-        .unwrap_or_else(|| panic!("missing production function {function_name}"));
-
-    let next_marker = format!("fn {next_function_name}(");
-    let async_next_marker = format!("async fn {next_function_name}(");
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("missing source marker {start_marker:?}"));
     let relative_end = source[start..]
-        .find(&async_next_marker)
-        .or_else(|| source[start..].find(&next_marker))
-        .unwrap_or_else(|| panic!("missing boundary function {next_function_name}"));
-
+        .find(end_marker)
+        .unwrap_or_else(|| panic!("missing source boundary {end_marker:?}"));
     &source[start..start + relative_end]
 }
 
@@ -47,10 +39,10 @@ fn outbound_http_client_construction_stays_behind_the_shared_fail_closed_builder
         "shared clients may only be supplied to validated_outbound_http_client, never used directly for outbound I/O"
     );
 
-    let builder = function_body(
+    let builder = source_section(
         &source,
-        "outbound_http_client_builder",
-        "clearfolio_tenant_headers",
+        "fn outbound_http_client_builder()",
+        "#[derive(Debug, Clone)]\npub struct AppConfig",
     );
     assert!(
         builder.contains("redirect(reqwest::redirect::Policy::none())"),
@@ -66,17 +58,17 @@ fn outbound_http_client_construction_stays_behind_the_shared_fail_closed_builder
 fn represented_outbound_surfaces_revalidate_destinations_before_network_io() {
     let source = production_lib_source();
     let mediated_surfaces = [
-        ("clearfolio_submit", "clearfolio_status"),
-        ("clearfolio_status", "soc_analyze"),
-        ("soc_analyze", "create_route"),
-        ("fetch_taxii_objects", "import_taxii_feed"),
-        ("fetch_text_feed", "import_phishing_database_feed"),
-        ("fetch_kev_catalog", "is_loopback_host"),
-        ("proxy_request", "build_proxy_url"),
+        ("async fn clearfolio_submit(", "async fn clearfolio_status(", "clearfolio_submit"),
+        ("async fn clearfolio_status(", "async fn soc_analyze(", "clearfolio_status"),
+        ("async fn soc_analyze(", "async fn create_route(", "soc_analyze"),
+        ("async fn fetch_taxii_objects(", "/// Ingest Suricata EVE", "fetch_taxii_objects"),
+        ("async fn fetch_text_feed(", "async fn import_phishing_database_feed(", "fetch_text_feed"),
+        ("async fn fetch_kev_catalog(", "/// Returns whether the parsed host is localhost", "fetch_kev_catalog"),
+        ("async fn proxy_request(", "pub fn upstream_target(", "proxy_request"),
     ];
 
-    for (function_name, next_function_name) in mediated_surfaces {
-        let body = function_body(&source, function_name, next_function_name);
+    for (start_marker, end_marker, function_name) in mediated_surfaces {
+        let body = source_section(&source, start_marker, end_marker);
         assert!(
             body.contains("validated_outbound_http_client"),
             "{function_name} must obtain its HTTP client through the request-time outbound destination policy"
