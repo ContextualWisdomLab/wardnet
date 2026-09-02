@@ -195,6 +195,29 @@ fn npm_location_global_spellings_are_blocked() {
 }
 
 #[test]
+fn npm_workspace_selection_cannot_expand_the_broker_selected_install_scope() {
+    for workspace_arguments in [
+        vec!["--workspace", "packages/unreviewed"],
+        vec!["--workspace=packages/unreviewed"],
+        vec!["--workspaces"],
+        vec!["--workspaces=true"],
+    ] {
+        let mut arguments = vec!["install", "@cwl/example@1.2.3", "--ignore-scripts"];
+        arguments.extend(workspace_arguments);
+        let (policy, intent, label) = install_case(
+            "npm",
+            "npm",
+            "@cwl/example",
+            "@cwl/example@1.2.3",
+            "https://registry.npmjs.org",
+            &arguments,
+        );
+
+        assert_alternate_root_blocked(&policy, &intent, &label);
+    }
+}
+
+#[test]
 fn container_pull_is_not_misclassified_as_an_install_root_escape() {
     let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let artifact_argument = format!("ghcr.io/contextualwisdomlab/example@sha256:{digest}");
