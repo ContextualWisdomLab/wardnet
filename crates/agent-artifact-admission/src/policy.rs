@@ -375,6 +375,8 @@ fn requests_alternate_trust_root(arguments: &[String]) -> bool {
         "--find-links",
         "--registry",
         "--registry-url",
+        "--git",
+        "--path",
         "-i",
         "-f",
     ];
