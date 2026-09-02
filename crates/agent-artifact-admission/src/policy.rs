@@ -396,7 +396,7 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
 
     match executable {
         "npm" => {
-            contains_flag(&["-g", "--global", "--prefix", "--workspace"])
+            contains_flag(&["-g", "--global", "--prefix", "--workspace", "-w"])
                 || arguments
                     .iter()
                     .any(|argument| matches!(argument.as_str(), "--workspaces" | "--workspaces=true"))
