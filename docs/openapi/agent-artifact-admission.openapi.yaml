@@ -305,6 +305,7 @@ components:
               - invalid_source_uri
               - forbidden_command
               - alternate_trust_root
+              - alternate_install_root
               - missing_safety_flag
               - audit_unavailable
         policy_id:
