@@ -4025,19 +4025,21 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_from_request_skips_invalid_spoofed_leading_forwarded_hops() {
+    fn client_ip_from_request_rejects_invalid_forwarded_hops() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
             HeaderValue::from_static("not-an-ip, 203.0.113.9"),
         );
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.88"));
         assert_eq!(
             client_ip_from_request(
                 &headers,
                 Some("192.0.2.44".parse().unwrap()),
                 &[IpNet::parse("192.0.2.0/24").unwrap()],
             ),
-            Some("203.0.113.9".parse().unwrap())
+            Some("192.0.2.44".parse().unwrap()),
+            "a malformed X-Forwarded-For chain must fall back to the direct peer and must not consult X-Real-IP",
         );
     }
 
