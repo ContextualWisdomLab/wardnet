@@ -645,9 +645,10 @@ struct ErrorBody {
 }
 
 /// Build the HTTP application surface for management, DNSBL, and gateway
-/// traffic. Gateway requests still require peer metadata via
-/// `ConnectInfo<SocketAddr>`; use [`serve`] or
-/// `Router::into_make_service_with_connect_info::<SocketAddr>()`.
+/// traffic. Direct router use without `ConnectInfo<SocketAddr>` remains
+/// compatible: forwarded identity is ignored and the existing shared
+/// unknown-client limiter bucket is used. [`serve`] preserves real peer
+/// attribution for production TCP traffic.
 pub fn build_app(state: AppState) -> Router {
     let max_body_bytes = state.max_body_bytes;
     Router::new()
@@ -2513,15 +2514,7 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .cloned();
-    let peer_ip = match connect_info.as_ref().map(|peer| peer.0.ip()) {
-        Some(peer_ip) => peer_ip,
-        None => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "gateway requires peer address metadata; serve with `serve(...)` or `into_make_service_with_connect_info::<SocketAddr>()`",
-            );
-        }
-    };
+    let peer_ip = connect_info.as_ref().map(|peer| peer.0.ip());
     let (parts, body) = request.into_parts();
     let method = parts.method;
     let uri = parts.uri;
@@ -2552,7 +2545,7 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
         (route.clone(), data.threats.clone(), data.dnsbl.clone())
     };
 
-    let client_ip = client_ip_from_request(&headers, Some(peer_ip), &state.trusted_proxies);
+    let client_ip = client_ip_from_request(&headers, peer_ip, &state.trusted_proxies);
 
     // Rate limiting runs before scoring/proxying so floods are shed cheaply.
     if !state.allow_request(client_ip).await {
@@ -2665,9 +2658,11 @@ pub fn effective_client_ip(
 ) -> Option<IpAddr> {
     match peer_ip {
         Some(peer_ip) if trusted_proxies.iter().any(|proxy| proxy.contains(peer_ip)) => {
-            trusted_forwarded_chain_client_ip(x_forwarded_for, trusted_proxies)
-                .or_else(|| trusted_real_ip_value(x_real_ip))
-                .or(Some(peer_ip))
+            match trusted_forwarded_chain_client_ip_checked(x_forwarded_for, trusted_proxies) {
+                Ok(Some(client_ip)) => Some(client_ip),
+                Ok(None) => trusted_real_ip_value(x_real_ip).or(Some(peer_ip)),
+                Err(()) => Some(peer_ip),
+            }
         }
         Some(peer_ip) => Some(peer_ip),
         None => None,
@@ -2695,24 +2690,35 @@ pub fn trusted_forwarded_chain_client_ip(
     x_forwarded_for: Option<&str>,
     trusted_proxies: &[IpNet],
 ) -> Option<IpAddr> {
-    let forwarded = x_forwarded_for?;
-    let mut client_ip = None;
-    for candidate in forwarded.split(',').rev() {
-        let candidate = candidate.trim();
-        if candidate.is_empty() {
-            continue;
-        }
-        let ip = match candidate.parse::<IpAddr>() {
-            Ok(ip) => ip,
-            Err(_) => continue,
-        };
-        if trusted_proxies.iter().any(|proxy| proxy.contains(ip)) {
-            continue;
-        }
-        client_ip = Some(ip);
-        break;
-    }
-    client_ip
+    trusted_forwarded_chain_client_ip_checked(x_forwarded_for, trusted_proxies)
+        .ok()
+        .flatten()
+}
+
+/// Parse the complete forwarded chain before selecting an identity. Any
+/// empty or unparsable hop invalidates the entire chain so callers can
+/// fall back to the direct peer without consulting `X-Real-IP`.
+fn trusted_forwarded_chain_client_ip_checked(
+    x_forwarded_for: Option<&str>,
+    trusted_proxies: &[IpNet],
+) -> Result<Option<IpAddr>, ()> {
+    let Some(forwarded) = x_forwarded_for else {
+        return Ok(None);
+    };
+    let hops = forwarded
+        .split(',')
+        .map(|candidate| {
+            let candidate = candidate.trim();
+            if candidate.is_empty() {
+                return Err(());
+            }
+            candidate.parse::<IpAddr>().map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(hops
+        .into_iter()
+        .rev()
+        .find(|ip| !trusted_proxies.iter().any(|proxy| proxy.contains(*ip))))
 }
 
 /// Trusted-proxy fallback for deployments that emit a single canonical client
@@ -4138,25 +4144,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_rejects_missing_connect_info_instead_of_silently_sharing_unknown_ip() {
+    async fn gateway_missing_connect_info_uses_unknown_bucket_without_trusting_headers() {
         let app = build_app(AppState::seeded(None).with_rate_limit(1, 60));
 
-        let response = app_request(
+        let first = app_request(
             &app,
             Request::builder()
                 .method(Method::GET)
                 .uri("/gateway/demo")
+                .header("x-forwarded-for", "203.0.113.9")
+                .header("x-real-ip", "203.0.113.10")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await;
+        assert_eq!(first.status(), StatusCode::OK);
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(
-            body_text(response)
-                .await
-                .contains("gateway requires peer address metadata")
-        );
+        let second = app_request(
+            &app,
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/demo")
+                .header("x-forwarded-for", "198.51.100.7")
+                .header("x-real-ip", "198.51.100.8")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
