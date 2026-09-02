@@ -130,6 +130,29 @@ fn uv_index_selection_cannot_override_the_approved_registry() {
 }
 
 #[test]
+fn cargo_source_selection_cannot_override_the_approved_registry() {
+    for extra_arguments in [
+        vec!["--git", "https://example.invalid/unreviewed.git"],
+        vec!["--git=https://example.invalid/unreviewed.git"],
+        vec!["--path", "/tmp/unreviewed-crate"],
+        vec!["--path=/tmp/unreviewed-crate"],
+    ] {
+        let mut arguments = vec!["install", "cwl-example@1.2.3", "--locked"];
+        arguments.extend(extra_arguments);
+        let (policy, intent, label) = install_case(
+            "cargo",
+            "cargo",
+            "cwl-example",
+            "cwl-example@1.2.3",
+            "https://crates.io",
+            &arguments,
+        );
+
+        assert_alternate_trust_root_blocked(&policy, &intent, &label);
+    }
+}
+
+#[test]
 fn cargo_inline_configuration_cannot_override_install_root() {
     for extra_arguments in [
         vec!["--config=install.root='/tmp/escape'"],
