@@ -395,7 +395,17 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
     };
 
     match executable {
-        "npm" | "pnpm" | "yarn" | "bun" => {
+        "npm" => {
+            contains_flag(&["-g", "--global", "--prefix", "--workspace"])
+                || arguments
+                    .iter()
+                    .any(|argument| matches!(argument.as_str(), "--workspaces" | "--workspaces=true"))
+                || arguments.iter().any(|argument| argument == "--location=global")
+                || arguments.windows(2).any(|pair| {
+                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
+                })
+        }
+        "pnpm" | "yarn" | "bun" => {
             contains_flag(&["-g", "--global", "--prefix"])
                 || arguments.iter().any(|argument| argument == "--location=global")
                 || arguments.windows(2).any(|pair| {
