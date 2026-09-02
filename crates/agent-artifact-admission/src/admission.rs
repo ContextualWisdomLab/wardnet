@@ -152,7 +152,8 @@ impl InstallIntent {
                 kind: InstructionSourceKind::LlmsTxt,
                 uri: Some("https://example.invalid/llms.txt".to_string()),
                 content_sha256: Some(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
                 ),
             },
             artifacts: vec![ArtifactCoordinate {
@@ -247,6 +248,8 @@ pub enum ReasonCode {
     ForbiddenCommand,
     /// The command attempted to introduce an alternate package trust root.
     AlternateTrustRoot,
+    /// The command attempted to install outside the executor-selected workspace root.
+    AlternateInstallRoot,
     /// The package manager invocation omitted a mandatory hardening flag.
     MissingSafetyFlag,
     /// Durable audit evidence could not be persisted before returning a decision.
@@ -273,6 +276,7 @@ impl ReasonCode {
             Self::InvalidSourceUri => "invalid_source_uri",
             Self::ForbiddenCommand => "forbidden_command",
             Self::AlternateTrustRoot => "alternate_trust_root",
+            Self::AlternateInstallRoot => "alternate_install_root",
             Self::MissingSafetyFlag => "missing_safety_flag",
             Self::AuditUnavailable => "audit_unavailable",
         }
