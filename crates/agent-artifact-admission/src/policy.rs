@@ -466,6 +466,8 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         "--find-links",
         "--registry",
         "--registry-url",
+        "--userconfig",
+        "--globalconfig",
         "--git",
         "--path",
         "-i",
