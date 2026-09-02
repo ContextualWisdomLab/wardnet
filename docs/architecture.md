@@ -34,7 +34,7 @@ flowchart LR
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
 - `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
 - `/api/commercial/license`: tenant/license metadata for commercial packaging.
-- `/api/commercial/readiness`: computed 2B KRW sale-readiness checks and blockers.
+- `/api/commercial/readiness`: computed 20B KRW sale-readiness checks and blockers.
 - `/api/threat-feeds/import`: authorized threat indicator and DNSBL import surface.
 - `/api/threat-feeds/freshness`: feed TTL expiry and stale/fresh evidence for buyer and SOC review.
 - `/api/support-bundle`: health, KPI, license, readiness, and evidence-count bundle for buyer or support review.

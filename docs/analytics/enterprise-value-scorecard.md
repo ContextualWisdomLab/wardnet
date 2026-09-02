@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This scorecard turns the 2B KRW sale-readiness target into measurable product evidence. It is not revenue recognition, a compliance certificate, or a guarantee of production security.
+This scorecard turns the 20B KRW sale-readiness target into measurable product evidence. It is not revenue recognition, a compliance certificate, or a guarantee of production security.
 
 ## Primary KPIs
 

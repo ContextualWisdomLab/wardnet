@@ -73,7 +73,7 @@ Entry: buyer engineer requests `GET /api/commercial/evidence-manifest`.
 
 Expected states:
 
-- readiness status, blockers, and 2B KRW target are visible without scraping multiple screens
+- readiness status, blockers, and 20B KRW target are visible without scraping multiple screens
 - required endpoints include method, path, content type, and what each proves
 - document paths include commercial, analytics, Product Design, Figma/FigJam, and complexity-audit artifacts
 - audit-log endpoint proves successful admin writes without exposing `X-Admin-Token`

@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BLOCK_SCORE: u16 = 50;
-pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
+pub const TARGET_SALE_VALUE_KRW: u64 = 20_000_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppData {
@@ -1132,7 +1132,7 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
         readiness_check(
             "contract_value",
             commercial_value_ready,
-            "annual contract value meets the 2B KRW sale target",
+            "annual contract value meets the 20B KRW sale target",
         ),
         readiness_check(
             "threat_feed_updates",
@@ -1246,7 +1246,7 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "GET",
             "/api/commercial/readiness",
             "application/json",
-            "2B KRW readiness checks and explicit blockers",
+            "20B KRW readiness checks and explicit blockers",
             true,
         ),
         buyer_evidence_endpoint(

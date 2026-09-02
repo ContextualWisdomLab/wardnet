@@ -27,13 +27,13 @@ It is still not a hardened internet-facing deployment. Use TLS, identity-aware a
 
 ## Commercial Readiness Baseline
 
-The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pilot state through API evidence:
+The 20B KRW sale readiness baseline means the runtime can prove a buyer-facing pilot state through API evidence:
 
 - `GET /api/commercial/license` returns tenant, edition, license, support, and annual contract metadata.
 - `POST /api/commercial/license` updates that metadata with `X-Admin-Token`.
 - `POST /api/threat-feeds/import` imports operator-reviewed threat indicators and DNSBL entries.
 - `POST /api/threat-feeds/import/phishing-database` pulls active domains/IPs from `Phishing-Database/Phishing.Database` and converts them into local block signals.
-- `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
+- `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 20B KRW target.
 - `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
 - `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
 - `GET /api/commercial/evidence-manifest` returns the buyer-verifiable runtime, document, and deployment evidence map.
