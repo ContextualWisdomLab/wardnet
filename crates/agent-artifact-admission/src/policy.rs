@@ -173,7 +173,7 @@ fn validate_command_path(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     {
         push_reason(reason_codes, ReasonCode::ForbiddenCommand);
     }
-    if requests_alternate_trust_root(arguments) {
+    if requests_alternate_trust_root(executable, arguments) {
         push_reason(reason_codes, ReasonCode::AlternateTrustRoot);
     }
     if requests_alternate_install_root(executable, arguments) {
@@ -456,7 +456,7 @@ fn requests_inline_eval(executable: &str, arguments: &[String]) -> bool {
         .any(|argument| matches!(argument.as_str(), "-c" | "-e" | "--eval" | "--execute"))
 }
 
-fn requests_alternate_trust_root(arguments: &[String]) -> bool {
+fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool {
     const FORBIDDEN_FLAGS: &[&str] = &[
         "--extra-index-url",
         "--index-url",
@@ -475,7 +475,10 @@ fn requests_alternate_trust_root(arguments: &[String]) -> bool {
         FORBIDDEN_FLAGS
             .iter()
             .any(|flag| matches_cli_flag(argument, flag))
-    })
+    }) || (executable == "bun"
+        && arguments
+            .iter()
+            .any(|argument| matches_cli_flag(argument, "--config")))
 }
 
 fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bool {
@@ -508,8 +511,15 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                     pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
                 })
         }
-        "pnpm" | "bun" => {
+        "pnpm" => {
             contains_flag(&["-g", "--global", "--prefix"])
+                || arguments.iter().any(|argument| argument == "--location=global")
+                || arguments.windows(2).any(|pair| {
+                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
+                })
+        }
+        "bun" => {
+            contains_flag(&["-g", "--global", "--prefix", "--cwd", "--filter"])
                 || arguments.iter().any(|argument| argument == "--location=global")
                 || arguments.windows(2).any(|pair| {
                     pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
