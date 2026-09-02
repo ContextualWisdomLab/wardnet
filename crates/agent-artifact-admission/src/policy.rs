@@ -260,13 +260,27 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
         .map(String::as_str)
         .collect();
 
-    if requests_indirect_artifact_source(executable, arguments)
+    if intent
+        .artifacts
+        .iter()
+        .any(|artifact| !artifact_ecosystem_matches_executable(executable, &artifact.ecosystem))
+        || requests_indirect_artifact_source(executable, arguments)
         || positional_arguments.len() != declared_arguments.len()
         || positional_arguments
             .iter()
             .any(|argument| !declared_arguments.contains(argument))
     {
         push_reason(reason_codes, ReasonCode::ArtifactNotApproved);
+    }
+}
+
+fn artifact_ecosystem_matches_executable(executable: &str, ecosystem: &str) -> bool {
+    match executable {
+        "npm" | "pnpm" | "yarn" | "bun" => ecosystem == "npm",
+        "pip" | "pip3" | "uv" => ecosystem == "pypi",
+        "cargo" => ecosystem == "cargo",
+        "docker" | "podman" => ecosystem == "oci",
+        _ => false,
     }
 }
 
