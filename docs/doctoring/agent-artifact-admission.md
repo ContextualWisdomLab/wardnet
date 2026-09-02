@@ -16,6 +16,7 @@ Verified 2026-09-02. This note records the primary sources that justify the admi
 | Reject alternate pip package sources and install roots | pip 26.2.1 documents `-i`/`--index-url` and `-f`/`--find-links` as package-source controls and `-t`/`--target`, `--root`, and `--prefix` as installation-location controls | `requests_alternate_trust_root`, `requests_alternate_install_root`, and attached-short-option hostile regressions |
 | Reject uv index and environment overrides | uv documents `--index`/`--default-index` as command-line package-index selectors, `--python` as an arbitrary target-environment selector, and `--system` as permission to mutate system Python | `requests_alternate_trust_root`, `requests_alternate_install_root`, `uv_index_selection_cannot_override_the_approved_registry`, and `uv_environment_selection_cannot_escape_the_broker_selected_install_root` |
 | Reject Cargo source, install-root and inline configuration overrides | Cargo documents `--git`, `--path`, `--registry`, and `--index` as package-source selectors, `--root`/`install.root` as installation-root authorities, and `--config KEY=VALUE or PATH` as a command-line configuration override | `requests_alternate_trust_root`, `requests_alternate_install_root`, `cargo_source_selection_cannot_override_the_approved_registry`, and `cargo_inline_configuration_cannot_override_install_root` |
+| Reject npm workspace scope overrides | npm documents `--workspace` as selecting named or path-addressed workspaces and `--workspaces` as running the command in all configured workspaces; install commands respect those selectors | `requests_alternate_install_root`; `npm_workspace_selection_cannot_expand_the_broker_selected_install_scope` |
 | Require an unambiguous install-script suppression flag | npm documents `ignore-scripts` as a Boolean whose safe state is `true`; npm CLI Boolean options can be explicitly set back to false, so a contradictory argv must not satisfy admission merely because a safe token also appears | `has_unambiguous_boolean_safety_flag`; hostile `--ignore-scripts=false` and `--no-ignore-scripts` regressions |
 | Loopback-only v0.1 | minimizes exposed trust boundary until authenticated transport is owned by a separate deployment layer | `validate_service_config` and service bind validation |
 
@@ -51,9 +52,11 @@ uv's package-index documentation states that command-line indexes take precedenc
 
 Cargo's `cargo install` documentation states that crates.io is the default package source while `--git`, `--path`, and `--registry` change that source; it separately exposes `--index` as a registry-index URL. The same command defines install-root precedence through `--root`, `CARGO_INSTALL_ROOT`, `install.root`, `CARGO_HOME`, then the default Cargo home, and Cargo's common options define `--config KEY=VALUE or PATH` as a command-line configuration override. Wardnet therefore rejects submitted source selectors (`--git`, `--path`, `--registry`, `--index`), `--root`, and `--config`: the reviewed artifact coordinate and destination remain the admission authority instead of being silently replaced by command arguments. The executor or quarantine runtime may establish controlled Cargo configuration outside this submitted argv boundary.
 
-### npm command safety
+### npm workspace and command safety
 
-npm documents `ignore-scripts` as a Boolean configuration with default `false`; when true, lifecycle scripts from package manifests are not executed. Wardnet's admission contract therefore requires the explicit safe token and rejects contradictory Boolean spellings in the same argv rather than attempting to reproduce npm's full precedence parser. This is deliberately fail-closed: the controller proves that the submitted command cannot negate the required safety flag before execution, while the executor and quarantine runtime remain responsible for environment and filesystem isolation.
+npm's current workspace documentation defines workspaces as nested packages in the local filesystem and shows that install commands respect workspace selection. The `workspace` option can name a workspace, point at a workspace directory, or point at a parent directory that selects nested workspaces; `workspaces` enables the command across all configured workspaces. Those selectors change the submitted command's filesystem/package scope relative to the broker-selected workspace intent, so Wardnet rejects `--workspace`, `--workspace=...`, `--workspaces`, and the enabled `--workspaces=true` spelling instead of allowing an approved artifact to authorize writes across a caller-selected workspace set.
+
+npm also documents `ignore-scripts` as a Boolean configuration with default `false`; when true, lifecycle scripts from package manifests are not executed. Wardnet's admission contract therefore requires the explicit safe token and rejects contradictory Boolean spellings in the same argv rather than attempting to reproduce npm's full precedence parser. This is deliberately fail-closed: the controller proves that the submitted command cannot negate the required safety flag before execution, while the executor and quarantine runtime remain responsible for environment and filesystem isolation.
 
 ## APA 7 references
 
@@ -68,6 +71,10 @@ National Institute of Standards and Technology. (2022). *Secure software develop
 National Institute of Standards and Technology. (2026). *Secure Software Development Framework: Publications.* https://csrc.nist.gov/Projects/ssdf/publications
 
 npm, Inc. (2026). *Config: ignore-scripts.* https://docs.npmjs.com/using-npm/config/
+
+npm, Inc. (2026). *Workspaces.* https://docs.npmjs.com/misc/workspaces/
+
+npm, Inc. (2026). *npm install.* https://docs.npmjs.com/cli/v10/commands/npm-install/
 
 pip developers. (2026). *pip install: pip documentation v26.2.1.* https://pip.pypa.io/en/stable/cli/pip_install/
 
