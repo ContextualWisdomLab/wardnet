@@ -519,8 +519,14 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                 })
         }
         "bun" => {
-            contains_flag(&["-g", "--global", "--prefix", "--cwd", "--filter"])
-                || arguments.iter().any(|argument| argument == "--location=global")
+            contains_flag(&[
+                "-g",
+                "--global",
+                "--prefix",
+                "--cwd",
+                "--filter",
+                "-F",
+            ]) || arguments.iter().any(|argument| argument == "--location=global")
                 || arguments.windows(2).any(|pair| {
                     pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
                 })
