@@ -1,36 +1,36 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-09-02. This file is a dated repository snapshot, not scheduler memory. Every later run must refetch live heads, bases, checks, review state, rulesets, releases, and foreign-owner state before acting.
+Snapshot date: 2026-09-02. This document is a dated repository snapshot. Live refs, reviews, checks, rulesets, releases, and foreign-owner state must be re-read before any merge, release, or integration decision.
 
-## Product boundary
+## Product and authority boundary
 
-Wardnet is the Rust-first gateway/SOC control plane. Its owned responsibilities are Gateway, Admission Policy, Artifact Identity, Security Analysis Integration, Network-Egress, SOC Evidence, Runtime Control, and Audit-Provenance. The Agent Artifact Admission Controller is a separate bounded context inside Wardnet's Security Admission subdomain.
+Wardnet is the Rust-first gateway/SOC control plane and owns Gateway, Admission Policy, Artifact Identity, Security Analysis Integration, Network-Egress, SOC Evidence, Runtime Control, Audit-Provenance, and the Agent Artifact Admission bounded context. It does not execute hostile workloads or own provider/model orchestration.
 
-Quarantine Sandbox Runtime owns hostile-workload execution isolation. `contextual-orchestrator` owns Agent/LLM orchestration. EgressWeave is the outbound HTTP-policy candidate. Wardnet consumes those capabilities through versioned ports and Anti-Corruption Layers; it does not copy their implementations or access their application databases.
+`ContextualWisdomLab/quarantine-sandbox-runtime` owns reusable hostile-workload isolation, execution lifecycle, cleanup, and artifact-analysis evidence. `contextual-orchestrator` owns Agent/LLM orchestration and provider/model routing. EgressWeave is the canonical outbound HTTP-policy candidate. Wardnet consumes released/versioned ports and Anti-Corruption Layers; it does not copy those implementations or access foreign application databases.
 
-`context-graph-contracts` is the provider-neutral Context Fabric Shared Kernel for canonical references, authority, truth status/origin, valid/system time, provenance, Context Assertion, CloudEvents/schema/conformance/admission. `enterprise-architecture-core` is the Enterprise Architecture Decision Plane. While the dedicated Context Fabric writer is active, both repositories are read-only source dependencies from Wardnet. Security findings, alerts, malware verdicts, artifact risk scores, prompts, and customer/runtime data do not become authoritative EA facts.
+`context-graph-contracts` is the provider-neutral Context Fabric Shared Kernel for canonical object/authority references, truth status/origin, valid/system time, provenance, Context Assertion, CloudEvents, schema, conformance, and admission. `enterprise-architecture-core` is the EA Decision Plane. Both remain read-only source dependencies from this writer while the dedicated Context Fabric writer is active. Security findings, alerts, malware verdicts, artifact risk scores, prompts, and customer/runtime data do not become authoritative EA facts.
 
 ## Protected truth and governance
 
-Protected/default Wardnet `main` is `cc15cc2c34daf8c104eeb83d52a6a66f3cd6e128`. It contains PR #137's externally provisioned, non-optional administrator Secret boundary. Wardnet currently has no GitHub Release.
+Protected/default Wardnet `main` is `cc15cc2c34daf8c104eeb83d52a6a66f3cd6e128`. It contains PR #137's externally provisioned, non-optional Kubernetes administrator Secret boundary. Wardnet currently has no GitHub Release.
 
-Organization ruleset `18156473` targets `~DEFAULT_BRANCH`. It requires one approving review, dismisses stale approvals, requires review-thread resolution, names no required reviewer/team, does not require code-owner or last-push approval, and also requires central review/security workflow evidence plus deletion/non-fast-forward protection.
+Organization ruleset `18156473` follows `~DEFAULT_BRANCH`. It still requires one approving review while naming no required reviewer/team, with no code-owner or last-push approval requirement. Review-thread resolution, central required workflows, deletion protection, and non-fast-forward protection remain enabled. Self-approval and bot/model-as-human approval are forbidden.
 
-The bare approval-count requirement is structurally inconsistent with the declared solo-maintainer operating model when no eligible independent human exists. This is a central `.github` governance defect, not a Wardnet staffing/product defect. Self-approval and bot/model-as-human approval remain forbidden. `.github#772` owns the minimum repair while deterministic workflow/security/coverage/package/SBOM/provenance/thread/branch-integrity controls stay enforced.
+The bare approval count is structurally inconsistent with the declared solo-maintainer model. This is a central governance defect rather than a Wardnet staffing requirement. `.github#1644`, referencing #772 and related governance work, is the current owner-plane reconciliation candidate. Its source policy removes the impossible approval count while preserving deterministic workflow/security/coverage/SBOM/provenance/thread/branch-integrity controls. Source integration alone does not mutate live rulesets; the owner-plane apply remains separately privileged and must be proven from live settings before Wardnet treats the rule as repaired.
 
-Runner/control-plane work is split by ownership. Clean replacement PR #153 pins every repository-owned CI/Fuzz/Scorecard `runs-on:` declaration to explicit `ubuntu-24.04` and rejects drift with a contract test. Its exact head `b663f9d200e5f385c7dd067d074940a02836c68e` has terminal-success repository CI/Fuzz/Security/SAST on the same SHA, proving the explicit hosted label works. Current pre-checkout starvation nevertheless also affects `ubuntu-latest` candidates: #155, #136, and the freshly repaired #144 replacement run all currently show required jobs with `runner_id=0`, no runner identity, and zero executed steps. `.github#712` remains the central acquisition/control-plane owner. Closed PR #149 is superseded branch-history evidence only.
+Runner acquisition is also a central control-plane concern. PR #153 pins repository-owned CI/Fuzz/Scorecard runner declarations to explicit `ubuntu-24.04` and permanently rejects floating `ubuntu-latest`. Exact head `b663f9d200e5f385c7dd067d074940a02836c68e` has already completed repository CI/Fuzz/Security/SAST successfully on that same source, proving the full hosted image is executable when admitted. Later exact-head waves across Wardnet, Context Graph Contracts, and EA Core have again remained pre-checkout with `runner_id=0`. `.github#712` owns that acquisition/capacity/policy-routing defect.
 
-Exact-head central review failures are tracked separately from source findings. Historical Noema evidence on clean runner head `b663f9d…` acquired `ubuntu-24.04`, completed exact-head/app-token/orchestrator preflight, then failed because the initial model verdict was malformed JSON and bounded repair exceeded its 900-second absolute deadline; `.github#1637` owns typed fail-closed handling for that class. Historical Strix evidence on auth source head `e6f05d7…` materialized the exact head and passed gateway preflight but all bounded scanner LLM attempts were provider-unavailable, so no authoritative scan evidence existed; `.github#891` owns the scanner/readiness recovery contract. Wardnet must not mutate clean product source to satisfy either infrastructure failure.
-
-A prior base-retarget incident showed that enabled auto-merge can immediately integrate a child into a temporary feature-branch base. Recovery was non-destructive: #153 is now the clean runner root; #156 preserves support-bundle work, #157 trusted-proxy work, and #158 readiness-metrics work as clean Draft descendants. Future retargets must inspect auto-merge state first and must not use an unprotected feature branch as final integration truth.
+GitHub's current hosted-runner contract does not make `ubuntu-slim` an equivalent workaround: it is an unprivileged 1-vCPU/5-GB container runner with a 15-minute job ceiling intended for lightweight automation rather than typical heavyweight CI/CD. A successful slim job is therefore an admission canary, not justification to downgrade Wardnet CI/Fuzz/CodeQL/coverage workloads.
 
 ## Context Fabric live boundary
 
-Fresh repository metadata still reports `develop` as the default branch for both `ContextualWisdomLab/context-graph-contracts` and `ContextualWisdomLab/enterprise-architecture-core`. Both currently expose zero GitHub Releases. Context Graph Contracts PR #20 is non-terminal at `475ce14185db697940e8219c3cda7f24d66f3ed7`; PR #21 remains a Draft child at `36d7b0fd8b4ba68f65a0d73565a3a3ddecdb2d67` on obsolete parent ancestry and carries the structured Context Assertion/CloudEvent envelope repair. Enterprise Architecture Core PR #39 is a non-terminal Draft at `c3879f172d97e2d814ff94d664be0a797e2228be`; PR #40 remains a Draft child at `b3ec93a42528ab0defc0116ac4695d669298240f` on obsolete #39 ancestry. The accepted protected-`main` transition and solo-maintainer ruleset repair are Context Fabric/central `.github` owner work, not Wardnet source mutations.
+Fresh metadata still reports `develop` as the default branch for both `ContextualWisdomLab/context-graph-contracts` and `ContextualWisdomLab/enterprise-architecture-core`. Both expose zero GitHub Releases. The accepted protected-`main` transition remains central `.github`/Context Fabric owner work rather than a Wardnet source mutation.
 
-Quarantine Sandbox Runtime also exposes no GitHub Release. Foundation PR #1 remains Draft at `57a54dbe3a01f623c0e47301af2fd36568de21e7`; caller-scoped application-service child #6 is a coherent descendant at `949b0f71a1e022eb0ea48df93ffa7bbbfd1eb259`. Effective-isolation/release/command-execution work remains in the Draft stack and current execution evidence is non-terminal. EgressWeave currently exposes no GitHub Release either. Wardnet issue #38 therefore remains release-gated rather than consuming sibling source.
+Context Graph Contracts #20 is Draft at exact `475ce14185db697940e8219c3cda7f24d66f3ed7`. Its current required jobs are non-terminal in the runner-acquisition class. Child #21 is Draft at exact `239a73d5f1a18b10ad317fdd51567b7fa040f570` on obsolete #20 ancestry and contains the structured Context Assertion/CloudEvent envelope and authority/conformance repair. No immutable CGC release exists, so Wardnet must not bind production behavior to either open PR head.
 
-Wardnet must not consume an open Context Fabric, quarantine, or EgressWeave PR head as a production dependency. Deployable application/service/API/runtime technology identity, lifecycle, ownership, risk, remediation, and transformation may be projected only through a released compatible Context Assertion/CloudEvent/API contract with provenance. Individual security findings and artifact verdicts remain Wardnet security evidence.
+Enterprise Architecture Core #39 is Draft at exact `c3879f172d97e2d814ff94d664be0a797e2228be` with current runner-acquisition evidence non-terminal. Child #40 is Draft at exact `b3ec93a42528ab0defc0116ac4695d669298240f` on obsolete #39 ancestry. #40 already preserves the required Wardnet/quarantine authority boundary: `contextual-orchestrator -> quarantine application-service lease`, `Wardnet -> quarantine artifact-analysis evidence`, no malware verdict or artifact risk score as authoritative EA fact, and no direct database/source-copy integration. It must remain release-gated until a compatible immutable CGC package/provenance contract exists.
+
+Quarantine Sandbox Runtime and EgressWeave also expose no inspected immutable GitHub release usable as a production dependency. Open sibling branches are evidence, not release authority.
 
 ## Live delivery queue
 
@@ -38,73 +38,70 @@ Fresh inventory contains 24 open PRs:
 
 `#77, #88, #90, #93, #95, #111, #112, #114, #115, #127, #129, #130, #134, #135, #136, #140, #141, #144, #153, #154, #155, #156, #157, #158`.
 
-PR #137 is protected-main truth. Closed/superseded predecessor checks, reviews, approvals, and artifacts do not transfer to replacements or moved heads.
+PR #137 is protected-main truth. Predecessor checks, reviews, approvals, and artifacts do not transfer after head/base movement.
 
-| PR | Exact head | Classification | Current evidence / next action |
+| PR | Exact head | State | Current decision |
 | --- | --- | --- | --- |
-| #129 Agent Artifact Admission | `79e8da09ef571f05a2eb7ac71aa80ed61c3b81b0` | Draft | Admission rejects alternate install/trust roots across uv, Cargo, pip attached short-option forms and contradictory npm script-suppression forms. The downstream executor/quarantine path remains responsible for independently verifying retrieved bytes or equivalent provenance before installation. Current repository gates are queued/non-passing and current-head review evidence must be reacquired before Ready. |
-| #136 Network-Egress | `3e66c260bfcd09c7dc98dc5d1e931583f8379093` | Ready, source defect remains | Shared URL/resolved-address validation, DNS pinning, no ambient proxy/redirect, bounded client cache, hop-by-hop response filtering, and architecture fitness are present. One verified defect remains: `validated_outbound_http_client` performs manual DNS resolution before the request timeout begins, so a stalled resolver can exceed the intended operation budget. It requires a deterministic bounded-resolution/deadline RED→GREEN repair before merge. Exact-head CI/Fuzz/Security/SAST are currently pre-checkout/queued; #155 must also become protected truth before final integration. |
-| #140 Runtime Configuration | `43d1b6e9122d8bb5cb882f8fc6e066c63b39ae45` | Ready | Security `33556345110` and SAST `33556345038` are GREEN; current CI/Fuzz are queued. Runtime Configuration remains a supporting bootstrap boundary distinct from secret-bearing Credential Registry. |
-| #144 Kubernetes manifest path + public docs | `8fd2461c6a1cadcf27f81f7fe29da62691eee7ff` | Ready, main-based | Repository-path migration preserves #137's hardened Secret contract and live Kubernetes identities. Predecessor CI acquired Ubuntu 24.04 and failed only `cargo fmt --check`; exact rustfmt output was applied in `4ab1e8a…` and `8fd2461…` without behavior change. Replacement CI `33607380492`, Security `33607380471`, SAST `33607380572`, and Fuzz `33607380609` are queued/pending, with CI currently pre-checkout at `runner_id=0`. Reacquire all exact-head evidence before merge. |
-| #153 explicit hosted runner | `b663f9d200e5f385c7dd067d074940a02836c68e` | Ready, clean stack root | Repository-owned exact-SHA CI/Fuzz/Security/SAST have previously completed GREEN on this unchanged source. Current replacement-PR repository/central evidence is again queued/non-passing; `.github#712`, `.github#1637`, and `.github#772` own the remaining control-plane/governance classes. |
-| #155 fail-closed management auth | `e6f05d77858e91c176cff25c4b11e790bc5dcdd1` | Ready, clean main-based replacement | Restores the exact reviewed auth delta to protected-main lineage after predecessor #138 was absorbed into a temporary feature branch. Prior same-source repository CI/Fuzz/Security/SAST are GREEN, but the new #155 workflow wave and central review/security/governance evidence remain non-terminal; its current repository CI is pre-checkout with `runner_id=0`. Devin's current comments are informational rather than source defects. |
-| #156 support-bundle operability evidence | `76037b8ae206ace8dab0e6622dfc9fc88c57deb3` | Draft, stacked on #153 | Clean replacement for contaminated #150. After #153 reaches protected `main`, retarget/reconstruct on fresh main and regenerate all base-sensitive evidence. |
-| #157 trusted proxy attribution | `65a2b7fbf2827f69ae1aa288696b6c5630af28c4` | Draft, stacked on #153 | Clean replacement for contaminated #151; forwarded identity is trusted only from configured proxy CIDRs. Revalidate after parent integration. |
-| #158 readiness metrics | `387a447f856093d02116dfadcf2c4a4a63c6d3ba` | Draft, stacked on #153 | Clean replacement for contaminated #152; readiness gauges reuse existing authority and require fresh evidence after parent integration. |
+| #129 Agent Artifact Admission | `1ea226df6ed871c64a0a749c7a4e4f5a6363e599` | Draft | Admission now also blocks npm workspace selectors (`--workspace`, `-w`, enabled `--workspaces`) in addition to previously covered uv/Cargo/pip/npm bypass classes. Current exact-head repository gates remain queued/non-passing; fresh review is required before Ready. Retrieval-byte/provenance verification and hostile execution stay executor/quarantine-owned. |
+| #136 Network-Egress | `3e66c260bfcd09c7dc98dc5d1e931583f8379093` | Ready, source defect | Shared structural URL validation, resolved-address validation, DNS pinning, no ambient proxy/redirect, bounded client cache, response hop filtering, and architecture fitness are present. A valid review finding remains: manual `lookup_host` occurs before request timeout accounting, so slow DNS can exceed the intended feed/TAXII/KEV operation budget. Repair with deterministic bounded-resolution/deadline RED→GREEN before merge. #155 must also become protected truth before final integration. |
+| #140 Runtime Configuration | `43d1b6e9122d8bb5cb882f8fc6e066c63b39ae45` | Ready | Security/SAST are GREEN on the current head; CI/Fuzz remain non-terminal. Runtime Configuration remains a supporting bootstrap boundary; Credential Registry remains secret authority. |
+| #144 Kubernetes path/public docs | `9616b94ac1ecf70038071a8c9395348694e6312c` | Ready | Hardened manifest source moves to `deploy/kubernetes/wardnet.yaml` without renaming live Kubernetes resources. Review-driven path/link regressions are resolved. Current CI `33616605266`, Security `33616605314`, SAST `33616605253`, and Fuzz `33616605334` remain queued/non-passing. |
+| #153 explicit hosted runner | `b663f9d200e5f385c7dd067d074940a02836c68e` | Ready, clean stack root | Same-source repository CI/Fuzz/Security/SAST have terminal GREEN evidence. Current central runner/review/governance evidence is non-terminal. `ubuntu-slim` is only an acquisition canary, not a heavyweight-workload replacement. |
+| #155 fail-closed management auth | `e6f05d77858e91c176cff25c4b11e790bc5dcdd1` | Ready, main-based | Non-loopback startup fails closed without write-capable admin credentials; current review threads are resolved. Same-source repository CI/Fuzz/Security/SAST have terminal GREEN evidence, while the latest replacement wave/central gates remain non-terminal. Issue #78 closes only after protected merge. |
+| #156 operability evidence | `76037b8ae206ace8dab0e6622dfc9fc88c57deb3` | Draft, child of #153 | Preserve support-bundle/readiness evidence; reconstruct/restack on fresh protected main after #153 integrates, then regenerate all base-sensitive evidence. |
+| #157 trusted proxy | `65a2b7fbf2827f69ae1aa288696b6c5630af28c4` | Draft, child of #153 | Preserve fail-closed forwarded-IP attribution. Reconstruct/restack after #153 protected merge. |
+| #158 readiness metrics | `387a447f856093d02116dfadcf2c4a4a63c6d3ba` | Draft, child of #153 | Preserve readiness gauges using existing readiness/KPI authority. Reconstruct/restack after #153 protected merge. |
 
-`queued`, `pending`, `skipped`, `cancelled`, `absent`, stale, predecessor-head, status-only, model-only, or synthetic evidence is non-passing. Do not transfer evidence after head/base movement.
+Auto-merge has been enabled on #144, #153, and #155, but none is protected truth until GitHub actually integrates the unchanged exact head through the live ruleset. Auto-merge state never transfers evidence or authorizes a weaker base.
 
 ## Open issues and production order
 
-Fresh inventory contains 17 open issues: `#11, #38, #74, #75, #78, #79, #80, #81, #82, #83, #84, #85, #86, #87, #89, #128, #139`.
+Fresh issue inventory remains `#11, #38, #74, #75, #78, #79, #80, #81, #82, #83, #84, #85, #86, #87, #89, #128, #139`.
 
-1. **Immediate exposure controls:** #78 fail-closed management auth through clean PR #155, #79 fail-closed destination policy through #136 plus its remaining allowlist/evidence work and DNS-deadline defect, #11 real attack-path CI, and #75 repository-path migration through #144.
-2. **Security admission:** #128 Agent Artifact Admission through #129. Hostile execution remains quarantine-owned.
-3. **Durable authority and effects:** #80 PostgreSQL production authority/tenant isolation, then #81 transactional outbox and leased workers.
-4. **Identity and overload:** #82 Keyverse-backed identity/authorization/approval and #83 distributed/global admission. #157 is only the trusted-network-identity slice and remains parent-gated on #153.
-5. **Proven security engines:** #86 Coraza/CRS and Suricata production enforcement with detection/false-positive evidence.
-6. **Immutable delivery and operation:** #84 signed/SBOM/provenance release promotion/rollback, then #85 OpenTelemetry/SLO/incident/restore evidence.
-7. **Supporting correctness:** #74 deterministic persistence fault testing, #77 pinned compiler, #139 coherent runtime configuration, #75 manifest filename migration, and #153 deterministic hosted-runner selection.
+1. Immediate exposure controls: #78 through #155, #79 through #136 plus remaining allowlist/evidence/deadline work, #11 real attack-path CI, and #75 through #144.
+2. Security admission: #128 through #129, without absorbing quarantine execution authority.
+3. Durable authority/effects: #80 PostgreSQL production authority and tenant isolation, then #81 transactional outbox/leased workers.
+4. Identity/overload: #82 Keyverse-backed authorization/approval and #83 distributed/global admission. #157 is only the trusted-network attribution slice.
+5. Proven security engines: #86 Coraza/CRS and Suricata with detection and false-positive evidence.
+6. Immutable delivery/operation: #84 signed artifact/SBOM/provenance/rollback, then #85 telemetry/SLO/incident/restore evidence.
+7. Supporting correctness: #74 deterministic persistence fault testing, #77 pinned compiler, #139 coherent runtime configuration, and #153 deterministic hosted-runner selection.
 
 Close an issue only after its owning protected merge satisfies the issue acceptance contract on current evidence.
 
 ## DDD and implementation gaps
 
-Agent Artifact Admission has a responsibility-aligned crate under `crates/agent-artifact-admission` on #129 with domain-policy independence tests. The candidate now treats package-manager destination selection, attached short-option capability spellings, script-suppression ambiguity, and alternate Cargo/uv trust roots as admitted capabilities. Actual artifact retrieval verification, filesystem/mount/process isolation, and hostile execution remain downstream executor/quarantine responsibilities.
+Agent Artifact Admission has a responsibility-aligned crate and domain-policy independence tests. Artifact retrieval verification, filesystem/mount/process isolation, and hostile execution remain downstream executor/quarantine responsibilities.
 
-The legacy gateway remains concentrated in root `src/lib.rs`. File size alone does not justify a deployable split, but repeated changes to client attribution, outbound policy, runtime configuration, proxying, SOC integration, rate limiting, support evidence, and management APIs show genuine responsibility-convergence pressure. Structural work should add dependency/ownership fitness first and prefer a modular monolith until transaction, deployment, scaling, or reuse evidence justifies another deployable.
+The legacy gateway remains concentrated in root `src/lib.rs`. File size alone is not a decomposition criterion, but repeated change pressure across client attribution, outbound policy, runtime configuration, proxying, SOC integration, rate limiting, support evidence, and management APIs is a real modularity signal. Add dependency/ownership fitness before structural movement and prefer a modular monolith until transaction, deployment, scaling, or reuse evidence justifies another deployable.
 
-#140 is the coherent Runtime Configuration migration. `CredentialRegistry` remains the secret-bearing bootstrap owner. New direct process-environment reads outside approved bootstrap adapters are architecture defects.
+Network-Egress remains incomplete after #136. Besides the resolver-deadline defect, #79 still requires versioned hostname/suffix/IP/CIDR/scheme/port allowlists, deterministic deny-overrides precedence, connector parity, minimized policy-decision evidence, and operator migration/rollback/diagnostics.
 
-Network-Egress remains incomplete after #136. In addition to the verified DNS-resolution deadline defect, issue #79 still requires versioned hostname/suffix/IP/CIDR/scheme/port allowlists, deterministic deny-overrides precedence, connector parity, minimized decision evidence, and operator migration/rollback/diagnostics.
-
-PR #95 is not an acceptable production integration vehicle. It is a large diverged cross-context branch combining Coraza, PostgreSQL, outbox, egress, and release responsibilities. Preserve its unique tests/evidence while reconstructing bounded #80/#81/#86 successor work rather than merging a god-PR.
+PR #95 remains too broad to serve as the production integration vehicle. Preserve its unique PostgreSQL/outbox/Coraza tests and evidence while reconstructing bounded #80/#81/#86 successor work instead of merging the cross-context god-PR.
 
 ## Research and standards grounding
 
-External standards constrain design and verification; they do not prove Wardnet currently implements every control.
+Standards constrain implementation and evidence; they do not prove controls are shipped.
 
 - Rose, S., Borchert, O., Mitchell, S., & Connelly, S. (2020). *Zero trust architecture* (NIST SP 800-207). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-207.
 - Souppaya, M., Scarfone, K., & Dodson, D. (2022). *Secure Software Development Framework (SSDF) version 1.1* (NIST SP 800-218). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218.
 - OWASP Foundation. (2025). *Application Security Verification Standard 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/.
 - Soldani, J., Tamburri, D. A., & van den Heuvel, W.-J. (2018). The pains and gains of microservices: A systematic grey literature review. *Journal of Systems and Software, 146*, 215–232. https://doi.org/10.1016/j.jss.2018.09.082.
 
-The microservices evidence is used narrowly to avoid decomposition-by-file-size: split deployables only when responsibility, scaling, transaction, isolation, or reuse evidence justifies the operating cost.
+The microservices evidence is used only to resist decomposition-by-file-size: deployable boundaries require responsibility, scaling, transaction, isolation, or reuse evidence that justifies their operating cost.
 
-## Quality, security, and release gates
+## Quality and release gates
 
-Wardnet-owned production code targets 100% statement and branch coverage and complete public rustdoc/docstrings. Security-critical changes require hostile/bypass/replay/race/DoS/network/cleanup tests and current-source verification of review findings. Coverage exclusions, source rewriting, skipped required paths, or green statuses bound to another revision are not acceptable evidence.
+Wardnet-owned production code targets 100% statement/branch coverage and complete public rustdoc/docstrings. Security-critical changes require realistic hostile/bypass/replay/race/DoS/network/cleanup tests and current-source verification of review findings. Coverage exclusions, source rewriting, skipped required paths, or statuses bound to another revision are not evidence.
 
-A release is not authorized. Wardnet, Quarantine Sandbox Runtime, EgressWeave, `context-graph-contracts`, and `enterprise-architecture-core` expose no GitHub Release at this snapshot, and Wardnet production gate #87 remains open. Release requires one exact integrated protected head with CI/security/coverage/docstrings/package/SBOM/provenance/reproducibility/review/migration/rollback/recovery/operability evidence and immutable artifact identity.
+No release is authorized. Wardnet, Context Graph Contracts, and EA Core expose no GitHub Release at this snapshot, and production release gate #87 remains open. Release requires one exact integrated protected head with CI/security/coverage/docstrings/package/SBOM/provenance/reproducibility/review/migration/rollback/recovery/operability evidence and immutable artifact identity.
 
 ## Next execution order
 
-1. Drive clean runner root #153 through current central evidence while `.github#712`, `.github#1637`, and `.github#772` repair acquisition/model-review/governance defects; keep scanner availability/evidence handling in `.github#891`.
-2. Keep independent work moving while #153 waits. Preserve #156/#157/#158 on clean #153 without predecessor-evidence reuse.
-3. Repair #136's DNS-resolution deadline defect test-first, then revalidate it after #155 becomes protected truth; keep #144 main-based and continue its fresh exact-head gates.
-4. Integrate immediate security root #155 as exact gates become valid.
-5. Finish #129 as one Agent Artifact Admission bounded context without absorbing quarantine or Agent/LLM orchestration.
-6. Drain clean supporting work such as #77, #90, #93, #134, #135, #140, #141, and #154 when exact evidence permits.
-7. Reconstruct #95's still-valuable PostgreSQL/outbox/Coraza evidence into bounded #80/#81/#86 lanes.
-8. Continue #82/#83/#84/#85 only after their declared dependencies become protected truth.
-9. Refresh this baseline whenever protected truth, queue topology, release state, or responsibility boundaries materially change.
+1. Continue #153/#155/#144 through current exact-head gates while `.github#712` repairs runner acquisition and `.github#1644`/related owner work repairs solo-maintainer ruleset semantics.
+2. Preserve #156/#157/#158 until #153 is protected, then non-force reconstruct/restack each child on fresh main and reacquire all evidence.
+3. Repair #136's DNS-resolution deadline defect test-first; after #155 becomes protected truth, refresh #136 against live main and revalidate.
+4. Finish #129 as one Agent Artifact Admission bounded context without absorbing quarantine or Agent/LLM orchestration.
+5. Drain clean supporting work (#77, #90, #93, #111, #134, #135, #140, #141, #154) only on unchanged exact heads with live evidence.
+6. Reconstruct #95's valuable PostgreSQL/outbox/Coraza evidence into bounded #80/#81/#86 lanes.
+7. Continue #82/#83/#84/#85 only after their declared prerequisites become protected/released truth.
+8. Refresh this baseline whenever protected truth, queue topology, release state, or responsibility boundaries materially change.
