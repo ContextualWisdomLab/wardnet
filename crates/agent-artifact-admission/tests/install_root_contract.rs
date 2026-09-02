@@ -220,6 +220,159 @@ fn npm_workspace_selection_cannot_expand_the_broker_selected_install_scope() {
 }
 
 #[test]
+fn undeclared_artifact_operands_cannot_hitchhike_on_approved_installs() {
+    let extra_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let cases = [
+        install_case(
+            "npm",
+            "npm",
+            "@cwl/example",
+            "@cwl/example@1.2.3",
+            "https://registry.npmjs.org",
+            &[
+                "install",
+                "@cwl/example@1.2.3",
+                "--ignore-scripts",
+                "@attacker/extra@9.9.9",
+            ],
+        ),
+        install_case(
+            "pnpm",
+            "npm",
+            "@cwl/example",
+            "@cwl/example@1.2.3",
+            "https://registry.npmjs.org",
+            &[
+                "add",
+                "@cwl/example@1.2.3",
+                "--ignore-scripts",
+                "@attacker/extra@9.9.9",
+            ],
+        ),
+        install_case(
+            "yarn",
+            "npm",
+            "@cwl/example",
+            "@cwl/example@1.2.3",
+            "https://registry.npmjs.org",
+            &[
+                "add",
+                "@cwl/example@1.2.3",
+                "--ignore-scripts",
+                "@attacker/extra@9.9.9",
+            ],
+        ),
+        install_case(
+            "bun",
+            "npm",
+            "@cwl/example",
+            "@cwl/example@1.2.3",
+            "https://registry.npmjs.org",
+            &[
+                "add",
+                "@cwl/example@1.2.3",
+                "--ignore-scripts",
+                "@attacker/extra@9.9.9",
+            ],
+        ),
+        install_case(
+            "pip",
+            "pypi",
+            "cwl-example",
+            "cwl-example==1.2.3",
+            "https://pypi.org/simple",
+            &[
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "attacker-extra==9.9.9",
+            ],
+        ),
+        install_case(
+            "pip3",
+            "pypi",
+            "cwl-example",
+            "cwl-example==1.2.3",
+            "https://pypi.org/simple",
+            &[
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "attacker-extra==9.9.9",
+            ],
+        ),
+        install_case(
+            "uv",
+            "pypi",
+            "cwl-example",
+            "cwl-example==1.2.3",
+            "https://pypi.org/simple",
+            &[
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "attacker-extra==9.9.9",
+            ],
+        ),
+        install_case(
+            "cargo",
+            "cargo",
+            "cwl-example",
+            "cwl-example@1.2.3",
+            "https://crates.io",
+            &[
+                "install",
+                "cwl-example@1.2.3",
+                "--locked",
+                "attacker-extra@9.9.9",
+            ],
+        ),
+        install_case(
+            "docker",
+            "oci",
+            "ghcr.io/contextualwisdomlab/example",
+            "ghcr.io/contextualwisdomlab/example@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "https://ghcr.io",
+            &[
+                "pull",
+                "ghcr.io/contextualwisdomlab/example@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "ghcr.io/attacker/extra@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            ],
+        ),
+        install_case(
+            "podman",
+            "oci",
+            "ghcr.io/contextualwisdomlab/example",
+            "ghcr.io/contextualwisdomlab/example@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "https://ghcr.io",
+            &[
+                "pull",
+                "ghcr.io/contextualwisdomlab/example@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "ghcr.io/attacker/extra@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            ],
+        ),
+    ];
+
+    assert_eq!(extra_digest.len(), 64);
+    for (policy, intent, label) in cases {
+        let decision = admission_decision(&policy, &intent);
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{label} must not execute an undeclared positional artifact"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "artifact_not_approved"),
+            "{label} must produce the stable artifact_not_approved reason"
+        );
+    }
+}
+
+#[test]
 fn container_pull_is_not_misclassified_as_an_install_root_escape() {
     let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let artifact_argument = format!("ghcr.io/contextualwisdomlab/example@sha256:{digest}");
