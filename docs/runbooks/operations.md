@@ -64,13 +64,17 @@ TRUSTED_PROXY_CIDRS=192.0.2.0/24,2001:db8::/32 \
 cargo run
 ```
 
-When a peer is in that allowlist, Wardnet honors the first `X-Forwarded-For`
-chain element that is not itself another trusted proxy, scanning the chain from
-right to left, and falls back to `X-Real-IP` only from that trusted proxy
-context. Trusted ingress proxies must normalize inbound forwarding headers
-before appending their own hop so attacker-supplied leading values cannot
-survive unchanged. If no trusted proxy range is configured, spoofed forwarded
-headers are ignored.
+When a peer is in that allowlist, Wardnet parses the complete
+`X-Forwarded-For` chain before selecting client identity. A syntactically valid
+chain is scanned from right to left and the first address that is not itself a
+trusted proxy becomes the client identity. If the header is absent, or a valid
+chain contains no untrusted hop, Wardnet may use `X-Real-IP` from that same
+trusted-proxy context and otherwise uses the direct peer. If **any**
+`X-Forwarded-For` hop is empty or unparsable, the whole chain is invalid:
+Wardnet falls back directly to the peer and does **not** consult `X-Real-IP`.
+Trusted ingress proxies should normalize inbound forwarding headers before
+appending their own hop. If no trusted proxy range is configured, forwarded
+headers are ignored entirely.
 
 Operational and research grounding:
 
