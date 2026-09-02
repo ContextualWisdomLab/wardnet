@@ -19,6 +19,7 @@ Verified 2026-09-03. This note records the primary sources that justify the admi
 | Reject Cargo source, install-root and inline configuration overrides | Cargo documents `--git`, `--path`, `--registry`, and `--index` as package-source selectors, `--root`/`install.root` as installation-root authorities, and `--config KEY=VALUE or PATH` as a command-line configuration override | `requests_alternate_trust_root`, `requests_alternate_install_root`, `cargo_source_selection_cannot_override_the_approved_registry`, and `cargo_inline_configuration_cannot_override_install_root` |
 | Reject npm workspace scope overrides | npm documents `--workspace` as selecting named or path-addressed workspaces and `--workspaces` as running the command in all configured workspaces; install commands respect those selectors | `requests_alternate_install_root`; `npm_workspace_selection_cannot_expand_the_broker_selected_install_scope` |
 | Reject Yarn Classic workspace-root escape overrides | Yarn Classic documents `yarn add ... --ignore-workspace-root-check` / `-W` as allowing installation at the workspaces root, widening the broker-selected package scope | `requests_alternate_install_root`; `yarn_workspace_root_contract.rs` |
+| Reject Bun working-directory, workspace-filter and explicit-config overrides | Bun documents `--cwd` as changing the working directory, `--filter` / `-F` as selecting monorepo packages for `bun install`, and `--config` as selecting a `bunfig.toml`; Bun configuration can replace the default or scoped package registry | `requests_alternate_install_root`, `requests_alternate_trust_root`, and `bun_scope_escape_contract.rs` |
 | Require an unambiguous install-script suppression flag | npm documents `ignore-scripts` as a Boolean whose safe state is `true`; npm CLI Boolean options can be explicitly set back to false, so a contradictory argv must not satisfy admission merely because a safe token also appears | `has_unambiguous_boolean_safety_flag`; hostile `--ignore-scripts=false` and `--no-ignore-scripts` regressions |
 | Loopback-only v0.1 | minimizes exposed trust boundary until authenticated transport is owned by a separate deployment layer | `validate_service_config` and service bind validation |
 
@@ -68,6 +69,12 @@ npm also documents `ignore-scripts` as a Boolean configuration with default `fal
 
 Yarn Classic's `yarn add` reference documents `--ignore-workspace-root-check` and its `-W` alias as allowing a package to be installed at the workspaces root. Wardnet's artifact-admission policy treats the reviewed workspace scope as part of the authorization boundary, so a caller may not use either flag to widen a reviewed package installation from the broker-selected workspace to the root workspace. Both spellings therefore map to `alternate_install_root`. Wardnet does not attempt to infer a Yarn major version from argv; supporting a generic `yarn` executable means the admission boundary must remain safe for the documented Yarn Classic spelling unless a future versioned package-manager capability contract narrows that surface.
 
+### Bun working directory, workspace filters and configuration
+
+Bun's current `bun install` CLI reference exposes `--cwd` to select a working directory and `--config` to select a `bunfig.toml`. Bun's package-filter documentation states that `--filter`, with `-F` as an alias, selects packages by name or path pattern in a monorepo and is supported by `bun install`. These inputs can move an otherwise approved package installation into a caller-selected workspace scope.
+
+A Bun configuration file is also security-relevant to artifact identity. Bun's registry documentation allows `install.registry` to replace the default package registry and `install.scopes` to configure per-scope private registries. Wardnet therefore rejects caller-supplied Bun `--config` rather than allowing submitted argv to select a second registry authority outside the reviewed artifact coordinate. It rejects `--cwd`, `--filter`, and `-F` as `alternate_install_root` because the broker-selected workspace remains part of admission authority. This does not claim control of Bun's ambient process environment; the execution broker/quarantine boundary must establish a controlled environment before executing an admitted intent.
+
 ## APA 7 references
 
 Astral Software, Inc. (2026). *Package indexes: uv documentation.* https://docs.astral.sh/uv/configuration/indexes/
@@ -75,6 +82,10 @@ Astral Software, Inc. (2026). *Package indexes: uv documentation.* https://docs.
 Astral Software, Inc. (2026). *Using environments: uv documentation.* https://docs.astral.sh/uv/pip/environments/
 
 Booth, H., Souppaya, M., Vassilev, A., Ogata, M., Stanley, M., & Scarfone, K. (2024). *Secure software development practices for generative AI and dual-use foundation models: An SSDF community profile (NIST SP 800-218A).* National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218A
+
+Bun. (n.d.). *bun install.* Retrieved September 3, 2026, from https://bun.sh/docs/pm/cli/install
+
+Bun. (n.d.). *Scopes and registries.* Retrieved September 3, 2026, from https://bun.sh/docs/pm/scopes-registries
 
 National Institute of Standards and Technology. (2022). *Secure Software Development Framework (SSDF) Version 1.1: Recommendations for Mitigating the Risk of Software Vulnerabilities (NIST SP 800-218).* https://doi.org/10.6028/NIST.SP.800-218
 
