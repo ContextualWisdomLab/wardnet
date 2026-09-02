@@ -572,7 +572,7 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                     "-p",
                 ])
         }
-        "cargo" => contains_flag(&["--root", "--config"]),
+        "cargo" => contains_flag(&["--root", "--config", "--target-dir"]),
         _ => false,
     }
 }
