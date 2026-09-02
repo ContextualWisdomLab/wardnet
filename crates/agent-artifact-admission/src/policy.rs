@@ -414,10 +414,18 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
 }
 
 fn matches_cli_flag(argument: &str, flag: &str) -> bool {
-    argument == flag
-        || argument
-            .strip_prefix(flag)
-            .is_some_and(|suffix| suffix.starts_with('='))
+    if argument == flag {
+        return true;
+    }
+    let Some(suffix) = argument.strip_prefix(flag) else {
+        return false;
+    };
+    suffix.starts_with('=') || (is_short_cli_flag(flag) && !suffix.is_empty())
+}
+
+fn is_short_cli_flag(flag: &str) -> bool {
+    let bytes = flag.as_bytes();
+    bytes.len() == 2 && bytes[0] == b'-' && bytes[1] != b'-'
 }
 
 fn push_reason(reason_codes: &mut Vec<ReasonCode>, reason: ReasonCode) {
