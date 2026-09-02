@@ -25,24 +25,28 @@ fn approved_npm_policy() -> AdmissionPolicy {
 }
 
 #[test]
-fn npm_boolean_override_cannot_reenable_install_scripts() {
+fn npm_boolean_overrides_cannot_reenable_install_scripts() {
     let policy = approved_npm_policy();
-    let mut intent = InstallIntent::unowned_llms_package_for_test();
-    intent.argv = vec![
-        "npm".to_string(),
-        "install".to_string(),
-        "@unowned/example@1.2.3".to_string(),
-        "--ignore-scripts".to_string(),
-        "--ignore-scripts=false".to_string(),
-    ];
 
-    let decision = admission_decision(&policy, &intent);
+    for conflicting_flag in ["--ignore-scripts=false", "--no-ignore-scripts"] {
+        let mut intent = InstallIntent::unowned_llms_package_for_test();
+        intent.argv = vec![
+            "npm".to_string(),
+            "install".to_string(),
+            "@unowned/example@1.2.3".to_string(),
+            "--ignore-scripts".to_string(),
+            conflicting_flag.to_string(),
+        ];
 
-    assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(
-        decision
-            .reason_codes
-            .iter()
-            .any(|reason| reason.as_str() == "missing_safety_flag")
-    );
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block, "{conflicting_flag}");
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "missing_safety_flag"),
+            "{conflicting_flag}"
+        );
+    }
 }
