@@ -369,6 +369,8 @@ fn requests_alternate_trust_root(arguments: &[String]) -> bool {
     const FORBIDDEN_FLAGS: &[&str] = &[
         "--extra-index-url",
         "--index-url",
+        "--index",
+        "--default-index",
         "--trusted-host",
         "--find-links",
         "--registry",
@@ -406,9 +408,18 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                 && arguments
                     .get(1)
                     .is_some_and(|argument| argument == "install")
-                && contains_flag(&["--user", "--target", "-t", "--root", "--prefix"])
+                && contains_flag(&[
+                    "--user",
+                    "--target",
+                    "-t",
+                    "--root",
+                    "--prefix",
+                    "--system",
+                    "--python",
+                    "-p",
+                ])
         }
-        "cargo" => contains_flag(&["--root"]),
+        "cargo" => contains_flag(&["--root", "--config"]),
         _ => false,
     }
 }
