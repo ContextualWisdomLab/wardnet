@@ -221,7 +221,6 @@ fn npm_workspace_selection_cannot_expand_the_broker_selected_install_scope() {
 
 #[test]
 fn undeclared_artifact_operands_cannot_hitchhike_on_approved_installs() {
-    let extra_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     let cases = [
         install_case(
             "npm",
@@ -354,7 +353,6 @@ fn undeclared_artifact_operands_cannot_hitchhike_on_approved_installs() {
         ),
     ];
 
-    assert_eq!(extra_digest.len(), 64);
     for (policy, intent, label) in cases {
         let decision = admission_decision(&policy, &intent);
         assert_eq!(
