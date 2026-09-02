@@ -58,13 +58,41 @@ fn outbound_http_client_construction_stays_behind_the_shared_fail_closed_builder
 fn represented_outbound_surfaces_revalidate_destinations_before_network_io() {
     let source = production_lib_source();
     let mediated_surfaces = [
-        ("async fn clearfolio_submit(", "async fn clearfolio_status(", "clearfolio_submit"),
-        ("async fn clearfolio_status(", "async fn soc_analyze(", "clearfolio_status"),
-        ("async fn soc_analyze(", "async fn create_route(", "soc_analyze"),
-        ("async fn fetch_taxii_objects(", "/// Ingest Suricata EVE", "fetch_taxii_objects"),
-        ("async fn fetch_text_feed(", "async fn import_phishing_database_feed(", "fetch_text_feed"),
-        ("async fn fetch_kev_catalog(", "/// Returns whether the parsed host is localhost", "fetch_kev_catalog"),
-        ("async fn proxy_request(", "pub fn upstream_target(", "proxy_request"),
+        (
+            "async fn clearfolio_submit(",
+            "async fn clearfolio_status(",
+            "clearfolio_submit",
+        ),
+        (
+            "async fn clearfolio_status(",
+            "async fn soc_analyze(",
+            "clearfolio_status",
+        ),
+        (
+            "async fn soc_analyze(",
+            "async fn create_route(",
+            "soc_analyze",
+        ),
+        (
+            "async fn fetch_taxii_objects(",
+            "/// Ingest Suricata EVE",
+            "fetch_taxii_objects",
+        ),
+        (
+            "async fn fetch_text_feed(",
+            "async fn import_phishing_database_feed(",
+            "fetch_text_feed",
+        ),
+        (
+            "async fn fetch_kev_catalog(",
+            "/// Returns whether the parsed host is localhost",
+            "fetch_kev_catalog",
+        ),
+        (
+            "async fn proxy_request(",
+            "pub fn upstream_target(",
+            "proxy_request",
+        ),
     ];
 
     for (start_marker, end_marker, function_name) in mediated_surfaces {
