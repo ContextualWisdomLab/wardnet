@@ -80,7 +80,7 @@ fn represented_outbound_surfaces_revalidate_destinations_before_network_io() {
         ),
         (
             "async fn fetch_text_feed(",
-            "async fn import_phishing_database_feed(",
+            "fn parse_phishing_domains(",
             "fetch_text_feed",
         ),
         (
