@@ -13,6 +13,7 @@ Verified 2026-09-02. This note records the primary sources that justify the admi
 | Do not infer publisher trust from registry presence | Sigstore verifies signing identity, certificate trust and Rekor inclusion; registry naming alone is not that evidence | exact reviewed owner is a local policy assertion, not an inferred identity |
 | Audit before returning allow; fail closed on audit outage | SSDF supply-chain controls require protected evidence and traceable release/security practices; append-before-response prevents an unaudited authorization gap | `append_before_response`; `audit_unavailable` => block/503 |
 | Structured argv; no shell command strings or runtime evaluation | SSDF least-functionality and secure-development principles; removes a command-injection interpretation layer | command-shape invariants in `policy.rs` |
+| Reject alternate pip package sources and install roots | pip 26.2.1 documents `-i`/`--index-url` and `-f`/`--find-links` as package-source controls and `-t`/`--target`, `--root`, and `--prefix` as installation-location controls | `requests_alternate_trust_root`, `requests_alternate_install_root`, and attached-short-option hostile regressions |
 | Require an unambiguous install-script suppression flag | npm documents `ignore-scripts` as a Boolean whose safe state is `true`; npm CLI Boolean options can be explicitly set back to false, so a contradictory argv must not satisfy admission merely because a safe token also appears | `has_unambiguous_boolean_safety_flag`; hostile `--ignore-scripts=false` and `--no-ignore-scripts` regressions |
 | Loopback-only v0.1 | minimizes exposed trust boundary until authenticated transport is owned by a separate deployment layer | `validate_service_config` and service bind validation |
 
@@ -36,6 +37,10 @@ The TUF specification page lists v1.0.33 as latest at verification time. TUF's m
 
 Sigstore's verification flow validates an artifact signature, the signing identity bound into the certificate, the certificate chain/trust root, and Rekor transparency-log evidence. That makes it suitable as a future external publisher/integrity authority. Wardnet must not reduce those semantics to a registry-owner string or silently copy Sigstore DTOs into the domain kernel.
 
+### pip command trust and installation roots
+
+The current stable pip 26.2.1 command reference defines `-i`/`--index-url` and `-f`/`--find-links` as inputs that change where package candidates are obtained. It also defines `-t`/`--target`, `--root`, and `--prefix` as controls that redirect where installation output is placed. Those are capability-expanding inputs relative to a reviewed artifact/registry/workspace intent, so Wardnet rejects them rather than silently widening an approved install. The parser recognizes both the documented short-option identity and attached short-option values; the latter is treated fail-closed because otherwise a short spelling can evade a policy that already forbids its long-form capability.
+
 ### npm command safety
 
 npm documents `ignore-scripts` as a Boolean configuration with default `false`; when true, lifecycle scripts from package manifests are not executed. Wardnet's admission contract therefore requires the explicit safe token and rejects contradictory Boolean spellings in the same argv rather than attempting to reproduce npm's full precedence parser. This is deliberately fail-closed: the controller proves that the submitted command cannot negate the required safety flag before execution, while the executor and quarantine runtime remain responsible for environment and filesystem isolation.
@@ -47,6 +52,8 @@ Booth, H., Souppaya, M., Vassilev, A., Ogata, M., Stanley, M., & Scarfone, K. (2
 National Institute of Standards and Technology. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities (NIST SP 800-218).* https://doi.org/10.6028/NIST.SP.800-218
 
 National Institute of Standards and Technology. (2026). *Secure Software Development Framework: Publications.* https://csrc.nist.gov/Projects/ssdf/publications
+
+pip developers. (2026). *pip install: pip documentation v26.2.1.* https://pip.pypa.io/en/stable/cli/pip_install/
 
 npm, Inc. (2026). *Config: ignore-scripts.* https://docs.npmjs.com/using-npm/config/
 
