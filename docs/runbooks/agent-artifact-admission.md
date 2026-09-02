@@ -54,6 +54,20 @@ Malformed structural input returns `400` after the minimized rejection fact has 
 
 An allow response is valid only after its audit record has been appended. If audit append, audit-record construction or the blocking audit task fails, Wardnet returns `503` with a block decision and the stable `audit_unavailable` reason. Operators must treat any `503` as fail-closed; never retry by bypassing Wardnet.
 
+### Execution-broker handoff
+
+An `allow` receipt authorizes only the exact reviewed install intent. It is not proof that bytes later returned by a registry are identical to the policy digest because this service does not download or hash packages.
+
+Before installation or execution, the downstream broker/quarantine path must:
+
+1. retain the exact admitted request/policy revision and refuse command or artifact substitution after admission;
+2. retrieve only from the admitted package source, without alternate registry/index/Git/path overrides;
+3. independently verify the retrieved artifact bytes against the admitted SHA-256 or consume equivalent verified provenance that binds the same bytes;
+4. execute only after byte identity and runtime isolation controls are both satisfied;
+5. treat any mismatch, missing verification evidence, or changed request as a new blocked/reauthorization condition rather than reusing the old allow receipt.
+
+Wardnet does not implement that hostile execution path. The quarantine runtime remains the reusable isolation owner; an execution broker that cannot prove byte identity must fail closed rather than treating the caller-supplied digest as verification evidence.
+
 ## Policy rollout
 
 Treat the reviewed policy as immutable deployment configuration in v0.1.
@@ -129,10 +143,10 @@ Before promoting a Wardnet build containing this context, require on the unchang
 - repository fuzz/property invariants where configured;
 - SAST/security/SBOM/provenance gates required by live GitHub policy;
 - zero valid unresolved review findings;
-- the independent approval required by the live ruleset.
+- the review/governance conditions required by the live ruleset.
 
 Queued, pending, skipped-required, cancelled, absent, stale or predecessor-head evidence is not release evidence.
 
 ## Ownership and escalation
 
-Agent Artifact Admission owns the install-intent policy and minimized admission receipt. Execution brokers own process sandboxing and the actual install/execute step. Sigstore, TUF and SLSA remain external evidence authorities. Central CWL `.github` owns organization-wide workflow/review controls. A failure in one of those owners must be repaired at that owner boundary rather than duplicated inside this crate.
+Agent Artifact Admission owns the install-intent policy and minimized admission receipt. Execution brokers own the actual install/execute step and must preserve the admitted identity; quarantine owns reusable hostile-workload isolation. The execution path must verify retrieved artifact bytes against the admitted digest (or equivalent verified provenance) before execution. Sigstore, TUF and SLSA remain external evidence authorities. Central CWL `.github` owns organization-wide workflow/review controls. A failure in one of those owners must be repaired at that owner boundary rather than duplicated inside this crate.
