@@ -17,7 +17,7 @@ fn bun_working_directory_and_filter_cannot_escape_the_broker_selected_scope() {
         let (policy, mut intent) = bun_install_case();
         intent
             .argv
-            .extend(scope_arguments.into_iter().map(str::to_string));
+            .extend(scope_arguments.into_iter().map(|argument| argument.to_string()));
 
         let decision = admission_decision(&policy, &intent);
 
@@ -46,7 +46,7 @@ fn bun_explicit_config_cannot_replace_the_reviewed_registry_context() {
         let (policy, mut intent) = bun_install_case();
         intent
             .argv
-            .extend(config_arguments.into_iter().map(str::to_string));
+            .extend(config_arguments.into_iter().map(|argument| argument.to_string()));
 
         let decision = admission_decision(&policy, &intent);
 
