@@ -84,6 +84,29 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
 }
 
 #[test]
+fn pnpm_directory_selection_cannot_escape_the_broker_selected_workspace() {
+    for directory_arguments in [
+        vec!["--dir", "/tmp/unreviewed-workspace"],
+        vec!["--dir=/tmp/unreviewed-workspace"],
+        vec!["-C", "/tmp/unreviewed-workspace"],
+        vec!["-C=/tmp/unreviewed-workspace"],
+    ] {
+        let mut arguments = vec!["add", "@cwl/example@1.2.3", "--ignore-scripts"];
+        arguments.extend(directory_arguments);
+        let (policy, intent, label) = install_case(
+            "pnpm",
+            "npm",
+            "@cwl/example",
+            "@cwl/example@1.2.3",
+            "https://registry.npmjs.org",
+            &arguments,
+        );
+
+        assert_alternate_root_blocked(&policy, &intent, &label);
+    }
+}
+
+#[test]
 fn uv_environment_selection_cannot_escape_the_broker_selected_install_root() {
     for extra_arguments in [
         vec!["--system"],
