@@ -175,6 +175,9 @@ fn validate_command_path(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     if requests_alternate_trust_root(arguments) {
         push_reason(reason_codes, ReasonCode::AlternateTrustRoot);
     }
+    if requests_alternate_install_root(executable, arguments) {
+        push_reason(reason_codes, ReasonCode::AlternateInstallRoot);
+    }
 }
 
 fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCode>) {
@@ -361,13 +364,47 @@ fn requests_alternate_trust_root(arguments: &[String]) -> bool {
         "-f",
     ];
     arguments.iter().any(|argument| {
-        FORBIDDEN_FLAGS.iter().any(|flag| {
-            argument == flag
-                || argument
-                    .strip_prefix(flag)
-                    .is_some_and(|suffix| suffix.starts_with('='))
-        })
+        FORBIDDEN_FLAGS
+            .iter()
+            .any(|flag| matches_cli_flag(argument, flag))
     })
+}
+
+fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bool {
+    let contains_flag = |flags: &[&str]| {
+        arguments
+            .iter()
+            .any(|argument| flags.iter().any(|flag| matches_cli_flag(argument, flag)))
+    };
+
+    match executable {
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            contains_flag(&["-g", "--global", "--prefix"])
+                || arguments.iter().any(|argument| argument == "--location=global")
+                || arguments.windows(2).any(|pair| {
+                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
+                })
+        }
+        "pip" | "pip3" => {
+            contains_flag(&["--user", "--target", "-t", "--root", "--prefix"])
+        }
+        "uv" => {
+            arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "install")
+                && contains_flag(&["--user", "--target", "-t", "--root", "--prefix"])
+        }
+        "cargo" => contains_flag(&["--root"]),
+        _ => false,
+    }
+}
+
+fn matches_cli_flag(argument: &str, flag: &str) -> bool {
+    argument == flag
+        || argument
+            .strip_prefix(flag)
+            .is_some_and(|suffix| suffix.starts_with('='))
 }
 
 fn push_reason(reason_codes: &mut Vec<ReasonCode>, reason: ReasonCode) {
