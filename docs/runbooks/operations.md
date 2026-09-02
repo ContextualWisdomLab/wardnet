@@ -72,12 +72,16 @@ before appending their own hop so attacker-supplied leading values cannot
 survive unchanged. If no trusted proxy range is configured, spoofed forwarded
 headers are ignored.
 
-Operational references:
+Operational and research grounding:
 
 - Petersson, A., & Nilsson, M. (2014). *Forwarded HTTP Extension* (RFC 7239). IETF. https://www.rfc-editor.org/info/rfc7239
   This standard defines proxy-disclosed client/address chain metadata and warns that forwarded headers cannot be assumed correct without trusted intermediary policy.
 - MDN contributors. (2025, July 4). *Forwarded header*. MDN Web Docs. https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Forwarded
   MDN documents the comma-appended proxy chain model and the de facto relationship between `Forwarded` and `X-Forwarded-For`, which is the operational shape Wardnet validates here.
+- Pletinckx, S., Kruegel, C., & Vigna, G. (2025). *A large-scale measurement study of the PROXY protocol and its security implications*. Network and Distributed System Security Symposium (NDSS 2025). https://doi.org/10.14722/ndss.2025.242247
+  Their Internet-scale study shows that accepting proxy-supplied client identity from untrusted sources can bypass proxy security controls and backend access restrictions. Wardnet applies the same trust-boundary principle to HTTP forwarding metadata: only explicitly trusted peer networks may supply client identity used for security decisions.
+
+The NDSS paper is linked rather than vendored under `docs/papers/`: the paper is publicly readable, but this repository has not established redistribution rights for committing a copy. This follows the repository rule to attach a PDF only when redistribution is clearly permitted.
 
 ## Health Check
 
