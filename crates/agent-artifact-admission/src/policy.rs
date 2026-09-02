@@ -479,6 +479,10 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         && arguments
             .iter()
             .any(|argument| matches_cli_flag(argument, "--config")))
+        || (executable == "pnpm"
+            && arguments
+                .iter()
+                .any(|argument| argument.starts_with("--config.")))
 }
 
 fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bool {
