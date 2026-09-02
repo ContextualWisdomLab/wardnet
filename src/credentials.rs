@@ -2,9 +2,9 @@
 //! credential registry.
 //!
 //! Org guidance: runtime code must not treat raw environment variables as the
-//! source of secrets. Environment (and optional credentials file) are bootstrap
-//! transports that seed this registry; handlers and auth checks read through
-//! [`CredentialRegistry::get_credential`].
+//! source of runtime secrets. Environment (and optional credentials file) are
+//! bootstrap transports that seed this registry; handlers and auth checks read
+//! through [`CredentialRegistry::get_credential`].
 
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::ErrorKind, path::Path};
@@ -12,6 +12,7 @@ use std::{collections::HashMap, io::ErrorKind, path::Path};
 /// Well-known credentials loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+pub const CRED_TRUSTED_PROXY_CIDRS: &str = "trusted_proxy_cidrs";
 
 /// Where secret-bearing credentials were loaded from (never includes values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -27,6 +28,7 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
+    /// Stable string label for non-secret source reporting surfaces.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -45,18 +47,31 @@ pub struct CredentialRegistry {
 }
 
 impl CredentialRegistry {
+    /// Build an empty registry for tests or runtime paths with no bootstrap
+    /// credentials.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Return one bootstrap value by well-known credential key.
     pub fn get_credential(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
+    /// Report whether the bootstrap source was env, file, or absent.
     pub fn source(&self) -> CredentialSource {
         self.source
     }
 
+    /// Store one bootstrap value for later runtime reads. Empty values are
+    /// discarded so callers can treat env/file as optional transports.
+    pub fn bootstrap_value(&mut self, name: &str, value: Option<String>) {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            self.values.insert(name.to_string(), value);
+        }
+    }
+
+    /// Report whether any admin credential was bootstrapped for runtime auth.
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
             .is_some_and(|v| !v.is_empty())
@@ -76,6 +91,7 @@ impl CredentialRegistry {
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
+        env_trusted_proxy_cidrs: Option<String>,
     ) -> Result<Self, String> {
         let mut values = HashMap::new();
         // CredentialSource is documented (and reported via HealthStatus/support
@@ -93,12 +109,18 @@ impl CredentialRegistry {
                                 path.display()
                             )
                         })?;
-                    for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
+                    for key in [
+                        CRED_ADMIN_TOKEN,
+                        CRED_ADMIN_TOKENS,
+                        CRED_TRUSTED_PROXY_CIDRS,
+                    ] {
                         if let Some(raw) = file_map.get(key) {
                             let text = json_value_as_nonempty_string(raw);
                             if let Some(text) = text {
                                 values.insert(key.to_string(), text);
-                                admin_from_file = true;
+                                if matches!(key, CRED_ADMIN_TOKEN | CRED_ADMIN_TOKENS) {
+                                    admin_from_file = true;
+                                }
                             }
                         }
                     }
@@ -125,6 +147,11 @@ impl CredentialRegistry {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             admin_from_env = true;
         }
+        if !values.contains_key(CRED_TRUSTED_PROXY_CIDRS)
+            && let Some(cidr_list) = env_trusted_proxy_cidrs.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_TRUSTED_PROXY_CIDRS.to_string(), cidr_list);
+        }
         let source = if admin_from_file {
             CredentialSource::File
         } else if admin_from_env {
@@ -137,6 +164,7 @@ impl CredentialRegistry {
     }
 }
 
+/// Normalize JSON scalar/bootstrap values into non-empty strings.
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
@@ -163,6 +191,7 @@ mod tests {
             None,
             Some("secret".to_string()),
             Some("tok:alice".to_string()),
+            Some("192.0.2.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
@@ -171,13 +200,17 @@ mod tests {
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("tok:alice")
         );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24")
+        );
         assert!(registry.has_admin_auth());
     }
 
     #[test]
     fn bootstrap_empty_when_no_secrets() {
         let registry =
-            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new())).unwrap();
+            CredentialRegistry::bootstrap_secrets(None, None, Some(String::new()), None).unwrap();
         assert_eq!(registry.source(), CredentialSource::None);
         assert!(!registry.has_admin_auth());
     }
@@ -206,6 +239,7 @@ mod tests {
             Some(&path),
             Some("from-env".to_string()),
             Some("envtok:env".to_string()),
+            Some("198.51.100.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -213,6 +247,10 @@ mod tests {
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKENS),
             Some("filetok:operator")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("198.51.100.0/24")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -236,6 +274,7 @@ mod tests {
             Some(&path),
             Some("ignored".to_string()),
             Some("envtok:bob".to_string()),
+            Some("198.51.100.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::File);
@@ -262,12 +301,17 @@ mod tests {
             Some(&path),
             Some("env-secret".to_string()),
             None,
+            Some("203.0.113.0/24".to_string()),
         )
         .unwrap();
         assert_eq!(registry.source(), CredentialSource::Env);
         assert_eq!(
             registry.get_credential(CRED_ADMIN_TOKEN),
             Some("env-secret")
+        );
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("203.0.113.0/24")
         );
     }
 
@@ -284,8 +328,88 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("credentials.json");
         std::fs::write(&path, "not-json").unwrap();
-        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
+        let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_overrides_env_for_trusted_proxy_cidrs() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-trusted-proxies-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"trusted_proxy_cidrs":"192.0.2.0/24,2001:db8::/32"}"#,
+        )
+        .unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            None,
+            None,
+            Some("198.51.100.0/24".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24,2001:db8::/32")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_proxy_file_config_does_not_mask_env_admin_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardnet-creds-source-proxy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, r#"{"trusted_proxy_cidrs":"192.0.2.0/24"}"#).unwrap();
+
+        let registry = CredentialRegistry::bootstrap_secrets(
+            Some(&path),
+            Some("env-admin".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(registry.source(), CredentialSource::Env);
+        assert_eq!(registry.get_credential(CRED_ADMIN_TOKEN), Some("env-admin"));
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_value_stores_non_empty_runtime_config() {
+        let mut registry = CredentialRegistry::empty();
+        registry.bootstrap_value(CRED_TRUSTED_PROXY_CIDRS, Some("192.0.2.0/24".to_string()));
+        registry.bootstrap_value("blank", Some(String::new()));
+
+        assert_eq!(
+            registry.get_credential(CRED_TRUSTED_PROXY_CIDRS),
+            Some("192.0.2.0/24")
+        );
+        assert_eq!(registry.get_credential("blank"), None);
     }
 }

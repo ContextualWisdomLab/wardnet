@@ -53,6 +53,40 @@ cargo run
 Health reports `credentials_source` (`file` / `env` / `none`) and
 `admin_auth_configured` (boolean) without exposing secret values.
 
+### Trusted proxy client IP attribution
+
+Wardnet now treats forwarded client IP headers as untrusted by default. Gateway
+rate limiting, DNSBL matching, and event attribution use the direct peer
+address unless that peer matches `TRUSTED_PROXY_CIDRS`.
+
+```bash
+TRUSTED_PROXY_CIDRS=192.0.2.0/24,2001:db8::/32 \
+cargo run
+```
+
+When a peer is in that allowlist, Wardnet parses the complete
+`X-Forwarded-For` chain before selecting client identity. A syntactically valid
+chain is scanned from right to left and the first address that is not itself a
+trusted proxy becomes the client identity. If the header is absent, or a valid
+chain contains no untrusted hop, Wardnet may use `X-Real-IP` from that same
+trusted-proxy context and otherwise uses the direct peer. If **any**
+`X-Forwarded-For` hop is empty or unparsable, the whole chain is invalid:
+Wardnet falls back directly to the peer and does **not** consult `X-Real-IP`.
+Trusted ingress proxies should normalize inbound forwarding headers before
+appending their own hop. If no trusted proxy range is configured, forwarded
+headers are ignored entirely.
+
+Operational and research grounding:
+
+- Petersson, A., & Nilsson, M. (2014). *Forwarded HTTP Extension* (RFC 7239). IETF. https://www.rfc-editor.org/info/rfc7239
+  This standard defines proxy-disclosed client/address chain metadata and warns that forwarded headers cannot be assumed correct without trusted intermediary policy.
+- MDN contributors. (2025, July 4). *Forwarded header*. MDN Web Docs. https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Forwarded
+  MDN documents the comma-appended proxy chain model and the de facto relationship between `Forwarded` and `X-Forwarded-For`, which is the operational shape Wardnet validates here.
+- Pletinckx, S., Kruegel, C., & Vigna, G. (2025). *A large-scale measurement study of the PROXY protocol and its security implications*. Network and Distributed System Security Symposium (NDSS 2025). https://doi.org/10.14722/ndss.2025.242247
+  Their Internet-scale study shows that accepting proxy-supplied client identity from untrusted sources can bypass proxy security controls and backend access restrictions. Wardnet applies the same trust-boundary principle to HTTP forwarding metadata: only explicitly trusted peer networks may supply client identity used for security decisions.
+
+The NDSS paper is linked rather than vendored under `docs/papers/`: the paper is publicly readable, but this repository has not established redistribution rights for committing a copy. This follows the repository rule to attach a PDF only when redistribution is clearly permitted.
+
 ## Health Check
 
 ```bash
