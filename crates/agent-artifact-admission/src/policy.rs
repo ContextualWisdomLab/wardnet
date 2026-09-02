@@ -496,7 +496,19 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                     pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
                 })
         }
-        "pnpm" | "yarn" | "bun" => {
+        "yarn" => {
+            contains_flag(&[
+                "-g",
+                "--global",
+                "--prefix",
+                "-W",
+                "--ignore-workspace-root-check",
+            ]) || arguments.iter().any(|argument| argument == "--location=global")
+                || arguments.windows(2).any(|pair| {
+                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
+                })
+        }
+        "pnpm" | "bun" => {
             contains_flag(&["-g", "--global", "--prefix"])
                 || arguments.iter().any(|argument| argument == "--location=global")
                 || arguments.windows(2).any(|pair| {
