@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 /// Text source extensions whose contents may carry repository path references.
 const TEXT_EXTENSIONS: &[&str] = &[
-    "css", "html", "js", "json", "jsx", "md", "py", "rs", "sh", "toml", "ts", "tsx",
-    "txt", "yaml", "yml",
+    "css", "html", "js", "json", "jsx", "md", "py", "rs", "sh", "toml", "ts", "tsx", "txt", "yaml",
+    "yml",
 ];
 
 /// Files whose legacy-path references are necessarily historical or negative fixtures.
@@ -28,7 +28,10 @@ fn text_source_files(root: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let candidate = entry.path();
             if candidate.is_dir() {
-                if candidate.file_name().is_some_and(|name| name == ".git" || name == "target") {
+                if candidate
+                    .file_name()
+                    .is_some_and(|name| name == ".git" || name == "target")
+                {
                     continue;
                 }
                 pending.push(candidate);
@@ -98,10 +101,7 @@ fn kubernetes_manifest_uses_the_wardnet_filename_only() {
     let stale_references = text_source_files(repository)
         .into_iter()
         .flat_map(|path| {
-            let relative = path
-                .strip_prefix(repository)
-                .unwrap_or(&path)
-                .to_path_buf();
+            let relative = path.strip_prefix(repository).unwrap_or(&path).to_path_buf();
             let content = fs::read_to_string(&path).unwrap_or_default();
             let legacy_reference = legacy_reference.clone();
             let canonical_reference = canonical_reference.clone();
