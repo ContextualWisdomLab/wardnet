@@ -103,3 +103,44 @@ fn represented_outbound_surfaces_revalidate_destinations_before_network_io() {
         );
     }
 }
+
+#[test]
+fn phishing_feed_dns_resolution_shares_the_end_to_end_operation_deadline() {
+    let source = production_lib_source();
+    let resolver = source_section(
+        &source,
+        "async fn validated_outbound_http_client(",
+        "fn pinned_outbound_http_client(",
+    );
+
+    assert!(
+        resolver.contains("tokio::time::Instant") && resolver.contains("tokio::time::timeout_at("),
+        "manual DNS resolution must accept an operation deadline and fail closed at that same deadline"
+    );
+
+    for (start_marker, end_marker, function_name) in [
+        (
+            "async fn fetch_taxii_objects(",
+            "/// Ingest Suricata EVE",
+            "fetch_taxii_objects",
+        ),
+        (
+            "async fn fetch_text_feed(",
+            "fn parse_phishing_domains(",
+            "fetch_text_feed",
+        ),
+        (
+            "async fn fetch_kev_catalog(",
+            "/// Returns whether the parsed host is localhost",
+            "fetch_kev_catalog",
+        ),
+    ] {
+        let body = source_section(&source, start_marker, end_marker);
+        assert!(
+            body.contains("tokio::time::Instant")
+                && body.contains("validated_outbound_http_client")
+                && body.contains(".timeout("),
+            "{function_name} must establish one deadline before DNS validation and apply only the remaining budget to the HTTP request"
+        );
+    }
+}
