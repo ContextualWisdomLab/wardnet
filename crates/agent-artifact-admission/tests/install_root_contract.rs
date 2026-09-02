@@ -199,6 +199,8 @@ fn npm_workspace_selection_cannot_expand_the_broker_selected_install_scope() {
     for workspace_arguments in [
         vec!["--workspace", "packages/unreviewed"],
         vec!["--workspace=packages/unreviewed"],
+        vec!["-w", "packages/unreviewed"],
+        vec!["-w=packages/unreviewed"],
         vec!["--workspaces"],
         vec!["--workspaces=true"],
     ] {
