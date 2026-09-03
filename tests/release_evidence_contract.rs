@@ -100,3 +100,18 @@ fn pull_request_release_build_cannot_mint_attestation_identity() {
         "binary/SBOM attestations without linked-artifact registry publishing must not request artifact-metadata write authority"
     );
 }
+
+#[test]
+fn job_level_configuration_does_not_use_runner_only_context() {
+    let workflow = release_workflow();
+    let attest_header = section(
+        &workflow,
+        "  attest-release-evidence:\n",
+        "    steps:\n",
+    );
+
+    assert!(
+        !attest_header.contains("${{ runner."),
+        "runner context is step/runtime scoped and must not be referenced from job-level env"
+    );
+}
