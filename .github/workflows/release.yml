@@ -36,9 +36,9 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+    outputs:
+      source_sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
     steps:
       - name: Harden release evidence runner
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
@@ -163,7 +163,6 @@ jobs:
 
           echo "EVIDENCE_DIR=$evidence" >> "$GITHUB_ENV"
           echo "PACKAGE_DIR=$package" >> "$GITHUB_ENV"
-          echo "PACKAGE_ARCHIVE=$evidence/wardnet-${RELEASE_VERSION}-linux-x86_64.tar.gz" >> "$GITHUB_ENV"
 
       - name: Generate SPDX JSON SBOM from packaged release contents
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
@@ -188,19 +187,6 @@ jobs:
             sha256sum wardnet.spdx.json release-manifest.json >> artifacts.sha256
           )
 
-      - name: Attest build provenance for protected-main dispatch
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: ${{ env.PACKAGE_ARCHIVE }}
-
-      - name: Attest SBOM for protected-main dispatch
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: ${{ env.PACKAGE_ARCHIVE }}
-          sbom-path: ${{ env.EVIDENCE_DIR }}/wardnet.spdx.json
-
       - name: Upload exact-source release evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -208,3 +194,70 @@ jobs:
           path: ${{ env.EVIDENCE_DIR }}/
           if-no-files-found: error
           retention-days: 30
+
+  attest-release-evidence:
+    name: Attest protected-main release evidence
+    if: github.event_name == 'workflow_dispatch'
+    needs: release-evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      EVIDENCE_DIR: ${{ runner.temp }}/wardnet-release-evidence
+      PACKAGE_ARCHIVE: ${{ runner.temp }}/wardnet-release-evidence/wardnet-${{ needs.release-evidence.outputs.version }}-linux-x86_64.tar.gz
+    steps:
+      - name: Harden attestation runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+          disable-telemetry: true
+
+      - name: Download exact-source release evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wardnet-release-evidence-${{ needs.release-evidence.outputs.source_sha }}
+          path: ${{ env.EVIDENCE_DIR }}
+
+      - name: Verify protected-main evidence before granting attestation authority
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.release-evidence.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.release-evidence.outputs.version }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [ "$GITHUB_REF_PROTECTED" != "true" ]; then
+            echo "::error::Attestation authority is restricted to protected main."
+            exit 1
+          fi
+          if [ "$REQUESTED_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "::error::Requested release version changed across the evidence boundary."
+            exit 1
+          fi
+          if [ "$(jq -r '.source_sha' "$EVIDENCE_DIR/release-manifest.json")" != "$RELEASE_SHA" ]; then
+            echo "::error::Downloaded release manifest does not match the reviewed source SHA."
+            exit 1
+          fi
+          if [ "$(jq -r '.version' "$EVIDENCE_DIR/release-manifest.json")" != "$RELEASE_VERSION" ]; then
+            echo "::error::Downloaded release manifest does not match the reviewed version."
+            exit 1
+          fi
+          (
+            cd "$EVIDENCE_DIR"
+            sha256sum --check artifacts.sha256
+          )
+
+      - name: Attest build provenance for protected-main dispatch
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.PACKAGE_ARCHIVE }}
+
+      - name: Attest SBOM for protected-main dispatch
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.PACKAGE_ARCHIVE }}
+          sbom-path: ${{ env.EVIDENCE_DIR }}/wardnet.spdx.json
