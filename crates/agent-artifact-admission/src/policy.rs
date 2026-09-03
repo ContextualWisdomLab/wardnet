@@ -513,9 +513,9 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
             .iter()
             .any(|flag| matches_cli_flag(argument, flag))
     }) || (executable == "bun"
-        && arguments
-            .iter()
-            .any(|argument| matches_cli_flag(argument, "--config")))
+        && arguments.iter().any(|argument| {
+            matches_cli_flag(argument, "--config") || matches_cli_flag(argument, "--trust")
+        }))
         || (executable == "pnpm"
             && arguments
                 .iter()
