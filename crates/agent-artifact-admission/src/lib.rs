@@ -1,6 +1,7 @@
 //! Fail-closed package-install admission primitives for AI coding agents.
 
 mod admission;
+mod artifact_variant;
 mod audit;
 mod config;
 mod http;
@@ -19,4 +20,19 @@ pub use config::{
     parse_cli_args, validate_service_config,
 };
 pub use http::{AdmissionState, ServiceError, build_app, run_cli, run_service};
-pub use policy::{admission_decision, is_sha256_hex, sha256_hex, validate_install_intent};
+pub use policy::{is_sha256_hex, sha256_hex, validate_install_intent};
+
+/// Compute a deterministic fail-closed admission decision for one install intent.
+pub fn admission_decision(
+    policy: &AdmissionPolicy,
+    intent: &InstallIntent,
+) -> AdmissionDecision {
+    let mut decision = policy::admission_decision(policy, intent);
+    if artifact_variant::requests_unapproved_oci_platform(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    decision
+}
