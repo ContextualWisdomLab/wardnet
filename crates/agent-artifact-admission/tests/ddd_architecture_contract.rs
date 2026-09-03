@@ -7,6 +7,7 @@
 const DOMAIN_SOURCES: &[(&str, &str)] = &[
     ("admission.rs", include_str!("../src/admission.rs")),
     ("artifact_variant.rs", include_str!("../src/artifact_variant.rs")),
+    ("oci_transport.rs", include_str!("../src/oci_transport.rs")),
     ("policy.rs", include_str!("../src/policy.rs")),
 ];
 
