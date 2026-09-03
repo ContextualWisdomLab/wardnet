@@ -188,8 +188,12 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     };
     let arguments = &intent.argv[1..];
     let missing = match executable {
-        "npm" | "yarn" | "bun" => {
+        "npm" | "yarn" => !has_unambiguous_boolean_safety_flag(arguments, "--ignore-scripts"),
+        "bun" => {
             !has_unambiguous_boolean_safety_flag(arguments, "--ignore-scripts")
+                || arguments
+                    .iter()
+                    .any(|argument| matches_cli_flag(argument, "--no-verify"))
         }
         "pnpm" => {
             !has_unambiguous_boolean_safety_flag(arguments, "--ignore-scripts")
