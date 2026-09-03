@@ -12,6 +12,16 @@ fn require(workflow: &str, needle: &str) {
     );
 }
 
+fn section<'a>(workflow: &'a str, start: &str, end: &str) -> &'a str {
+    let start_offset = workflow
+        .find(start)
+        .unwrap_or_else(|| panic!("release workflow must contain section start {start:?}"));
+    let end_offset = workflow[start_offset..]
+        .find(end)
+        .unwrap_or_else(|| panic!("release workflow must contain section end {end:?}"));
+    &workflow[start_offset..start_offset + end_offset]
+}
+
 #[test]
 fn release_workflow_binds_reviewed_source_to_verifiable_evidence() {
     let workflow = release_workflow();
@@ -45,4 +55,45 @@ fn release_workflow_binds_reviewed_source_to_verifiable_evidence() {
         !workflow.contains("@main") && !workflow.contains("@master"),
         "release actions must be pinned to immutable revisions"
     );
+}
+
+#[test]
+fn pull_request_release_build_cannot_mint_attestation_identity() {
+    let workflow = release_workflow();
+    let build_job = section(
+        &workflow,
+        "  release-evidence:\n",
+        "  attest-release-evidence:\n",
+    );
+
+    for forbidden in [
+        "id-token: write",
+        "attestations: write",
+        "artifact-metadata: write",
+        "actions/attest@",
+    ] {
+        assert!(
+            !build_job.contains(forbidden),
+            "the PR-executable release build job must not carry attestation authority {forbidden:?}"
+        );
+    }
+
+    let attest_job = workflow
+        .split_once("  attest-release-evidence:\n")
+        .map(|(_, body)| body)
+        .expect("release workflow must isolate protected-main attestation in a separate job");
+    for required in [
+        "if: github.event_name == 'workflow_dispatch'",
+        "needs: release-evidence",
+        "id-token: write",
+        "attestations: write",
+        "artifact-metadata: write",
+        "actions/download-artifact@",
+        "actions/attest@",
+    ] {
+        assert!(
+            attest_job.contains(required),
+            "protected-main attestation job must contain {required:?}"
+        );
+    }
 }
