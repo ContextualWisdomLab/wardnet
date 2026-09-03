@@ -1,0 +1,22 @@
+name: Scorecard analysis
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: '31 9 * * 2'
+  push:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  scorecard_analysis:
+    name: Scorecard analysis
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    uses: ContextualWisdomLab/.github/.github/workflows/scorecard-analysis.yml@51b812d181989ed28366b5850d1a34f51df10187
