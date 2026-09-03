@@ -119,6 +119,7 @@ fn kubernetes_manifest_uses_the_wardnet_filename_only() {
                         ))
                     .then(|| format!("{}:{}", relative.display(), index + 1))
                 })
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
 
