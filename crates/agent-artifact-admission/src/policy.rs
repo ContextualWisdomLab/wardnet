@@ -167,7 +167,8 @@ fn validate_command_path(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
         return;
     };
     let arguments = &intent.argv[1..];
-    if is_permanently_forbidden_executable(executable)
+    if arguments.iter().any(|argument| argument == "--")
+        || is_permanently_forbidden_executable(executable)
         || requests_inline_eval(executable, arguments)
         || !supported_install_command(executable, arguments)
     {
