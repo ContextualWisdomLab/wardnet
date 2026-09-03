@@ -15,7 +15,15 @@ pub(crate) fn requests_unapproved_oci_platform(intent: &InstallIntent) -> bool {
         return false;
     }
 
-    arguments
-        .iter()
-        .any(|argument| argument == "--platform" || argument.starts_with("--platform="))
+    arguments.iter().any(|argument| {
+        argument == "--platform"
+            || argument.starts_with("--platform=")
+            || (executable == "podman"
+                && (argument == "--arch"
+                    || argument.starts_with("--arch=")
+                    || argument == "--os"
+                    || argument.starts_with("--os=")
+                    || argument == "--variant"
+                    || argument.starts_with("--variant=")))
+    })
 }
