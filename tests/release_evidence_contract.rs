@@ -87,7 +87,6 @@ fn pull_request_release_build_cannot_mint_attestation_identity() {
         "needs: release-evidence",
         "id-token: write",
         "attestations: write",
-        "artifact-metadata: write",
         "actions/download-artifact@",
         "actions/attest@",
     ] {
@@ -96,4 +95,8 @@ fn pull_request_release_build_cannot_mint_attestation_identity() {
             "protected-main attestation job must contain {required:?}"
         );
     }
+    assert!(
+        !attest_job.contains("artifact-metadata: write"),
+        "binary/SBOM attestations without linked-artifact registry publishing must not request artifact-metadata write authority"
+    );
 }
