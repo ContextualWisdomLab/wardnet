@@ -303,8 +303,15 @@ mod tests {
 
     #[test]
     fn nested_runtime_env_read_is_detected_by_architecture_fitness_gate() {
-        let temp = tempfile::tempdir().unwrap();
-        let nested = temp.path().join("gateway").join("delivery");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "wardnet-runtime-config-{}-{unique}",
+            std::process::id()
+        ));
+        let nested = temp.join("gateway").join("delivery");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(
             nested.join("leak.rs"),
@@ -313,8 +320,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            direct_runtime_env_read_offenders(temp.path()),
+            direct_runtime_env_read_offenders(&temp),
             vec![PathBuf::from("gateway/delivery/leak.rs")]
         );
+        std::fs::remove_dir_all(&temp).unwrap();
     }
 }
