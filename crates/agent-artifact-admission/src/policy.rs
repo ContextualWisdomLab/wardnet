@@ -265,6 +265,7 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
         .iter()
         .any(|artifact| !artifact_ecosystem_matches_executable(executable, &artifact.ecosystem))
         || requests_indirect_artifact_source(executable, arguments)
+        || requests_unapproved_cargo_build_variant(executable, arguments)
         || positional_arguments.len() != declared_arguments.len()
         || positional_arguments
             .iter()
@@ -317,6 +318,32 @@ fn requests_indirect_artifact_source(executable: &str, arguments: &[String]) -> 
         }
         _ => false,
     }
+}
+
+fn requests_unapproved_cargo_build_variant(executable: &str, arguments: &[String]) -> bool {
+    if executable != "cargo" {
+        return false;
+    }
+
+    const BUILD_VARIANT_FLAGS: &[&str] = &[
+        "-F",
+        "--features",
+        "--all-features",
+        "--no-default-features",
+        "--bin",
+        "--bins",
+        "--example",
+        "--examples",
+        "--target",
+        "--debug",
+        "--profile",
+    ];
+
+    arguments.iter().any(|argument| {
+        BUILD_VARIANT_FLAGS
+            .iter()
+            .any(|flag| matches_cli_flag(argument, flag))
+    })
 }
 
 fn has_unambiguous_boolean_safety_flag(arguments: &[String], flag: &str) -> bool {
