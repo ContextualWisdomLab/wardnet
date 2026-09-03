@@ -3,7 +3,10 @@ use std::{fs, path::PathBuf};
 fn production_lib_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("failed to read production source {}: {error}", path.display())
+        panic!(
+            "failed to read production source {}: {error}",
+            path.display()
+        )
     })
 }
 
