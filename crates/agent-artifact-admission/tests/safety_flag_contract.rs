@@ -95,6 +95,31 @@ fn npm_boolean_overrides_cannot_reenable_install_scripts() {
 }
 
 #[test]
+fn option_terminator_cannot_hide_required_safety_flags_from_the_package_manager() {
+    let policy = approved_npm_policy();
+    let mut intent = InstallIntent::unowned_llms_package_for_test();
+    intent.argv = vec![
+        "npm".to_string(),
+        "install".to_string(),
+        "@unowned/example@1.2.3".to_string(),
+        "--".to_string(),
+        "--ignore-scripts".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "forbidden_command"),
+        "option terminator must not create a second parser authority: {:?}",
+        decision.reason_codes
+    );
+}
+
+#[test]
 fn pip_attached_short_options_cannot_escape_reviewed_install_capability() {
     let policy = approved_pip_policy();
 
