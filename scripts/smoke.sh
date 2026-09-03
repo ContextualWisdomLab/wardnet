@@ -104,11 +104,11 @@ curl -fsS \
     "deployment_id": "prod-seoul-edge",
     "edition": "enterprise",
     "license_status": "active",
-    "license_id": "LIC-20B-KRW-0001",
+    "license_id": "LIC-2B-KRW-0001",
     "licensee": "Contextual Wisdom Enterprise Buyer",
     "licensed_until_unix": 1829088000,
     "licensed_node_count": 12,
-    "annual_contract_value_krw": 20000000000,
+    "annual_contract_value_krw": 2000000000,
     "support_contact": "soc-support@example.com",
     "features": ["rust-edge-gateway", "tenant-license-readiness", "threat-feed-import", "dnsbl-zone-export"]
   }' \
@@ -155,7 +155,7 @@ assert_json_field "$kpis" 'data["stale_threat_feed_count"] == 0'
 assert_json_field "$kpis" 'data["audit_log_count"] >= 3'
 
 readiness="$(curl -fsS "$BASE_URL/api/commercial/readiness")"
-assert_json_field "$readiness" 'data["target_sale_value_krw"] == 20000000000'
+assert_json_field "$readiness" 'data["target_sale_value_krw"] == 2000000000'
 assert_json_field "$readiness" 'data["ready_for_enterprise_sale"] is True'
 assert_json_field "$readiness" 'data["readiness_level"] == "sale_ready"'
 assert_json_field "$readiness" 'data["blockers"] == []'
@@ -182,7 +182,7 @@ grep -q '"action":"blocked"' <<<"$event_export"
 support_bundle="$(curl -fsS "$BASE_URL/api/support-bundle")"
 assert_json_field "$support_bundle" 'data["readiness"]["ready_for_enterprise_sale"] is True'
 assert_json_field "$support_bundle" 'data["evidence_manifest"]["ready_for_enterprise_sale"] is True'
-assert_json_field "$support_bundle" 'data["commercial"]["annual_contract_value_krw"] == 20000000000'
+assert_json_field "$support_bundle" 'data["commercial"]["annual_contract_value_krw"] == 2000000000'
 assert_json_field "$support_bundle" 'data["kpis"]["fresh_threat_feed_count"] == 1'
 assert_json_field "$support_bundle" 'data["audit_log_count"] >= 3'
 assert_json_field "$support_bundle" 'data["threat_feed_freshness"][0]["stale"] is False'

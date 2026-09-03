@@ -3534,7 +3534,7 @@ mod tests {
             deployment_id: "prod-seoul-edge".to_string(),
             edition: ProductEdition::Enterprise,
             license_status: LicenseStatus::Active,
-            license_id: Some("LIC-20B-KRW-0001".to_string()),
+            license_id: Some("LIC-2B-KRW-0001".to_string()),
             licensee: Some("Contextual Wisdom Enterprise Buyer".to_string()),
             licensed_until_unix: Some(1_829_088_000),
             licensed_node_count: Some(12),
@@ -4670,10 +4670,7 @@ mod tests {
             .await,
         )
         .await;
-        assert_eq!(
-            saved_profile.annual_contract_value_krw,
-            Some(20_000_000_000)
-        );
+        assert_eq!(saved_profile.annual_contract_value_krw, Some(2_000_000_000));
 
         let feed = threat_feed_import();
         let unauthorized_feed = app_request(
@@ -4807,7 +4804,7 @@ mod tests {
         );
         assert_eq!(
             support.commercial.license_id,
-            Some("LIC-20B-KRW-0001".to_string())
+            Some("LIC-2B-KRW-0001".to_string())
         );
         assert_eq!(support.threat_feed_count, 1);
         assert_eq!(support.kpis.fresh_threat_feed_count, 1);
@@ -7180,7 +7177,7 @@ mod tests {
         assert!(!blocked.ready_for_enterprise_sale);
         assert!(blocked.blockers.iter().any(|item| item == "license"));
 
-        data.commercial.license_id = Some("LIC-20B-KRW-0001".to_string());
+        data.commercial.license_id = Some("LIC-2B-KRW-0001".to_string());
         let ready = commercial_readiness_snapshot_at(&data, 1);
         assert!(ready.ready_for_enterprise_sale);
 

@@ -1,13 +1,13 @@
-# 20B KRW Commercial Sale Readiness Standard
+# 2B KRW Commercial Sale Readiness Standard
 
-This project treats a 20B KRW sale as an enterprise due-diligence threshold, not a marketing claim. The runtime must expose evidence that an operator can verify without reading source code.
+This project treats a 2B KRW sale as an enterprise due-diligence threshold, not a marketing claim. The runtime must expose evidence that an operator can verify without reading source code.
 
 ## Acceptance Criteria
 
 1. The product exposes a tenant-aware license profile through `GET /api/commercial/license`.
 2. Authorized operators can register license metadata through `POST /api/commercial/license`.
 3. The license profile must support edition, status, licensee, node count, support contact, and annual contract value.
-4. The annual contract value must be at least `20_000_000_000` KRW for the readiness API to report sale readiness.
+4. The annual contract value must be at least `2_000_000_000` KRW for the readiness API to report sale readiness.
 5. Threat feed updates must be importable through `POST /api/threat-feeds/import`.
 6. The product must expose fresh/stale threat feed evidence through `GET /api/threat-feeds/freshness`.
 7. The product must expose SOC event export through `GET /api/events.ndjson`.
@@ -25,7 +25,7 @@ This project treats a 20B KRW sale as an enterprise due-diligence threshold, not
 
 `GET /api/commercial/readiness` returns:
 
-- `target_sale_value_krw`: always `20000000000`
+- `target_sale_value_krw`: always `2000000000`
 - `ready_for_enterprise_sale`: true only when all checks pass
 - `readiness_level`: `sale_ready` or `implementation_required`
 - `blockers`: failed check identifiers
@@ -43,7 +43,7 @@ This project treats a 20B KRW sale as an enterprise due-diligence threshold, not
 ## Required Passing Checks
 
 - `license`: active or evaluation license metadata is present.
-- `contract_value`: annual contract value is at least 20B KRW.
+- `contract_value`: annual contract value is at least 2B KRW.
 - `threat_feed_updates`: at least one imported threat feed is fresh within its TTL.
 - `gateway_enforcement`: at least one enabled gateway route exists.
 - `dnsbl_publication`: DNSBL entries are available for zone export.

@@ -10,4 +10,3 @@
 ### Operations
 
 - Documented administrator credential provisioning, rotation, rollout verification, rollback, evidence handling, and the boundary with the separate runtime-authentication fail-closed work tracked in issue #78.
-- Raised the buyer-facing commercial readiness contract from 2B KRW to 20B KRW across the runtime threshold, smoke evidence, seeded enterprise fixture, and operator-facing documentation so the shipped product matches the repository baseline.
