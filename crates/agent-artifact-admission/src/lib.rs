@@ -5,6 +5,7 @@ mod artifact_variant;
 mod audit;
 mod config;
 mod http;
+mod oci_transport;
 mod policy;
 
 pub use admission::{
@@ -31,6 +32,12 @@ pub fn admission_decision(
     if artifact_variant::requests_unapproved_oci_platform(intent) {
         if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if oci_transport::requests_unapproved_oci_transport_trust(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
