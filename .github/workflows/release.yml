@@ -205,7 +205,6 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-      artifact-metadata: write
     env:
       EVIDENCE_DIR: ${{ runner.temp }}/wardnet-release-evidence
       PACKAGE_ARCHIVE: ${{ runner.temp }}/wardnet-release-evidence/wardnet-${{ needs.release-evidence.outputs.version }}-linux-x86_64.tar.gz
