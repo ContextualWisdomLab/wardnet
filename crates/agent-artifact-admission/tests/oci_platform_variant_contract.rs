@@ -28,6 +28,63 @@ fn caller_selected_platform_is_not_authorized_by_an_index_digest() {
 }
 
 #[test]
+fn podman_platform_selection_is_bound_by_the_same_oci_policy() {
+    let (policy, mut intent) = approved_oci_pull("podman");
+    intent
+        .argv
+        .insert(2, "--platform=linux/amd64".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "artifact_not_approved")
+    );
+}
+
+#[test]
+fn separated_platform_value_does_not_duplicate_artifact_reason() {
+    let (policy, mut intent) = approved_oci_pull("docker");
+    intent.argv.insert(2, "--platform".to_string());
+    intent.argv.insert(3, "linux/arm64".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert_eq!(
+        decision
+            .reason_codes
+            .iter()
+            .filter(|reason| reason.as_str() == "artifact_not_approved")
+            .count(),
+        1,
+        "platform hardening must preserve deterministic reason-code de-duplication"
+    );
+}
+
+#[test]
+fn non_pull_oci_command_remains_owned_by_the_existing_command_guard() {
+    let (policy, mut intent) = approved_oci_pull("docker");
+    intent.argv[1] = "push".to_string();
+    intent
+        .argv
+        .insert(2, "--platform=linux/arm64".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "forbidden_command")
+    );
+}
+
+#[test]
 fn exact_digest_pull_without_caller_selected_platform_remains_allowed() {
     let (policy, intent) = approved_oci_pull("docker");
 
@@ -35,6 +92,22 @@ fn exact_digest_pull_without_caller_selected_platform_remains_allowed() {
 
     assert_eq!(decision.decision, DecisionKind::Allow);
     assert!(decision.reason_codes.is_empty());
+}
+
+#[test]
+fn missing_executable_remains_fail_closed_without_panicking_variant_guard() {
+    let (policy, mut intent) = approved_oci_pull("docker");
+    intent.argv.clear();
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "missing_executable")
+    );
 }
 
 fn approved_oci_pull(executable: &str) -> (AdmissionPolicy, InstallIntent) {
