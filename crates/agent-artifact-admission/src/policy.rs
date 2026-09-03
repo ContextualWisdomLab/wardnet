@@ -187,8 +187,12 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
     };
     let arguments = &intent.argv[1..];
     let missing = match executable {
-        "npm" | "pnpm" | "yarn" | "bun" => {
+        "npm" | "yarn" | "bun" => {
             !has_unambiguous_boolean_safety_flag(arguments, "--ignore-scripts")
+        }
+        "pnpm" => {
+            !has_unambiguous_boolean_safety_flag(arguments, "--ignore-scripts")
+                || !has_unambiguous_boolean_safety_flag(arguments, "--ignore-pnpmfile")
         }
         "pip" | "pip3" => !arguments
             .iter()
