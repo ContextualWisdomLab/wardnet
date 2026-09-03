@@ -46,6 +46,29 @@ fn podman_platform_selection_is_bound_by_the_same_oci_policy() {
 }
 
 #[test]
+fn podman_platform_selector_aliases_require_separately_approved_artifact_identity() {
+    for selector in ["--arch=arm64", "--os=linux", "--variant=v7"] {
+        let (policy, mut intent) = approved_oci_pull("podman");
+        intent.argv.insert(2, selector.to_string());
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "caller-selected Podman selector {selector} must not inherit approval from an index-level artifact coordinate"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "artifact_not_approved"),
+            "Podman selector {selector} must remain in the artifact-identity reason domain"
+        );
+    }
+}
+
+#[test]
 fn separated_platform_value_does_not_duplicate_artifact_reason() {
     let (policy, mut intent) = approved_oci_pull("docker");
     intent.argv.insert(2, "--platform".to_string());
