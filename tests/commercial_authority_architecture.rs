@@ -28,7 +28,9 @@ fn product_quality_ambition_is_not_a_customer_contract_threshold() {
     assert!(customer_contract.contains("usd-20b-product-quality-bar.md"));
 
     assert!(product_quality.contains("USD 20 billion"));
-    assert!(product_quality.contains("not a tenant price, contract-value threshold, billing rule, or accounting fact"));
+    assert!(product_quality.contains(
+        "not a tenant price, contract-value threshold, billing rule, or accounting fact"
+    ));
     assert!(product_quality.contains("Buyer-visible evidence"));
     assert!(product_quality.contains("2b-krw-customer-contract-readiness.md"));
 
