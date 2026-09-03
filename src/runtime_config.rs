@@ -6,7 +6,9 @@
 //! remain owned by the separate credential-bootstrap boundary.
 
 use crate::{AppConfig, CRED_ADMIN_TOKEN, CredentialRegistry};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Immutable bootstrap snapshot for non-secret Wardnet runtime settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
