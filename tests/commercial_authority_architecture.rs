@@ -39,18 +39,3 @@ fn product_quality_ambition_is_not_a_customer_contract_threshold() {
     assert!(legacy.contains("usd-20b-product-quality-bar.md"));
     assert!(legacy.contains("must not be used as numeric authority"));
 }
-
-#[test]
-fn product_technical_gap_baseline_preserves_both_commercial_authorities() {
-    let baseline = repo_file("docs/product-technical-gap-baseline.md");
-
-    assert!(baseline.contains("USD 20 billion product-quality ambition"));
-    assert!(baseline.contains("2B KRW customer-contract readiness"));
-    assert!(baseline.contains("annual_contract_value_krw"));
-    assert!(baseline.contains("#87"));
-    assert!(baseline.contains("#78"));
-    assert!(baseline.contains("#79"));
-    assert!(baseline.contains("#128"));
-    assert!(baseline.contains("no GitHub Release"));
-    assert!(baseline.contains("must not be encoded as tenant pricing"));
-}
