@@ -131,10 +131,13 @@ jobs:
 
           install -m 0755 target/release/waf-ids-ai-soc "$package/waf-ids-ai-soc"
           install -m 0644 LICENSE "$package/LICENSE"
+          install -m 0644 Cargo.toml "$package/Cargo.toml"
+          install -m 0644 Cargo.lock "$package/Cargo.lock"
+          install -m 0644 rust-toolchain.toml "$package/rust-toolchain.toml"
 
           commit_epoch="$(git show -s --format=%ct "$RELEASE_SHA")"
           tar --sort=name --mtime="@$commit_epoch" --owner=0 --group=0 --numeric-owner \
-            -C "$package" -cf - LICENSE waf-ids-ai-soc \
+            -C "$package" -cf - Cargo.lock Cargo.toml LICENSE rust-toolchain.toml waf-ids-ai-soc \
             | gzip -n > "$evidence/wardnet-${RELEASE_VERSION}-linux-x86_64.tar.gz"
 
           cargo metadata --locked --format-version=1 > "$evidence/cargo-metadata.json"
@@ -159,12 +162,13 @@ jobs:
             > "$evidence/release-manifest.json"
 
           echo "EVIDENCE_DIR=$evidence" >> "$GITHUB_ENV"
+          echo "PACKAGE_DIR=$package" >> "$GITHUB_ENV"
           echo "PACKAGE_ARCHIVE=$evidence/wardnet-${RELEASE_VERSION}-linux-x86_64.tar.gz" >> "$GITHUB_ENV"
 
-      - name: Generate SPDX JSON SBOM from the reviewed release binary
+      - name: Generate SPDX JSON SBOM from packaged release contents
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          file: ./target/release/waf-ids-ai-soc
+          path: ${{ env.PACKAGE_DIR }}
           format: spdx-json
           output-file: ${{ env.EVIDENCE_DIR }}/wardnet.spdx.json
           upload-artifact: false
