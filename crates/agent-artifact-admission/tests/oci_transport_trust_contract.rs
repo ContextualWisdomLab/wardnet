@@ -10,19 +10,27 @@ const IMAGE_NAME: &str = "ghcr.io/contextualwisdomlab/wardnet-runtime";
 
 #[test]
 fn podman_cannot_disable_registry_tls_verification() {
-    let (policy, mut intent) = approved_podman_pull();
-    intent.argv.insert(2, "--tls-verify=false".to_string());
+    for disabled in ["false", "FALSE", "f", "0"] {
+        let (policy, mut intent) = approved_podman_pull();
+        intent
+            .argv
+            .insert(2, format!("--tls-verify={disabled}"));
 
-    let decision = admission_decision(&policy, &intent);
+        let decision = admission_decision(&policy, &intent);
 
-    assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(
-        decision
-            .reason_codes
-            .iter()
-            .any(|reason| reason.as_str() == "alternate_trust_root"),
-        "caller-selected TLS verification disablement must not inherit registry trust from policy"
-    );
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "Podman false spelling {disabled} must not disable reviewed registry TLS verification"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "alternate_trust_root"),
+            "caller-selected TLS verification disablement must not inherit registry trust from policy"
+        );
+    }
 }
 
 #[test]
