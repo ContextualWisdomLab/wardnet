@@ -42,45 +42,71 @@ fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -> bool {
     })
 }
 
-/// Pip can select a wheel compatibility target or force/configure a source
-/// build independently of the name/version coordinate. Until policy carries
-/// that artifact/build identity, caller-selected selectors fail closed.
+/// Pip-compatible installers can select a wheel compatibility target or
+/// force/configure a source build independently of the approved name/version
+/// coordinate. Until policy carries that artifact/build identity, caller-
+/// selected selectors fail closed.
 fn requests_unapproved_pypi_artifact_variant(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
     };
-    if !matches!(executable, "pip" | "pip3") {
-        return false;
-    }
-
     let arguments = &intent.argv[1..];
-    if !arguments
-        .first()
-        .is_some_and(|argument| argument == "install")
-    {
-        return false;
-    }
 
-    arguments.iter().skip(1).any(|argument| {
-        matches_value_flag(argument, "--platform")
-            || matches_value_flag(argument, "--python-version")
-            || matches_value_flag(argument, "--implementation")
-            || matches_value_flag(argument, "--abi")
-            || matches_value_flag(argument, "--no-binary")
-            || matches_value_flag(argument, "--only-binary")
-            || argument == "--prefer-binary"
-            || argument == "--no-build-isolation"
-            || matches_short_value_flag(argument, "-C")
-            || matches_value_flag(argument, "--config-settings")
-    })
+    match executable {
+        "pip" | "pip3"
+            if arguments
+                .first()
+                .is_some_and(|argument| argument == "install") =>
+        {
+            arguments.iter().skip(1).any(requests_unapproved_pip_variant)
+        }
+        "uv"
+            if arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "install") =>
+        {
+            arguments.iter().skip(2).any(requests_unapproved_uv_pip_variant)
+        }
+        _ => false,
+    }
+}
+
+fn requests_unapproved_pip_variant(argument: &String) -> bool {
+    matches_value_flag(argument, "--platform")
+        || matches_value_flag(argument, "--python-version")
+        || matches_value_flag(argument, "--implementation")
+        || matches_value_flag(argument, "--abi")
+        || matches_value_flag(argument, "--no-binary")
+        || matches_value_flag(argument, "--only-binary")
+        || argument == "--prefer-binary"
+        || argument == "--no-build-isolation"
+        || matches_short_value_flag(argument, "-C")
+        || matches_value_flag(argument, "--config-settings")
+}
+
+fn requests_unapproved_uv_pip_variant(argument: &String) -> bool {
+    matches_value_flag(argument, "--python-platform")
+        || matches_value_flag(argument, "--no-binary")
+        || matches_value_flag(argument, "--no-binary-package")
+        || matches_value_flag(argument, "--only-binary")
+        || matches_value_flag(argument, "--only-binary-package")
+        || argument == "--no-build"
+        || argument == "--no-build-isolation"
+        || matches_value_flag(argument, "--no-build-isolation-package")
+        || matches_short_value_flag(argument, "-C")
+        || matches_value_flag(argument, "--config-setting")
+        || matches_value_flag(argument, "--config-settings")
+        || matches_value_flag(argument, "--config-settings-package")
 }
 
 fn matches_value_flag(argument: &str, flag: &str) -> bool {
     argument == flag || argument.strip_prefix(flag).is_some_and(|suffix| suffix.starts_with('='))
 }
 
-/// Pip's option parser accepts short options with their required value attached,
-/// for example `-Cbackend-mode=unsafe`, so exact-token matching is insufficient.
+/// Pip-compatible option parsers accept short options with their required
+/// value attached, for example `-Cbackend-mode=unsafe`, so exact-token matching
+/// is insufficient.
 fn matches_short_value_flag(argument: &str, flag: &str) -> bool {
     argument == flag
         || argument
