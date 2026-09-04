@@ -14,7 +14,14 @@ fn cargo_overwrite_and_tracking_overrides_require_separate_review_authority() {
     // Cargo documents --force as permitting overwrite of existing crates/binaries
     // and --no-track as disabling install metadata and concurrent-install protection.
     // Neither side effect is represented by the approved artifact coordinate.
-    for unreviewed_mutation in [vec!["--force"], vec!["-f"], vec!["--no-track"]] {
+    for unreviewed_mutation in [
+        vec!["--force"],
+        vec!["--force=true"],
+        vec!["-f"],
+        vec!["-fq"],
+        vec!["--no-track"],
+        vec!["--no-track=true"],
+    ] {
         let policy = approved_cargo_policy();
         let mut argv = vec![
             "cargo".to_string(),
@@ -44,6 +51,22 @@ fn cargo_overwrite_and_tracking_overrides_require_separate_review_authority() {
             "overwrite/tracking authority must use the stable artifact_not_approved reason: {unreviewed_mutation:?}"
         );
     }
+}
+
+#[test]
+fn reviewed_cargo_install_without_mutation_override_remains_eligible() {
+    let policy = approved_cargo_policy();
+    let intent = approved_cargo_intent(vec![
+        "cargo".to_string(),
+        "install".to_string(),
+        ARTIFACT_ARGUMENT.to_string(),
+        "--locked".to_string(),
+    ]);
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Allow);
+    assert!(decision.reason_codes.is_empty());
 }
 
 fn approved_cargo_policy() -> AdmissionPolicy {
