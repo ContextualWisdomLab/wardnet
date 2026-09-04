@@ -18,6 +18,10 @@ pub(crate) fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -
     arguments.iter().any(|argument| {
         argument == "--all-tags"
             || argument == "-a"
+            || argument
+                .strip_prefix("--all-tags=")
+                .is_some_and(is_true_boolean)
+            || argument.strip_prefix("-a=").is_some_and(is_true_boolean)
             || argument == "--platform"
             || argument.starts_with("--platform=")
             || (executable == "podman"
@@ -28,4 +32,11 @@ pub(crate) fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -
                     || argument == "--variant"
                     || argument.starts_with("--variant=")))
     })
+}
+
+fn is_true_boolean(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "t" | "true"
+    )
 }
