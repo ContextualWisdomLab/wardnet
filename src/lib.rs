@@ -41,10 +41,12 @@ mod credentials;
 mod kev_import;
 mod misp_import;
 mod opencti_import;
+mod runtime_config;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use runtime_config::RuntimeConfiguration;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -392,7 +394,8 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-fn parse_trusted_proxies(raw: Option<&str>) -> Result<Vec<IpNet>, String> {
+/// Parse the trusted-proxy bootstrap value into normalized host/CIDR entries.
+pub(crate) fn parse_trusted_proxies(raw: Option<&str>) -> Result<Vec<IpNet>, String> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
@@ -2544,10 +2547,25 @@ async fn gateway(State(state): State<AppState>, request: Request) -> Response {
     }
 }
 
+/// Read one request header as UTF-8 text, ignoring invalid byte sequences.
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
+/// Resolve the effective client IP for gateway enforcement.
+///
+/// Wardnet trusts forwarded client metadata only from configured proxy ranges,
+/// then walks `X-Forwarded-For` right to left until it reaches the first hop
+/// outside that trusted set. That matches the operational model used by common
+/// reverse proxies and the trust boundary described by RFC 7239's proxy-added
+/// forwarding parameters: each intermediary may add or alter the chain, so the
+/// application must anchor trust in the direct peer rather than in header
+/// presence alone.
+///
+/// Sources:
+/// - RFC 7239: <https://datatracker.ietf.org/doc/html/rfc7239>
+/// - NGINX realip recursion: <https://nginx.org/en/docs/http/ngx_http_realip_module.html>
+/// - Envoy trusted XFF handling: <https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/headers>
 pub fn effective_client_ip(
     peer_ip: Option<IpAddr>,
     x_forwarded_for: Option<&str>,
@@ -2566,6 +2584,7 @@ pub fn effective_client_ip(
     }
 }
 
+/// Resolve client IP headers from the request's direct peer and trusted ranges.
 fn client_ip_from_request(
     headers: &HeaderMap,
     peer_ip: Option<IpAddr>,
@@ -2579,6 +2598,11 @@ fn client_ip_from_request(
     )
 }
 
+/// Parse and validate a trusted `X-Forwarded-For` chain.
+///
+/// Any malformed or empty hop invalidates the entire chain and forces a
+/// fail-closed fallback to the direct peer. When the chain is valid, the
+/// rightmost untrusted hop is the client address nearest the trust boundary.
 fn trusted_forwarded_chain_client_ip_checked(
     x_forwarded_for: Option<&str>,
     trusted_proxies: &[IpNet],
@@ -2601,6 +2625,7 @@ fn trusted_forwarded_chain_client_ip_checked(
         .find(|ip| !trusted_proxies.iter().any(|proxy| proxy.contains(*ip))))
 }
 
+/// Parse `X-Real-IP` only after the direct peer has already been trusted.
 fn trusted_real_ip_value(x_real_ip: Option<&str>) -> Option<IpAddr> {
     x_real_ip
         .and_then(|value| value.trim().parse::<IpAddr>().ok())
@@ -3429,46 +3454,18 @@ pub fn parse_u64_env(
 pub async fn run_from_env(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    // Secret-bearing values go through the credential registry (env/file are
-    // bootstrap transports only). Operational config remains env for now.
-    let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
-        .ok()
-        .map(PathBuf::from);
-    let credentials = CredentialRegistry::bootstrap_secrets(
-        credentials_path.as_deref(),
-        std::env::var("ADMIN_TOKEN").ok(),
-        std::env::var("ADMIN_TOKENS").ok(),
-    )?;
-    let config = AppConfig {
-        admin_token: credentials
-            .get_credential(CRED_ADMIN_TOKEN)
-            .map(str::to_owned),
-        state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
-        dnsbl_origin: std::env::var("DNSBL_ORIGIN")
-            .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
-        event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
-        trusted_proxies: parse_trusted_proxies(
-            std::env::var("TRUSTED_PROXY_CIDRS").ok().as_deref(),
-        )
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?,
-    };
-    let rate_limit = parse_u32_env("RATE_LIMIT", std::env::var("RATE_LIMIT").ok().as_deref(), 0)?;
-    let rate_limit_window = parse_u64_env(
-        "RATE_LIMIT_WINDOW",
-        std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
-        60,
-    )?;
+    let runtime = RuntimeConfiguration::from_env()?;
+    let bind_addr = runtime.bind_addr.clone();
+    let (credentials, _credentials_path) = CredentialRegistry::bootstrap_from_env()?;
+    let config = runtime.app_config(&credentials);
+    let rate_limit = runtime.rate_limit;
+    let rate_limit_window = runtime.rate_limit_window;
     let admin_tokens = parse_admin_tokens(
         credentials
             .get_credential(CRED_ADMIN_TOKENS)
             .unwrap_or_default(),
     );
-    let max_body_bytes = parse_u64_env(
-        "MAX_BODY_BYTES",
-        std::env::var("MAX_BODY_BYTES").ok().as_deref(),
-        1_048_576,
-    )? as usize;
+    let max_body_bytes = runtime.max_body_bytes;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     println!("waf-ids-ai-soc listening on http://{local_addr}");

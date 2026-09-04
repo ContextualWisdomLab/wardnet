@@ -7,7 +7,11 @@
 //! [`CredentialRegistry::get_credential`].
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::ErrorKind, path::Path};
+use std::{
+    collections::HashMap,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 /// Well-known credentials loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
@@ -47,6 +51,19 @@ pub struct CredentialRegistry {
 impl CredentialRegistry {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Bootstrap the registry from process-edge delivery inputs.
+    pub fn bootstrap_from_env() -> Result<(Self, Option<PathBuf>), String> {
+        let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
+            .ok()
+            .map(PathBuf::from);
+        let registry = Self::bootstrap_secrets(
+            credentials_path.as_deref(),
+            std::env::var("ADMIN_TOKEN").ok(),
+            std::env::var("ADMIN_TOKENS").ok(),
+        )?;
+        Ok((registry, credentials_path))
     }
 
     pub fn get_credential(&self, name: &str) -> Option<&str> {
