@@ -58,6 +58,10 @@ impl RuntimeConfiguration {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
+    /// Build the same runtime snapshot from an injected lookup source.
+    ///
+    /// Tests use this seam to prove startup consumes one immutable bootstrap
+    /// view without mutating or re-reading process environment state.
     fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -167,6 +171,8 @@ pub fn parse_u64_env(
 }
 
 #[cfg(test)]
+/// Walk the Rust source tree and return any file that performs direct runtime
+/// environment reads outside the approved bootstrap adapters.
 fn direct_runtime_env_read_offenders(root: &Path) -> Vec<PathBuf> {
     fn visit(root: &Path, current: &Path, offenders: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(current).unwrap() {
