@@ -11,7 +11,14 @@ const IMAGE_NAME: &str = "ghcr.io/contextualwisdomlab/wardnet-runtime";
 #[test]
 fn oci_all_tags_cannot_expand_an_exact_approved_digest_to_a_repository_set() {
     for executable in ["docker", "podman"] {
-        for all_tags_flag in ["--all-tags", "-a", "--all-tags=true", "-a=true"] {
+        for all_tags_flag in [
+            "--all-tags",
+            "-a",
+            "--all-tags=true",
+            "--all-tags=TRUE",
+            "-a=true",
+            "-a=1",
+        ] {
             let (policy, mut intent) = approved_oci_pull(executable);
             intent.argv.insert(2, all_tags_flag.to_string());
 
@@ -28,6 +35,24 @@ fn oci_all_tags_cannot_expand_an_exact_approved_digest_to_a_repository_set() {
                     .iter()
                     .any(|reason| reason.as_str() == "artifact_not_approved"),
                 "repository-wide OCI expansion must stay in the artifact-identity reason domain"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_false_all_tags_assignment_preserves_exact_digest_admission() {
+    for executable in ["docker", "podman"] {
+        for all_tags_flag in ["--all-tags=false", "-a=0"] {
+            let (policy, mut intent) = approved_oci_pull(executable);
+            intent.argv.insert(2, all_tags_flag.to_string());
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Allow,
+                "{executable} {all_tags_flag} leaves repository-wide expansion disabled and must not create a false security block"
             );
         }
     }
