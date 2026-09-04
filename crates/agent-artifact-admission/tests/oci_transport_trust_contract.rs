@@ -91,6 +91,26 @@ fn podman_cannot_supply_registry_credentials_from_untrusted_argv() {
 }
 
 #[test]
+fn podman_cannot_select_an_unreviewed_image_decryption_key() {
+    let (policy, mut intent) = approved_podman_pull();
+    intent.argv.insert(
+        2,
+        "--decryption-key=/tmp/agent-controlled-key.pem:synthetic-passphrase".to_string(),
+    );
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "alternate_trust_root"),
+        "untrusted argv must not choose secret-bearing image decryption material"
+    );
+}
+
+#[test]
 fn explicit_tls_verification_true_does_not_weaken_the_reviewed_registry_trust() {
     let (policy, mut intent) = approved_podman_pull();
     intent.argv.insert(2, "--tls-verify=true".to_string());
