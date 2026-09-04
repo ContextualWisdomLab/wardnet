@@ -60,6 +60,24 @@ fn explicit_false_all_tags_assignment_preserves_exact_digest_admission() {
     }
 }
 
+#[test]
+fn quiet_shorthand_without_all_tags_preserves_exact_digest_admission() {
+    for executable in ["docker", "podman"] {
+        for quiet_flag in ["-q", "-qq"] {
+            let (policy, mut intent) = approved_oci_pull(executable);
+            intent.argv.insert(2, quiet_flag.to_string());
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Allow,
+                "{executable} {quiet_flag} changes presentation only and must not be confused with repository-wide expansion"
+            );
+        }
+    }
+}
+
 fn approved_oci_pull(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     let artifact_argument = format!("{IMAGE_NAME}@sha256:{DIGEST}");
     let artifact = ArtifactCoordinate {
