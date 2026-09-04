@@ -55,24 +55,10 @@ fn valid_chain_selects_rightmost_untrusted_hop() {
 }
 
 #[test]
-fn mapped_ipv6_trusted_cidr_matches_equivalent_ipv4_range() {
-    let mapped_range = vec![IpNet::parse("::ffff:192.0.2.0/120")
-        .expect("IPv4-mapped IPv6 /120 must normalize to IPv4 /24")];
-    let forwarded = "198.51.100.77, 192.0.2.10";
+fn noncanonical_ipv4_mapped_cidr_configuration_fails_closed() {
+    let error = IpNet::parse("::ffff:192.0.2.0/120")
+        .expect_err("mapped IPv6 CIDR syntax must be rewritten as canonical IPv4 CIDR");
 
-    let mapped_result = effective_client_ip(
-        Some(ip("::ffff:192.0.2.44")),
-        Some(forwarded),
-        None,
-        &mapped_range,
-    );
-    let ipv4_result = effective_client_ip(
-        Some(ip("192.0.2.44")),
-        Some(forwarded),
-        None,
-        &trusted_proxy_range(),
-    );
-
-    assert_eq!(mapped_result, Some(ip("198.51.100.77")));
-    assert_eq!(mapped_result, ipv4_result);
+    assert!(error.contains("prefix 120 is too large"));
+    assert!(IpNet::parse("192.0.2.0/24").is_ok());
 }
