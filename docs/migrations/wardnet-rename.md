@@ -16,12 +16,12 @@ configuration must use `WARDNET_*`.
 
 ## Preserve state before first Wardnet startup
 
-Copy the existing state before starting Wardnet. Do not start the renamed
-workload against an empty destination and then copy state over it: an empty
-state location can be initialized with seeded state, making it ambiguous which
-copy is authoritative. Stop writes to the old workload, retain a rollback copy
-of `state.json`, and verify the copied file by size and SHA-256 before starting
-the new workload. Keep the old storage read-only until the renamed workload has
+Copy existing state before starting Wardnet. Do not start the renamed workload
+against an empty destination and then copy state over it: an empty state
+location can be initialized with seeded state, making it ambiguous which copy
+is authoritative. Stop writes to the old workload, retain a rollback copy of
+`state.json`, and verify the copied file by size and SHA-256 before starting the
+new workload. Keep the old storage read-only until the renamed workload has
 loaded the expected routes, threat indicators, DNSBL entries, feeds, and event
 history.
 
@@ -51,16 +51,16 @@ organization's secret-management control plane create or synchronize
 procedure copies the value from `waf-ids-ai-soc-admin`, perform that copy
 through the secret-management boundary rather than committing or echoing the
 secret into repository files or shell history. Confirm that `wardnet-admin`
-exists and contains the expected key before you apply
-`deploy/kubernetes/wardnet.yaml`. The Deployment intentionally has no literal
-fallback and should remain unable to start if the Secret is absent.
+exists and contains the expected key before you apply `deploy/kubernetes/wardnet.yaml`.
+The Deployment intentionally has no literal fallback and should remain unable
+to start if the Secret is absent.
 
-After state and Secret migration are verified, apply
-`deploy/kubernetes/wardnet.yaml`, wait for readiness, compare buyer/operator
-state and audit evidence with the pre-migration snapshot, and only then retire
-the old workload. A failed readiness or state comparison means roll back to the
-retained old workload/storage; do not delete the old PVC, volume, or Secret as
-part of the same change that first starts Wardnet.
+After state and Secret migration are verified, apply `deploy/kubernetes/wardnet.yaml`,
+wait for readiness, compare buyer/operator state and audit evidence with the
+pre-migration snapshot, and only then retire the old workload. A failed
+readiness or state comparison means roll back to the retained old
+workload/storage; do not delete the old PVC, volume, or Secret as part of the
+same change that first starts Wardnet.
 
 ## Metrics compatibility
 
