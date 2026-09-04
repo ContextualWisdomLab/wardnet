@@ -24,7 +24,7 @@ Runner/event/review materialization is separately owned by `.github#712` and rel
 
 ### #155 — fail-closed management authentication
 
-PR #155 remains Ready/mergeable at exact `e6f05d77858e91c176cff25c4b11e790bc5dcdd1` on protected `main@cc15cc2c34daf8c104754eb83d52a6a66f3cd6e128`. Repository-owned CI `33590350994`, Fuzz `33590350997`, Security Scan `33590350967`, and SAST Semgrep `33590350991` are terminal GREEN; returned inline review threads are resolved.
+PR #155 remains Ready/mergeable at exact `e6f05d77858e91c176cff25c4b11e790bc5dcdd1` on protected `main@cc15cc2c34daf8c104eeb83d52a6a66f3cd6e128`. Repository-owned CI `33590350994`, Fuzz `33590350997`, Security Scan `33590350967`, and SAST Semgrep `33590350991` are terminal GREEN; returned inline review threads are resolved.
 
 Required OpenCode run `33590351182` has terminal-success bootstrap `100122902000`, coverage-source-tree `100272722468`, and coverage-evidence `100479589911`. Final `opencode-review` job `100659819151` did acquire GitHub-hosted runner `1001655142`, completed setup and the authenticated current-head review request, then remained at the fail-closed verdict boundary until the administrative three-hour limit and ended `cancelled` around `2026-09-04T04:37:15Z`. The current defect is therefore verdict materialization/timeout semantics, not runner acquisition. Exact evidence and GREEN acceptance are on `.github#712` comment `5535918616`. Do not rerun-storm this unchanged head. #78 closes only when this exact or a verified successor delta reaches protected main through satisfiable ordinary governance.
 
