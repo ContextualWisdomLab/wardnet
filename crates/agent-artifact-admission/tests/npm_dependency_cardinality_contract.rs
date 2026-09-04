@@ -25,8 +25,8 @@ fn npm_family_direct_installs_fail_closed_without_reviewed_dependency_closure() 
             decision
                 .reason_codes
                 .iter()
-                .any(|reason| reason.as_str() == "dependency_closure_unverified"),
-            "{executable} must expose that no reviewed transitive dependency closure is enforceable by this direct-install grammar"
+                .any(|reason| reason.as_str() == "artifact_not_approved"),
+            "{executable} transitive artifacts have no reviewed artifact authority in the v0.1 direct-install contract"
         );
     }
 }
