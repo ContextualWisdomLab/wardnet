@@ -43,7 +43,7 @@ fn rename_documents_state_and_secret_cutover_before_new_deployment() {
     }
 
     let state_copy = migration
-        .find("Copy the existing state before starting Wardnet")
+        .find("Copy existing state before starting Wardnet")
         .expect("migration guide must require state migration before startup");
     let deployment_apply = migration
         .find("apply `deploy/kubernetes/wardnet.yaml`")
