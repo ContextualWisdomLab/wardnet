@@ -731,6 +731,7 @@ async fn clearfolio_submit(
         &endpoint,
         "Clearfolio submit URL",
         cfg!(test),
+        None,
     )
     .await
     {
@@ -788,6 +789,7 @@ async fn clearfolio_status(
         &endpoint,
         "Clearfolio status URL",
         cfg!(test),
+        None,
     )
     .await
     {
@@ -969,6 +971,7 @@ async fn soc_analyze(
         &endpoint,
         "SOC LLM endpoint",
         cfg!(test),
+        None,
     )
     .await
     {
@@ -1790,6 +1793,8 @@ async fn fetch_taxii_objects(
 ) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(PHISHING_DATABASE_FETCH_TIMEOUT_SECS);
     let parsed = validate_outbound_http_url(
         url,
         "TAXII objects URL",
@@ -1804,8 +1809,10 @@ async fn fetch_taxii_objects(
         &parsed,
         "TAXII objects URL",
         cfg!(test),
+        Some(deadline),
     )
     .await?;
+    let request_timeout = remaining_outbound_operation_budget(deadline, "TAXII objects URL")?;
 
     let mut request = client
         .get(parsed)
@@ -1813,9 +1820,7 @@ async fn fetch_taxii_objects(
             "Accept",
             "application/taxii+json;version=2.1, application/stix+json;version=2.1, application/json",
         )
-        .timeout(std::time::Duration::from_secs(
-            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
-        ));
+        .timeout(request_timeout);
 
     if let Some(token) = bearer_token.map(str::trim).filter(|s| !s.is_empty()) {
         request = request.bearer_auth(token);
@@ -2397,6 +2402,8 @@ async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
     use futures_util::StreamExt;
 
     let url = state.kev_catalog_url();
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(PHISHING_DATABASE_FETCH_TIMEOUT_SECS);
     validate_kev_catalog_url(url)?;
     let parsed = validate_outbound_http_url(
         url,
@@ -2412,13 +2419,13 @@ async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
         &parsed,
         "KEV catalog URL",
         cfg!(test),
+        Some(deadline),
     )
     .await?;
+    let request_timeout = remaining_outbound_operation_budget(deadline, "KEV catalog URL")?;
     let response = client
         .get(parsed)
-        .timeout(std::time::Duration::from_secs(
-            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
-        ))
+        .timeout(request_timeout)
         .send()
         .await
         .map_err(|error| format!("failed to fetch KEV catalog {url}: {error}"))?;
@@ -2505,6 +2512,7 @@ async fn validated_outbound_http_client(
     url: &reqwest::Url,
     label: &str,
     allow_loopback_destination: bool,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<reqwest::Client, String> {
     let original_host = url
         .host_str()
@@ -2520,10 +2528,15 @@ async fn validated_outbound_http_client(
     let port = url
         .port_or_known_default()
         .ok_or_else(|| format!("{label} port is required"))?;
-    let addresses = lookup_host((host, port))
-        .await
-        .map_err(|error| format!("{label} host {host} resolution failed: {error}"))?
-        .collect::<Vec<_>>();
+    let resolution = lookup_host((host, port));
+    let addresses = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, resolution)
+            .await
+            .map_err(|_| format!("{label} host {host} resolution timed out"))?,
+        None => resolution.await,
+    }
+    .map_err(|error| format!("{label} host {host} resolution failed: {error}"))?
+    .collect::<Vec<_>>();
     pinned_outbound_http_client(
         client_cache,
         original_host,
@@ -2532,6 +2545,19 @@ async fn validated_outbound_http_client(
         allow_loopback_destination,
         addresses,
     )
+}
+
+fn remaining_outbound_operation_budget(
+    deadline: tokio::time::Instant,
+    label: &str,
+) -> Result<std::time::Duration, String> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(format!(
+            "{label} operation timed out before sending request"
+        ));
+    }
+    Ok(remaining)
 }
 
 /// Builds a client pinned to the already-validated resolution result for `host`.
@@ -2924,6 +2950,7 @@ async fn proxy_request(
         &parsed,
         "proxy upstream",
         cfg!(test),
+        None,
     )
     .await?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
@@ -3252,6 +3279,8 @@ async fn apply_threat_feed_import(
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(PHISHING_DATABASE_FETCH_TIMEOUT_SECS);
     validate_http_url(url, /* allow_non_default_hosts */ true)
         .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let parsed = validate_outbound_http_url(
@@ -3269,14 +3298,15 @@ async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> 
         &parsed,
         "feed URL",
         cfg!(test),
+        Some(deadline),
     )
     .await
     .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    let request_timeout = remaining_outbound_operation_budget(deadline, "feed URL")
+        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
     let response = client
         .get(parsed)
-        .timeout(std::time::Duration::from_secs(
-            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
-        ))
+        .timeout(request_timeout)
         .send()
         .await
         .map_err(|error| format!("failed to fetch feed {url}: {error}"))?;
@@ -7245,6 +7275,27 @@ mod tests {
             .unwrap_or_else(|error| panic!("expected cached pinned request to succeed: {error}"));
         assert_eq!(second_response.status(), reqwest::StatusCode::OK);
         assert_eq!(cache.lock().unwrap().entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn validated_outbound_http_client_rejects_elapsed_deadline_before_dns() {
+        let cache = Arc::new(StdMutex::new(PinnedOutboundClientCache::default()));
+        let url = reqwest::Url::parse("https://example.invalid/feed.txt").unwrap();
+        let deadline = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        let error = validated_outbound_http_client(
+            &outbound_http_client_builder().build().unwrap(),
+            &cache,
+            &url,
+            "feed URL",
+            false,
+            Some(deadline),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "feed URL host example.invalid resolution timed out");
+        assert!(cache.lock().unwrap().entries.is_empty());
     }
 
     #[test]
