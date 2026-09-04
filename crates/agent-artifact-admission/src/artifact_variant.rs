@@ -70,13 +70,22 @@ fn requests_unapproved_pypi_artifact_variant(intent: &InstallIntent) -> bool {
             || matches_value_flag(argument, "--only-binary")
             || argument == "--prefer-binary"
             || argument == "--no-build-isolation"
-            || matches_value_flag(argument, "-C")
+            || matches_short_value_flag(argument, "-C")
             || matches_value_flag(argument, "--config-settings")
     })
 }
 
 fn matches_value_flag(argument: &str, flag: &str) -> bool {
     argument == flag || argument.strip_prefix(flag).is_some_and(|suffix| suffix.starts_with('='))
+}
+
+/// Pip's option parser accepts short options with their required value attached,
+/// for example `-Cbackend-mode=unsafe`, so exact-token matching is insufficient.
+fn matches_short_value_flag(argument: &str, flag: &str) -> bool {
+    argument == flag
+        || argument
+            .strip_prefix(flag)
+            .is_some_and(|suffix| !suffix.is_empty())
 }
 
 /// Docker and Podman expose `-a` (`--all-tags`) and `-q` (`--quiet`) as
