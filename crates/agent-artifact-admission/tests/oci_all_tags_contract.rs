@@ -18,6 +18,8 @@ fn oci_all_tags_cannot_expand_an_exact_approved_digest_to_a_repository_set() {
             "--all-tags=TRUE",
             "-a=true",
             "-a=1",
+            "-aq",
+            "-qa",
         ] {
             let (policy, mut intent) = approved_oci_pull(executable);
             intent.argv.insert(2, all_tags_flag.to_string());
