@@ -59,7 +59,7 @@ Failure, recovery, verification, and evidence requirements are documented in [`.
 - Terminate TLS in front of the service.
 - Expose `/admin` and `/api/*` only through identity-aware access.
 - Configure upstream allowlists and egress policy.
-- Store `ADMIN_TOKEN` in a secret manager.
+- Store the write-capable administrator credential in a secret manager. The process will not become ready on any non-loopback `BIND_ADDR` if no usable `ADMIN_TOKEN`, write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH` credential is configured. Recovery is to provision the secret authority and restart; do not disable the gate. This fail-closed bootstrap aligns with the threat model and the NIST guidance cited in [docs/security/threat-model.md](../security/threat-model.md).
 - Mount persistent state or replace JSON persistence with a database.
 - Run `scripts/smoke.sh` before promoting a release.
 - Keep block mode route-scoped and reversible.
