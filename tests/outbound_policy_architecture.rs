@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, future, path::PathBuf, time::Duration};
 
 fn production_lib_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
@@ -117,8 +117,9 @@ fn phishing_feed_dns_resolution_shares_the_end_to_end_operation_deadline() {
     );
 
     assert!(
-        resolver.contains("tokio::time::Instant") && resolver.contains("tokio::time::timeout_at("),
-        "manual DNS resolution must accept an operation deadline and fail closed at that same deadline"
+        resolver.contains("tokio::time::Instant")
+            && resolver.contains("tokio::time::timeout_at(deadline, resolution)"),
+        "manual DNS resolution must wrap the actual lookup future in the operation deadline"
     );
 
     for (start_marker, end_marker, function_name) in [
@@ -146,4 +147,15 @@ fn phishing_feed_dns_resolution_shares_the_end_to_end_operation_deadline() {
             "{function_name} must establish one deadline before DNS validation and apply only the remaining budget to the HTTP request"
         );
     }
+}
+
+#[tokio::test]
+async fn pending_resolver_future_is_cancelled_at_the_shared_deadline() {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+    let result = tokio::time::timeout_at(deadline, future::pending::<()>()).await;
+
+    assert!(
+        result.is_err(),
+        "a resolver future that never becomes ready must terminate at the shared deadline"
+    );
 }
