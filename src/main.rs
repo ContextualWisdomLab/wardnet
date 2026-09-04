@@ -4,21 +4,34 @@
 #[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    wardnet::run_from_env(Box::pin(shutdown_signal())).await
+    // Registered eagerly, before `run_from_env` binds its listener and prints
+    // the readiness line, so a SIGTERM delivered immediately on startup (as
+    // container runtimes and the e2e test harness do) cannot race the OS-level
+    // handler installation and fall through to the default "kill" disposition.
+    let shutdown = install_shutdown_signal();
+    wardnet::run_from_env(Box::pin(shutdown)).await
 }
 
 #[cfg(all(not(test), unix))]
-async fn shutdown_signal() {
-    // Shut down gracefully on SIGTERM (what container runtimes and the e2e test
-    // harness send) so in-flight requests drain and the process exits cleanly.
+fn install_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
+    // `tokio::signal::unix::signal` registers the handler synchronously on
+    // call; only the subsequent `.recv()` wait is deferred to the returned
+    // future, so callers must invoke this *before* announcing readiness.
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
-    term.recv().await;
+    async move {
+        term.recv().await;
+    }
 }
 
-#[cfg(all(not(test), not(unix)))]
-async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("install Ctrl-C handler");
+#[cfg(all(not(test), windows))]
+fn install_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
+    // Mirrors the Unix path: `tokio::signal::windows::ctrl_c` registers the
+    // handler synchronously, so only `.recv()` is deferred to the future.
+    // Scoped to `windows` specifically (not `not(unix)`) since that API only
+    // exists on Windows -- a broader non-Unix target would fail to compile.
+    let mut ctrl_c = tokio::signal::windows::ctrl_c().expect("install Ctrl-C handler");
+    async move {
+        ctrl_c.recv().await;
+    }
 }

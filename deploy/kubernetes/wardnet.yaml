@@ -3,15 +3,12 @@ kind: Namespace
 metadata:
   name: wardnet
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: wardnet-admin
-  namespace: wardnet
-type: Opaque
-stringData:
-  ADMIN_TOKEN: replace-with-secret-manager-sync
----
+# The administrator Secret is intentionally not distributed with Wardnet.
+# For a fresh install, create this Namespace idempotently first, provision
+# `wardnet-admin` through the organization's secret-management control
+# plane, wait for synchronization, then apply this complete manifest. The
+# Deployment has no fallback value and therefore fails closed when the Secret
+# or `ADMIN_TOKEN` key is absent.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -41,6 +38,7 @@ spec:
       labels:
         app.kubernetes.io/name: wardnet
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         fsGroup: 10001
@@ -67,6 +65,7 @@ spec:
                 secretKeyRef:
                   name: wardnet-admin
                   key: ADMIN_TOKEN
+                  optional: false
           volumeMounts:
             - name: state
               mountPath: /var/lib/wardnet

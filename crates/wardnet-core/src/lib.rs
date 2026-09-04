@@ -11,6 +11,8 @@ pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
 pub struct AppData {
     pub routes: Vec<RouteConfig>,
     pub threats: Vec<ThreatIndicator>,
+    #[serde(default)]
+    pub operator_threat_keys: Vec<ThreatIndicatorKey>,
     pub dnsbl: Vec<DnsblEntry>,
     pub events: Vec<SecurityEvent>,
     pub next_event_id: u64,
@@ -22,6 +24,8 @@ pub struct AppData {
     pub commercial: CommercialProfile,
     #[serde(default)]
     pub threat_feeds: Vec<ThreatFeedStatus>,
+    #[serde(default)]
+    pub threat_feed_ownership: Vec<ThreatFeedOwnership>,
 }
 
 impl AppData {
@@ -42,6 +46,7 @@ impl AppData {
                 source: "seed:owasp-crs-shape".to_string(),
                 ttl_seconds: 86_400,
             }],
+            operator_threat_keys: Vec::new(),
             dnsbl: vec![DnsblEntry {
                 address: "203.0.113.10".parse().expect("seed IP address is valid"),
                 code: "127.0.0.2".to_string(),
@@ -56,6 +61,7 @@ impl AppData {
             next_audit_log_id: 1,
             commercial: CommercialProfile::seeded(),
             threat_feeds: Vec::new(),
+            threat_feed_ownership: Vec::new(),
         }
     }
 }
@@ -177,6 +183,19 @@ pub struct ThreatFeedStatus {
     pub threat_count: usize,
     pub dnsbl_count: usize,
     pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreatFeedOwnership {
+    pub feed_id: String,
+    pub threat_keys: Vec<ThreatIndicatorKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ThreatIndicatorKey {
+    pub indicator_type: String,
+    pub value: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -533,6 +552,32 @@ pub fn upsert_threat_feed(
     feed
 }
 
+pub fn threat_indicator_key(indicator: &ThreatIndicator) -> ThreatIndicatorKey {
+    ThreatIndicatorKey {
+        indicator_type: indicator.indicator_type.clone(),
+        value: indicator.value.clone(),
+        source: indicator.source.clone(),
+    }
+}
+
+pub fn replace_threat_feed_ownership(
+    ownership: &mut Vec<ThreatFeedOwnership>,
+    feed_id: String,
+    threat_keys: Vec<ThreatIndicatorKey>,
+) -> Vec<ThreatIndicatorKey> {
+    if let Some(existing) = ownership.iter_mut().find(|item| item.feed_id == feed_id) {
+        let previous = existing.threat_keys.clone();
+        existing.threat_keys = threat_keys;
+        previous
+    } else {
+        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys,
+        });
+        Vec::new()
+    }
+}
+
 pub fn record_audit_log(data: &mut AppData, entry: NewAuditLogEntry) -> AuditLogEntry {
     let audit_log = AuditLogEntry {
         id: data.next_audit_log_id,
@@ -845,6 +890,14 @@ pub fn score_request(
         let kind = indicator.indicator_type.to_ascii_lowercase();
         let matched = if matches!(kind.as_str(), "ip" | "client_ip" | "source_ip" | "src_ip") {
             client_ip.is_some_and(|ip| indicator.value.parse::<IpAddr>().ok() == Some(ip))
+        } else if kind == "cve" {
+            // A CVE identifier is vulnerability-catalog metadata (e.g. from a
+            // CISA KEV import), not a request-content observable: it can
+            // legitimately appear in a vulnerability-management or security
+            // tool's own traffic (`/api/cve/CVE-2021-44228`), so it must never
+            // drive content-substring scoring. It stays visible via the
+            // threat-indicator, feed-freshness, and buyer-evidence APIs.
+            false
         } else {
             haystack.contains(&indicator.value.to_lowercase())
         };
@@ -1293,6 +1346,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "OpenCTI observable/indicator JSON ingest into threat indicators and DNSBL (admin-auth)",
             false,
         ),
+        buyer_evidence_endpoint(
+            "cisa_kev_ingest",
+            "POST",
+            "/api/threat-intel/cisa-kev",
+            "application/json",
+            "CISA Known Exploited Vulnerabilities catalog pull into CVE threat indicators (admin-auth)",
+            false,
+        ),
     ]
 }
 
@@ -1440,6 +1501,31 @@ mod tests {
             &[],
         );
         assert_eq!(miss.score, 0);
+    }
+
+    #[test]
+    fn score_request_never_content_matches_cve_indicators() {
+        // A CVE indicator (e.g. from a CISA KEV import) is vulnerability
+        // metadata, not a request-content signature: a security-tooling
+        // request can legitimately carry the literal CVE string, and that
+        // must never contribute to the block score.
+        let threats = vec![ThreatIndicator {
+            value: "CVE-2021-44228".to_string(),
+            indicator_type: "cve".to_string(),
+            severity: Severity::Critical,
+            source: "feed:cisa-kev".to_string(),
+            ttl_seconds: 86_400,
+        }];
+        let hit = score_request(
+            "/api/cve/CVE-2021-44228",
+            None,
+            "looking up CVE-2021-44228 details",
+            None,
+            &threats,
+            &[],
+        );
+        assert_eq!(hit.score, 0);
+        assert_eq!(hit.reason, "no matching indicator");
     }
 
     #[test]

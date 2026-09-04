@@ -63,6 +63,18 @@ The core stays an in-repo workspace crate on purpose (no git submodule) until it
 ## Runtime Configuration
 
 Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `ADMIN_TOKEN` (write token for `X-Admin-Token`), `ADMIN_TOKENS` (comma-separated `token:actor` pairs for multi-token RBAC with per-token audit actors), `WARDNET_STATE_PATH` (optional JSON state file; omitted = seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT` (default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`.
+Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default
+`127.0.0.1:8080`), `WARDNET_STATE_PATH` (optional JSON state file; omitted =
+seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT`
+(default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`,
+`WAF_IDS_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local
+credentials/config), `ADMIN_TOKEN` (bootstrap transport for the shared write
+token), and `ADMIN_TOKENS` (bootstrap transport for comma-separated
+`token:actor[:role]` RBAC entries). `ADMIN_TOKEN` and `ADMIN_TOKENS` are loaded
+into `CredentialRegistry` before the server starts; handlers read the
+in-process registry/AppState copy, not raw env vars. KEV imports use the
+built-in CISA endpoint at runtime; only in-crate tests can override it through
+`AppState::with_kev_catalog_url` to point at a loopback mock server.
 
 ## Key Conventions
 
@@ -71,7 +83,9 @@ Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `
 - Audit logs must never leak admin tokens (`scripts/smoke.sh` asserts this).
 - Untrusted-input surfaces (request scorer, state deserializer, admin-token parser, DNSBL zone export) are fuzzed; if you change one, keep its libFuzzer target and proptest mirror in sync (`docs/fuzzing.md` lists the invariants per target).
 - Block mode is route-scoped; default bind is localhost. See `docs/architecture.md` for security boundaries and the near-term adapter roadmap.
-- Deployment assets: `Dockerfile` (two-stage build, pinned base images, runs as non-root `wardnet`), `deploy/docker-compose.yml`, `deploy/kubernetes/wardnet.yaml`.
+- Deployment assets: `Dockerfile` (two-stage build, pinned base images, runs as
+  non-root `wardnet`), `deploy/docker-compose.yml`,
+  `deploy/kubernetes/wardnet.yaml`.
 
 ## Further Docs
 
