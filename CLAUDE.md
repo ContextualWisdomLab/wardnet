@@ -40,7 +40,9 @@ cargo +nightly fuzz run fuzz_score_request -- -max_total_time=60
 
 ## Toolchain
 
-`rust-toolchain.toml` pins the `stable` channel with `llvm-tools-preview` (needed by `cargo llvm-cov`), `rustfmt`, and `clippy`. Both workspace crates use `edition = "2024"`. Fuzzing is the one exception that needs nightly.
+`rust-toolchain.toml` pins Rust `1.98.0` with `llvm-tools-preview` (needed by `cargo llvm-cov`), `rustfmt`, and `clippy`. CI reads the compiler version from that file so automated toolchain bumps update one source of truth. Both workspace crates use `edition = "2024"`. Fuzzing is the one exception that needs nightly.
+
+This pin is a supply-chain control, not just a convenience. Lamb and Zacchiroli (2021) describe reproducible builds as the path that lets independent builders verify that source and released binaries match, and Malka et al. (2026) show that Docker alone does not guarantee reproducibility because build instructions and environment details still matter. Wardnet therefore keeps the reviewed compiler version in `rust-toolchain.toml`, has CI derive the toolchain from that file, and avoids a second drifting Rust version source in the container build. Sources: Lamb, C., & Zacchiroli, S. (2021). *Reproducible Builds: Increasing the Integrity of Software Supply Chains* [Preprint]. arXiv. https://arxiv.org/abs/2104.06020 ; Malka, J., Zacchiroli, S., & Zimmermann, T. (2026). *Docker Does Not Guarantee Reproducibility* [Preprint]. arXiv. https://arxiv.org/abs/2601.12811. Local PDFs: `docs/papers/reproducible-builds-software-supply-chains-arxiv-2104.06020.pdf`, `docs/papers/docker-does-not-guarantee-reproducibility-arxiv-2601.12811.pdf`.
 
 ## Workspace Layout
 
