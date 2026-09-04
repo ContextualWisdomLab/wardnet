@@ -11,6 +11,14 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// Immutable bootstrap snapshot for non-secret Wardnet runtime settings.
+///
+/// As of September 2026, this public type no longer carries a
+/// `credentials_path` field. External callers that previously built
+/// `RuntimeConfiguration` struct literals with that field must now bootstrap
+/// secret-file selection through [`CredentialRegistry::bootstrap_from_env`] or
+/// [`CredentialRegistry::bootstrap_secrets`] and keep
+/// `RuntimeConfiguration` limited to non-secret listener, DNSBL, and retention
+/// settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfiguration {
     /// Socket address the gateway binds during process startup.

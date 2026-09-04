@@ -10,3 +10,4 @@
 ### Operations
 
 - Documented administrator credential provisioning, rotation, rollout verification, rollback, evidence handling, and the boundary with the separate runtime-authentication fail-closed work tracked in issue #78.
+- Clarified the public `RuntimeConfiguration` bootstrap contract after the September 2026 removal of `credentials_path`: external callers now keep credential-file selection in `CredentialRegistry` and use `RuntimeConfiguration` only for non-secret runtime settings.
