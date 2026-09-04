@@ -55,12 +55,12 @@ fn valid_chain_selects_rightmost_untrusted_hop() {
 }
 
 #[test]
-fn ipv4_mapped_cidr_configuration_is_canonicalized() {
-    let mapped =
-        IpNet::parse("::ffff:192.0.2.0/120").expect("mapped IPv6 CIDR should canonicalize");
-    let canonical = IpNet::parse("192.0.2.0/24").expect("canonical IPv4 CIDR should parse");
+fn noncanonical_ipv4_mapped_cidr_configuration_fails_closed() {
+    let error = IpNet::parse("::ffff:192.0.2.0/120")
+        .expect_err("mapped IPv6 CIDR syntax must be rewritten as canonical IPv4 CIDR");
 
-    assert_eq!(mapped, canonical);
+    assert!(error.contains("prefix 120 is too large"));
+    assert!(IpNet::parse("192.0.2.0/24").is_ok());
 }
 
 #[test]
