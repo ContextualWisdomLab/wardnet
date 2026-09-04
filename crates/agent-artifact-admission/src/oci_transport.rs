@@ -1,7 +1,7 @@
 use crate::InstallIntent;
 
 /// Return whether a Podman pull asks the caller to replace or disable the
-/// registry TLS trust represented by the reviewed artifact policy.
+/// registry transport or authentication trust represented by reviewed policy.
 pub(crate) fn requests_unapproved_oci_transport_trust(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
@@ -18,6 +18,10 @@ pub(crate) fn requests_unapproved_oci_transport_trust(intent: &InstallIntent) ->
     arguments.iter().skip(1).any(|argument| {
         argument == "--cert-dir"
             || argument.starts_with("--cert-dir=")
+            || argument == "--authfile"
+            || argument.starts_with("--authfile=")
+            || argument == "--creds"
+            || argument.starts_with("--creds=")
             || argument
                 .strip_prefix("--tls-verify=")
                 .is_some_and(is_false_boolean)
