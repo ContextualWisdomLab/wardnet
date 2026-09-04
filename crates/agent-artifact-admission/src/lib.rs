@@ -29,7 +29,7 @@ pub fn admission_decision(
     intent: &InstallIntent,
 ) -> AdmissionDecision {
     let mut decision = policy::admission_decision(policy, intent);
-    if artifact_variant::requests_unapproved_oci_platform(intent) {
+    if artifact_variant::requests_unapproved_oci_artifact_variant(intent) {
         if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
