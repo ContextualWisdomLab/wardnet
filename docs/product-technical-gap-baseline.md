@@ -1,6 +1,9 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-09-04. Re-read live refs, PRs, reviews/threads, exact-head checks, rulesets, security results and releases before any merge, release, restack or foreign-owner handoff. This is the Wardnet-owned current-state ledger, not an archive of superseded run state.
+Snapshot date: 2026-09-04T16:45+09:00. Re-read live refs, PRs,
+reviews/threads, exact-head checks, rulesets, security results and releases
+before any merge, release, restack or foreign-owner handoff. This is the
+Wardnet-owned current-state ledger, not an archive of superseded run state.
 
 ## Authority boundary
 
@@ -20,9 +23,35 @@ Runner/event/review materialization belongs to `.github#712` and related central
 
 ## Immediate protected-main security path
 
-- **#155 auth** — exact `e6f05d77858e91c176cff25c4b11e790bc5dcdd1`, Ready/mergeable. Repository CI/Fuzz/Security/SAST are terminal GREEN and returned inline threads are resolved. Required OpenCode bootstrap/source-tree/coverage passed, but final current-head review job `100659819151` acquired runner `1001655142`, issued the authenticated review request, then reached the three-hour administrative boundary without a verdict and ended cancelled. `.github#712` comment `5535918616` owns verdict/timeout RCA. #78 closes only after this delta reaches protected main through satisfiable ordinary governance.
-- **#77 Rust/deployment hardening** — exact `46fef54c9b5916eb77196fb515a8fabad13a05d1`. RED `43d2c874732063e418b3929e3435c388ccfa7c69` proved a first-match Kubernetes manifest validator could hide a later duplicate target Deployment. GREEN `17a2a1e833e6c4cab6101ef6a534589d75a5920a` requires exactly one target identity and keeps the hostile duplicate-resource regression. Current CI/Security/SAST/Scorecard/OSV remain queued.
-- **#136 Network-Egress** — exact `28e5776388b2fc31e1d0567382871a1f599aa3ed`, Draft/mergeable. Runnable RED `3cb1047416c3aa7fa8eb352b842cc55ad8c21b19` / CI `33698726857` proved manual DNS lookup could outlive the operation budget. Production now carries one absolute Tokio deadline through `lookup_host` and remaining HTTP work; current head adds a forever-pending resolver cancellation regression. CI/Fuzz/Security/SAST remain queued; the DNS review thread stays unresolved until unchanged-head hosted GREEN. Refresh against protected main after #155 integrates.
+- **#155 auth** — exact `e6f05d77858e91c176cff25c4b11e790bc5dcdd1`,
+  Blocked on live governance, not source correctness. Repository
+  CI/Fuzz/Security/SAST are terminal GREEN and returned inline threads are
+  resolved. Required OpenCode bootstrap/source-tree/coverage passed, but final
+  current-head review job `100659819151` acquired runner `1001655142`, issued
+  the authenticated review request, then reached the three-hour administrative
+  boundary without a verdict and ended cancelled. Required Noema Review is also
+  failing on the exact head, and GitHub still records
+  `mergeStateStatus=BLOCKED` / `reviewDecision=REVIEW_REQUIRED`. `.github#712`
+  comment `5535918616` owns verdict/timeout RCA. #78 closes only after this
+  delta reaches protected main through satisfiable ordinary governance.
+- **#77 Rust/deployment hardening** — exact
+  `46fef54c9b5916eb77196fb515a8fabad13a05d1`, Blocked. RED
+  `43d2c874732063e418b3929e3435c388ccfa7c69` proved a first-match Kubernetes
+  manifest validator could hide a later duplicate target Deployment. GREEN
+  `17a2a1e833e6c4cab6101ef6a534589d75a5920a` requires exactly one target
+  identity and keeps the hostile duplicate-resource regression. On the live
+  head, Required Noema Review is failing, Required OpenCode Review has
+  cancelled review-bootstrap attempts, and SAST/Scorecard/Security subchecks
+  remain queued.
+- **#136 Network-Egress** — exact
+  `28e5776388b2fc31e1d0567382871a1f599aa3ed`, Draft/blocked. Runnable RED
+  `3cb1047416c3aa7fa8eb352b842cc55ad8c21b19` / CI `33698726857` proved manual
+  DNS lookup could outlive the operation budget. Production now carries one
+  absolute Tokio deadline through `lookup_host` and remaining HTTP work;
+  current head adds a forever-pending resolver cancellation regression.
+  Exact-head CI/Fuzz/Security/SAST/Noema/OpenCode/Strix remain queued, and the
+  DNS review thread stays unresolved until unchanged-head hosted GREEN.
+  Refresh against protected main after #155 integrates.
 
 ## Agent Artifact Admission
 
@@ -54,7 +83,19 @@ For `enterprise-architecture-core`, parent #39 remains exact `c063570bd9177578fa
 
 Fresh open-PR inventory contains 27 lanes: `#77, #88, #90, #93, #95, #111, #112, #114, #115, #127, #129, #130, #134, #135, #136, #140, #141, #144, #153, #155, #156, #157, #158, #159, #160, #162, #164`.
 
-Integration is prerequisite-driven: #155, then repaired #77; #136 after #155 truth; #164 only after #77 protected; #129 continues without absorbing quarantine/Noema/CO; #153 before #156/#157/#158; #160 waits for the protected non-regressing central owner. #127 additionally requires real-browser current-head WCAG 2.2 AA evidence. #88 remains architecture-gated until CO publishes a compatible immutable contract. Broad/stale #90/#95/#112/#114/#115 are repair/transfer lanes, not Close candidates. #130 is the sole writer for this file; #162 separately owns the 2B-KRW customer-readiness versus USD-20B product-quality authority split.
+Integration is prerequisite-driven: #155, then repaired #77; #136 after #155
+truth; #164 only after #77 protected; #129 continues without absorbing
+quarantine/Noema/CO; #153 before #156/#157/#158; #160 waits for the protected
+non-regressing central owner. #127 additionally requires real-browser
+current-head WCAG 2.2 AA evidence. #88 remains architecture-gated until CO
+publishes a compatible immutable contract. Broad/stale
+#90/#95/#112/#114/#115 are repair/transfer lanes, not Close candidates. #130 is
+the sole writer for this file and is itself Draft/blocked with fresh exact-head
+CI/CodeQL/OpenCode/Noema/Security/SAST/Strix runs queued on
+`codex/main-gap-followup@c03fad0`. #140 is non-draft but equally blocked until
+its fresh exact-head CI/Fuzz/CodeQL/OpenCode/Noema/Security/SAST/Strix results
+land on `feat/runtime-config-bootstrap-snapshot@6b0219d`. #162 separately owns
+the 2B-KRW customer-readiness versus USD-20B product-quality authority split.
 
 PR retirement requires protected merge, explicit user instruction, malicious/no-valid delta, or verified complete successor transfer of useful code/tests/fixtures/contracts/evidence.
 
