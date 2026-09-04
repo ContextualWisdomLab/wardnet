@@ -43,6 +43,7 @@ fn caller_selected_source_distribution_and_build_backend_controls_are_not_preapp
         "--no-binary=:all:",
         "--no-build-isolation",
         "--config-settings=backend-mode=unsafe",
+        "-Cbackend-mode=unsafe",
     ] {
         let (policy, mut intent) = approved_pypi_install("pip");
         intent.argv.insert(2, selector.to_string());
