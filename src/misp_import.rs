@@ -212,14 +212,15 @@ fn materialize_attribute(
     severity: Severity,
     event_label: &str,
 ) -> AttributeOutcome {
-    // Skip non-IDS attributes when to_ids is explicitly false (MISP convention).
+    // MISP defines `to_ids` as a boolean. Retain the existing scalar compatibility
+    // spellings, but never turn an explicitly malformed structured value into IDS evidence.
     let to_ids = attr
         .get("to_ids")
         .map(|v| match v {
             serde_json::Value::Bool(b) => *b,
             serde_json::Value::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
             serde_json::Value::Number(n) => n.as_u64() == Some(1),
-            _ => true,
+            _ => false,
         })
         .unwrap_or(true);
     if !to_ids {
