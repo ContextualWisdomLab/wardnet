@@ -3,6 +3,7 @@ mod misp_import;
 
 #[test]
 fn malformed_or_missing_to_ids_values_fail_closed() {
+    // Policy and research traceability: docs/doctoring/misp-to-ids-admission.md.
     let raw = r#"[
       {"type":"domain","value":"object.example","to_ids":{"unexpected":true}},
       {"type":"domain","value":"array.example","to_ids":[true]},
