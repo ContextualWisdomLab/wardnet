@@ -110,14 +110,18 @@ fn kubernetes_manifest_uses_the_wardnet_filename_only() {
                 .lines()
                 .enumerate()
                 .filter_map(move |(index, line)| {
-                    (line.contains(&legacy_reference)
+                    if line.contains(&legacy_reference)
                         && !legacy_reference_is_allowed(
                             &relative,
                             line,
                             &legacy_reference,
                             &canonical_reference,
-                        ))
-                    .then(|| format!("{}:{}", relative.display(), index + 1))
+                        )
+                    {
+                        Some(format!("{}:{}", relative.display(), index + 1))
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>()
         })
