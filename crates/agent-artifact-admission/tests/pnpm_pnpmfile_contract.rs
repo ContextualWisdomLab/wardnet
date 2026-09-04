@@ -4,7 +4,7 @@ use wardnet_agent_artifact_admission::{
 };
 
 #[test]
-fn pnpm_requires_pnpmfile_suppression_before_admission() {
+fn pnpm_requires_pnpmfile_suppression_before_dependency_closure_can_be_considered() {
     let (policy, mut intent) = approved_pnpm_case();
 
     let decision = admission_decision(&policy, &intent);
@@ -23,7 +23,21 @@ fn pnpm_requires_pnpmfile_suppression_before_admission() {
 
     intent.argv.push("--ignore-pnpmfile".to_string());
     let hardened = admission_decision(&policy, &intent);
-    assert_eq!(hardened.decision, DecisionKind::Allow);
+    assert_eq!(hardened.decision, DecisionKind::Block);
+    assert!(
+        !hardened
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "missing_safety_flag"),
+        "pnpmfile suppression must satisfy the execution-hook safety requirement"
+    );
+    assert!(
+        hardened
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "artifact_not_approved"),
+        "the remaining block must represent resolver-selected transitive artifacts that v0.1 policy does not authorize"
+    );
 }
 
 fn approved_pnpm_case() -> (AdmissionPolicy, InstallIntent) {
