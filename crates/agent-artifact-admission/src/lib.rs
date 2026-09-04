@@ -10,6 +10,7 @@ mod dependency_cardinality;
 mod http;
 mod oci_transport;
 mod policy;
+mod pypi_hash_mode;
 
 pub use admission::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate,
@@ -59,6 +60,12 @@ pub fn admission_decision(
     if dependency_cardinality::npm_family_dependency_closure_is_unverified(intent) {
         if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_hash_mode::requests_disabled_hash_requirement(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
+            decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
