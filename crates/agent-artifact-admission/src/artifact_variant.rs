@@ -36,18 +36,37 @@ pub(crate) fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -
 }
 
 /// Docker and Podman expose `-a` (`--all-tags`) and `-q` (`--quiet`) as
-/// Boolean pull shorthands. Their pflag-style parsers permit Boolean shorthand
-/// flags to be bundled, so `-aq` and `-qa` carry the same repository-expansion
-/// authority as a bare `-a` and must fail closed.
+/// Boolean pull shorthands. Their pflag-style parsers permit shorthand bundles;
+/// every non-final Boolean shorthand is enabled while an attached assignment
+/// belongs to the final shorthand. Thus `-aq=false` still enables `-a`, whereas
+/// `-qa=false` leaves `-a` disabled.
 fn requests_all_tags_short_bundle(argument: &str) -> bool {
     let Some(bundle) = argument.strip_prefix('-') else {
         return false;
     };
-    if bundle.starts_with('-') || bundle.contains('=') || bundle.chars().count() < 2 {
+    if bundle.starts_with('-') {
         return false;
     }
 
-    bundle.contains('a') && bundle.chars().all(|flag| matches!(flag, 'a' | 'q'))
+    let (shorthands, assigned_value) = match bundle.split_once('=') {
+        Some(parts) => parts,
+        None => (bundle, ""),
+    };
+    if shorthands.chars().count() < 2
+        || !shorthands.chars().all(|flag| matches!(flag, 'a' | 'q'))
+    {
+        return false;
+    }
+
+    let mut flags = shorthands.chars();
+    let Some(last_flag) = flags.next_back() else {
+        return false;
+    };
+    if flags.any(|flag| flag == 'a') {
+        return true;
+    }
+
+    last_flag == 'a' && (assigned_value.is_empty() || is_true_boolean(assigned_value))
 }
 
 fn is_true_boolean(value: &str) -> bool {
