@@ -12,7 +12,7 @@ GitHub Actions' concurrency contract provides the platform mechanism Wardnet use
 
 ## Traceability and licensing
 
-The research paper is published in the Proceedings of the 47th International Conference on Software Engineering (ICSE 2025) and the authors' arXiv version is licensed CC BY 4.0, which permits redistribution with attribution. The current automation connector can write UTF-8 repository files but cannot upload binary PDF bytes, so the citation and redistribution status are recorded here; the permissibly redistributable PDF remains an evidence-packaging follow-up rather than being represented by an invalid text-encoded `.pdf`.
+The research paper is published in the Proceedings of the 47th International Conference on Software Engineering (ICSE 2025), and the authors' arXiv version is licensed CC BY 4.0, which permits redistribution with attribution. The redistribution-permitted full-text PDF is required in Wardnet's evidence pack at `docs/papers/ci-at-scale-lean-green-fast-arxiv-2501.03440.pdf` before this process-change candidate is merge-ready; citation-only evidence does not satisfy that packaging gate.
 
 ### References
 
