@@ -24,7 +24,7 @@ concurrency:
 jobs:
   fuzz:
     # One runner covers every bounded target; a matrix would consume four org slots.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '300' }}
     steps:
