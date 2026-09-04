@@ -3,6 +3,7 @@
 mod admission;
 mod artifact_variant;
 mod audit;
+mod cargo_install_authority;
 mod config;
 mod dependency_cardinality;
 mod http;
@@ -31,6 +32,12 @@ pub fn admission_decision(
 ) -> AdmissionDecision {
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_variant::requests_unapproved_artifact_variant(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if cargo_install_authority::requests_unapproved_cargo_install_mutation(intent) {
         if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
