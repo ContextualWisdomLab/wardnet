@@ -212,8 +212,9 @@ fn materialize_attribute(
     severity: Severity,
     event_label: &str,
 ) -> AttributeOutcome {
-    // MISP defines `to_ids` as a boolean. Retain the existing scalar compatibility
-    // spellings, but never turn an explicitly malformed structured value into IDS evidence.
+    // MISP's `to_ids` contract is affirmative evidence. Preserve the previously supported
+    // scalar true spellings, but absent or malformed values cannot authorize enforcement.
+    // See docs/doctoring/misp-to-ids-admission.md.
     let to_ids = attr
         .get("to_ids")
         .map(|v| match v {
@@ -222,7 +223,7 @@ fn materialize_attribute(
             serde_json::Value::Number(n) => n.as_u64() == Some(1),
             _ => false,
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
     if !to_ids {
         return AttributeOutcome::Skipped;
     }
