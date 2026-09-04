@@ -18,20 +18,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  group: wardnet-fuzz-${{ github.repository }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'schedule' && format('schedule-{0}', github.ref) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - fuzz_score_request
-          - fuzz_appdata_json
-          - fuzz_parse_admin_tokens
-          - fuzz_dnsbl_zone
+    env:
+      FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '300' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -46,30 +40,25 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-fuzz
             fuzz/target
-          key: cargo-fuzz-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.toml') }}
+          key: cargo-fuzz-0.13.2-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.toml') }}
 
       - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked || true
+        run: command -v cargo-fuzz >/dev/null || cargo +nightly install cargo-fuzz --version 0.13.2 --locked
 
-      # PRs: 60s per target. Nightly/manual: 300s per target.
-      - name: Set fuzz duration
+      - name: Fuzz bounded targets
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "FUZZ_SECONDS=60" >> "$GITHUB_ENV"
-          else
-            echo "FUZZ_SECONDS=300" >> "$GITHUB_ENV"
-          fi
-
-      - name: Fuzz ${{ matrix.target }}
-        run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time="$FUZZ_SECONDS" \
-            -rss_limit_mb=2048
+          exit_code=0
+          for target in fuzz_score_request fuzz_appdata_json fuzz_parse_admin_tokens fuzz_dnsbl_zone; do
+            cargo +nightly fuzz run "$target" -- \
+              -max_total_time="$FUZZ_SECONDS" \
+              -rss_limit_mb=2048 || exit_code=$?
+          done
+          exit "$exit_code"
 
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
-          path: fuzz/artifacts/${{ matrix.target }}/
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
           if-no-files-found: ignore
