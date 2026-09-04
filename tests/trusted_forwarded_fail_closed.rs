@@ -8,15 +8,18 @@
 use std::net::IpAddr;
 use waf_ids_ai_soc::{IpNet, effective_client_ip};
 
+/// Parse one test IP literal.
 fn ip(value: &str) -> IpAddr {
     value.parse().expect("test IP must parse")
 }
 
+/// Shared trusted proxy range for forwarded-header regression tests.
 fn trusted_proxy_range() -> Vec<IpNet> {
     vec![IpNet::parse("192.0.2.0/24").expect("test CIDR must parse")]
 }
 
 #[test]
+/// Any malformed hop invalidates the entire forwarded chain.
 fn malformed_middle_hop_falls_back_to_direct_peer() {
     let direct_peer = ip("192.0.2.44");
     let resolved = effective_client_ip(
@@ -30,6 +33,7 @@ fn malformed_middle_hop_falls_back_to_direct_peer() {
 }
 
 #[test]
+/// Empty hops are treated as malformed forwarding metadata.
 fn empty_middle_hop_falls_back_to_direct_peer() {
     let direct_peer = ip("192.0.2.44");
     let resolved = effective_client_ip(
@@ -43,6 +47,7 @@ fn empty_middle_hop_falls_back_to_direct_peer() {
 }
 
 #[test]
+/// A valid chain resolves to the client nearest the trust boundary.
 fn valid_chain_selects_rightmost_untrusted_hop() {
     let resolved = effective_client_ip(
         Some(ip("192.0.2.44")),
@@ -55,6 +60,7 @@ fn valid_chain_selects_rightmost_untrusted_hop() {
 }
 
 #[test]
+/// Non-canonical mapped IPv6 CIDRs must be rewritten or rejected.
 fn noncanonical_ipv4_mapped_cidr_configuration_fails_closed() {
     let error = IpNet::parse("::ffff:192.0.2.0/120")
         .expect_err("mapped IPv6 CIDR syntax must be rewritten as canonical IPv4 CIDR");
@@ -64,6 +70,7 @@ fn noncanonical_ipv4_mapped_cidr_configuration_fails_closed() {
 }
 
 #[test]
+/// Prefix lengths above the address-family bound fail closed.
 fn out_of_range_ipv6_prefixes_fail_closed() {
     for value in ["2001:db8::/129", "::ffff:192.0.2.77/129"] {
         let error = IpNet::parse(value)

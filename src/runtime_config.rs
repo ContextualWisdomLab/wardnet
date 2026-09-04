@@ -45,6 +45,7 @@ impl RuntimeConfiguration {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
+    /// Build one runtime snapshot from a caller-supplied bootstrap lookup seam.
     fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -99,7 +100,9 @@ impl RuntimeConfiguration {
 }
 
 #[cfg(test)]
+/// Recursively report Rust source files that read runtime env outside bootstrap adapters.
 fn direct_runtime_env_read_offenders(root: &Path) -> Vec<PathBuf> {
+    /// Walk the source tree and collect files with direct env reads.
     fn visit(root: &Path, current: &Path, offenders: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(current).unwrap() {
             let path = entry.unwrap().path();
@@ -133,6 +136,7 @@ mod tests {
     use crate::CRED_ADMIN_TOKENS;
     use std::collections::HashMap;
 
+    /// Build a runtime snapshot from deterministic in-memory key/value pairs.
     fn runtime_from_pairs(
         pairs: &[(&str, &str)],
     ) -> Result<RuntimeConfiguration, Box<dyn std::error::Error>> {
@@ -144,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    /// Defaults apply when no bootstrap values are supplied.
     fn runtime_configuration_defaults_when_bootstrap_input_is_unset() {
         let config = runtime_from_pairs(&[]).unwrap();
         assert_eq!(config.bind_addr, RuntimeConfiguration::DEFAULT_BIND_ADDR);
@@ -163,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    /// The snapshot reads each non-secret runtime field exactly once.
     fn runtime_configuration_reads_one_non_secret_bootstrap_snapshot() {
         let config = runtime_from_pairs(&[
             ("BIND_ADDR", "127.0.0.1:9090"),
@@ -187,6 +193,7 @@ mod tests {
     }
 
     #[test]
+    /// Runtime configuration excludes secret bootstrap selectors and values.
     fn runtime_configuration_never_reads_secret_bootstrap_locator() {
         let config = RuntimeConfiguration::from_lookup(|name| {
             assert_ne!(
@@ -208,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    /// Malformed bounds and malformed trusted CIDRs fail closed at bootstrap.
     fn runtime_configuration_rejects_malformed_bounds() {
         assert!(runtime_from_pairs(&[("EVENT_LIMIT", "0")]).is_err());
         assert!(runtime_from_pairs(&[("RATE_LIMIT_WINDOW", "abc")]).is_err());
@@ -215,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    /// AppConfig derives non-secret settings from runtime and secrets from the registry.
     fn runtime_configuration_builds_app_config_from_registry() {
         let runtime = RuntimeConfiguration {
             bind_addr: RuntimeConfiguration::DEFAULT_BIND_ADDR.to_string(),
@@ -246,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    /// Source scans reject new direct env reads outside the approved bootstrap modules.
     fn runtime_env_reads_stay_in_bootstrap_adapters_recursively() {
         let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let offenders = direct_runtime_env_read_offenders(&src_dir);
