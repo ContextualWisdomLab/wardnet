@@ -3,8 +3,8 @@ use std::{fs, path::PathBuf};
 const CENTRAL_SCORECARD_MERGE_SHA: &str = "51b812d181989ed28366b5850d1a34f51df10187";
 
 fn scorecard_workflow_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".github/workflows/scorecard-analysis.yml");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/scorecard-analysis.yml");
     fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "default-branch Scorecard caller must exist at {}: {error}",
