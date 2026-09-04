@@ -152,22 +152,31 @@ pub fn parse_u32_env(
     }
 }
 
-/// Parse a `u64` environment value (already read as an optional string),
-/// returning `default` when absent and a configuration error when malformed.
+/// Parse a positive `u64` environment value (already read as an optional
+/// string), returning `default` when absent and a configuration error when the
+/// supplied value is malformed or zero.
 pub fn parse_u64_env(
     name: &str,
     raw: Option<&str>,
     default: u64,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    match raw {
-        Some(raw) => Ok(raw.parse::<u64>().map_err(|error| {
+    let value = match raw {
+        Some(raw) => raw.parse::<u64>().map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("{name} must be a positive integer, got {raw:?}: {error}"),
             )
-        })?),
-        None => Ok(default),
+        })?,
+        None => default,
+    };
+    if value == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} must be greater than zero"),
+        )
+        .into());
     }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -274,6 +283,8 @@ mod tests {
     fn runtime_configuration_rejects_malformed_bounds_without_mutating_process_env() {
         assert!(runtime_from_pairs(&[("EVENT_LIMIT", "0")]).is_err());
         assert!(runtime_from_pairs(&[("RATE_LIMIT_WINDOW", "abc")]).is_err());
+        assert!(runtime_from_pairs(&[("RATE_LIMIT_WINDOW", "0")]).is_err());
+        assert!(runtime_from_pairs(&[("MAX_BODY_BYTES", "0")]).is_err());
     }
 
     #[test]
