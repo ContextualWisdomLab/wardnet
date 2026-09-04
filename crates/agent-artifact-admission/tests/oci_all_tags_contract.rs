@@ -20,6 +20,8 @@ fn oci_all_tags_cannot_expand_an_exact_approved_digest_to_a_repository_set() {
             "-a=1",
             "-aq",
             "-qa",
+            "-aq=false",
+            "-aq=0",
         ] {
             let (policy, mut intent) = approved_oci_pull(executable);
             intent.argv.insert(2, all_tags_flag.to_string());
@@ -45,7 +47,7 @@ fn oci_all_tags_cannot_expand_an_exact_approved_digest_to_a_repository_set() {
 #[test]
 fn explicit_false_all_tags_assignment_preserves_exact_digest_admission() {
     for executable in ["docker", "podman"] {
-        for all_tags_flag in ["--all-tags=false", "-a=0"] {
+        for all_tags_flag in ["--all-tags=false", "-a=0", "-qa=false", "-qa=0"] {
             let (policy, mut intent) = approved_oci_pull(executable);
             intent.argv.insert(2, all_tags_flag.to_string());
 
