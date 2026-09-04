@@ -53,3 +53,26 @@ fn valid_chain_selects_rightmost_untrusted_hop() {
 
     assert_eq!(resolved, Some(ip("203.0.113.9")));
 }
+
+#[test]
+fn mapped_ipv6_trusted_cidr_matches_equivalent_ipv4_range() {
+    let mapped_range = vec![IpNet::parse("::ffff:192.0.2.0/120")
+        .expect("IPv4-mapped IPv6 /120 must normalize to IPv4 /24")];
+    let forwarded = "198.51.100.77, 192.0.2.10";
+
+    let mapped_result = effective_client_ip(
+        Some(ip("::ffff:192.0.2.44")),
+        Some(forwarded),
+        None,
+        &mapped_range,
+    );
+    let ipv4_result = effective_client_ip(
+        Some(ip("192.0.2.44")),
+        Some(forwarded),
+        None,
+        &trusted_proxy_range(),
+    );
+
+    assert_eq!(mapped_result, Some(ip("198.51.100.77")));
+    assert_eq!(mapped_result, ipv4_result);
+}
