@@ -142,3 +142,22 @@ fn pip_attached_short_options_cannot_escape_reviewed_install_capability() {
         );
     }
 }
+
+#[test]
+fn pip_boolean_override_cannot_disable_required_hash_checking() {
+    let policy = approved_pip_policy();
+    let mut intent = approved_pip_intent("--no-deps");
+    intent.argv.push("--no-require-hashes".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "missing_safety_flag"),
+        "a contradictory --no-require-hashes must prevent integrity mode from satisfying admission: {:?}",
+        decision.reason_codes
+    );
+}
