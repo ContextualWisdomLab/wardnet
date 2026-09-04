@@ -62,11 +62,9 @@ fn requests_unapproved_cargo_artifact_variant(intent: &InstallIntent) -> bool {
         return false;
     }
 
-    if arguments
-        .iter()
-        .skip(1)
-        .any(|argument| matches_value_flag(argument, "--version") || matches_value_flag(argument, "--vers"))
-    {
+    if arguments.iter().skip(1).any(|argument| {
+        matches_value_flag(argument, "--version") || matches_value_flag(argument, "--vers")
+    }) {
         return true;
     }
 
