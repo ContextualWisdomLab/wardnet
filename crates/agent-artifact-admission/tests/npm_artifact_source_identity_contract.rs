@@ -41,15 +41,21 @@ fn npm_package_spec_cannot_replace_reviewed_registry_coordinate() {
 }
 
 #[test]
-fn exact_npm_registry_name_and_version_remain_allowed() {
+fn exact_npm_registry_name_and_version_still_requires_reviewed_dependency_closure() {
     let artifact_argument = format!("{PACKAGE_NAME}@{PACKAGE_VERSION}");
     let policy = approved_npm_policy(&artifact_argument);
     let intent = approved_npm_intent(&artifact_argument);
 
     let decision = admission_decision(&policy, &intent);
 
-    assert_eq!(decision.decision, DecisionKind::Allow);
-    assert!(decision.reason_codes.is_empty());
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "artifact_not_approved"),
+        "matching the direct registry coordinate must not authorize resolver-selected transitive artifacts"
+    );
 }
 
 #[test]
