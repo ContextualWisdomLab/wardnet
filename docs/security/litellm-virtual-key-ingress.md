@@ -1,5 +1,12 @@
 # LiteLLM virtual-key ingress defense
 
+This document preserves the security boundary and regression evidence from the
+LiteLLM credential-guard prototype. As of September 5, 2026, Wardnet does not
+ship or support a standalone LiteLLM proxy deployment from this repository.
+Contextual Orchestrator must first publish an immutable released contract
+because it remains the authority for virtual-key authorization and
+provider/model routing.
+
 ## Protected failure
 
 The Wardnet `litellm-virtual-key-proxy` binary rejects a telephone-shaped synthetic credential before it reaches LiteLLM:
@@ -35,7 +42,14 @@ The Wardnet guard establishes only a lexical class boundary. A value such as `sk
 
 ## Runtime configuration registry
 
-Runtime values are read from a versioned JSON KV document and copied into an immutable process-local registry during startup. The only bootstrap input is the `--config <path>` argument. The proxy does not read individual runtime values from raw environment variables.
+Runtime values are read from a versioned JSON KV document and copied into an
+immutable process-local registry during startup. The only bootstrap input is
+the `--config <path>` argument. The proxy does not read individual runtime
+values from raw environment variables.
+
+The JSON contract and example below are retained as preserved design evidence
+for a future Contextual Orchestrator-backed consumer. They are not a supported
+or deployable Wardnet runtime path until that released contract exists.
 
 Copy the deployment example and restrict it to the `wardnet` service account:
 
@@ -58,16 +72,24 @@ Example registry document:
 }
 ```
 
-Run from source with:
+Historical prototype command, retained for evidence only:
 
 ```bash
 cargo run --locked --bin litellm-virtual-key-proxy -- \
   --config ./deploy/systemd/litellm-virtual-key-proxy.json.example
 ```
 
-The registry rejects unknown keys, wrong JSON types, unsupported `configuration_version` values, zero limits, and missing required values. A durable external KV can later materialize the same versioned JSON contract without changing the proxy's runtime lookup path.
+The registry rejects unknown keys, wrong JSON types, unsupported
+`configuration_version` values, zero limits, and missing required values. A
+durable external KV can later materialize the same versioned JSON contract
+without changing the proxy's runtime lookup path.
 
-The idle timeout applies independently while waiting for each upstream response chunk. It bounds stalled responses without imposing a total lifetime on active SSE streams.
+The idle timeout applies independently while waiting for each upstream response
+chunk. It bounds stalled responses without imposing a total lifetime on active
+SSE streams. This follows the same low-bandwidth resource-exhaustion concern
+that Crosby and Wallach (2003) describe for attacker-controlled protocol
+interactions: bound silence per chunk, but keep relaying an actively producing
+stream.
 
 ## Upstream and request contract
 
@@ -78,7 +100,14 @@ POST https://wardnet-llm.example/v1/chat/completions
 Authorization: Bearer sk-...
 ```
 
-The configured upstream is an **origin**, not an arbitrary base path. Wardnet appends the incoming path and query to that fixed origin. An upstream URL containing credentials, a non-root path, query, or fragment is rejected. HTTPS is mandatory except for loopback integration tests. System proxy discovery and redirect following are disabled, and an upstream 3xx response is converted to a cache-safe `502 upstream_redirect_rejected` response without exposing `Location`.
+The configured upstream is an **origin**, not an arbitrary base path. Wardnet
+appends the incoming path and query to that fixed origin. An upstream URL
+containing credentials, a non-root path, query, or fragment is rejected. HTTPS
+is mandatory for every operational configuration. Test-only loopback HTTP is
+isolated behind the regression harness rather than the runtime configuration
+path. System proxy discovery and redirect following are disabled, and an
+upstream 3xx response is converted to a cache-safe
+`502 upstream_redirect_rejected` response without exposing `Location`.
 
 Allowed methods are `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS`. `CONNECT`, `TRACE`, and extension methods fail with `405` before upstream I/O.
 
@@ -125,7 +154,16 @@ Wardnet forwards only request metadata required by OpenAI-compatible LLM APIs:
 
 It does not forward cookies, `Host`, forwarding-chain headers, proxy credentials, `Connection`, transfer framing, trace `baggage`, arbitrary caller headers, or caller-controlled `x-litellm-*` extensions.
 
-Approved upstream response metadata includes content type/encoding, retry information, authentication challenge, request correlation, OpenAI/LiteLLM response metadata, and rate-limit headers. Response bodies are streamed rather than accumulated in memory, preserving server-sent event behavior and bounding proxy memory by active chunks rather than full completions.
+Approved upstream response metadata includes content type/encoding, retry
+information, authentication challenge, request correlation, OpenAI/LiteLLM
+response metadata, and rate-limit headers. Response bodies are streamed rather
+than accumulated in memory, preserving server-sent event behavior and bounding
+proxy memory by active chunks rather than full completions.
+
+Research basis: Crosby and Wallach (2003) motivate bounding
+attacker-controlled resource retention, while RFC 9110's intermediary
+semantics justify preserving approved end-to-end response metadata instead of
+buffering and rewriting whole responses.
 
 ## Health contract
 

@@ -697,8 +697,8 @@ async fn clearfolio_status(
 // request/response shaping is pure and unit-tested, the HTTP glue is thin.
 
 /// Builds an OpenAI `/v1/chat/completions` request body that asks for concise
-/// SOC triage of one security event.
-fn soc_llm_chat_body(model: &str, event: &SecurityEvent) -> serde_json::Value {
+/// SOC triage of one security event while delegating model selection.
+fn soc_llm_chat_body(event: &SecurityEvent) -> serde_json::Value {
     let client_ip = event
         .client_ip
         .map(|ip| ip.to_string())
@@ -708,7 +708,6 @@ fn soc_llm_chat_body(model: &str, event: &SecurityEvent) -> serde_json::Value {
         event.action, event.reason, event.score, event.path, client_ip, event.timestamp_unix
     );
     serde_json::json!({
-        "model": model,
         "orchestration_mode": "auto",
         "messages": [
             {
@@ -832,7 +831,7 @@ async fn soc_analyze(
             format!("unknown event id: {}", request.event_id),
         );
     };
-    let body = soc_llm_chat_body(&config.model, &event);
+    let body = soc_llm_chat_body(&event);
     let endpoint = format!(
         "{}/v1/chat/completions",
         config.base_url.trim_end_matches('/')
@@ -7883,8 +7882,8 @@ mod tests {
 
     #[test]
     fn soc_llm_chat_body_and_extract() {
-        let body = soc_llm_chat_body("m1", &soc_test_event());
-        assert_eq!(body["model"], "m1");
+        let body = soc_llm_chat_body(&soc_test_event());
+        assert!(body.get("model").is_none());
         assert_eq!(body["messages"][0]["role"], "system");
         assert!(
             body["messages"][1]["content"]
@@ -7895,7 +7894,7 @@ mod tests {
         // client_ip None branch renders "unknown".
         let mut anon = soc_test_event();
         anon.client_ip = None;
-        let anon_body = soc_llm_chat_body("m1", &anon);
+        let anon_body = soc_llm_chat_body(&anon);
         assert!(
             anon_body["messages"][1]["content"]
                 .as_str()

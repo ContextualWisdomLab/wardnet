@@ -29,9 +29,6 @@ fn soc_llm_request_explicitly_delegates_to_auto_policy() {
         "the auto orchestration policy must be confined to soc_llm_chat_body"
     );
 
-    let model_position = function_source
-        .find("\"model\"")
-        .expect("the SOC request must retain its model selector");
     let policy_position = function_source
         .find("\"orchestration_mode\": \"auto\"")
         .expect("the SOC request must retain the explicit auto policy");
@@ -39,7 +36,11 @@ fn soc_llm_request_explicitly_delegates_to_auto_policy() {
         .find("\"messages\"")
         .expect("the SOC request must retain its messages payload");
     assert!(
-        model_position < policy_position && policy_position < messages_position,
+        !function_source.contains("\"model\""),
+        "the SOC request must delegate concrete model selection to contextual-orchestrator"
+    );
+    assert!(
+        policy_position < messages_position,
         "the orchestration policy must remain in the generated SOC chat payload"
     );
 }

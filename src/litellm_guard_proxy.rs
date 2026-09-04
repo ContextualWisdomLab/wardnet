@@ -29,11 +29,7 @@ use runtime_config::{
     LITELLM_PROXY_IDLE_TIMEOUT_SECONDS, LITELLM_PROXY_MAX_BODY_BYTES, LITELLM_PROXY_UPSTREAM_URL,
 };
 use serde::Serialize;
-use std::{
-    error::Error,
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{error::Error, net::SocketAddr, time::Duration};
 
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8090";
 const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -117,6 +113,34 @@ impl ProxyConfig {
             return Err("idle_timeout must be greater than 0".to_string());
         }
         let upstream_url = validate_upstream_url(upstream_url.as_ref())?;
+        Ok(Self {
+            bind_address,
+            upstream_url,
+            max_body_bytes,
+            connect_timeout,
+            idle_timeout,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn for_test_http_upstream(
+        bind_address: SocketAddr,
+        upstream_url: impl AsRef<str>,
+        max_body_bytes: usize,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+    ) -> Result<Self, String> {
+        if max_body_bytes == 0 {
+            return Err("max_body_bytes must be greater than 0".to_string());
+        }
+        if connect_timeout.is_zero() {
+            return Err("connect_timeout must be greater than 0".to_string());
+        }
+        if idle_timeout.is_zero() {
+            return Err("idle_timeout must be greater than 0".to_string());
+        }
+        let upstream_url =
+            validate_test_upstream_url(upstream_url.as_ref()).map_err(|message| message)?;
         Ok(Self {
             bind_address,
             upstream_url,
@@ -273,6 +297,9 @@ async fn proxy_request(
     *response.status_mut() = status;
     credential_guard::copy_response_headers(&upstream_headers, response.headers_mut());
     response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn with_idle_timeout<S, E>(
@@ -361,6 +388,30 @@ fn proxy_error(status: StatusCode, code: &str, message: impl Into<String>) -> Re
 }
 
 fn validate_upstream_url(raw: &str) -> Result<Url, String> {
+    let url = validate_origin_url(raw)?;
+    match url.scheme() {
+        "https" => Ok(url),
+        _ => Err("upstream URL must use https://".to_string()),
+    }
+}
+
+#[cfg(test)]
+fn validate_test_upstream_url(raw: &str) -> Result<Url, String> {
+    let url = validate_origin_url(raw)?;
+    match (url.scheme(), url.host_str()) {
+        ("https", _) => Ok(url),
+        ("http", Some("localhost")) => Ok(url),
+        ("http", Some(host)) => host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .filter(|address| address.is_loopback())
+            .map(|_| url)
+            .ok_or_else(|| "test upstream URL must use https:// or loopback http://".to_string()),
+        _ => Err("test upstream URL must use https:// or loopback http://".to_string()),
+    }
+}
+
+fn validate_origin_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|error| format!("invalid upstream URL: {error}"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err("upstream URL must not contain credentials".to_string());
@@ -371,27 +422,10 @@ fn validate_upstream_url(raw: &str) -> Result<Url, String> {
     if url.path() != "/" {
         return Err("upstream URL must be an origin without a path prefix".to_string());
     }
-    match url.scheme() {
-        "https" => {}
-        "http" if is_loopback_host(url.host_str()) => {}
-        "http" => return Err("plaintext upstream is allowed only for loopback tests".to_string()),
-        _ => return Err("upstream URL must use https:// or loopback http://".to_string()),
-    }
     if url.host_str().is_none() {
         return Err("upstream URL must include a host".to_string());
     }
     Ok(url)
-}
-
-fn is_loopback_host(host: Option<&str>) -> bool {
-    let Some(host) = host else {
-        return false;
-    };
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .map(|address| address.is_loopback())
-            .unwrap_or(false)
 }
 
 fn error_class(error: &reqwest::Error) -> &'static str {
@@ -476,7 +510,7 @@ mod tests {
     #[test]
     fn validates_upstream_security_boundary() {
         assert!(validate_upstream_url("https://llm.example").is_ok());
-        assert!(validate_upstream_url("http://127.0.0.1:4000").is_ok());
+        assert!(validate_upstream_url("http://127.0.0.1:4000").is_err());
         assert!(validate_upstream_url("http://localhost:4000/base").is_err());
         assert!(validate_upstream_url("http://llm.example").is_err());
         assert!(validate_upstream_url("https://user:secret@llm.example").is_err());
