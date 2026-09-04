@@ -31,6 +31,7 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
+    /// Return the redacted provenance label exposed in health and evidence APIs.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -49,18 +50,22 @@ pub struct CredentialRegistry {
 }
 
 impl CredentialRegistry {
+    /// Create an empty registry for tests and bootstrap paths with no secrets.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Look up a credential by its well-known registry key.
     pub fn get_credential(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
+    /// Report where the registry's admin credentials came from.
     pub fn source(&self) -> CredentialSource {
         self.source
     }
 
+    /// Return whether at least one administrator credential is present.
     pub fn has_admin_auth(&self) -> bool {
         self.get_credential(CRED_ADMIN_TOKEN)
             .is_some_and(|v| !v.is_empty())
@@ -69,6 +74,7 @@ impl CredentialRegistry {
                 .is_some_and(|v| !v.trim().is_empty())
     }
 
+    /// Bootstrap the registry from the process-edge delivery environment.
     pub fn bootstrap_from_env() -> Result<(Self, Option<PathBuf>), String> {
         let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
             .ok()
@@ -153,6 +159,7 @@ impl CredentialRegistry {
     }
 }
 
+/// Convert a credential JSON value into a stored non-empty string.
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),

@@ -29,7 +29,6 @@ flowchart LR
 
 - `src/runtime_config.rs`: runtime-configuration supporting subdomain bootstrap. Reads non-secret process settings from env once, validates them into an immutable `RuntimeConfiguration`, and passes that snapshot inward to `run_from_env`.
 - `src/credentials.rs`: secret bootstrap adapter. Reads `ADMIN_TOKEN`, `ADMIN_TOKENS`, and optional `WAF_IDS_CREDENTIALS_PATH` only at the process edge, then exposes a process-local `CredentialRegistry`.
-
 - `src/main.rs`: thin process entrypoint and shutdown-signal installation.
 - `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests.
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
