@@ -3,6 +3,7 @@
 ## Product Evidence
 
 - Runtime health: `GET /healthz`
+- Gateway readiness probe: `GET /readyz`
 - Web control plane: `GET /admin`
 - Gateway routes: `GET /api/routes`
 - Threat indicators: `GET /api/threats`
@@ -17,6 +18,7 @@
 - Threat feed status: `GET /api/threat-feeds`
 - Threat feed freshness: `GET /api/threat-feeds/freshness`
 - Support bundle: `GET /api/support-bundle`
+- Prometheus operations metrics: `GET /metrics`
 
 ## Engineering Evidence
 
@@ -27,6 +29,7 @@
 - Authenticated management writes through `X-Admin-Token`.
 - Automated tests for management APIs, gateway scoring, DNSBL export, event NDJSON export, feed freshness, persistence failures, commercial readiness, and legacy state compatibility.
 - Buyer evidence manifest that lists required runtime endpoints, committed document paths, deployment assets, blockers, and runtime evidence counts from one API.
+- Support bundle payload that includes the same route-readiness snapshot as `/readyz` and the same Prometheus exposition text as `/metrics`.
 - `scripts/smoke.sh` verifies a full local lifecycle including restart persistence.
 
 ## Security Review Packet
@@ -58,6 +61,8 @@ Then inspect:
 ```bash
 curl -fsS http://127.0.0.1:8080/api/commercial/readiness
 curl -fsS http://127.0.0.1:8080/api/commercial/evidence-manifest
+curl -fsS http://127.0.0.1:8080/readyz
+curl -fsS http://127.0.0.1:8080/metrics
 curl -fsS http://127.0.0.1:8080/api/threat-feeds/freshness
 curl -fsS http://127.0.0.1:8080/api/events.ndjson
 curl -fsS http://127.0.0.1:8080/api/support-bundle

@@ -381,10 +381,12 @@ fn normalized_origin(origin: &str) -> String {
 pub struct SupportBundle {
     pub generated_at_unix: u64,
     pub health: HealthStatus,
+    pub gateway_readiness: GatewayReadinessStatus,
     pub kpis: SocKpiSnapshot,
     pub commercial: CommercialProfile,
     pub readiness: CommercialReadiness,
     pub evidence_manifest: BuyerEvidenceManifest,
+    pub prometheus_metrics_text: String,
     pub threat_feed_freshness: Vec<ThreatFeedFreshness>,
     pub route_count: usize,
     pub threat_indicator_count: usize,
@@ -404,6 +406,12 @@ pub struct HealthStatus {
     pub credentials_source: String,
     /// True when at least one admin write token is configured.
     pub admin_auth_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayReadinessStatus {
+    pub ready: bool,
+    pub routes_enabled: usize,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -885,24 +893,16 @@ async fn version() -> Json<serde_json::Value> {
 /// Kubernetes readiness probe: distinct from `/healthz` (liveness), it reports
 /// whether the gateway is configured to serve — i.e. has an enabled route.
 async fn readyz(State(state): State<AppState>) -> Response {
-    let routes_enabled = {
+    let readiness = {
         let data = state.inner.read().await;
-        data.routes.iter().filter(|route| route.enabled).count()
+        gateway_readiness_status(&data)
     };
-    let ready = routes_enabled > 0;
-    let status = if ready {
+    let status = if readiness.ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (
-        status,
-        Json(serde_json::json!({
-            "ready": ready,
-            "routes_enabled": routes_enabled,
-        })),
-    )
-        .into_response()
+    (status, Json(readiness)).into_response()
 }
 
 async fn admin_console() -> Html<&'static str> {
@@ -1104,7 +1104,7 @@ async fn evaluate_request(
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let body = {
         let data = state.inner.read().await;
-        prometheus_exposition(&kpi_snapshot_at(&data, now_unix()))
+        prometheus_metrics_text(&data, now_unix())
     };
     (
         [(
@@ -1113,6 +1113,18 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+fn gateway_readiness_status(data: &AppData) -> GatewayReadinessStatus {
+    let routes_enabled = data.routes.iter().filter(|route| route.enabled).count();
+    GatewayReadinessStatus {
+        ready: routes_enabled > 0,
+        routes_enabled,
+    }
+}
+
+fn prometheus_metrics_text(data: &AppData, now_unix: u64) -> String {
+    prometheus_exposition(&kpi_snapshot_at(data, now_unix))
 }
 
 async fn get_commercial_license(State(state): State<AppState>) -> Json<CommercialProfile> {
@@ -2270,13 +2282,16 @@ fn is_loopback_host(host: &str) -> bool {
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
     let data = state.inner.read().await;
     let generated_at_unix = now_unix();
+    let gateway_readiness = gateway_readiness_status(&data);
     Json(SupportBundle {
         generated_at_unix,
         health: state.health_status(),
+        gateway_readiness,
         kpis: kpi_snapshot_at(&data, generated_at_unix),
         commercial: data.commercial.clone(),
         readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
         evidence_manifest: buyer_evidence_manifest_at(&data, generated_at_unix),
+        prometheus_metrics_text: prometheus_metrics_text(&data, generated_at_unix),
         threat_feed_freshness: threat_feed_freshness_snapshot(
             &data.threat_feeds,
             generated_at_unix,
@@ -4784,6 +4799,20 @@ mod tests {
         );
         assert!(
             manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/readyz" && endpoint.required_for_sale)
+        );
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/metrics"
+                    && endpoint.content_type == "text/plain; version=0.0.4; charset=utf-8"
+                    && endpoint.required_for_sale)
+        );
+        assert!(
+            manifest
                 .document_paths
                 .iter()
                 .any(|path| path == "docs/figma/enterprise-product-architecture.md")
@@ -4792,9 +4821,28 @@ mod tests {
         let support: SupportBundle =
             json_body(app_request(&app, empty_request(Method::GET, "/api/support-bundle")).await)
                 .await;
+        let readyz: GatewayReadinessStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/readyz")).await).await;
+        let metrics_text =
+            body_text(app_request(&app, empty_request(Method::GET, "/metrics")).await).await;
         assert!(support.generated_at_unix > 0);
+        assert_eq!(support.gateway_readiness, readyz);
         assert!(support.readiness.ready_for_enterprise_sale);
         assert!(support.evidence_manifest.ready_for_enterprise_sale);
+        assert!(
+            support
+                .evidence_manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/readyz")
+        );
+        assert!(
+            support
+                .evidence_manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/metrics")
+        );
         assert!(
             support
                 .evidence_manifest
@@ -4813,6 +4861,8 @@ mod tests {
         assert_eq!(support.threat_feed_freshness.len(), 1);
         assert!(!support.threat_feed_freshness[0].stale);
         assert!(support.event_count >= 1);
+        assert_eq!(support.prometheus_metrics_text, metrics_text);
+        assert!(support.prometheus_metrics_text.contains("waf_ids_routes 1"));
 
         let persisted: AppData =
             serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
