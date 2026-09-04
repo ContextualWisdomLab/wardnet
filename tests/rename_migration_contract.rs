@@ -13,11 +13,20 @@ fn rename_preserves_local_state_exclusion_and_primary_credentials_name() {
     let dockerignore = repo_file(".dockerignore");
     let claude = repo_file("CLAUDE.md");
 
-    assert!(dockerignore.lines().any(|line| line == "wardnet-state.local.json"));
-    assert!(dockerignore.lines().any(|line| line == "waf-ids-state.local.json"));
-    assert!(claude.contains(
-        "`WARDNET_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local"
-    ));
+    assert!(
+        dockerignore
+            .lines()
+            .any(|line| line == "wardnet-state.local.json")
+    );
+    assert!(
+        dockerignore
+            .lines()
+            .any(|line| line == "waf-ids-state.local.json")
+    );
+    assert!(
+        claude
+            .contains("`WARDNET_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local")
+    );
     assert!(claude.contains("`WAF_IDS_CREDENTIALS_PATH` remains a legacy fallback"));
 }
 
@@ -55,12 +64,10 @@ fn rename_documents_state_and_secret_cutover_before_new_deployment() {
 fn deployment_regression_tracks_the_renamed_manifest_and_secret() {
     let deployment_test = repo_file("tests/deployment_manifest.rs");
 
-    assert!(deployment_test.contains(
-        "include_str!(\"../deploy/kubernetes/wardnet.yaml\")"
-    ));
-    assert!(!deployment_test.contains(
-        "include_str!(\"../deploy/kubernetes/waf-ids-ai-soc.yaml\")"
-    ));
+    assert!(deployment_test.contains("include_str!(\"../deploy/kubernetes/wardnet.yaml\")"));
+    assert!(
+        !deployment_test.contains("include_str!(\"../deploy/kubernetes/waf-ids-ai-soc.yaml\")")
+    );
     assert!(deployment_test.contains("namespace: \"wardnet\""));
     assert!(deployment_test.contains("secret_name: \"wardnet-admin\""));
 }
