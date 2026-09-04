@@ -1,6 +1,7 @@
 //! Fail-closed package-install admission primitives for AI coding agents.
 
 mod admission;
+mod artifact_source_identity;
 mod artifact_variant;
 mod audit;
 mod cargo_install_authority;
@@ -31,6 +32,12 @@ pub fn admission_decision(
     intent: &InstallIntent,
 ) -> AdmissionDecision {
     let mut decision = policy::admission_decision(policy, intent);
+    if artifact_source_identity::requests_unapproved_artifact_source(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
     if artifact_variant::requests_unapproved_artifact_variant(intent) {
         if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
