@@ -54,6 +54,14 @@ Malformed structural input returns `400` after the minimized rejection fact has 
 
 An allow response is valid only after its audit record has been appended. If audit append, audit-record construction or the blocking audit task fails, Wardnet returns `503` with a block decision and the stable `audit_unavailable` reason. Operators must treat any `503` as fail-closed; never retry by bypassing Wardnet.
 
+### npm-family dependency closure
+
+Direct `npm install`, `pnpm add/install`, `yarn add`, and `bun add/install` requests are intentionally blocked in v0.1 even when the named direct package exactly matches policy and all execution-hardening flags are present. Those commands may resolve and fetch transitive dependencies that are not represented by the current direct-artifact `InstallIntent`; a reviewed direct package is therefore insufficient authority for the material set that would actually be installed. `--ignore-scripts` and pnpm's `--ignore-pnpmfile` reduce execution authority but do not prove dependency identity.
+
+Do not work around this block by adding wildcard artifacts, treating a lockfile path or branch as implicit approval, permitting a resolver-selected package set after the decision, or bypassing Wardnet. The future allow path must bind an immutable reviewed lockfile/material-set digest and the exact dependency closure to the admission request, then constrain the broker to a frozen project installation that cannot rewrite that lockfile. Current package-manager documentation provides candidate executor semantics—`npm ci`, `pnpm install --frozen-lockfile`, Yarn `install --immutable`, and `bun ci`/`bun install --frozen-lockfile`—but none becomes authorized merely because the command supports a frozen mode. Wardnet must first version and test the material-set contract and the broker must independently verify the installed bytes/provenance.
+
+PyPI is narrower in the current contract: pip/pip3 and `uv pip install` can proceed only with exact declared package operands, required hashes, and exact `--no-deps`, so no resolver-selected transitive package may be added outside the reviewed intent. Cargo and OCI remain governed by their separate exact-source/build/platform/cardinality invariants.
+
 ### Execution-broker handoff
 
 An `allow` receipt authorizes only the exact reviewed install intent. It is not proof that bytes later returned by a registry are identical to the policy digest because this service does not download or hash packages.
