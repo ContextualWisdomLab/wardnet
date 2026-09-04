@@ -67,13 +67,14 @@ Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default
 `127.0.0.1:8080`), `WARDNET_STATE_PATH` (optional JSON state file; omitted =
 seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT`
 (default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`,
-`WAF_IDS_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local
-credentials/config), `ADMIN_TOKEN` (bootstrap transport for the shared write
-token), and `ADMIN_TOKENS` (bootstrap transport for comma-separated
-`token:actor[:role]` RBAC entries). `ADMIN_TOKEN` and `ADMIN_TOKENS` are loaded
-into `CredentialRegistry` before the server starts; handlers read the
-in-process registry/AppState copy, not raw env vars. KEV imports use the
-built-in CISA endpoint at runtime; only in-crate tests can override it through
+`WARDNET_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local
+credentials/config; `WAF_IDS_CREDENTIALS_PATH` remains a legacy fallback),
+`ADMIN_TOKEN` (bootstrap transport for the shared write token), and
+`ADMIN_TOKENS` (bootstrap transport for comma-separated `token:actor[:role]`
+RBAC entries). `ADMIN_TOKEN` and `ADMIN_TOKENS` are loaded into
+`CredentialRegistry` before the server starts; handlers read the in-process
+registry/AppState copy, not raw env vars. KEV imports use the built-in CISA
+endpoint at runtime; only in-crate tests can override it through
 `AppState::with_kev_catalog_url` to point at a loopback mock server.
 
 ## Key Conventions
