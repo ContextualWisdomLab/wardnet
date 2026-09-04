@@ -22,6 +22,12 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 - Do **not** weaken or disable the gate. A local scan with a stale DB misses findings: run `trivy --download-db-only` first, then scan the **merge ref**, not just the PR head (e.g. `trivy fs --scanners vuln,misconfig --severity CRITICAL,HIGH --ignore-unfixed .`).
 - Gating is by the Security Scan **job result**, not the `code_scanning` rule. That org ruleset is intentionally **CodeQL-only** (multiple code-scanning tools can't converge on one PR ref) — do **not** add tools to it.
 
+### GitHub Actions ownership
+
+- Organization ruleset `18156473` owns Wardnet PR review, governance, security, and CodeQL through the seven required workflows in `ContextualWisdomLab/.github@769691526f8c73cf714de8fe8ba51ae6cfa2901a`. Do not add local PR Governance, Dependency Review, Close Empty PR, CodeQL, Security Scan, SAST, Strix, OpenCode, or Noema copies.
+- Keep repository-local `CI` and path-filtered `Fuzz` because they validate Wardnet's Rust code. Their PR concurrency keys must include a fixed workflow name, `github.repository`, and the PR number; only superseded heads of that PR may be cancelled.
+- Keep the local Scorecard default-branch, weekly, and branch-protection workflow until the central reusable owner matches Wardnet's pinned Scorecard version. The compared central revision uses Scorecard v2.4.3 while Wardnet uses v2.4.4, so delegating now would weaken deployed security evidence.
+
 ### Code exploration
 
 - There is no `.codegraph/` index in this repo, so use normal search (grep/ripgrep, `cargo` tooling, editor navigation). If a `.codegraph/` index is added later, prefer CodeGraph (`codegraph explore "<query>"` or the code-review-graph MCP tools) before grep/find — it surfaces callers/callees/impact that text search misses.
