@@ -68,8 +68,8 @@ fn cargo_positional_package_version_must_match_reviewed_coordinate() {
         decision
             .reason_codes
             .iter()
-            .any(|reason| reason.as_str() == "invalid_artifact"),
-        "coordinate/argv disagreement must fail structural artifact validation"
+            .any(|reason| reason.as_str() == "artifact_not_approved"),
+        "coordinate/argv disagreement must fail with artifact_not_approved"
     );
 }
 
