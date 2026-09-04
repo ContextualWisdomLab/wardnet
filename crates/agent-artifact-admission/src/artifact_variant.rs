@@ -1,8 +1,15 @@
 use crate::InstallIntent;
 
+/// Return whether an install asks the package client to expand or select
+/// artifact/build identity that is not represented by the approved coordinates.
+pub(crate) fn requests_unapproved_artifact_variant(intent: &InstallIntent) -> bool {
+    requests_unapproved_oci_artifact_variant(intent)
+        || requests_unapproved_pypi_artifact_variant(intent)
+}
+
 /// Return whether an OCI pull asks the client to expand or select artifact
 /// identity that is not represented by the approved artifact coordinates.
-pub(crate) fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -> bool {
+fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
     };
@@ -33,6 +40,43 @@ pub(crate) fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -
                     || argument == "--variant"
                     || argument.starts_with("--variant=")))
     })
+}
+
+/// Pip can select a wheel compatibility target or force/configure a source
+/// build independently of the name/version coordinate. Until policy carries
+/// that artifact/build identity, caller-selected selectors fail closed.
+fn requests_unapproved_pypi_artifact_variant(intent: &InstallIntent) -> bool {
+    let Some(executable) = intent.argv.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(executable, "pip" | "pip3") {
+        return false;
+    }
+
+    let arguments = &intent.argv[1..];
+    if !arguments
+        .first()
+        .is_some_and(|argument| argument == "install")
+    {
+        return false;
+    }
+
+    arguments.iter().skip(1).any(|argument| {
+        matches_value_flag(argument, "--platform")
+            || matches_value_flag(argument, "--python-version")
+            || matches_value_flag(argument, "--implementation")
+            || matches_value_flag(argument, "--abi")
+            || matches_value_flag(argument, "--no-binary")
+            || matches_value_flag(argument, "--only-binary")
+            || argument == "--prefer-binary"
+            || argument == "--no-build-isolation"
+            || matches_value_flag(argument, "-C")
+            || matches_value_flag(argument, "--config-settings")
+    })
+}
+
+fn matches_value_flag(argument: &str, flag: &str) -> bool {
+    argument == flag || argument.strip_prefix(flag).is_some_and(|suffix| suffix.starts_with('='))
 }
 
 /// Docker and Podman expose `-a` (`--all-tags`) and `-q` (`--quiet`) as
