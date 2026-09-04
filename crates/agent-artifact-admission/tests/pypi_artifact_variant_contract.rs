@@ -119,6 +119,7 @@ fn approved_pypi_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
         "install".to_string(),
         format!("{PACKAGE_NAME}=={PACKAGE_VERSION}"),
         "--require-hashes".to_string(),
+        "--no-deps".to_string(),
     ])
 }
 
@@ -129,6 +130,7 @@ fn approved_uv_pypi_install() -> (AdmissionPolicy, InstallIntent) {
         "install".to_string(),
         format!("{PACKAGE_NAME}=={PACKAGE_VERSION}"),
         "--require-hashes".to_string(),
+        "--no-deps".to_string(),
     ])
 }
 
