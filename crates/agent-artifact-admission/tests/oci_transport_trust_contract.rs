@@ -52,6 +52,45 @@ fn podman_cannot_select_an_unreviewed_registry_certificate_directory() {
 }
 
 #[test]
+fn podman_cannot_select_an_unreviewed_registry_auth_file() {
+    let (policy, mut intent) = approved_podman_pull();
+    intent.argv.insert(
+        2,
+        "--authfile=/tmp/agent-controlled-registry-auth.json".to_string(),
+    );
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "alternate_trust_root"),
+        "caller-selected registry authentication files must not become admission authority"
+    );
+}
+
+#[test]
+fn podman_cannot_supply_registry_credentials_from_untrusted_argv() {
+    let (policy, mut intent) = approved_podman_pull();
+    intent
+        .argv
+        .insert(2, "--creds=agent-user:synthetic-secret".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "alternate_trust_root"),
+        "untrusted argv must not choose the registry principal used to retrieve an approved artifact"
+    );
+}
+
+#[test]
 fn explicit_tls_verification_true_does_not_weaken_the_reviewed_registry_trust() {
     let (policy, mut intent) = approved_podman_pull();
     intent.argv.insert(2, "--tls-verify=true".to_string());
