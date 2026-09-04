@@ -336,21 +336,12 @@ impl IpNet {
         }
         let (addr, prefix_len) = match raw.split_once('/') {
             Some((addr, prefix)) => {
-                let addr = parse_ip_with_mapped_ipv4(addr)?;
-                let max_prefix = match addr {
-                    IpAddr::V4(_) => 32,
-                    IpAddr::V6(_) => 128,
-                };
+                let original_addr = parse_ip(addr)?;
                 let prefix_len = prefix
                     .trim()
                     .parse::<u8>()
                     .map_err(|error| format!("invalid trusted proxy prefix {raw:?}: {error}"))?;
-                if prefix_len > max_prefix {
-                    return Err(format!(
-                        "trusted proxy prefix {prefix_len} is too large for {raw:?}"
-                    ));
-                }
-                (addr, prefix_len)
+                canonicalize_trusted_proxy_net(original_addr, prefix_len, raw)?
             }
             None => {
                 let addr = parse_ip_with_mapped_ipv4(raw)?;
@@ -377,11 +368,46 @@ impl std::str::FromStr for IpNet {
     }
 }
 
-fn parse_ip_with_mapped_ipv4(raw: &str) -> Result<IpAddr, String> {
+/// Parse one trusted-proxy address without normalizing IPv4-mapped IPv6 input.
+fn parse_ip(raw: &str) -> Result<IpAddr, String> {
     raw.trim()
         .parse::<IpAddr>()
-        .map(normalize_ip)
         .map_err(|error| format!("invalid trusted proxy address {raw:?}: {error}"))
+}
+
+fn parse_ip_with_mapped_ipv4(raw: &str) -> Result<IpAddr, String> {
+    parse_ip(raw).map(normalize_ip)
+}
+
+/// Canonicalize CIDR input so IPv4-mapped IPv6 networks become equivalent IPv4
+/// networks. Prefixes narrower than `/96` span non-mapped IPv6 space and are
+/// rejected.
+fn canonicalize_trusted_proxy_net(
+    original_addr: IpAddr,
+    prefix_len: u8,
+    raw: &str,
+) -> Result<(IpAddr, u8), String> {
+    match original_addr {
+        IpAddr::V4(addr) => {
+            if prefix_len > 32 {
+                return Err(format!(
+                    "trusted proxy prefix {prefix_len} is too large for {raw:?}"
+                ));
+            }
+            Ok((IpAddr::V4(addr), prefix_len))
+        }
+        IpAddr::V6(addr) => {
+            if let Some(mapped) = addr.to_ipv4_mapped() {
+                if prefix_len < 96 {
+                    return Err(format!(
+                        "trusted proxy prefix {prefix_len} is too small for IPv4-mapped CIDR {raw:?}"
+                    ));
+                }
+                return Ok((IpAddr::V4(mapped), prefix_len - 96));
+            }
+            Ok((IpAddr::V6(addr), prefix_len))
+        }
+    }
 }
 
 fn normalize_ip(ip: IpAddr) -> IpAddr {
@@ -3573,6 +3599,14 @@ mod tests {
     fn parse_trusted_proxies_rejects_invalid_entries() {
         assert!(parse_trusted_proxies(Some("192.0.2.0/40")).is_err());
         assert!(parse_trusted_proxies(Some("bad-ip")).is_err());
+    }
+
+    #[test]
+    fn parse_trusted_proxies_accepts_ipv4_mapped_ipv6_cidrs() {
+        let parsed = parse_trusted_proxies(Some("::ffff:192.0.2.0/120")).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].contains("192.0.2.77".parse().unwrap()));
+        assert!(!parsed[0].contains("198.51.100.7".parse().unwrap()));
     }
 
     #[test]
