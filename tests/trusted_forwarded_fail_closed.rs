@@ -62,3 +62,15 @@ fn ipv4_mapped_cidr_configuration_is_canonicalized() {
 
     assert_eq!(mapped, canonical);
 }
+
+#[test]
+fn out_of_range_ipv6_prefixes_fail_closed() {
+    for value in ["2001:db8::/129", "::ffff:192.0.2.77/129"] {
+        let error = IpNet::parse(value)
+            .expect_err("an IPv6 prefix above 128 must not be silently reinterpreted");
+        assert!(
+            error.contains("prefix 129 is too large"),
+            "unexpected error for {value}: {error}"
+        );
+    }
+}
