@@ -183,6 +183,7 @@ pub fn parse_u64_env(
 /// Walk the Rust source tree and return any file that performs direct runtime
 /// environment reads outside the approved bootstrap adapters.
 fn direct_runtime_env_read_offenders(root: &Path) -> Vec<PathBuf> {
+    /// Recurse through nested source directories and collect violating files.
     fn visit(root: &Path, current: &Path, offenders: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(current).unwrap() {
             let path = entry.unwrap().path();
@@ -216,6 +217,7 @@ mod tests {
     use crate::{CRED_ADMIN_TOKENS, CredentialRegistry};
     use std::collections::HashMap;
 
+    /// Build a deterministic runtime snapshot from in-memory bootstrap pairs.
     fn runtime_from_pairs(
         pairs: &[(&str, &str)],
     ) -> Result<RuntimeConfiguration, Box<dyn std::error::Error>> {
@@ -227,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    /// Defaults apply when no non-secret bootstrap values are provided.
     fn runtime_configuration_defaults_when_bootstrap_input_is_unset() {
         let config = runtime_from_pairs(&[]).unwrap();
         assert_eq!(config.bind_addr, RuntimeConfiguration::DEFAULT_BIND_ADDR);
@@ -245,6 +248,7 @@ mod tests {
     }
 
     #[test]
+    /// Every non-secret bootstrap field is read from the injected snapshot.
     fn runtime_configuration_reads_one_non_secret_bootstrap_snapshot() {
         let config = runtime_from_pairs(&[
             ("BIND_ADDR", "127.0.0.1:9090"),
@@ -267,6 +271,7 @@ mod tests {
     }
 
     #[test]
+    /// Runtime bootstrap must not request the secret credentials-path selector.
     fn runtime_configuration_never_reads_secret_bootstrap_locator() {
         let config = RuntimeConfiguration::from_lookup(|name| {
             assert_ne!(
@@ -280,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    /// Invalid numeric bounds fail closed before the listener binds.
     fn runtime_configuration_rejects_malformed_bounds_without_mutating_process_env() {
         assert!(runtime_from_pairs(&[("EVENT_LIMIT", "0")]).is_err());
         assert!(runtime_from_pairs(&[("RATE_LIMIT_WINDOW", "abc")]).is_err());
@@ -288,6 +294,7 @@ mod tests {
     }
 
     #[test]
+    /// AppConfig combines non-secret runtime values with registry-backed secrets.
     fn runtime_configuration_builds_app_config_from_registry() {
         let runtime = RuntimeConfiguration {
             bind_addr: RuntimeConfiguration::DEFAULT_BIND_ADDR.to_string(),
@@ -317,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    /// The architecture fitness gate rejects direct env reads outside adapters.
     fn runtime_env_reads_stay_in_bootstrap_adapters_recursively() {
         let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let offenders = direct_runtime_env_read_offenders(&src_dir);
@@ -327,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    /// Nested source files are scanned so deep env reads cannot evade the gate.
     fn nested_runtime_env_read_is_detected_by_architecture_fitness_gate() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -14,6 +14,12 @@ fn zero_runtime_resource_bounds_fail_closed() {
 
 #[test]
 fn positive_runtime_resource_bounds_and_defaults_remain_valid() {
-    assert_eq!(parse_u64_env("RATE_LIMIT_WINDOW", Some("1"), 60).unwrap(), 1);
-    assert_eq!(parse_u64_env("MAX_BODY_BYTES", None, 1_048_576).unwrap(), 1_048_576);
+    assert_eq!(
+        parse_u64_env("RATE_LIMIT_WINDOW", Some("1"), 60).unwrap(),
+        1
+    );
+    assert_eq!(
+        parse_u64_env("MAX_BODY_BYTES", None, 1_048_576).unwrap(),
+        1_048_576
+    );
 }

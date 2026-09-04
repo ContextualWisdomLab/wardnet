@@ -159,7 +159,7 @@ impl CredentialRegistry {
     }
 }
 
-/// Convert a credential JSON value into a stored non-empty string.
+/// Convert one credential JSON value into a stored non-empty string.
 fn json_value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if !text.is_empty() => Some(text.clone()),
