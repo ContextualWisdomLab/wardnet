@@ -65,6 +65,35 @@ fn caller_selected_source_distribution_and_build_backend_controls_are_not_preapp
 }
 
 #[test]
+fn uv_pip_target_platform_and_build_backend_controls_are_not_preapproved() {
+    for selector in [
+        "--python-platform=x86_64-unknown-linux-gnu",
+        "--no-binary=:all:",
+        "--no-build-isolation",
+        "--config-settings=backend-mode=unsafe",
+        "-Cbackend-mode=unsafe",
+    ] {
+        let (policy, mut intent) = approved_uv_pypi_install();
+        intent.argv.insert(3, selector.to_string());
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "uv pip selector {selector} must not inherit approval from a PyPI artifact coordinate that does not bind target-platform or build-backend authority"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "artifact_not_approved"),
+            "uv pip selector {selector} must stay in the artifact-identity reason domain"
+        );
+    }
+}
+
+#[test]
 fn exact_pypi_install_without_caller_selected_variant_remains_allowed() {
     let (policy, intent) = approved_pypi_install("pip");
 
@@ -74,7 +103,36 @@ fn exact_pypi_install_without_caller_selected_variant_remains_allowed() {
     assert!(decision.reason_codes.is_empty());
 }
 
+#[test]
+fn exact_uv_pypi_install_without_caller_selected_variant_remains_allowed() {
+    let (policy, intent) = approved_uv_pypi_install();
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Allow);
+    assert!(decision.reason_codes.is_empty());
+}
+
 fn approved_pypi_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
+    approved_pypi_install_with_argv(vec![
+        executable.to_string(),
+        "install".to_string(),
+        format!("{PACKAGE_NAME}=={PACKAGE_VERSION}"),
+        "--require-hashes".to_string(),
+    ])
+}
+
+fn approved_uv_pypi_install() -> (AdmissionPolicy, InstallIntent) {
+    approved_pypi_install_with_argv(vec![
+        "uv".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        format!("{PACKAGE_NAME}=={PACKAGE_VERSION}"),
+        "--require-hashes".to_string(),
+    ])
+}
+
+fn approved_pypi_install_with_argv(argv: Vec<String>) -> (AdmissionPolicy, InstallIntent) {
     let artifact_argument = format!("{PACKAGE_NAME}=={PACKAGE_VERSION}");
     let artifact = ArtifactCoordinate {
         ecosystem: "pypi".to_string(),
@@ -88,7 +146,7 @@ fn approved_pypi_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     let policy = AdmissionPolicy {
         policy_id: "pypi-production".to_string(),
         policy_revision: "2026-09-04.1".to_string(),
-        allowed_executables: vec![executable.to_string()],
+        allowed_executables: vec![argv[0].clone()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
             sha256: MANIFEST_DIGEST.to_string(),
@@ -108,12 +166,7 @@ fn approved_pypi_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
         actor_id: "agent:wardnet:admission".to_string(),
         workspace_id: "ContextualWisdomLab/wardnet".to_string(),
         operation: "install".to_string(),
-        argv: vec![
-            executable.to_string(),
-            "install".to_string(),
-            artifact_argument,
-            "--require-hashes".to_string(),
-        ],
+        argv,
         manifest_sha256: MANIFEST_DIGEST.to_string(),
         source: InstructionSource {
             kind: InstructionSourceKind::ReviewedConfig,
