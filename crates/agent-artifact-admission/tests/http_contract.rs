@@ -22,25 +22,36 @@ fn approved_policy() -> AdmissionPolicy {
     AdmissionPolicy {
         policy_id: "enterprise-default".to_string(),
         policy_revision: "2026-08-29.2".to_string(),
-        allowed_executables: vec!["npm".to_string()],
+        allowed_executables: vec!["cargo".to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
             sha256: digest('a'),
         }],
         approved_artifacts: vec![ApprovedArtifact {
-            ecosystem: "npm".to_string(),
-            name: "@unowned/example".to_string(),
+            ecosystem: "cargo".to_string(),
+            name: "cwl-example".to_string(),
             version: "1.2.3".to_string(),
-            registry_url: "https://registry.npmjs.org".to_string(),
+            registry_url: "https://crates.io".to_string(),
             owner: "Unowned".to_string(),
             sha256: digest('c'),
-            artifact_argument: "@unowned/example@1.2.3".to_string(),
+            artifact_argument: "cwl-example@1.2.3".to_string(),
         }],
     }
 }
 
 fn approved_intent() -> InstallIntent {
-    InstallIntent::unowned_llms_package_for_test()
+    let mut intent = InstallIntent::unowned_llms_package_for_test();
+    intent.argv = vec![
+        "cargo".to_string(),
+        "install".to_string(),
+        "cwl-example@1.2.3".to_string(),
+        "--locked".to_string(),
+    ];
+    intent.artifacts[0].ecosystem = "cargo".to_string();
+    intent.artifacts[0].name = "cwl-example".to_string();
+    intent.artifacts[0].registry_url = "https://crates.io".to_string();
+    intent.artifacts[0].artifact_argument = "cwl-example@1.2.3".to_string();
+    intent
 }
 
 fn state(
