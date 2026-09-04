@@ -11,7 +11,7 @@ const ARTIFACT_SHA256: &str =
 #[test]
 fn cargo_version_selector_cannot_override_reviewed_artifact_version() {
     for version_selector in ["--version=9.9.9", "--vers=9.9.9"] {
-        let artifact_argument = "cwl-example";
+        let artifact_argument = "cwl-example@1.2.3";
         let policy = approved_cargo_policy("1.2.3", artifact_argument);
         let intent = approved_cargo_intent(
             "1.2.3",
