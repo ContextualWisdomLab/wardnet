@@ -6,7 +6,7 @@
 //! actor value.
 
 use proptest::prelude::*;
-use waf_ids_ai_soc::parse_admin_tokens;
+use wardnet::parse_admin_tokens;
 
 proptest! {
     #[test]

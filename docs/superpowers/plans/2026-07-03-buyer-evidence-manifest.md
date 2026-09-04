@@ -6,7 +6,7 @@ Advance the 2B KRW buyer-readiness baseline by giving enterprise evaluators one 
 
 ## Scope
 
-- Add a pure `BuyerEvidenceManifest` model and deterministic snapshot function to `crates/waf-ids-core`.
+- Add a pure `BuyerEvidenceManifest` model and deterministic snapshot function to `crates/wardnet-core`.
 - Expose `GET /api/commercial/evidence-manifest` from the app crate.
 - Include the manifest in `GET /api/support-bundle` so support handoff and buyer due diligence share the same evidence map.
 - Add the manifest to the embedded admin console.

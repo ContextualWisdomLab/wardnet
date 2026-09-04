@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-wardnet (crate name `waf-ids-ai-soc`) is a Rust-first WAF/IDS/AI SOC gateway and control-plane baseline for ContextualWisdomLab: web-managed API gateway routes, request scoring from threat indicators and DNSBL entries, monitor/block enforcement, RFC 5782-style DNSBL zone export, SOC event/KPI APIs, commercial readiness evidence APIs, and an embedded admin console at `/admin`. It deliberately does not reimplement a full WAF/IDS/SIEM — production coverage is meant to come from adapters to proven engines (OWASP CRS/Coraza, Suricata, STIX/TAXII, MISP/OpenCTI).
+wardnet (crate name `wardnet`) is a Rust-first WAF/IDS/AI SOC gateway and control-plane baseline for ContextualWisdomLab: web-managed API gateway routes, request scoring from threat indicators and DNSBL entries, monitor/block enforcement, RFC 5782-style DNSBL zone export, SOC event/KPI APIs, commercial readiness evidence APIs, and an embedded admin console at `/admin`. It deliberately does not reimplement a full WAF/IDS/SIEM — production coverage is meant to come from adapters to proven engines (OWASP CRS/Coraza, Suricata, STIX/TAXII, MISP/OpenCTI).
 
 ## Commands
 
@@ -23,7 +23,7 @@ Other common commands:
 ```bash
 cargo run                                  # serve on 127.0.0.1:8080; open /admin
 cargo test --workspace <test_name_filter>  # run a single test by name
-cargo test -p waf-ids-core                 # test only the core crate
+cargo test -p wardnet-core                 # test only the core crate
 scripts/smoke.sh                           # end-to-end smoke: boots the binary, exercises the API, verifies restart persistence
 ```
 
@@ -46,9 +46,9 @@ cargo +nightly fuzz run fuzz_score_request -- -max_total_time=60
 
 Root Cargo workspace with two members (resolver 3):
 
-- `crates/waf-ids-core` — pure domain crate, no async/HTTP deps (only `serde` + `percent-encoding`): models, validation, upserts, request scoring, DNSBL zone formatting, event retention, threat-feed freshness, KPI snapshots, commercial readiness, buyer evidence manifests.
-- Root crate `waf-ids-ai-soc` (`src/lib.rs`) — Axum management API, embedded admin console, optional JSON state persistence, upstream proxying, NDJSON event export, support bundle assembly, plus the in-crate HTTP tests. Depends on `waf-ids-core`.
-- `src/main.rs` — deliberately thin shim over `waf_ids_ai_soc::run_from_env` so all config/serve logic is unit-testable; covered end-to-end by `tests/binary.rs` (SIGTERM graceful shutdown).
+- `crates/wardnet-core` — pure domain crate, no async/HTTP deps (only `serde` + `percent-encoding`): models, validation, upserts, request scoring, DNSBL zone formatting, event retention, threat-feed freshness, KPI snapshots, commercial readiness, buyer evidence manifests.
+- Root crate `wardnet` (`src/lib.rs`) — Axum management API, embedded admin console, optional JSON state persistence, upstream proxying, NDJSON event export, support bundle assembly, plus the in-crate HTTP tests. Depends on `wardnet-core`.
+- `src/main.rs` — deliberately thin shim over `wardnet::run_from_env` so all config/serve logic is unit-testable; covered end-to-end by `tests/binary.rs` (SIGTERM graceful shutdown).
 - `fuzz/` — a **separate** cargo workspace (empty `[workspace]` table in `fuzz/Cargo.toml` — do not remove) so root `cargo test --workspace` never builds fuzz targets. Seed corpora live in `fuzz/corpus/<target>/`.
 
 The core stays an in-repo workspace crate on purpose (no git submodule) until it has an independent release cadence.
@@ -57,12 +57,24 @@ The core stays an in-repo workspace crate on purpose (no git submodule) until it
 
 - In-crate HTTP tests: `#[cfg(test)]` module in `src/lib.rs` (uses `tower::ServiceExt` to drive the Axum app). Tests that mutate env vars serialize on `ENV_GUARD`.
 - E2E binary test: `tests/binary.rs`.
-- Property-test mirrors of the fuzz invariants (run on stable in normal CI): `tests/fuzz_invariants.rs` and `crates/waf-ids-core/tests/fuzz_invariants.rs` (proptest).
+- Property-test mirrors of the fuzz invariants (run on stable in normal CI): `tests/fuzz_invariants.rs` and `crates/wardnet-core/tests/fuzz_invariants.rs` (proptest).
 - External smoke: `scripts/smoke.sh`.
 
 ## Runtime Configuration
 
-Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `WAF_IDS_STATE_PATH` (optional JSON state file; omitted = seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT` (default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`, `WAF_IDS_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local credentials/config), `ADMIN_TOKEN` (bootstrap transport for the shared write token), and `ADMIN_TOKENS` (bootstrap transport for comma-separated `token:actor[:role]` RBAC entries). `ADMIN_TOKEN` and `ADMIN_TOKENS` are loaded into `CredentialRegistry` before the server starts; handlers read the in-process registry/AppState copy, not raw env vars. KEV imports use the built-in CISA endpoint at runtime; only in-crate tests can override it through `AppState::with_kev_catalog_url` to point at a loopback mock server.
+Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default
+`127.0.0.1:8080`), `WARDNET_STATE_PATH` (optional JSON state file; omitted =
+seeded in-memory state), `DNSBL_ORIGIN` (default `dnsbl.local`), `EVENT_LIMIT`
+(default 1000, must be > 0), `RATE_LIMIT` / `RATE_LIMIT_WINDOW`,
+`WARDNET_CREDENTIALS_PATH` (optional JSON bootstrap file for process-local
+credentials/config; `WAF_IDS_CREDENTIALS_PATH` remains a legacy fallback),
+`ADMIN_TOKEN` (bootstrap transport for the shared write token), and
+`ADMIN_TOKENS` (bootstrap transport for comma-separated `token:actor[:role]`
+RBAC entries). `ADMIN_TOKEN` and `ADMIN_TOKENS` are loaded into
+`CredentialRegistry` before the server starts; handlers read the in-process
+registry/AppState copy, not raw env vars. KEV imports use the built-in CISA
+endpoint at runtime; only in-crate tests can override it through
+`AppState::with_kev_catalog_url` to point at a loopback mock server.
 
 ## Key Conventions
 
@@ -71,7 +83,9 @@ Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `
 - Audit logs must never leak admin tokens (`scripts/smoke.sh` asserts this).
 - Untrusted-input surfaces (request scorer, state deserializer, admin-token parser, DNSBL zone export) are fuzzed; if you change one, keep its libFuzzer target and proptest mirror in sync (`docs/fuzzing.md` lists the invariants per target).
 - Block mode is route-scoped; default bind is localhost. See `docs/architecture.md` for security boundaries and the near-term adapter roadmap.
-- Deployment assets: `Dockerfile` (two-stage build, pinned base images, runs as non-root `wafids`), `deploy/docker-compose.yml`, `deploy/kubernetes/waf-ids-ai-soc.yaml`.
+- Deployment assets: `Dockerfile` (two-stage build, pinned base images, runs as
+  non-root `wardnet`), `deploy/docker-compose.yml`,
+  `deploy/kubernetes/wardnet.yaml`.
 
 ## Further Docs
 

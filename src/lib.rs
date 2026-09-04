@@ -19,7 +19,7 @@ use tokio::{
     fs,
     sync::{Mutex, RwLock},
 };
-use waf_ids_core::{
+use wardnet_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
     enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
     replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
@@ -27,7 +27,7 @@ use waf_ids_core::{
     validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
     validate_threat_feed_import,
 };
-pub use waf_ids_core::{
+pub use wardnet_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
     CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
     NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
@@ -569,7 +569,7 @@ fn clearfolio_tenant_headers(config: &ClearfolioConfig) -> [(&'static str, &str)
     ]
 }
 
-/// Renders a waf-ids document to plain-text bytes for Clearfolio ingest.
+/// Renders a Wardnet document to plain-text bytes for Clearfolio ingest.
 /// Clearfolio only blocks `hwp`/`hwpx`, so text uploads convert normally.
 /// Returns `(filename, bytes)` or `None` for an unknown kind.
 fn clearfolio_document(kind: &str, data: &AppData) -> Option<(String, Vec<u8>)> {
@@ -613,7 +613,7 @@ async fn clearfolio_config(State(state): State<AppState>) -> Json<ClearfolioConf
     })
 }
 
-/// Submits a live waf-ids document to Clearfolio for conversion and relays the
+/// Submits a live Wardnet document to Clearfolio for conversion and relays the
 /// async job envelope (`jobId`, `status`, `statusUrl`) back to the console.
 async fn clearfolio_submit(
     State(state): State<AppState>,
@@ -2906,7 +2906,7 @@ const ADMIN_HTML: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WAF IDS AI SOC — Console</title>
+<title>Wardnet — Console</title>
 <style>
 :root{
   --brand:#14213d;--canvas:#f7f8fa;--surface:#ffffff;--border:#d9dee7;
@@ -2983,7 +2983,7 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="app">
-  <h1>ContextualWisdomLab WAF/IDS/AI SOC Gateway</h1>
+  <h1>Wardnet</h1>
   <div class="toolbar">
     <input id="adminToken" class="hdr-input" type="password" placeholder="Admin token (write or readonly)" autocomplete="off" aria-label="Admin token for management writes and audit log reads">
     <button class="btn-ghost" id="hcToggle" aria-pressed="false">High contrast</button>
@@ -3268,6 +3268,17 @@ pub fn parse_u64_env(
     }
 }
 
+fn renamed_env(primary: &str, legacy: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var(legacy)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+}
+
 /// Read gateway configuration from the process environment, bind the listener,
 /// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
 /// over this function so every branch is reachable from tests (the parse/error
@@ -3279,9 +3290,8 @@ pub async fn run_from_env(
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     // Secret-bearing values go through the credential registry (env/file are
     // bootstrap transports only). Operational config remains env for now.
-    let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
-        .ok()
-        .map(PathBuf::from);
+    let credentials_path =
+        renamed_env("WARDNET_CREDENTIALS_PATH", "WAF_IDS_CREDENTIALS_PATH").map(PathBuf::from);
     let credentials = CredentialRegistry::bootstrap_secrets(
         credentials_path.as_deref(),
         std::env::var("ADMIN_TOKEN").ok(),
@@ -3291,7 +3301,7 @@ pub async fn run_from_env(
         admin_token: credentials
             .get_credential(CRED_ADMIN_TOKEN)
             .map(str::to_owned),
-        state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
+        state_path: renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH").map(PathBuf::from),
         dnsbl_origin: std::env::var("DNSBL_ORIGIN")
             .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
         event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
@@ -3314,7 +3324,7 @@ pub async fn run_from_env(
     )? as usize;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
-    println!("waf-ids-ai-soc listening on http://{local_addr}");
+    println!("wardnet listening on http://{local_addr}");
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
@@ -3361,6 +3371,8 @@ mod tests {
             "BIND_ADDR",
             "ADMIN_TOKEN",
             "ADMIN_TOKENS",
+            "WARDNET_STATE_PATH",
+            "WARDNET_CREDENTIALS_PATH",
             "WAF_IDS_STATE_PATH",
             "WAF_IDS_CREDENTIALS_PATH",
             "DNSBL_ORIGIN",
@@ -3382,6 +3394,33 @@ mod tests {
         assert_eq!(parse_event_limit(Some("25")).unwrap(), 25);
         assert!(parse_event_limit(Some("0")).is_err());
         assert!(parse_event_limit(Some("not-a-number")).is_err());
+    }
+
+    #[tokio::test]
+    async fn renamed_env_prefers_wardnet_and_accepts_legacy_alias() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe { std::env::set_var("WAF_IDS_STATE_PATH", "legacy.json") };
+        assert_eq!(
+            renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH").as_deref(),
+            Some("legacy.json")
+        );
+        unsafe { std::env::set_var("WARDNET_STATE_PATH", "wardnet.json") };
+        assert_eq!(
+            renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH").as_deref(),
+            Some("wardnet.json")
+        );
+        unsafe { std::env::set_var("WARDNET_STATE_PATH", " ") };
+        assert_eq!(
+            renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH").as_deref(),
+            Some("legacy.json")
+        );
+        unsafe { std::env::set_var("WAF_IDS_STATE_PATH", "") };
+        assert_eq!(
+            renamed_env("WARDNET_STATE_PATH", "WAF_IDS_STATE_PATH"),
+            None
+        );
+        clear_run_env();
     }
 
     #[test]
@@ -3481,14 +3520,14 @@ mod tests {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
         let path = std::env::temp_dir().join(format!(
-            "waf_ids_bad_state_{}_{}.json",
+            "wardnet_bad_state_{}_{}.json",
             std::process::id(),
             now_unix()
         ));
         std::fs::write(&path, b"{ not valid json").unwrap();
         unsafe {
             std::env::set_var("BIND_ADDR", "127.0.0.1:0");
-            std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
+            std::env::set_var("WARDNET_STATE_PATH", path.to_str().unwrap());
         }
         // Bind succeeds, but loading corrupt persisted state maps to an error.
         assert!(
@@ -3683,11 +3722,12 @@ mod tests {
     fn prometheus_exposition_emits_typed_gauges() {
         let text = prometheus_exposition(&kpi_snapshot_at(&AppData::seeded(), 0));
         // HELP/TYPE metadata plus a value line for a representative metric.
-        assert!(text.contains("# TYPE waf_ids_routes gauge"));
-        assert!(text.contains("waf_ids_routes 1")); // seed has one route
-        assert!(text.contains("waf_ids_dnsbl_entries 1")); // seed has one DNSBL entry
-        assert!(text.contains("waf_ids_security_events 0"));
-        assert!(text.contains("waf_ids_security_events_blocked 0"));
+        assert!(text.contains("# TYPE wardnet_routes gauge"));
+        assert!(text.contains("wardnet_routes 1")); // seed has one route
+        assert!(text.contains("wardnet_dnsbl_entries 1")); // seed has one DNSBL entry
+        assert!(text.contains("wardnet_security_events 0"));
+        assert!(text.contains("wardnet_security_events_blocked 0"));
+        assert!(text.contains("waf_ids_routes 1")); // migration alias
     }
 
     #[tokio::test]
@@ -3706,7 +3746,7 @@ mod tests {
             "unexpected content-type: {content_type}"
         );
         let body = body_text(response).await;
-        assert!(body.contains("waf_ids_security_events_blocked"));
+        assert!(body.contains("wardnet_security_events_blocked"));
     }
 
     #[tokio::test]
@@ -4334,7 +4374,7 @@ mod tests {
 
         let response = app_request(&app, empty_request(Method::GET, "/admin")).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(body_text(response).await.contains("WAF/IDS/AI SOC Gateway"));
+        assert!(body_text(response).await.contains("<h1>Wardnet</h1>"));
 
         let health: HealthStatus =
             json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
@@ -6646,7 +6686,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "waf-ids-ai-soc-{name}-{}-{nanos}.json",
+            "wardnet-{name}-{}-{nanos}.json",
             std::process::id()
         ))
     }
@@ -7193,20 +7233,20 @@ mod tests {
         assert!(freshness[0].stale);
         assert_eq!(freshness[0].expires_at_unix, 601);
 
-        let wrapper_kpis = waf_ids_core::kpi_snapshot(&data);
+        let wrapper_kpis = wardnet_core::kpi_snapshot(&data);
         assert_eq!(wrapper_kpis.route_count, data.routes.len());
-        let wrapper_readiness = waf_ids_core::commercial_readiness_snapshot(&data);
+        let wrapper_readiness = wardnet_core::commercial_readiness_snapshot(&data);
         assert_eq!(
             wrapper_readiness.target_sale_value_krw,
             TARGET_SALE_VALUE_KRW
         );
-        let wrapper_manifest = waf_ids_core::buyer_evidence_manifest(&data);
+        let wrapper_manifest = wardnet_core::buyer_evidence_manifest(&data);
         assert_eq!(
             wrapper_manifest.target_sale_value_krw,
             TARGET_SALE_VALUE_KRW
         );
 
-        let manifest = waf_ids_core::buyer_evidence_manifest_at(&data, 1);
+        let manifest = wardnet_core::buyer_evidence_manifest_at(&data, 1);
         assert!(manifest.ready_for_enterprise_sale);
         assert_eq!(manifest.runtime_counts.dnsbl_entry_count, data.dnsbl.len());
         assert!(
@@ -7216,7 +7256,7 @@ mod tests {
                 .any(|endpoint| endpoint.id == "dnsbl_zone" && endpoint.required_for_sale)
         );
 
-        let stale_manifest = waf_ids_core::buyer_evidence_manifest_at(&data, 601);
+        let stale_manifest = wardnet_core::buyer_evidence_manifest_at(&data, 601);
         assert!(!stale_manifest.ready_for_enterprise_sale);
         assert!(
             stale_manifest
@@ -7321,7 +7361,7 @@ mod tests {
         let _ = fs::remove_file(valid_path).await;
 
         let local_path = PathBuf::from(format!(
-            "waf-ids-state-unit-{}-{}.json",
+            "wardnet-state-unit-{}-{}.json",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

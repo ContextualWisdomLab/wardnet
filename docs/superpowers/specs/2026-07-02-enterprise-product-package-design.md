@@ -28,14 +28,14 @@ Move the current WAF/IDS/AI SOC runtime from a commercial baseline into a buyer-
 
 ## Architecture Decision
 
-Create `crates/waf-ids-core` inside the same Cargo workspace. It owns pure domain models and deterministic logic:
+Create `crates/wardnet-core` inside the same Cargo workspace. It owns pure domain models and deterministic logic:
 
 - route, threat, DNSBL, feed, event, license, KPI, and readiness models
 - route/threat/DNSBL/feed validation and upsert semantics
 - request scoring and DNSBL zone export
 - event retention, KPI snapshot, and readiness snapshot
 
-The root `waf-ids-ai-soc` crate keeps process startup, Axum routes, persistence, upstream proxying, admin console, and integration tests. This boundary gives a future SDK/adapters a stable domain surface without adding submodule governance overhead.
+The root `wardnet` crate keeps process startup, Axum routes, persistence, upstream proxying, admin console, and integration tests. This boundary gives a future SDK/adapters a stable domain surface without adding submodule governance overhead.
 
 ## Product Design Scope
 
@@ -74,7 +74,7 @@ Guardrails:
 
 ## Ponytail Audit Outcome
 
-- Shrink: move pure domain logic out of `src/lib.rs` into `crates/waf-ids-core`.
+- Shrink: move pure domain logic out of `src/lib.rs` into `crates/wardnet-core`.
 - YAGNI: do not add a git submodule before an independent release boundary exists.
 - Delete: do not build a fake WAF/IDS engine; keep Coraza and Suricata as explicit future adapters.
 - Net: reduce app crate complexity while preserving the single-binary sales-demo path.

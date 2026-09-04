@@ -8,7 +8,7 @@
 //! any value that deserializes must round-trip back through serde_json.
 
 use libfuzzer_sys::fuzz_target;
-use waf_ids_core::AppData;
+use wardnet_core::AppData;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
