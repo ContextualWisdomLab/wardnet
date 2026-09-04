@@ -17,9 +17,9 @@ fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
             "group: {fixed_group}-${{{{ github.repository }}}}-${{{{ github.event_name == 'pull_request'"
         )));
         assert!(workflow.contains("format('pr-{0}', github.event.pull_request.number)"));
-        assert!(workflow.contains(
-            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
-        ));
+        assert!(
+            workflow.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}")
+        );
     }
 }
 
@@ -40,8 +40,7 @@ fn fuzz_uses_one_runner_for_all_bounded_targets() {
 
 #[test]
 fn central_required_workflows_are_not_copied_locally() {
-    let workflow_directory =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let workflow_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
     for name in [
         "pr-governance.yml",
         "dependency-review.yml",
