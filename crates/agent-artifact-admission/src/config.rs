@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::artifact_source_identity::artifact_argument_matches_reviewed_source;
 use crate::policy::{
     canonical_registry_url, is_permanently_forbidden_executable, supported_executable,
     valid_pinned_version, valid_text_field,
@@ -197,6 +198,12 @@ fn validate_policy(policy: &AdmissionPolicy) -> Result<(), ConfigError> {
             || !valid_text_field(&artifact.owner, 512)
             || !is_sha256_hex(&artifact.sha256)
             || !valid_text_field(&artifact.artifact_argument, 1024)
+            || !artifact_argument_matches_reviewed_source(
+                &artifact.ecosystem,
+                &artifact.name,
+                &artifact.version,
+                &artifact.artifact_argument,
+            )
             || !artifacts.insert((
                 artifact.ecosystem.as_str(),
                 artifact.name.as_str(),
