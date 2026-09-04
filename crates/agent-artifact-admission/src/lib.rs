@@ -56,6 +56,12 @@ pub fn admission_decision(
         }
         decision.decision = DecisionKind::Block;
     }
+    if dependency_cardinality::npm_family_dependency_closure_is_unverified(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
     if oci_transport::requests_unapproved_oci_transport_trust(intent) {
         if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
