@@ -11,7 +11,7 @@ const IMAGE_NAME: &str = "ghcr.io/contextualwisdomlab/wardnet-runtime";
 #[test]
 fn oci_all_tags_cannot_expand_an_exact_approved_digest_to_a_repository_set() {
     for executable in ["docker", "podman"] {
-        for all_tags_flag in ["--all-tags", "-a"] {
+        for all_tags_flag in ["--all-tags", "-a", "--all-tags=true", "-a=true"] {
             let (policy, mut intent) = approved_oci_pull(executable);
             intent.argv.insert(2, all_tags_flag.to_string());
 
