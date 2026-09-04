@@ -4,6 +4,7 @@ mod admission;
 mod artifact_variant;
 mod audit;
 mod config;
+mod dependency_cardinality;
 mod http;
 mod oci_transport;
 mod policy;
@@ -32,6 +33,12 @@ pub fn admission_decision(
     if artifact_variant::requests_unapproved_artifact_variant(intent) {
         if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if dependency_cardinality::misses_exact_dependency_set_guard(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
+            decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
