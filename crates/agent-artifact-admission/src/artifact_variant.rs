@@ -5,6 +5,7 @@ use crate::InstallIntent;
 pub(crate) fn requests_unapproved_artifact_variant(intent: &InstallIntent) -> bool {
     requests_unapproved_oci_artifact_variant(intent)
         || requests_unapproved_pypi_artifact_variant(intent)
+        || requests_unapproved_cargo_artifact_variant(intent)
 }
 
 /// Return whether an OCI pull asks the client to expand or select artifact
@@ -39,6 +40,39 @@ fn requests_unapproved_oci_artifact_variant(intent: &InstallIntent) -> bool {
                     || argument.starts_with("--os=")
                     || argument == "--variant"
                     || argument.starts_with("--variant=")))
+    })
+}
+
+/// Cargo accepts both `crate@version` and `--version`/`--vers` selectors. The
+/// admission coordinate already carries one exact reviewed version, so the CLI
+/// must encode that same identity rather than letting the caller select another.
+fn requests_unapproved_cargo_artifact_variant(intent: &InstallIntent) -> bool {
+    let Some(executable) = intent.argv.first().map(String::as_str) else {
+        return false;
+    };
+    if executable != "cargo" {
+        return false;
+    }
+
+    let arguments = &intent.argv[1..];
+    if !arguments
+        .first()
+        .is_some_and(|argument| argument == "install")
+    {
+        return false;
+    }
+
+    if arguments
+        .iter()
+        .skip(1)
+        .any(|argument| matches_value_flag(argument, "--version") || matches_value_flag(argument, "--vers"))
+    {
+        return true;
+    }
+
+    intent.artifacts.iter().any(|artifact| {
+        artifact.ecosystem == "cargo"
+            && artifact.artifact_argument != format!("{}@{}", artifact.name, artifact.version)
     })
 }
 
