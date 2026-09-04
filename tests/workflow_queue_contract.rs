@@ -23,6 +23,7 @@ fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
             "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]"
         ));
         assert!(workflow.contains("github.event.pull_request.draft == false"));
+        assert!(workflow.contains("github.event.action != 'closed'"));
     }
 }
 
