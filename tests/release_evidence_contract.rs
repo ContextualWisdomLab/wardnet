@@ -104,11 +104,7 @@ fn pull_request_release_build_cannot_mint_attestation_identity() {
 #[test]
 fn job_level_configuration_does_not_use_runner_only_context() {
     let workflow = release_workflow();
-    let attest_header = section(
-        &workflow,
-        "  attest-release-evidence:\n",
-        "    steps:\n",
-    );
+    let attest_header = section(&workflow, "  attest-release-evidence:\n", "    steps:\n");
 
     assert!(
         !attest_header.contains("${{ runner."),
