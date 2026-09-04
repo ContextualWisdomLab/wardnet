@@ -11,15 +11,18 @@ fn workflow_text(name: &str) -> String {
 
 #[test]
 fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
-    for (name, fixed_group) in [("ci.yml", "wardnet-ci"), ("fuzz.yml", "wardnet-fuzz")] {
+    for name in ["ci.yml", "fuzz.yml"] {
         let workflow = workflow_text(name);
-        assert!(workflow.contains(&format!(
-            "group: {fixed_group}-${{{{ github.repository }}}}-${{{{ github.event_name == 'pull_request'"
-        )));
-        assert!(workflow.contains("format('pr-{0}', github.event.pull_request.number)"));
+        assert!(workflow.contains(
+            "group: ${{ github.workflow }}-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}"
+        ));
         assert!(
             workflow.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}")
         );
+        assert!(workflow.contains(
+            "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]"
+        ));
+        assert!(workflow.contains("github.event.pull_request.draft == false"));
     }
 }
 
