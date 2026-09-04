@@ -6,11 +6,15 @@ Agent Artifact Admission authorizes exact reviewed OCI artifact coordinates, inc
 
 A follow-up hostile case found the first repair was syntactically incomplete. Boolean CLI options can also be supplied as assignments, including `--all-tags=true` and short-form assignments such as `-a=true`. The exact-token predicate rejected bare `-a` / `--all-tags` but did not classify assigned true forms, so the same artifact-set expansion authority could escape the admission boundary while the reviewed digest operand still matched policy.
 
+A second follow-up found another parser-level spelling. Docker currently defines both `all-tags` (`-a`) and `quiet` (`-q`) as Boolean pull flags, and Podman documents the same two shorthands. The pflag command-line grammar used by Cobra-style Go CLIs permits Boolean shorthand flags to be combined in a single token. Therefore `-aq` and `-qa` retain `-a`'s repository-expansion authority even though neither token equals the previously rejected bare or assignment forms. Admission must interpret that semantic shorthand bundle rather than treating structured argv as an opaque string list.
+
 This is an admission-authority defect, not an OCI transport implementation responsibility. Wardnet owns whether submitted structured argv stays inside the reviewed artifact set. Docker/Podman continue to own registry transport, and the downstream execution broker/quarantine path still owns retrieval, byte verification, and hostile execution isolation.
 
 ## Decision
 
-For Docker and Podman `pull`, bare `-a` / `--all-tags` and assigned true spellings are rejected as `artifact_not_approved`. The existing artifact-variant predicate is intentionally widened to cover both platform selection and dynamic artifact-set expansion because both change artifact identity beyond the reviewed `ArtifactCoordinate` set. Explicit false assignments remain admissible because they do not widen the pull set. No new public reason code or provider-specific transport abstraction is introduced.
+For Docker and Podman `pull`, bare `-a` / `--all-tags`, assigned true spellings, and Boolean shorthand bundles composed from the documented pull shorthands that contain `a` are rejected as `artifact_not_approved`. The current bounded parser recognizes `a` and `q`: `-aq`/`-qa` are denied while `-q`/`-qq` remain presentation-only and admissible. This keeps the repair causal rather than attempting to reimplement the complete provider CLI grammar.
+
+The existing artifact-variant predicate is intentionally widened to cover both platform selection and dynamic artifact-set expansion because both change artifact identity beyond the reviewed `ArtifactCoordinate` set. Explicit false assignments remain admissible because they do not widen the pull set. No new public reason code or provider-specific transport abstraction is introduced.
 
 The decision is fail-closed until Wardnet has a versioned policy aggregate capable of enumerating every artifact that a repository-wide operation may retrieve. A mutable tag set is not equivalent to a reviewed list of exact digests.
 
@@ -21,6 +25,9 @@ The decision is fail-closed until Wardnet has a versioned policy aggregate capab
 - Follow-up RED `883d1d37e05b0ccd9d30b2c1b25fd7d53c6fc8d8`: the hostile contract adds assigned true forms that the exact-token predicate did not reject.
 - Causal GREEN `e9e07e696c013dab88df6a5a6dc1be8306b9b688`: the predicate recognizes true Boolean assignments without treating explicit false assignments as repository expansion.
 - Coverage refinement `2207a6f79522dc8b6cb95e817be648bb6ef9a7f3`: exercises Docker/Podman long/short assigned true spellings and the explicit-false non-regression boundary.
+- Bundled-shorthand RED `a1105c5de234e8750ce3c9b4036de1669a67b818`: hostile Docker/Podman `-aq` and `-qa` cases expose that exact-token/assignment matching still permits the `all-tags` capability when combined with the Boolean `quiet` shorthand.
+- Causal GREEN `f35db9e712b243bd6e8cff9125aaa968b9d12362`: the artifact-variant boundary recognizes documented Boolean `a`/`q` shorthand bundles containing `a` without broadening Wardnet into an OCI CLI implementation.
+- Non-regression coverage `897a790baf89347778a27dbb1356aaf2d002e032`: proves quiet-only `-q`/`-qq` remains allowed for an otherwise exact approved digest.
 - Exact-current-head workflow execution remains authoritative for terminal GREEN; predecessor workflow results do not transfer to a changed head.
 
 ## Threat effect
@@ -37,4 +44,6 @@ National Institute of Standards and Technology. (2022). *Secure Software Develop
 
 Podman contributors. (2026). *podman-pull*. Podman documentation. https://docs.podman.io/en/latest/markdown/podman-pull.1.html
 
-Primary command references were re-verified on 2026-09-04. Docker documents `-a, --all-tags` as downloading all tagged images in a repository and its CLI reference documents explicit assignment syntax for Boolean options. Podman documents the equivalent all-tags option as pulling all tagged images and documents explicit true/false assignment semantics for Boolean pull options such as TLS verification. Those semantics are why assigned true all-tags forms are treated as artifact-set authority rather than harmless presentation detail.
+spf13 contributors. (2026). *pflag: Command-line flag syntax*. GitHub. https://github.com/spf13/pflag
+
+Primary command/parser references were re-verified on 2026-09-04. Docker documents `-a, --all-tags` and `-q, --quiet` as Boolean pull options, with `all-tags` expanding the request to all tagged images. Podman documents the equivalent `-a` and `-q` pull options. pflag documents that Boolean shorthand flags can be combined and that single-dash tokens may represent a series of shorthand letters. Those semantics are why bundled all-tags spellings are treated as artifact-set authority rather than harmless presentation detail.
