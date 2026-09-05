@@ -48,3 +48,63 @@ fn deleted_misp_attributes_cannot_authorize_enforcement() {
         .any(|threat| threat.value == "active-omitted.example"));
     assert_eq!(material.skipped_attributes, 3);
 }
+
+#[test]
+fn deleted_or_ambiguous_misp_objects_cannot_authorize_nested_attributes() {
+    // MISP objects carry an independent lifecycle marker. A nested attribute's
+    // `to_ids=true` cannot override a deleted or structurally ambiguous parent object.
+    let raw = r#"{
+      "Event": {
+        "id": "object-lifecycle",
+        "Object": [
+          {
+            "name": "deleted-bool",
+            "deleted": true,
+            "Attribute": [
+              {"type":"domain","value":"deleted-object-bool.example","to_ids":true,"deleted":false}
+            ]
+          },
+          {
+            "name": "deleted-string",
+            "deleted": "1",
+            "Attribute": [
+              {"type":"domain","value":"deleted-object-string.example","to_ids":true}
+            ]
+          },
+          {
+            "name": "ambiguous-object",
+            "deleted": {"unexpected": false},
+            "Attribute": [
+              {"type":"domain","value":"ambiguous-object.example","to_ids":true}
+            ]
+          },
+          {
+            "name": "active-bool",
+            "deleted": false,
+            "Attribute": [
+              {"type":"domain","value":"active-object-bool.example","to_ids":true}
+            ]
+          },
+          {
+            "name": "active-omitted",
+            "Attribute": [
+              {"type":"domain","value":"active-object-omitted.example","to_ids":true}
+            ]
+          }
+        ]
+      }
+    }"#;
+
+    let material = misp_import::parse_misp_document(raw, "misp:test", 60).unwrap();
+
+    assert_eq!(material.threats.len(), 2);
+    assert!(material
+        .threats
+        .iter()
+        .any(|threat| threat.value == "active-object-bool.example"));
+    assert!(material
+        .threats
+        .iter()
+        .any(|threat| threat.value == "active-object-omitted.example"));
+    assert_eq!(material.skipped_attributes, 3);
+}
