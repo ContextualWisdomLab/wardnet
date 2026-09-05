@@ -14,6 +14,8 @@ pub struct AppData {
     #[serde(default)]
     pub operator_threat_keys: Vec<ThreatIndicatorKey>,
     pub dnsbl: Vec<DnsblEntry>,
+    #[serde(default)]
+    pub operator_dnsbl_keys: Vec<DnsblEntryKey>,
     pub events: Vec<SecurityEvent>,
     pub next_event_id: u64,
     #[serde(default)]
@@ -55,6 +57,7 @@ impl AppData {
                 ttl_seconds: 300,
                 prefix_len: None,
             }],
+            operator_dnsbl_keys: Vec::new(),
             events: Vec::new(),
             next_event_id: 1,
             audit_logs: Vec::new(),
@@ -138,6 +141,13 @@ pub struct DnsblEntry {
     pub prefix_len: Option<u8>,
 }
 
+/// Stable DNSBL ownership identity. It mirrors [`upsert_dnsbl`], which stores
+/// one effective DNSBL row per IP address regardless of producer payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct DnsblEntryKey {
+    pub address: IpAddr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommercialProfile {
     pub tenant_id: String,
@@ -189,6 +199,8 @@ pub struct ThreatFeedStatus {
 pub struct ThreatFeedOwnership {
     pub feed_id: String,
     pub threat_keys: Vec<ThreatIndicatorKey>,
+    #[serde(default)]
+    pub dnsbl_keys: Vec<DnsblEntryKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -491,9 +503,6 @@ pub fn validate_threat_feed_import(feed: &ThreatFeedImport) -> Result<(), &'stat
     if feed.ttl_seconds == 0 {
         return Err("threat feed ttl_seconds must be greater than 0");
     }
-    if feed.threats.is_empty() && feed.dnsbl.is_empty() {
-        return Err("threat feed must include at least one threat or DNSBL entry");
-    }
     for threat in &feed.threats {
         validate_threat(threat)?;
     }
@@ -560,21 +569,37 @@ pub fn threat_indicator_key(indicator: &ThreatIndicator) -> ThreatIndicatorKey {
     }
 }
 
+/// Returns the durable ownership identity used by DNSBL snapshot reconciliation.
+pub fn dnsbl_entry_key(entry: &DnsblEntry) -> DnsblEntryKey {
+    DnsblEntryKey {
+        address: entry.address,
+    }
+}
+
+/// Replaces one feed's complete threat and DNSBL claim sets and returns the
+/// persisted predecessor snapshot so callers can retire claims that disappeared.
 pub fn replace_threat_feed_ownership(
     ownership: &mut Vec<ThreatFeedOwnership>,
     feed_id: String,
     threat_keys: Vec<ThreatIndicatorKey>,
-) -> Vec<ThreatIndicatorKey> {
+    dnsbl_keys: Vec<DnsblEntryKey>,
+) -> ThreatFeedOwnership {
     if let Some(existing) = ownership.iter_mut().find(|item| item.feed_id == feed_id) {
-        let previous = existing.threat_keys.clone();
+        let previous = existing.clone();
         existing.threat_keys = threat_keys;
+        existing.dnsbl_keys = dnsbl_keys;
         previous
     } else {
         ownership.push(ThreatFeedOwnership {
-            feed_id,
+            feed_id: feed_id.clone(),
             threat_keys,
+            dnsbl_keys,
         });
-        Vec::new()
+        ThreatFeedOwnership {
+            feed_id,
+            threat_keys: Vec::new(),
+            dnsbl_keys: Vec::new(),
+        }
     }
 }
 
@@ -617,168 +642,32 @@ pub struct BuiltinSignature {
 /// false positives; operator [`ThreatIndicator`]s cover site-specific payloads.
 pub fn builtin_signatures() -> &'static [BuiltinSignature] {
     const SIGS: &[BuiltinSignature] = &[
-        // SQL injection
-        BuiltinSignature {
-            id: "sqli-union-select",
-            class: "sqli",
-            pattern: "union select",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "sqli-or-tautology",
-            class: "sqli",
-            pattern: "or 1=1",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "sqli-quoted-tautology",
-            class: "sqli",
-            pattern: "' or '",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "sqli-comment",
-            class: "sqli",
-            pattern: "'--",
-            severity: Severity::Medium,
-        },
-        BuiltinSignature {
-            id: "sqli-sleep",
-            class: "sqli",
-            pattern: "sleep(",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "sqli-benchmark",
-            class: "sqli",
-            pattern: "benchmark(",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "sqli-waitfor",
-            class: "sqli",
-            pattern: "waitfor delay",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "sqli-info-schema",
-            class: "sqli",
-            pattern: "information_schema",
-            severity: Severity::Medium,
-        },
-        // Cross-site scripting
-        BuiltinSignature {
-            id: "xss-script-tag",
-            class: "xss",
-            pattern: "<script",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "xss-javascript-uri",
-            class: "xss",
-            pattern: "javascript:",
-            severity: Severity::Medium,
-        },
-        BuiltinSignature {
-            id: "xss-onerror",
-            class: "xss",
-            pattern: "onerror=",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "xss-onload",
-            class: "xss",
-            pattern: "onload=",
-            severity: Severity::Medium,
-        },
-        BuiltinSignature {
-            id: "xss-svg",
-            class: "xss",
-            pattern: "<svg",
-            severity: Severity::Medium,
-        },
-        BuiltinSignature {
-            id: "xss-cookie-theft",
-            class: "xss",
-            pattern: "document.cookie",
-            severity: Severity::Medium,
-        },
-        // Path traversal / local file inclusion
-        BuiltinSignature {
-            id: "traversal-dotdot",
-            class: "path-traversal",
-            pattern: "../",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "traversal-dotdot-enc",
-            class: "path-traversal",
-            pattern: "..%2f",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "traversal-etc-passwd",
-            class: "path-traversal",
-            pattern: "/etc/passwd",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "traversal-win-ini",
-            class: "path-traversal",
-            pattern: "\\windows\\win.ini",
-            severity: Severity::High,
-        },
-        // OS command injection
-        BuiltinSignature {
-            id: "cmdi-cat-etc",
-            class: "command-injection",
-            pattern: "; cat /",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "cmdi-subshell",
-            class: "command-injection",
-            pattern: "$(",
-            severity: Severity::Medium,
-        },
-        BuiltinSignature {
-            id: "cmdi-pipe-whoami",
-            class: "command-injection",
-            pattern: "|whoami",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "cmdi-bin-sh",
-            class: "command-injection",
-            pattern: "/bin/sh",
-            severity: Severity::Medium,
-        },
-        // SSRF / cloud metadata
-        BuiltinSignature {
-            id: "ssrf-file-uri",
-            class: "ssrf",
-            pattern: "file://",
-            severity: Severity::Medium,
-        },
-        BuiltinSignature {
-            id: "ssrf-gopher",
-            class: "ssrf",
-            pattern: "gopher://",
-            severity: Severity::High,
-        },
-        BuiltinSignature {
-            id: "ssrf-cloud-metadata",
-            class: "ssrf",
-            pattern: "169.254.169.254",
-            severity: Severity::High,
-        },
-        // JNDI / deserialization (Log4Shell-shape)
-        BuiltinSignature {
-            id: "jndi-injection",
-            class: "deserialization",
-            pattern: "${jndi:",
-            severity: Severity::Critical,
-        },
+        BuiltinSignature { id: "sqli-union-select", class: "sqli", pattern: "union select", severity: Severity::High },
+        BuiltinSignature { id: "sqli-or-tautology", class: "sqli", pattern: "or 1=1", severity: Severity::High },
+        BuiltinSignature { id: "sqli-quoted-tautology", class: "sqli", pattern: "' or '", severity: Severity::High },
+        BuiltinSignature { id: "sqli-comment", class: "sqli", pattern: "'--", severity: Severity::Medium },
+        BuiltinSignature { id: "sqli-sleep", class: "sqli", pattern: "sleep(", severity: Severity::High },
+        BuiltinSignature { id: "sqli-benchmark", class: "sqli", pattern: "benchmark(", severity: Severity::High },
+        BuiltinSignature { id: "sqli-waitfor", class: "sqli", pattern: "waitfor delay", severity: Severity::High },
+        BuiltinSignature { id: "sqli-info-schema", class: "sqli", pattern: "information_schema", severity: Severity::Medium },
+        BuiltinSignature { id: "xss-script-tag", class: "xss", pattern: "<script", severity: Severity::High },
+        BuiltinSignature { id: "xss-javascript-uri", class: "xss", pattern: "javascript:", severity: Severity::Medium },
+        BuiltinSignature { id: "xss-onerror", class: "xss", pattern: "onerror=", severity: Severity::High },
+        BuiltinSignature { id: "xss-onload", class: "xss", pattern: "onload=", severity: Severity::Medium },
+        BuiltinSignature { id: "xss-svg", class: "xss", pattern: "<svg", severity: Severity::Medium },
+        BuiltinSignature { id: "xss-cookie-theft", class: "xss", pattern: "document.cookie", severity: Severity::Medium },
+        BuiltinSignature { id: "traversal-dotdot", class: "path-traversal", pattern: "../", severity: Severity::High },
+        BuiltinSignature { id: "traversal-dotdot-enc", class: "path-traversal", pattern: "..%2f", severity: Severity::High },
+        BuiltinSignature { id: "traversal-etc-passwd", class: "path-traversal", pattern: "/etc/passwd", severity: Severity::High },
+        BuiltinSignature { id: "traversal-win-ini", class: "path-traversal", pattern: "\\windows\\win.ini", severity: Severity::High },
+        BuiltinSignature { id: "cmdi-cat-etc", class: "command-injection", pattern: "; cat /", severity: Severity::High },
+        BuiltinSignature { id: "cmdi-subshell", class: "command-injection", pattern: "$(", severity: Severity::Medium },
+        BuiltinSignature { id: "cmdi-pipe-whoami", class: "command-injection", pattern: "|whoami", severity: Severity::High },
+        BuiltinSignature { id: "cmdi-bin-sh", class: "command-injection", pattern: "/bin/sh", severity: Severity::Medium },
+        BuiltinSignature { id: "ssrf-file-uri", class: "ssrf", pattern: "file://", severity: Severity::Medium },
+        BuiltinSignature { id: "ssrf-gopher", class: "ssrf", pattern: "gopher://", severity: Severity::High },
+        BuiltinSignature { id: "ssrf-cloud-metadata", class: "ssrf", pattern: "169.254.169.254", severity: Severity::High },
+        BuiltinSignature { id: "jndi-injection", class: "deserialization", pattern: "${jndi:", severity: Severity::Critical },
     ];
     SIGS
 }
@@ -814,22 +703,13 @@ pub fn signature_catalog() -> Vec<SignatureInfo> {
 pub fn anomaly_signal(haystack: &str) -> Option<(u16, String)> {
     let mut score = 0u16;
     let mut reasons = Vec::new();
-
-    // Signal 1: shell/markup metacharacter density.
     const META: &str = "<>'\"();|&$`";
     let suspicious = haystack.chars().filter(|c| META.contains(*c)).count();
     let ratio = suspicious as f64 / haystack.chars().count().max(1) as f64;
     if suspicious >= 6 && ratio >= 0.08 {
         score += 15;
-        reasons.push(format!(
-            "{suspicious} metacharacters ({:.0}% density)",
-            ratio * 100.0
-        ));
+        reasons.push(format!("{suspicious} metacharacters ({:.0}% density)", ratio * 100.0));
     }
-
-    // Signal 2: high Shannon entropy over a non-trivial payload — a marker of
-    // encoded/obfuscated content (base64 blobs, packed exploit strings) that
-    // signature matching misses. Length-gated so short requests never trip it.
     if haystack.len() >= 40 {
         let entropy = shannon_entropy(haystack.as_bytes());
         if entropy >= 4.5 {
@@ -837,29 +717,17 @@ pub fn anomaly_signal(haystack: &str) -> Option<(u16, String)> {
             reasons.push(format!("high entropy {entropy:.1} bits/byte"));
         }
     }
-
-    if score == 0 {
-        None
-    } else {
-        Some((score, format!("anomaly heuristic: {}", reasons.join("; "))))
-    }
+    if score == 0 { None } else { Some((score, format!("anomaly heuristic: {}", reasons.join("; ")))) }
 }
 
-/// Shannon entropy in bits per byte of a non-empty byte slice.
 fn shannon_entropy(bytes: &[u8]) -> f64 {
     let mut counts = [0u32; 256];
-    for &byte in bytes {
-        counts[byte as usize] += 1;
-    }
+    for &byte in bytes { counts[byte as usize] += 1; }
     let total = bytes.len() as f64;
-    counts
-        .iter()
-        .filter(|&&count| count > 0)
-        .map(|&count| {
-            let p = count as f64 / total;
-            -p * p.log2()
-        })
-        .sum()
+    counts.iter().filter(|&&count| count > 0).map(|&count| {
+        let p = count as f64 / total;
+        -p * p.log2()
+    }).sum()
 }
 
 pub fn score_request(
@@ -870,70 +738,43 @@ pub fn score_request(
     threats: &[ThreatIndicator],
     dnsbl: &[DnsblEntry],
 ) -> ScoredRequest {
-    let decoded_query = query
-        .map(|value| percent_decode_str(value).decode_utf8_lossy())
-        .unwrap_or_default();
+    let decoded_query = query.map(|value| percent_decode_str(value).decode_utf8_lossy()).unwrap_or_default();
     let haystack = format!("{}?{} {}", path, decoded_query, body).to_lowercase();
     let mut score: u16 = 0;
     let mut reasons = Vec::new();
-
-    // Built-in OWASP-shape signatures (no operator configuration required).
     for sig in builtin_signatures() {
         if haystack.contains(sig.pattern) {
             score = score.saturating_add(severity_score(&sig.severity));
             reasons.push(format!("builtin {} rule {}", sig.class, sig.id));
         }
     }
-
-    // Operator-configured threat indicators (and engine-fed IP/path hits).
     for indicator in threats {
         let kind = indicator.indicator_type.to_ascii_lowercase();
         let matched = if matches!(kind.as_str(), "ip" | "client_ip" | "source_ip" | "src_ip") {
             client_ip.is_some_and(|ip| indicator.value.parse::<IpAddr>().ok() == Some(ip))
         } else if kind == "cve" {
-            // A CVE identifier is vulnerability-catalog metadata (e.g. from a
-            // CISA KEV import), not a request-content observable: it can
-            // legitimately appear in a vulnerability-management or security
-            // tool's own traffic (`/api/cve/CVE-2021-44228`), so it must never
-            // drive content-substring scoring. It stays visible via the
-            // threat-indicator, feed-freshness, and buyer-evidence APIs.
             false
         } else {
             haystack.contains(&indicator.value.to_lowercase())
         };
         if matched {
             score = score.saturating_add(severity_score(&indicator.severity));
-            reasons.push(format!(
-                "{} indicator from {}",
-                indicator.indicator_type, indicator.source
-            ));
+            reasons.push(format!("{} indicator from {}", indicator.indicator_type, indicator.source));
         }
     }
-
-    // DNSBL client reputation.
     if let Some(ip) = client_ip
         && let Some(entry) = dnsbl.iter().find(|entry| dnsbl_matches(entry, ip))
     {
         score = score.saturating_add(100);
-        reasons.push(format!(
-            "DNSBL match {} from {}",
-            entry.reason, entry.source
-        ));
+        reasons.push(format!("DNSBL match {} from {}", entry.reason, entry.source));
     }
-
-    // Behavioral anomaly heuristic (first-tier AI SOC signal).
     if let Some((anomaly, reason)) = anomaly_signal(&haystack) {
         score = score.saturating_add(anomaly);
         reasons.push(reason);
     }
-
     ScoredRequest {
         score,
-        reason: if reasons.is_empty() {
-            "no matching indicator".to_string()
-        } else {
-            reasons.join("; ")
-        },
+        reason: if reasons.is_empty() { "no matching indicator".to_string() } else { reasons.join("; ") },
     }
 }
 
@@ -946,22 +787,8 @@ pub fn severity_score(severity: &Severity) -> u16 {
     }
 }
 
-/// Fixed-window rate-limit arithmetic for one client key. Given the current
-/// window state `(window_start, count)`, returns `(allowed, new_window_start,
-/// new_count)`. `limit == 0` disables limiting (always allowed).
-///
-/// ponytail: fixed window — permits up to ~2x `limit` across a boundary; swap
-/// for a sliding window if that burst matters.
-pub fn rate_limit_step(
-    now_unix: u64,
-    window_start: u64,
-    count: u32,
-    limit: u32,
-    window_secs: u64,
-) -> (bool, u64, u32) {
-    if limit == 0 {
-        return (true, window_start, count);
-    }
+pub fn rate_limit_step(now_unix: u64, window_start: u64, count: u32, limit: u32, window_secs: u64) -> (bool, u64, u32) {
+    if limit == 0 { return (true, window_start, count); }
     if now_unix.saturating_sub(window_start) >= window_secs.max(1) {
         (true, now_unix, 1)
     } else if count < limit {
@@ -978,31 +805,18 @@ pub fn enforce_event_limit(data: &mut AppData, limit: usize) {
     }
 }
 
-pub fn threat_feed_freshness_snapshot(
-    feeds: &[ThreatFeedStatus],
-    now_unix: u64,
-) -> Vec<ThreatFeedFreshness> {
-    feeds
-        .iter()
-        .map(|feed| {
-            let expires_at_unix = feed.last_updated_unix.saturating_add(feed.ttl_seconds);
-            ThreatFeedFreshness {
-                feed_id: feed.feed_id.clone(),
-                source: feed.source.clone(),
-                last_updated_unix: feed.last_updated_unix,
-                threat_count: feed.threat_count,
-                dnsbl_count: feed.dnsbl_count,
-                ttl_seconds: feed.ttl_seconds,
-                expires_at_unix,
-                stale: expires_at_unix <= now_unix,
-            }
-        })
-        .collect()
+pub fn threat_feed_freshness_snapshot(feeds: &[ThreatFeedStatus], now_unix: u64) -> Vec<ThreatFeedFreshness> {
+    feeds.iter().map(|feed| {
+        let expires_at_unix = feed.last_updated_unix.saturating_add(feed.ttl_seconds);
+        ThreatFeedFreshness {
+            feed_id: feed.feed_id.clone(), source: feed.source.clone(), last_updated_unix: feed.last_updated_unix,
+            threat_count: feed.threat_count, dnsbl_count: feed.dnsbl_count, ttl_seconds: feed.ttl_seconds,
+            expires_at_unix, stale: expires_at_unix <= now_unix,
+        }
+    }).collect()
 }
 
-pub fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
-    kpi_snapshot_at(data, unix_now())
-}
+pub fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot { kpi_snapshot_at(data, unix_now()) }
 
 pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
     let feed_freshness = threat_feed_freshness_snapshot(&data.threat_feeds, now_unix);
@@ -1014,169 +828,62 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
         fresh_threat_feed_count: feed_freshness.iter().filter(|feed| !feed.stale).count(),
         stale_threat_feed_count: feed_freshness.iter().filter(|feed| feed.stale).count(),
         event_count: data.events.len(),
-        blocked_event_count: data
-            .events
-            .iter()
-            .filter(|event| event.action == "blocked")
-            .count(),
-        monitor_event_count: data
-            .events
-            .iter()
-            .filter(|event| event.action == "monitored")
-            .count(),
+        blocked_event_count: data.events.iter().filter(|event| event.action == "blocked").count(),
+        monitor_event_count: data.events.iter().filter(|event| event.action == "monitored").count(),
         audit_log_count: data.audit_logs.len(),
         gateway_mode: "rust-first edge gateway program baseline".to_string(),
     }
 }
 
-/// Renders a [`SocKpiSnapshot`] as Prometheus text exposition (0.0.4). Counters
-/// are current-state gauges, so a `gauge` type is correct for scrapers. No
-/// dependency — the format is a few lines of text.
 pub fn prometheus_exposition(kpi: &SocKpiSnapshot) -> String {
     let metrics: [(&str, &str, usize); 10] = [
-        (
-            "waf_ids_routes",
-            "Configured gateway routes.",
-            kpi.route_count,
-        ),
-        (
-            "waf_ids_threat_indicators",
-            "Operator threat indicators loaded.",
-            kpi.threat_indicator_count,
-        ),
-        (
-            "waf_ids_dnsbl_entries",
-            "DNSBL reputation entries.",
-            kpi.dnsbl_entry_count,
-        ),
-        (
-            "waf_ids_threat_feeds",
-            "Imported threat feeds.",
-            kpi.threat_feed_count,
-        ),
-        (
-            "waf_ids_threat_feeds_fresh",
-            "Threat feeds within their TTL.",
-            kpi.fresh_threat_feed_count,
-        ),
-        (
-            "waf_ids_threat_feeds_stale",
-            "Threat feeds past their TTL.",
-            kpi.stale_threat_feed_count,
-        ),
-        (
-            "waf_ids_security_events",
-            "Total recorded security events.",
-            kpi.event_count,
-        ),
-        (
-            "waf_ids_security_events_blocked",
-            "Security events with a blocked action.",
-            kpi.blocked_event_count,
-        ),
-        (
-            "waf_ids_security_events_monitored",
-            "Security events with a monitored action.",
-            kpi.monitor_event_count,
-        ),
-        (
-            "waf_ids_audit_log_entries",
-            "Recorded management audit-log entries.",
-            kpi.audit_log_count,
-        ),
+        ("waf_ids_routes", "Configured gateway routes.", kpi.route_count),
+        ("waf_ids_threat_indicators", "Operator threat indicators loaded.", kpi.threat_indicator_count),
+        ("waf_ids_dnsbl_entries", "DNSBL reputation entries.", kpi.dnsbl_entry_count),
+        ("waf_ids_threat_feeds", "Imported threat feeds.", kpi.threat_feed_count),
+        ("waf_ids_threat_feeds_fresh", "Threat feeds within their TTL.", kpi.fresh_threat_feed_count),
+        ("waf_ids_threat_feeds_stale", "Threat feeds past their TTL.", kpi.stale_threat_feed_count),
+        ("waf_ids_security_events", "Total recorded security events.", kpi.event_count),
+        ("waf_ids_security_events_blocked", "Security events with a blocked action.", kpi.blocked_event_count),
+        ("waf_ids_security_events_monitored", "Security events with a monitored action.", kpi.monitor_event_count),
+        ("waf_ids_audit_log_entries", "Recorded management audit-log entries.", kpi.audit_log_count),
     ];
     let mut out = String::new();
     for (name, help, value) in metrics {
-        out.push_str(&format!(
-            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
-        ));
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"));
     }
     out
 }
 
-pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness {
-    commercial_readiness_snapshot_at(data, unix_now())
-}
+pub fn commercial_readiness_snapshot(data: &AppData) -> CommercialReadiness { commercial_readiness_snapshot_at(data, unix_now()) }
 
 pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> CommercialReadiness {
-    let license_ready = matches!(
-        data.commercial.license_status,
-        LicenseStatus::Active | LicenseStatus::Evaluation
-    ) && data
-        .commercial
-        .license_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-        && data
-            .commercial
-            .licensee
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
-    let commercial_value_ready = data
-        .commercial
-        .annual_contract_value_krw
-        .is_some_and(|value| value >= TARGET_SALE_VALUE_KRW);
+    let license_ready = matches!(data.commercial.license_status, LicenseStatus::Active | LicenseStatus::Evaluation)
+        && data.commercial.license_id.as_deref().is_some_and(|value| !value.trim().is_empty())
+        && data.commercial.licensee.as_deref().is_some_and(|value| !value.trim().is_empty());
+    let commercial_value_ready = data.commercial.annual_contract_value_krw.is_some_and(|value| value >= TARGET_SALE_VALUE_KRW);
     let threat_feed_ready = threat_feed_freshness_snapshot(&data.threat_feeds, now_unix)
-        .iter()
-        .any(|feed| !feed.stale && (feed.threat_count > 0 || feed.dnsbl_count > 0));
+        .iter().any(|feed| !feed.stale && (feed.threat_count > 0 || feed.dnsbl_count > 0));
     let route_ready = data.routes.iter().any(|route| route.enabled);
     let dnsbl_ready = !data.dnsbl.is_empty();
     let support_evidence_ready = !data.events.is_empty();
-
     let checks = vec![
-        readiness_check(
-            "license",
-            license_ready,
-            "active/evaluation tenant license metadata is present",
-        ),
-        readiness_check(
-            "contract_value",
-            commercial_value_ready,
-            "annual contract value meets the 2B KRW sale target",
-        ),
-        readiness_check(
-            "threat_feed_updates",
-            threat_feed_ready,
-            "at least one imported threat feed is fresh within its TTL",
-        ),
-        readiness_check(
-            "gateway_enforcement",
-            route_ready,
-            "at least one enabled gateway route is configured",
-        ),
-        readiness_check(
-            "dnsbl_publication",
-            dnsbl_ready,
-            "DNSBL entries are available for zone export",
-        ),
-        readiness_check(
-            "support_evidence",
-            support_evidence_ready,
-            "security event evidence is available for a support bundle",
-        ),
+        readiness_check("license", license_ready, "active/evaluation tenant license metadata is present"),
+        readiness_check("contract_value", commercial_value_ready, "annual contract value meets the 2B KRW sale target"),
+        readiness_check("threat_feed_updates", threat_feed_ready, "at least one imported threat feed is fresh within its TTL"),
+        readiness_check("gateway_enforcement", route_ready, "at least one enabled gateway route is configured"),
+        readiness_check("dnsbl_publication", dnsbl_ready, "DNSBL entries are available for zone export"),
+        readiness_check("support_evidence", support_evidence_ready, "security event evidence is available for a support bundle"),
     ];
-    let blockers: Vec<String> = checks
-        .iter()
-        .filter(|check| check.status == ReadinessStatus::Fail)
-        .map(|check| check.id.clone())
-        .collect();
+    let blockers: Vec<String> = checks.iter().filter(|check| check.status == ReadinessStatus::Fail).map(|check| check.id.clone()).collect();
     let ready_for_enterprise_sale = blockers.is_empty();
-
     CommercialReadiness {
         target_sale_value_krw: TARGET_SALE_VALUE_KRW,
         ready_for_enterprise_sale,
-        readiness_level: if ready_for_enterprise_sale {
-            "sale_ready".to_string()
-        } else {
-            "implementation_required".to_string()
-        },
+        readiness_level: if ready_for_enterprise_sale { "sale_ready".to_string() } else { "implementation_required".to_string() },
         blockers,
         checks,
-        deployment_assets: vec![
-            "Dockerfile".to_string(),
-            "deploy/docker-compose.yml".to_string(),
-            "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string(),
-        ],
+        deployment_assets: vec!["Dockerfile".to_string(), "deploy/docker-compose.yml".to_string(), "deploy/kubernetes/waf-ids-ai-soc.yaml".to_string()],
         buyer_evidence: vec![
             "docs/commercial/20b-krw-sale-readiness.md".to_string(),
             "docs/commercial/buyer-due-diligence.md".to_string(),
@@ -1186,14 +893,11 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
     }
 }
 
-pub fn buyer_evidence_manifest(data: &AppData) -> BuyerEvidenceManifest {
-    buyer_evidence_manifest_at(data, unix_now())
-}
+pub fn buyer_evidence_manifest(data: &AppData) -> BuyerEvidenceManifest { buyer_evidence_manifest_at(data, unix_now()) }
 
 pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenceManifest {
     let readiness = commercial_readiness_snapshot_at(data, now_unix);
     let kpis = kpi_snapshot_at(data, now_unix);
-
     BuyerEvidenceManifest {
         generated_at_unix: now_unix,
         target_sale_value_krw: readiness.target_sale_value_krw,
@@ -1225,170 +929,37 @@ pub fn buyer_evidence_manifest_at(data: &AppData, now_unix: u64) -> BuyerEvidenc
 
 fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
     vec![
-        buyer_evidence_endpoint(
-            "health",
-            "GET",
-            "/healthz",
-            "application/json",
-            "runtime health, persistence mode, DNSBL origin, and event retention limit",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "license",
-            "GET",
-            "/api/commercial/license",
-            "application/json",
-            "tenant, edition, license, support, node count, and contract metadata",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "readiness",
-            "GET",
-            "/api/commercial/readiness",
-            "application/json",
-            "2B KRW readiness checks and explicit blockers",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "evidence_manifest",
-            "GET",
-            "/api/commercial/evidence-manifest",
-            "application/json",
-            "buyer-verifiable evidence map for runtime APIs, docs, and deployment assets",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "feed_freshness",
-            "GET",
-            "/api/threat-feeds/freshness",
-            "application/json",
-            "fresh and stale threat-feed evidence from TTL and last update time",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "soc_event_export",
-            "GET",
-            "/api/events.ndjson",
-            "application/x-ndjson",
-            "one-security-event-per-line SOC/SIEM ingestion evidence",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "management_audit_logs",
-            "GET",
-            "/api/audit-logs",
-            "application/json",
-            "admin write history for buyer due-diligence without admin secrets",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "support_bundle",
-            "GET",
-            "/api/support-bundle",
-            "application/json",
-            "support and due-diligence handoff package without admin secrets",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "dnsbl_zone",
-            "GET",
-            "/dnsbl/zone",
-            "text/plain",
-            "RFC 5782-style DNSBL zone export for buyer lab DNS validation",
-            true,
-        ),
-        buyer_evidence_endpoint(
-            "suricata_eve_ingest",
-            "POST",
-            "/api/ids/suricata/eve",
-            "application/json",
-            "Suricata EVE JSON/NDJSON alert ingest into SOC security events (admin-auth)",
-            false,
-        ),
-        buyer_evidence_endpoint(
-            "coraza_audit_ingest",
-            "POST",
-            "/api/waf/coraza/audit",
-            "application/json",
-            "Coraza/OWASP CRS WAF audit JSON/NDJSON ingest into SOC security events (admin-auth)",
-            false,
-        ),
-        buyer_evidence_endpoint(
-            "stix_indicator_ingest",
-            "POST",
-            "/api/threat-intel/stix",
-            "application/json",
-            "STIX 2.x indicator/bundle ingest into threat indicators and DNSBL (admin-auth)",
-            false,
-        ),
-        buyer_evidence_endpoint(
-            "misp_event_ingest",
-            "POST",
-            "/api/threat-intel/misp",
-            "application/json",
-            "MISP Event/attribute JSON ingest into threat indicators and DNSBL (admin-auth)",
-            false,
-        ),
-        buyer_evidence_endpoint(
-            "taxii_collection_poll",
-            "POST",
-            "/api/threat-intel/taxii/poll",
-            "application/json",
-            "TAXII 2.1 collection objects poll into threat indicators and DNSBL (admin-auth)",
-            false,
-        ),
-        buyer_evidence_endpoint(
-            "opencti_observable_ingest",
-            "POST",
-            "/api/threat-intel/opencti",
-            "application/json",
-            "OpenCTI observable/indicator JSON ingest into threat indicators and DNSBL (admin-auth)",
-            false,
-        ),
-        buyer_evidence_endpoint(
-            "cisa_kev_ingest",
-            "POST",
-            "/api/threat-intel/cisa-kev",
-            "application/json",
-            "CISA Known Exploited Vulnerabilities catalog pull into CVE threat indicators (admin-auth)",
-            false,
-        ),
+        buyer_evidence_endpoint("health", "GET", "/healthz", "application/json", "runtime health, persistence mode, DNSBL origin, and event retention limit", true),
+        buyer_evidence_endpoint("license", "GET", "/api/commercial/license", "application/json", "tenant, edition, license, support, node count, and contract metadata", true),
+        buyer_evidence_endpoint("readiness", "GET", "/api/commercial/readiness", "application/json", "2B KRW readiness checks and explicit blockers", true),
+        buyer_evidence_endpoint("evidence_manifest", "GET", "/api/commercial/evidence-manifest", "application/json", "buyer-verifiable evidence map for runtime APIs, docs, and deployment assets", true),
+        buyer_evidence_endpoint("feed_freshness", "GET", "/api/threat-feeds/freshness", "application/json", "fresh and stale threat-feed evidence from TTL and last update time", true),
+        buyer_evidence_endpoint("soc_event_export", "GET", "/api/events.ndjson", "application/x-ndjson", "one-security-event-per-line SOC/SIEM ingestion evidence", true),
+        buyer_evidence_endpoint("management_audit_logs", "GET", "/api/audit-logs", "application/json", "admin write history for buyer due-diligence without admin secrets", true),
+        buyer_evidence_endpoint("support_bundle", "GET", "/api/support-bundle", "application/json", "support and due-diligence handoff package without admin secrets", true),
+        buyer_evidence_endpoint("dnsbl_zone", "GET", "/dnsbl/zone", "text/plain", "RFC 5782-style DNSBL zone export for buyer lab DNS validation", true),
+        buyer_evidence_endpoint("suricata_eve_ingest", "POST", "/api/ids/suricata/eve", "application/json", "Suricata EVE JSON/NDJSON alert ingest into SOC security events (admin-auth)", false),
+        buyer_evidence_endpoint("coraza_audit_ingest", "POST", "/api/waf/coraza/audit", "application/json", "Coraza/OWASP CRS WAF audit JSON/NDJSON ingest into SOC security events (admin-auth)", false),
+        buyer_evidence_endpoint("stix_indicator_ingest", "POST", "/api/threat-intel/stix", "application/json", "STIX 2.x indicator/bundle ingest into threat indicators and DNSBL (admin-auth)", false),
+        buyer_evidence_endpoint("misp_event_ingest", "POST", "/api/threat-intel/misp", "application/json", "MISP Event/attribute JSON ingest into threat indicators and DNSBL (admin-auth)", false),
+        buyer_evidence_endpoint("taxii_collection_poll", "POST", "/api/threat-intel/taxii/poll", "application/json", "TAXII 2.1 collection objects poll into threat indicators and DNSBL (admin-auth)", false),
+        buyer_evidence_endpoint("opencti_observable_ingest", "POST", "/api/threat-intel/opencti", "application/json", "OpenCTI observable/indicator JSON ingest into threat indicators and DNSBL (admin-auth)", false),
+        buyer_evidence_endpoint("cisa_kev_ingest", "POST", "/api/threat-intel/cisa-kev", "application/json", "CISA Known Exploited Vulnerabilities catalog pull into CVE threat indicators (admin-auth)", false),
     ]
 }
 
-fn buyer_evidence_endpoint(
-    id: &str,
-    method: &str,
-    path: &str,
-    content_type: &str,
-    proves: &str,
-    required_for_sale: bool,
-) -> BuyerEvidenceEndpoint {
-    BuyerEvidenceEndpoint {
-        id: id.to_string(),
-        method: method.to_string(),
-        path: path.to_string(),
-        content_type: content_type.to_string(),
-        proves: proves.to_string(),
-        required_for_sale,
-    }
+fn buyer_evidence_endpoint(id: &str, method: &str, path: &str, content_type: &str, proves: &str, required_for_sale: bool) -> BuyerEvidenceEndpoint {
+    BuyerEvidenceEndpoint { id: id.to_string(), method: method.to_string(), path: path.to_string(), content_type: content_type.to_string(), proves: proves.to_string(), required_for_sale }
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck {
     ReadinessCheck {
         id: id.to_string(),
-        status: if passed {
-            ReadinessStatus::Pass
-        } else {
-            ReadinessStatus::Fail
-        },
+        status: if passed { ReadinessStatus::Pass } else { ReadinessStatus::Fail },
         evidence: evidence.to_string(),
     }
 }
@@ -1397,54 +968,25 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
         if let IpAddr::V4(address) = entry.address {
-            // The response code is emitted as a bare, unquoted A-record token, so
-            // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers
-            // live in 127.0.0.0/8). `validate_dnsbl` enforces this at the
-            // create/import boundary, but the persisted-state deserializer is an
-            // untrusted surface that is not re-validated on load, so a state file
-            // can carry a code outside 127/8, an IPv6 literal, or a zone-injection
-            // string (e.g. a newline plus a forged `IN TXT` line). Re-enforce the
-            // invariant here and re-render the canonical form so no non-loopback,
-            // non-IPv4, or attacker-controlled bytes survive into the zone.
             let code = match IpAddr::from_str(&entry.code) {
                 Ok(IpAddr::V4(code)) if code.octets()[0] == 127 => code,
                 _ => continue,
             };
             let name = reverse_ipv4_for_dnsbl(address.octets());
             out.push_str(&format!("{} IN A {}\n", name, code));
-            out.push_str(&format!(
-                "{} IN TXT \"{}\"\n",
-                name,
-                escape_txt(&format!("{} source={}", entry.reason, entry.source))
-            ));
+            out.push_str(&format!("{} IN TXT \"{}\"\n", name, escape_txt(&format!("{} source={}", entry.reason, entry.source))));
         }
     }
     out
 }
 
-/// Sanitize a DNS zone origin so operator/threat-feed input can never break out
-/// of the generated zone file. A legitimate origin is a domain name, so only
-/// letters, digits, `-`, `_`, and `.` are kept; every other byte (newline,
-/// quote, space, control char) is dropped. Leading/trailing dots are trimmed
-/// because the caller re-appends the root dot. Empty input falls back to the
-/// RFC 6761 reserved `.invalid` TLD, which is guaranteed non-resolvable.
 fn sanitize_zone_origin(origin: &str) -> String {
-    let filtered: String = origin
-        .trim()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        .collect();
+    let filtered: String = origin.trim().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
     let trimmed = filtered.trim_matches('.');
-    if trimmed.is_empty() {
-        "dnsbl.invalid".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    if trimmed.is_empty() { "dnsbl.invalid".to_string() } else { trimmed.to_string() }
 }
 
-pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
-    format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
-}
+pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String { format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0]) }
 
 fn escape_txt(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -1452,15 +994,9 @@ fn escape_txt(value: &str) -> String {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            // Control characters (notably raw newlines) would otherwise terminate
-            // the single-line TXT record and let a crafted reason/source inject
-            // subsequent zone lines. Emit them as BIND decimal escapes (`\DDD`)
-            // so the payload stays on one fully-quoted line.
             c if c.is_control() => {
                 let mut buf = [0u8; 4];
-                for &b in c.encode_utf8(&mut buf).as_bytes() {
-                    out.push_str(&format!("\\{b:03}"));
-                }
+                for &b in c.encode_utf8(&mut buf).as_bytes() { out.push_str(&format!("\\{b:03}")); }
             }
             c => out.push(c),
         }
@@ -1473,89 +1009,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn predecessor_state_defaults_dnsbl_ownership() {
+        let predecessor = r#"{
+            "routes":[],"threats":[],"operator_threat_keys":[],"dnsbl":[],
+            "events":[],"next_event_id":1,
+            "threat_feed_ownership":[{"feed_id":"feed-a","threat_keys":[]}]
+        }"#;
+        let loaded: AppData = serde_json::from_str(predecessor).unwrap();
+        assert!(loaded.operator_dnsbl_keys.is_empty());
+        assert_eq!(loaded.threat_feed_ownership.len(), 1);
+        assert!(loaded.threat_feed_ownership[0].dnsbl_keys.is_empty());
+    }
+
+    #[test]
     fn score_request_matches_client_ip_threat_indicators() {
-        let threats = vec![ThreatIndicator {
-            value: "203.0.113.50".to_string(),
-            indicator_type: "client_ip".to_string(),
-            severity: Severity::High,
-            source: "engine:coraza".to_string(),
-            ttl_seconds: 3600,
-        }];
-        let hit = score_request(
-            "/index",
-            None,
-            "",
-            Some("203.0.113.50".parse().unwrap()),
-            &threats,
-            &[],
-        );
+        let threats = vec![ThreatIndicator { value: "203.0.113.50".to_string(), indicator_type: "client_ip".to_string(), severity: Severity::High, source: "engine:coraza".to_string(), ttl_seconds: 3600 }];
+        let hit = score_request("/index", None, "", Some("203.0.113.50".parse().unwrap()), &threats, &[]);
         assert!(hit.score >= BLOCK_SCORE);
         assert!(hit.reason.contains("client_ip"));
-        let miss = score_request(
-            "/index",
-            None,
-            "",
-            Some("198.51.100.1".parse().unwrap()),
-            &threats,
-            &[],
-        );
+        let miss = score_request("/index", None, "", Some("198.51.100.1".parse().unwrap()), &threats, &[]);
         assert_eq!(miss.score, 0);
     }
 
     #[test]
     fn score_request_never_content_matches_cve_indicators() {
-        // A CVE indicator (e.g. from a CISA KEV import) is vulnerability
-        // metadata, not a request-content signature: a security-tooling
-        // request can legitimately carry the literal CVE string, and that
-        // must never contribute to the block score.
-        let threats = vec![ThreatIndicator {
-            value: "CVE-2021-44228".to_string(),
-            indicator_type: "cve".to_string(),
-            severity: Severity::Critical,
-            source: "feed:cisa-kev".to_string(),
-            ttl_seconds: 86_400,
-        }];
-        let hit = score_request(
-            "/api/cve/CVE-2021-44228",
-            None,
-            "looking up CVE-2021-44228 details",
-            None,
-            &threats,
-            &[],
-        );
+        let threats = vec![ThreatIndicator { value: "CVE-2021-44228".to_string(), indicator_type: "cve".to_string(), severity: Severity::Critical, source: "feed:cisa-kev".to_string(), ttl_seconds: 86_400 }];
+        let hit = score_request("/api/cve/CVE-2021-44228", None, "looking up CVE-2021-44228 details", None, &threats, &[]);
         assert_eq!(hit.score, 0);
         assert_eq!(hit.reason, "no matching indicator");
     }
 
     #[test]
     fn score_request_saturates_instead_of_overflowing_on_many_matches() {
-        // Regression: `score` is a u16 accumulator. With enough matching
-        // indicators (each Critical = 100), a plain `+=` overflows u16 (>65535):
-        // a debug/overflow-checked build panics -- violating the WAF invariant
-        // that scoring never panics on arbitrary input -- and a release build
-        // wraps the score down to a tiny value, silently letting a maximally
-        // malicious request slip under the block threshold. Saturating
-        // arithmetic must clamp the score at u16::MAX so the request still
-        // scores as blockable. 700 * 100 = 70000 exceeds u16::MAX (65535).
-        let threats: Vec<ThreatIndicator> = (0..700)
-            .map(|i| ThreatIndicator {
-                value: "attack".to_string(),
-                indicator_type: "keyword".to_string(),
-                severity: Severity::Critical,
-                source: format!("feed-{i}"),
-                ttl_seconds: 300,
-            })
-            .collect();
-
+        let threats: Vec<ThreatIndicator> = (0..700).map(|i| ThreatIndicator {
+            value: "attack".to_string(), indicator_type: "keyword".to_string(), severity: Severity::Critical,
+            source: format!("feed-{i}"), ttl_seconds: 300,
+        }).collect();
         let scored = score_request("/attack", None, "attack", None, &threats, &[]);
-
         assert_eq!(scored.score, u16::MAX);
         assert!(scored.score >= BLOCK_SCORE);
     }
 
-    /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
-    /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
-    /// so regressions in zone escaping fail as a plain unit test too.
     fn assert_txt_quotes_escaped(zone: &str) {
         for line in zone.lines().filter(|l| l.contains(" IN TXT ")) {
             let start = line.find('"').expect("TXT record has an opening quote");
@@ -1565,14 +1059,8 @@ mod tests {
                 if b == b'"' {
                     let mut backslashes = 0usize;
                     let mut j = idx;
-                    while j > 0 && payload[j - 1] == b'\\' {
-                        backslashes += 1;
-                        j -= 1;
-                    }
-                    assert!(
-                        backslashes % 2 == 1,
-                        "unescaped quote in TXT payload: {line:?}"
-                    );
+                    while j > 0 && payload[j - 1] == b'\\' { backslashes += 1; j -= 1; }
+                    assert!(backslashes % 2 == 1, "unescaped quote in TXT payload: {line:?}");
                 }
             }
         }
@@ -1580,41 +1068,20 @@ mod tests {
 
     #[test]
     fn export_dnsbl_zone_resists_origin_zone_injection() {
-        // Reproduces the fuzz crash: a crafted origin carrying a newline plus a
-        // forged `IN TXT` line with bare double quotes must not break out of the
-        // generated zone.
         let zone = export_dnsbl_zone(
             "dn\nner\"\"\"\"\"\"\"\" IN TXT \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\";eed",
-            &[DnsblEntry {
-                address: "192.0.2.10".parse().unwrap(),
-                code: "127.0.0.2".to_string(),
-                reason: "scanner".to_string(),
-                source: "unit".to_string(),
-                ttl_seconds: 300,
-                prefix_len: None,
-            }],
+            &[DnsblEntry { address: "192.0.2.10".parse().unwrap(), code: "127.0.0.2".to_string(), reason: "scanner".to_string(), source: "unit".to_string(), ttl_seconds: 300, prefix_len: None }],
         );
         assert!(zone.starts_with("$ORIGIN "));
-        // The origin is sanitized down to DNS-safe characters on a single line.
         assert_eq!(zone.lines().next().unwrap(), "$ORIGIN dnnerINTXTeed.");
         assert_txt_quotes_escaped(&zone);
     }
 
     #[test]
     fn export_dnsbl_zone_escapes_quotes_and_backslashes_in_reason() {
-        // Reason carrying both a backslash and a double quote must be escaped so
-        // the quote stays inside the payload (`\"`) and the backslash is doubled
-        // (`\\`); this also exercises the escaped-quote path of the checker.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
-            &[DnsblEntry {
-                address: "192.0.2.10".parse().unwrap(),
-                code: "127.0.0.2".to_string(),
-                reason: "back\\slash and \"quote\"".to_string(),
-                source: "unit".to_string(),
-                ttl_seconds: 300,
-                prefix_len: None,
-            }],
+            &[DnsblEntry { address: "192.0.2.10".parse().unwrap(), code: "127.0.0.2".to_string(), reason: "back\\slash and \"quote\"".to_string(), source: "unit".to_string(), ttl_seconds: 300, prefix_len: None }],
         );
         assert!(zone.contains("10.2.0.192 IN TXT \"back\\\\slash and \\\"quote\\\" source=unit\""));
         assert_txt_quotes_escaped(&zone);
@@ -1622,30 +1089,13 @@ mod tests {
 
     #[test]
     fn export_dnsbl_zone_rejects_non_ip_code_injection() {
-        // A `code` that is not a valid IP literal would become a bare A-record
-        // token; a newline-bearing value must be dropped, never rendered.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
             &[
-                DnsblEntry {
-                    address: "192.0.2.10".parse().unwrap(),
-                    code: "127.0.0.2\n10.2.0.192 IN TXT \"pwned".to_string(),
-                    reason: "scanner".to_string(),
-                    source: "unit".to_string(),
-                    ttl_seconds: 300,
-                    prefix_len: None,
-                },
-                DnsblEntry {
-                    address: "192.0.2.20".parse().unwrap(),
-                    code: "127.0.0.9".to_string(),
-                    reason: "ok".to_string(),
-                    source: "unit".to_string(),
-                    ttl_seconds: 300,
-                    prefix_len: None,
-                },
+                DnsblEntry { address: "192.0.2.10".parse().unwrap(), code: "127.0.0.2\n10.2.0.192 IN TXT \"pwned".to_string(), reason: "scanner".to_string(), source: "unit".to_string(), ttl_seconds: 300, prefix_len: None },
+                DnsblEntry { address: "192.0.2.20".parse().unwrap(), code: "127.0.0.9".to_string(), reason: "ok".to_string(), source: "unit".to_string(), ttl_seconds: 300, prefix_len: None },
             ],
         );
-        // The malformed-code entry is skipped entirely; the valid one renders.
         assert!(!zone.contains("pwned"));
         assert!(zone.contains("20.2.0.192 IN A 127.0.0.9"));
         assert_txt_quotes_escaped(&zone);
@@ -1653,90 +1103,33 @@ mod tests {
 
     #[test]
     fn export_dnsbl_zone_omits_non_loopback_response_codes() {
-        // `validate_dnsbl` gates the create/import path to `127.0.0.0/8`, but the
-        // persisted-state deserializer (a documented untrusted-input surface) is
-        // NOT re-validated on load, so a state file can carry a DNSBL entry whose
-        // `code` is a valid IP outside 127/8 — or an IPv6 literal. The zone export
-        // is the output boundary that publishes each code as a bare A-record
-        // token, so it must re-enforce the "response code in 127.0.0.0/8"
-        // invariant itself: a non-loopback IPv4 answer breaks RFC 5782 semantics
-        // for every DNSBL consumer, and an IPv6 literal yields a syntactically
-        // invalid A record that fails the whole authoritative zone load.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
             &[
-                DnsblEntry {
-                    address: "192.0.2.10".parse().unwrap(),
-                    // Valid IPv4, but NOT in 127.0.0.0/8.
-                    code: "8.8.8.8".to_string(),
-                    reason: "spoofed".to_string(),
-                    source: "state-file".to_string(),
-                    ttl_seconds: 300,
-                    prefix_len: None,
-                },
-                DnsblEntry {
-                    address: "192.0.2.20".parse().unwrap(),
-                    // IPv6 literal — never a legal A-record response code.
-                    code: "::1".to_string(),
-                    reason: "spoofed6".to_string(),
-                    source: "state-file".to_string(),
-                    ttl_seconds: 300,
-                    prefix_len: None,
-                },
-                DnsblEntry {
-                    address: "192.0.2.30".parse().unwrap(),
-                    // Valid loopback code — must still render.
-                    code: "127.0.0.4".to_string(),
-                    reason: "ok".to_string(),
-                    source: "state-file".to_string(),
-                    ttl_seconds: 300,
-                    prefix_len: None,
-                },
+                DnsblEntry { address: "192.0.2.10".parse().unwrap(), code: "8.8.8.8".to_string(), reason: "spoofed".to_string(), source: "state-file".to_string(), ttl_seconds: 300, prefix_len: None },
+                DnsblEntry { address: "192.0.2.20".parse().unwrap(), code: "::1".to_string(), reason: "spoofed6".to_string(), source: "state-file".to_string(), ttl_seconds: 300, prefix_len: None },
+                DnsblEntry { address: "192.0.2.30".parse().unwrap(), code: "127.0.0.4".to_string(), reason: "ok".to_string(), source: "state-file".to_string(), ttl_seconds: 300, prefix_len: None },
             ],
         );
-        // No non-loopback or non-IPv4 answer may escape into the published zone.
-        assert!(
-            !zone.contains("IN A 8.8.8.8"),
-            "non-127/8 A record leaked into zone: {zone}"
-        );
-        assert!(
-            !zone.contains("IN A ::1"),
-            "IPv6 A record leaked into zone: {zone}"
-        );
-        // Every emitted A record's response code is an IPv4 loopback address.
+        assert!(!zone.contains("IN A 8.8.8.8"), "non-127/8 A record leaked into zone: {zone}");
+        assert!(!zone.contains("IN A ::1"), "IPv6 A record leaked into zone: {zone}");
         for line in zone.lines().filter(|l| l.contains(" IN A ")) {
             let code = line.rsplit(" IN A ").next().unwrap().trim();
             match IpAddr::from_str(code).expect("A-record code is an IP literal") {
-                IpAddr::V4(v4) => assert_eq!(
-                    v4.octets()[0],
-                    127,
-                    "non-loopback DNSBL response code published: {code}"
-                ),
+                IpAddr::V4(v4) => assert_eq!(v4.octets()[0], 127, "non-loopback DNSBL response code published: {code}"),
                 IpAddr::V6(_) => panic!("IPv6 DNSBL response code published: {code}"),
             }
         }
-        // The legitimate loopback entry is unaffected.
         assert!(zone.contains("30.2.0.192 IN A 127.0.0.4"));
         assert_txt_quotes_escaped(&zone);
     }
 
     #[test]
     fn export_dnsbl_zone_escapes_control_chars_in_reason() {
-        // A raw newline in reason/source must be neutralized so the TXT record
-        // stays on one line and cannot inject subsequent zone entries.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
-            &[DnsblEntry {
-                address: "192.0.2.10".parse().unwrap(),
-                code: "127.0.0.2".to_string(),
-                reason: "line1\n10.2.0.192 IN TXT \"break".to_string(),
-                source: "unit".to_string(),
-                ttl_seconds: 300,
-                prefix_len: None,
-            }],
+            &[DnsblEntry { address: "192.0.2.10".parse().unwrap(), code: "127.0.0.2".to_string(), reason: "line1\n10.2.0.192 IN TXT \"break".to_string(), source: "unit".to_string(), ttl_seconds: 300, prefix_len: None }],
         );
-        // No raw newline survives inside the TXT payload: the whole record,
-        // including the injected `IN TXT` text, stays on a single line.
         assert_eq!(zone.lines().filter(|l| l.contains(" IN TXT ")).count(), 1);
         assert!(zone.contains("\\010"));
         assert_txt_quotes_escaped(&zone);
@@ -1746,26 +1139,18 @@ mod tests {
     fn sanitize_zone_origin_falls_back_when_empty() {
         assert_eq!(sanitize_zone_origin("\"\n\t \""), "dnsbl.invalid");
         assert_eq!(sanitize_zone_origin("dnsbl.example."), "dnsbl.example");
-        assert_eq!(
-            sanitize_zone_origin("dnsbl_feed.example-1"),
-            "dnsbl_feed.example-1"
-        );
+        assert_eq!(sanitize_zone_origin("dnsbl_feed.example-1"), "dnsbl_feed.example-1");
     }
 
     #[test]
     fn anomaly_signal_flags_metacharacters_and_entropy() {
-        // Metacharacter density on a short payload (entropy check length-gated out).
         let (score, reason) = anomaly_signal("a<b>c'd\"e(f)g;h|i&j").unwrap();
         assert_eq!(score, 15);
         assert!(reason.contains("metacharacters"));
-
-        // High-entropy encoded blob (40+ bytes, no metacharacters).
         let blob = "aGVsbG8Xd29ybGQ0Zm9vYmFyMTIzNDU2Nzg5MDBhYmNkZWZn";
         let (score, reason) = anomaly_signal(blob).unwrap();
         assert_eq!(score, 10);
         assert!(reason.contains("entropy"));
-
-        // Long but low-entropy (repeated byte) and ordinary short text: not flagged.
         assert!(anomaly_signal(&"a".repeat(60)).is_none());
         assert!(anomaly_signal("/account/profile?tab=settings").is_none());
     }
@@ -1779,30 +1164,8 @@ mod tests {
     #[test]
     fn records_audit_logs_with_monotonic_ids() {
         let mut data = AppData::seeded();
-
-        let first = record_audit_log(
-            &mut data,
-            NewAuditLogEntry {
-                timestamp_unix: 10,
-                actor: "operator@example.com".to_string(),
-                action: "upsert_route".to_string(),
-                resource: "route".to_string(),
-                resource_id: "edge".to_string(),
-                outcome: "success".to_string(),
-            },
-        );
-        let second = record_audit_log(
-            &mut data,
-            NewAuditLogEntry {
-                timestamp_unix: 11,
-                actor: "operator@example.com".to_string(),
-                action: "update_license".to_string(),
-                resource: "commercial_license".to_string(),
-                resource_id: "cwlab-enterprise".to_string(),
-                outcome: "success".to_string(),
-            },
-        );
-
+        let first = record_audit_log(&mut data, NewAuditLogEntry { timestamp_unix: 10, actor: "operator@example.com".to_string(), action: "upsert_route".to_string(), resource: "route".to_string(), resource_id: "edge".to_string(), outcome: "success".to_string() });
+        let second = record_audit_log(&mut data, NewAuditLogEntry { timestamp_unix: 11, actor: "operator@example.com".to_string(), action: "update_license".to_string(), resource: "commercial_license".to_string(), resource_id: "cwlab-enterprise".to_string(), outcome: "success".to_string() });
         assert_eq!(first.id, 1);
         assert_eq!(second.id, 2);
         assert_eq!(data.audit_logs.len(), 2);
