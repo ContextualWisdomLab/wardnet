@@ -12,7 +12,12 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
             "@cwl/example",
             "@cwl/example@1.2.3",
             "https://registry.npmjs.org",
-            &["install", "@cwl/example@1.2.3", "--ignore-scripts", "--global"],
+            &[
+                "install",
+                "@cwl/example@1.2.3",
+                "--ignore-scripts",
+                "--global",
+            ],
         ),
         install_case(
             "pnpm",
@@ -36,7 +41,12 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
             "@cwl/example",
             "@cwl/example@1.2.3",
             "https://registry.npmjs.org",
-            &["add", "@cwl/example@1.2.3", "--ignore-scripts", "--prefix=/tmp/escape"],
+            &[
+                "add",
+                "@cwl/example@1.2.3",
+                "--ignore-scripts",
+                "--prefix=/tmp/escape",
+            ],
         ),
         install_case(
             "pip",
@@ -44,7 +54,12 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
             "cwl-example",
             "cwl-example==1.2.3",
             "https://pypi.org/simple",
-            &["install", "cwl-example==1.2.3", "--require-hashes", "--target=/tmp/escape"],
+            &[
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "--target=/tmp/escape",
+            ],
         ),
         install_case(
             "pip3",
@@ -52,7 +67,12 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
             "cwl-example",
             "cwl-example==1.2.3",
             "https://pypi.org/simple",
-            &["install", "cwl-example==1.2.3", "--require-hashes", "--user"],
+            &[
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "--user",
+            ],
         ),
         install_case(
             "uv",
@@ -74,7 +94,12 @@ fn package_managers_cannot_escape_the_broker_selected_install_root() {
             "cwl-example",
             "cwl-example@1.2.3",
             "https://crates.io",
-            &["install", "cwl-example@1.2.3", "--locked", "--root=/tmp/escape"],
+            &[
+                "install",
+                "cwl-example@1.2.3",
+                "--locked",
+                "--root=/tmp/escape",
+            ],
         ),
     ];
 
@@ -198,10 +223,7 @@ fn cargo_inline_configuration_cannot_override_install_root() {
 
 #[test]
 fn npm_location_global_spellings_are_blocked() {
-    for location_arguments in [
-        vec!["--location=global"],
-        vec!["--location", "GLOBAL"],
-    ] {
+    for location_arguments in [vec!["--location=global"], vec!["--location", "GLOBAL"]] {
         let mut arguments = vec!["install", "@cwl/example@1.2.3", "--ignore-scripts"];
         arguments.extend(location_arguments);
         let (policy, intent, label) = install_case(
@@ -409,10 +431,12 @@ fn container_pull_is_not_misclassified_as_an_install_root_escape() {
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Allow);
-    assert!(!decision
-        .reason_codes
-        .iter()
-        .any(|reason| reason.as_str() == "alternate_install_root"));
+    assert!(
+        !decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "alternate_install_root")
+    );
 }
 
 fn assert_alternate_root_blocked(policy: &AdmissionPolicy, intent: &InstallIntent, label: &str) {
@@ -467,8 +491,7 @@ fn install_case(
         version: "1.2.3".to_string(),
         registry_url: registry_url.to_string(),
         owner: "ContextualWisdomLab".to_string(),
-        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            .to_string(),
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         artifact_argument: artifact_argument.to_string(),
     };
     let policy = AdmissionPolicy {
@@ -477,8 +500,7 @@ fn install_case(
         allowed_executables: vec![executable.to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }],
         approved_artifacts: vec![ApprovedArtifact {
             ecosystem: artifact.ecosystem.clone(),
