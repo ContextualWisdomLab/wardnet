@@ -67,7 +67,11 @@ fn pnpm_case(scope_arguments: &[&str]) -> (AdmissionPolicy, InstallIntent, Strin
         artifact.artifact_argument.clone(),
         "--ignore-scripts".to_string(),
     ];
-    argv.extend(scope_arguments.iter().map(|argument| (*argument).to_string()));
+    argv.extend(
+        scope_arguments
+            .iter()
+            .map(|argument| (*argument).to_string()),
+    );
     let intent = InstallIntent {
         request_id: "req-pnpm-workspace-scope".to_string(),
         actor_id: "agent:codex:test".to_string(),
