@@ -119,7 +119,14 @@ pub fn misp_material_from_value(
     }
 
     for (attr, severity) in loose_attributes {
-        match materialize_attribute(attr, source, ttl_seconds, severity, "misp-attribute", true) {
+        match materialize_attribute(
+            attr,
+            source,
+            ttl_seconds,
+            severity,
+            "misp-attribute",
+            true,
+        ) {
             AttributeOutcome::Mapped {
                 threats: t,
                 dnsbl: d,
@@ -180,7 +187,9 @@ fn looks_like_attribute(obj: &serde_json::Value) -> bool {
 }
 
 fn severity_from_event(event: &serde_json::Value) -> Severity {
-    // MISP threat_level_id: 1=High, 2=Medium, 3=Low, 4=Undefined
+    // MISP threat_level_id is an external semantic code, not a zero-based Wardnet ordinal:
+    // 1=High, 2=Medium, 3=Low, 4=Undefined. Missing/unrecognized values retain the existing
+    // compatibility fallback to level 2 (Medium) rather than inventing stronger source truth.
     match event
         .get("threat_level_id")
         .and_then(|v| {
@@ -190,9 +199,9 @@ fn severity_from_event(event: &serde_json::Value) -> Severity {
         })
         .unwrap_or(2)
     {
-        1 => Severity::Critical,
-        2 => Severity::High,
-        3 => Severity::Medium,
+        1 => Severity::High,
+        2 => Severity::Medium,
+        3 => Severity::Low,
         _ => Severity::Low,
     }
 }
@@ -201,7 +210,9 @@ fn active_by_deleted_marker(deleted: Option<&serde_json::Value>) -> bool {
     deleted
         .map(|value| match value {
             serde_json::Value::Bool(is_deleted) => !*is_deleted,
-            serde_json::Value::String(value) => value == "0" || value.eq_ignore_ascii_case("false"),
+            serde_json::Value::String(value) => {
+                value == "0" || value.eq_ignore_ascii_case("false")
+            }
             serde_json::Value::Number(value) => value.as_u64() == Some(0),
             _ => false,
         })
