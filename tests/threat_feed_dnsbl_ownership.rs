@@ -64,7 +64,11 @@ async fn feed_refresh_reaps_dnsbl_entries_it_withdraws() {
         .await
         .unwrap();
     assert_eq!(first.status(), StatusCode::CREATED);
-    assert!(dnsbl(&app).iter().any(|entry| entry.address.to_string() == "203.0.113.210"));
+    assert!(
+        dnsbl(&app)
+            .iter()
+            .any(|entry| entry.address.to_string() == "203.0.113.210")
+    );
 
     let refresh = app
         .clone()

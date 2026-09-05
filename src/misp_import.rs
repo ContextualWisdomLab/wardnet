@@ -119,14 +119,7 @@ pub fn misp_material_from_value(
     }
 
     for (attr, severity) in loose_attributes {
-        match materialize_attribute(
-            attr,
-            source,
-            ttl_seconds,
-            severity,
-            "misp-attribute",
-            true,
-        ) {
+        match materialize_attribute(attr, source, ttl_seconds, severity, "misp-attribute", true) {
             AttributeOutcome::Mapped {
                 threats: t,
                 dnsbl: d,
@@ -208,9 +201,7 @@ fn active_by_deleted_marker(deleted: Option<&serde_json::Value>) -> bool {
     deleted
         .map(|value| match value {
             serde_json::Value::Bool(is_deleted) => !*is_deleted,
-            serde_json::Value::String(value) => {
-                value == "0" || value.eq_ignore_ascii_case("false")
-            }
+            serde_json::Value::String(value) => value == "0" || value.eq_ignore_ascii_case("false"),
             serde_json::Value::Number(value) => value.as_u64() == Some(0),
             _ => false,
         })
