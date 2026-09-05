@@ -27,9 +27,7 @@ fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
         assert!(workflow.contains(
             "cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
         ));
-        assert!(workflow.contains(
-            "types: [opened, synchronize, reopened, ready_for_review]"
-        ));
+        assert!(workflow.contains("types: [opened, synchronize, reopened, ready_for_review]"));
         assert!(!workflow.contains("converted_to_draft"));
         assert!(!workflow.contains("closed]"));
         assert!(workflow.contains(
