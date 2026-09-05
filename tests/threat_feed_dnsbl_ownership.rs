@@ -66,6 +66,7 @@ async fn feed_refresh_reaps_dnsbl_entries_it_withdraws() {
     assert_eq!(first.status(), StatusCode::CREATED);
     assert!(
         dnsbl(&app)
+            .await
             .iter()
             .any(|entry| entry.address.to_string() == "203.0.113.210")
     );
@@ -83,6 +84,7 @@ async fn feed_refresh_reaps_dnsbl_entries_it_withdraws() {
 
     assert!(
         !dnsbl(&app)
+            .await
             .iter()
             .any(|entry| entry.address.to_string() == "203.0.113.210"),
         "withdrawn feed DNSBL material must not keep blocking after refresh"
@@ -120,6 +122,7 @@ async fn feed_refresh_preserves_dnsbl_still_owned_by_another_feed() {
 
     assert!(
         dnsbl(&app)
+            .await
             .iter()
             .any(|entry| entry.address.to_string() == address),
         "one feed cannot delete a DNSBL address still claimed by another feed"
@@ -171,7 +174,7 @@ async fn feed_refresh_preserves_operator_managed_dnsbl_payload() {
         .unwrap();
     assert_eq!(refresh.status(), StatusCode::CREATED);
 
-    let entries = dnsbl(&app);
+    let entries = dnsbl(&app).await;
     let entry = entries
         .iter()
         .find(|entry| entry.address.to_string() == address)
@@ -219,7 +222,7 @@ async fn feed_import_does_not_overwrite_operator_dnsbl_or_count_a_skipped_write(
     let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(result["upserted_dnsbl"], 0);
 
-    let entries = dnsbl(&app);
+    let entries = dnsbl(&app).await;
     let entry = entries
         .iter()
         .find(|entry| entry.address.to_string() == address)
