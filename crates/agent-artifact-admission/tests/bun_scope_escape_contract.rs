@@ -15,9 +15,11 @@ fn bun_working_directory_and_filter_cannot_escape_the_broker_selected_scope() {
     ] {
         let label = scope_arguments.join(" ");
         let (policy, mut intent) = bun_install_case();
-        intent
-            .argv
-            .extend(scope_arguments.into_iter().map(|argument| argument.to_string()));
+        intent.argv.extend(
+            scope_arguments
+                .into_iter()
+                .map(|argument| argument.to_string()),
+        );
 
         let decision = admission_decision(&policy, &intent);
 
@@ -44,9 +46,11 @@ fn bun_explicit_config_cannot_replace_the_reviewed_registry_context() {
     ] {
         let label = config_arguments.join(" ");
         let (policy, mut intent) = bun_install_case();
-        intent
-            .argv
-            .extend(config_arguments.into_iter().map(|argument| argument.to_string()));
+        intent.argv.extend(
+            config_arguments
+                .into_iter()
+                .map(|argument| argument.to_string()),
+        );
 
         let decision = admission_decision(&policy, &intent);
 
@@ -73,8 +77,7 @@ fn bun_install_case() -> (AdmissionPolicy, InstallIntent) {
         version: "1.2.3".to_string(),
         registry_url: "https://registry.npmjs.org".to_string(),
         owner: "ContextualWisdomLab".to_string(),
-        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            .to_string(),
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         artifact_argument: artifact_argument.to_string(),
     };
     let policy = AdmissionPolicy {
@@ -83,8 +86,7 @@ fn bun_install_case() -> (AdmissionPolicy, InstallIntent) {
         allowed_executables: vec!["bun".to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }],
         approved_artifacts: vec![ApprovedArtifact {
             ecosystem: artifact.ecosystem.clone(),
