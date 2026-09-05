@@ -244,16 +244,14 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
     };
     let arguments = &intent.argv[1..];
     let command_prefix_len = match executable {
-        "uv"
-            if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install") =>
+        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+            && arguments
+                .get(1)
+                .is_some_and(|argument| argument == "install") =>
         {
             2
         }
-        "npm" | "pnpm" | "yarn" | "bun" | "pip" | "pip3" | "cargo" | "docker"
-        | "podman" => 1,
+        "npm" | "pnpm" | "yarn" | "bun" | "pip" | "pip3" | "cargo" | "docker" | "podman" => 1,
         _ => return,
     };
 
@@ -309,11 +307,10 @@ fn requests_indirect_artifact_source(executable: &str, arguments: &[String]) -> 
             "--editable",
             "--requirements-from-script",
         ]),
-        "uv"
-            if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install") =>
+        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+            && arguments
+                .get(1)
+                .is_some_and(|argument| argument == "install") =>
         {
             contains_flag(&[
                 "-r",
@@ -536,13 +533,15 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
     match executable {
         "npm" => {
             contains_flag(&["-g", "--global", "--prefix", "--workspace", "-w"])
+                || arguments.iter().any(|argument| {
+                    matches!(argument.as_str(), "--workspaces" | "--workspaces=true")
+                })
                 || arguments
                     .iter()
-                    .any(|argument| matches!(argument.as_str(), "--workspaces" | "--workspaces=true"))
-                || arguments.iter().any(|argument| argument == "--location=global")
-                || arguments.windows(2).any(|pair| {
-                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
-                })
+                    .any(|argument| argument == "--location=global")
+                || arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global"))
         }
         "yarn" => {
             contains_flag(&[
@@ -551,10 +550,12 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                 "--prefix",
                 "-W",
                 "--ignore-workspace-root-check",
-            ]) || arguments.iter().any(|argument| argument == "--location=global")
-                || arguments.windows(2).any(|pair| {
-                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
-                })
+            ]) || arguments
+                .iter()
+                .any(|argument| argument == "--location=global")
+                || arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global"))
         }
         "pnpm" => {
             contains_flag(&[
@@ -571,41 +572,30 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
                 "--recursive",
                 "-r",
                 "--include-workspace-root",
-            ]) || arguments.iter().any(|argument| argument == "--location=global")
-                || arguments.windows(2).any(|pair| {
-                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
-                })
+            ]) || arguments
+                .iter()
+                .any(|argument| argument == "--location=global")
+                || arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global"))
         }
         "bun" => {
-            contains_flag(&[
-                "-g",
-                "--global",
-                "--prefix",
-                "--cwd",
-                "--filter",
-                "-F",
-            ]) || arguments.iter().any(|argument| argument == "--location=global")
-                || arguments.windows(2).any(|pair| {
-                    pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global")
-                })
+            contains_flag(&["-g", "--global", "--prefix", "--cwd", "--filter", "-F"])
+                || arguments
+                    .iter()
+                    .any(|argument| argument == "--location=global")
+                || arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--location" && pair[1].eq_ignore_ascii_case("global"))
         }
-        "pip" | "pip3" => {
-            contains_flag(&["--user", "--target", "-t", "--root", "--prefix"])
-        }
+        "pip" | "pip3" => contains_flag(&["--user", "--target", "-t", "--root", "--prefix"]),
         "uv" => {
             arguments.first().is_some_and(|argument| argument == "pip")
                 && arguments
                     .get(1)
                     .is_some_and(|argument| argument == "install")
                 && contains_flag(&[
-                    "--user",
-                    "--target",
-                    "-t",
-                    "--root",
-                    "--prefix",
-                    "--system",
-                    "--python",
-                    "-p",
+                    "--user", "--target", "-t", "--root", "--prefix", "--system", "--python", "-p",
                 ])
         }
         "cargo" => contains_flag(&["--root", "--config", "--target-dir"]),
