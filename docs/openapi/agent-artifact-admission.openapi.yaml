@@ -1,0 +1,327 @@
+openapi: 3.1.0
+info:
+  title: Wardnet Agent Artifact Admission API
+  version: 0.1.0
+  description: >-
+    Loopback-only pre-execution admission boundary for structured package-install
+    intents. The service never executes package-manager commands.
+servers:
+  - url: http://127.0.0.1:8091
+    description: Example loopback deployment; the configured bind port is authoritative.
+paths:
+  /healthz:
+    get:
+      operationId: getAgentArtifactAdmissionHealth
+      summary: Read process health and immutable policy identity
+      responses:
+        '200':
+          description: Process is serving the configured immutable policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthView'
+  /v1/policy:
+    get:
+      operationId: getAgentArtifactAdmissionPolicy
+      summary: Read the immutable admission policy
+      security:
+        - AdminToken: []
+      responses:
+        '200':
+          description: Current immutable process policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdmissionPolicy'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/admissions:
+    post:
+      operationId: createAgentArtifactAdmission
+      summary: Evaluate one structured package-install intent
+      description: >-
+        Returns a durable allow/block decision. A policy block is HTTP 200 because
+        the domain decision completed successfully. Structurally invalid authenticated
+        JSON is audited and returned as HTTP 400. An authenticated body that exceeds
+        the configured materialization limit is audited with a content-unavailable
+        surrogate and returned as HTTP 413. An allow is not returned until the audit
+        record has been durably appended. Audit failure returns HTTP 503 and a
+        fail-closed block decision.
+      security:
+        - AdminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstallIntent'
+      responses:
+        '200':
+          description: Durable policy allow or policy block decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdmissionDecision'
+        '400':
+          description: Authenticated request was malformed or structurally invalid and was durably audited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdmissionDecision'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Authenticated request body exceeded the configured limit; a minimized rejection audit was durably appended before this response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdmissionDecision'
+        '503':
+          description: Audit durability was unavailable; execution must not proceed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdmissionDecision'
+components:
+  securitySchemes:
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+      description: >-
+        Exactly one bounded visible-ASCII token loaded from the credentials file at
+        process startup. Missing, duplicate, malformed, or incorrect values fail closed.
+  responses:
+    Unauthorized:
+      description: Authentication failed without disclosing credential details.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorView'
+  schemas:
+    HealthView:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - policy_id
+        - policy_revision
+        - allowed_executable_count
+        - approved_manifest_count
+        - approved_artifact_count
+      properties:
+        status:
+          type: string
+          const: ok
+        policy_id:
+          type: string
+        policy_revision:
+          type: string
+        allowed_executable_count:
+          type: integer
+          minimum: 0
+        approved_manifest_count:
+          type: integer
+          minimum: 0
+        approved_artifact_count:
+          type: integer
+          minimum: 0
+    ErrorView:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          const: unauthorized
+    AdmissionPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - policy_id
+        - policy_revision
+        - allowed_executables
+        - approved_manifests
+        - approved_artifacts
+      properties:
+        policy_id:
+          type: string
+        policy_revision:
+          type: string
+        allowed_executables:
+          type: array
+          items:
+            type: string
+        approved_manifests:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovedManifest'
+        approved_artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApprovedArtifact'
+    ApprovedManifest:
+      type: object
+      additionalProperties: false
+      required:
+        - workspace_id
+        - sha256
+      properties:
+        workspace_id:
+          type: string
+        sha256:
+          $ref: '#/components/schemas/Sha256'
+    ApprovedArtifact:
+      allOf:
+        - $ref: '#/components/schemas/ArtifactCoordinate'
+    ArtifactCoordinate:
+      type: object
+      additionalProperties: false
+      required:
+        - ecosystem
+        - name
+        - version
+        - registry_url
+        - owner
+        - sha256
+        - artifact_argument
+      properties:
+        ecosystem:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        registry_url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        owner:
+          type: string
+        sha256:
+          $ref: '#/components/schemas/Sha256'
+        artifact_argument:
+          type: string
+    InstructionSource:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - uri
+        - content_sha256
+      properties:
+        kind:
+          type: string
+          enum:
+            - llms_txt
+            - llms_full_txt
+            - web_page
+            - issue_comment
+            - reviewed_config
+        uri:
+          oneOf:
+            - type: string
+              format: uri
+            - type: 'null'
+        content_sha256:
+          oneOf:
+            - $ref: '#/components/schemas/Sha256'
+            - type: 'null'
+    InstallIntent:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - actor_id
+        - workspace_id
+        - operation
+        - argv
+        - manifest_sha256
+        - source
+        - artifacts
+      properties:
+        request_id:
+          type: string
+        actor_id:
+          type: string
+        workspace_id:
+          type: string
+        operation:
+          type: string
+          const: install
+        argv:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        manifest_sha256:
+          $ref: '#/components/schemas/Sha256'
+        source:
+          $ref: '#/components/schemas/InstructionSource'
+        artifacts:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ArtifactCoordinate'
+    AdmissionDecision:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - decision
+        - reason_codes
+        - policy_id
+        - policy_revision
+        - normalized_source_uri
+        - command_sha256
+        - artifact_count
+      properties:
+        request_id:
+          type: string
+        decision:
+          type: string
+          enum:
+            - allow
+            - block
+        reason_codes:
+          type: array
+          items:
+            type: string
+            enum:
+              - malformed_request
+              - request_body_too_large
+              - invalid_request
+              - invalid_operation
+              - invalid_manifest_digest
+              - invalid_artifact
+              - duplicate_artifact
+              - artifact_not_approved
+              - manifest_not_approved
+              - executable_not_allowed
+              - missing_executable
+              - missing_source_uri
+              - missing_source_digest
+              - invalid_source_uri
+              - forbidden_command
+              - alternate_trust_root
+              - alternate_install_root
+              - missing_safety_flag
+              - audit_unavailable
+        policy_id:
+          type: string
+        policy_revision:
+          type: string
+        normalized_source_uri:
+          oneOf:
+            - type: string
+              format: uri
+            - type: 'null'
+        command_sha256:
+          $ref: '#/components/schemas/Sha256'
+        artifact_count:
+          type: integer
+          minimum: 0
+    Sha256:
+      type: string
+      pattern: '^[0-9a-f]{64}$'

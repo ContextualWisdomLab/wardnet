@@ -1,0 +1,13 @@
+{
+  "configuration_version": "1",
+  "bind_address": "127.0.0.1:8787",
+  "max_request_body_bytes": 65536,
+  "audit_log_path": "/var/lib/wardnet/agent-artifact-admission.ndjson",
+  "policy": {
+    "policy_id": "deny-all",
+    "policy_revision": "example-v1",
+    "allowed_executables": [],
+    "approved_manifests": [],
+    "approved_artifacts": []
+  }
+}
