@@ -173,7 +173,9 @@ fn looks_like_attribute(obj: &serde_json::Value) -> bool {
 }
 
 fn severity_from_event(event: &serde_json::Value) -> Severity {
-    // MISP threat_level_id: 1=High, 2=Medium, 3=Low, 4=Undefined
+    // MISP threat_level_id is an external semantic code, not a zero-based Wardnet ordinal:
+    // 1=High, 2=Medium, 3=Low, 4=Undefined. Missing/unrecognized values retain the existing
+    // compatibility fallback to level 2 (Medium) rather than inventing stronger source truth.
     match event
         .get("threat_level_id")
         .and_then(|v| {
@@ -183,9 +185,9 @@ fn severity_from_event(event: &serde_json::Value) -> Severity {
         })
         .unwrap_or(2)
     {
-        1 => Severity::Critical,
-        2 => Severity::High,
-        3 => Severity::Medium,
+        1 => Severity::High,
+        2 => Severity::Medium,
+        3 => Severity::Low,
         _ => Severity::Low,
     }
 }
