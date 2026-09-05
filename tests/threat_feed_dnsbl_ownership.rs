@@ -71,7 +71,7 @@ async fn feed_refresh_reaps_dnsbl_entries_it_withdraws() {
         .oneshot(json_request(
             Method::POST,
             "/api/threat-feeds/import",
-            feed_payload("feed-a", "feed:a", &[]),
+            feed_payload("feed-a", "feed:a", &["203.0.113.250"]),
         ))
         .await
         .unwrap();
@@ -108,7 +108,7 @@ async fn feed_refresh_preserves_dnsbl_still_owned_by_another_feed() {
         .oneshot(json_request(
             Method::POST,
             "/api/threat-feeds/import",
-            feed_payload("feed-a", "feed:a", &[]),
+            feed_payload("feed-a", "feed:a", &["203.0.113.250"]),
         ))
         .await
         .unwrap();
@@ -161,7 +161,7 @@ async fn feed_refresh_preserves_operator_managed_dnsbl_payload() {
         .oneshot(json_request(
             Method::POST,
             "/api/threat-feeds/import",
-            feed_payload("feed-a", "feed:a", &[]),
+            feed_payload("feed-a", "feed:a", &["203.0.113.250"]),
         ))
         .await
         .unwrap();
