@@ -11,15 +11,42 @@ fn workflow_text(name: &str) -> String {
 
 #[test]
 fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
-    for (name, fixed_group) in [("ci.yml", "wardnet-ci"), ("fuzz.yml", "wardnet-fuzz")] {
+    for (name, expected_group) in [
+        (
+            "ci.yml",
+            "group: wardnet-ci-${{ github.repository }}-${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+        ),
+        (
+            "fuzz.yml",
+            "group: wardnet-fuzz-${{ github.repository }}-${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+        ),
+    ] {
         let workflow = workflow_text(name);
-        assert!(workflow.contains(&format!(
-            "group: {fixed_group}-${{{{ github.repository }}}}-${{{{ github.event_name == 'pull_request'"
-        )));
-        assert!(workflow.contains("format('pr-{0}', github.event.pull_request.number)"));
-        assert!(
-            workflow.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}")
-        );
+        assert!(workflow.contains(expected_group));
+        assert!(!workflow.contains("group: ${{ github.workflow }}"));
+        assert!(workflow.contains(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
+        ));
+        assert!(workflow.contains("types: [opened, synchronize, reopened, ready_for_review]"));
+        assert!(!workflow.contains("converted_to_draft"));
+        assert!(!workflow.contains("closed]"));
+        assert!(workflow.contains(
+            "if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}"
+        ));
+    }
+}
+
+#[test]
+fn fuzz_keeps_path_filtered_validation_without_state_transition_cancellation() {
+    let workflow = workflow_text("fuzz.yml");
+    assert!(workflow.contains("    paths:\n"));
+    for path in [
+        "src/**",
+        "crates/**",
+        "fuzz/**",
+        ".github/workflows/fuzz.yml",
+    ] {
+        assert!(workflow.contains(path));
     }
 }
 

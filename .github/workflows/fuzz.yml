@@ -4,6 +4,7 @@ on:
   # Bounded smoke fuzzing on every PR that touches fuzzable surfaces or the
   # harness. Time budget is capped low to keep CI cost predictable.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "src/**"
       - "crates/**"
@@ -18,12 +19,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: wardnet-fuzz-${{ github.repository }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'schedule' && format('schedule-{0}', github.ref) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Keep a fixed workflow identity. Only opened/synchronize validation shares
+  # the PR group; state-only re-entry is isolated so an unchanged head is not
+  # cancelled. A synchronize event may cancel only the superseded PR head.
+  group: wardnet-fuzz-${{ github.repository }}-${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   fuzz:
     # One runner covers every bounded target; a matrix would consume four org slots.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-24.04
     env:
       FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '300' }}

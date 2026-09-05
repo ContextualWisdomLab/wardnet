@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -9,11 +10,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: wardnet-ci-${{ github.repository }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Only opened/synchronize validation shares the PR group. State-only
+  # re-entry uses an independent run group so it cannot cancel an unchanged
+  # current head; synchronize may cancel only a genuinely superseded head.
+  group: wardnet-ci-${{ github.repository }}-${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   rust:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
