@@ -22,7 +22,8 @@ fn yarn_classic_workspace_root_escape_flags_fail_closed() {
             allowed_executables: vec!["yarn".to_string()],
             approved_manifests: vec![ApprovedManifest {
                 workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-                sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
             }],
             approved_artifacts: vec![ApprovedArtifact {
                 ecosystem: artifact.ecosystem.clone(),
