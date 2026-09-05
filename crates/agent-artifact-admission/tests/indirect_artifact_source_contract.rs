@@ -8,7 +8,13 @@ fn pip_family_cannot_source_undeclared_artifacts_from_files_or_editable_paths() 
     let cases: &[(&str, &[&str])] = &[
         (
             "pip",
-            &["install", "cwl-example==1.2.3", "--require-hashes", "-r", "requirements.txt"],
+            &[
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "-r",
+                "requirements.txt",
+            ],
         ),
         (
             "pip3",
@@ -21,7 +27,13 @@ fn pip_family_cannot_source_undeclared_artifacts_from_files_or_editable_paths() 
         ),
         (
             "pip",
-            &["install", "cwl-example==1.2.3", "--require-hashes", "-e", "./unreviewed"],
+            &[
+                "install",
+                "cwl-example==1.2.3",
+                "--require-hashes",
+                "-e",
+                "./unreviewed",
+            ],
         ),
         (
             "pip3",
@@ -51,7 +63,14 @@ fn pip_family_cannot_source_undeclared_artifacts_from_files_or_editable_paths() 
 #[test]
 fn uv_pip_cannot_source_undeclared_artifacts_from_files_groups_or_editable_paths() {
     let cases: &[&[&str]] = &[
-        &["pip", "install", "cwl-example==1.2.3", "--require-hashes", "-r", "requirements.txt"],
+        &[
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "-r",
+            "requirements.txt",
+        ],
         &[
             "pip",
             "install",
@@ -59,7 +78,14 @@ fn uv_pip_cannot_source_undeclared_artifacts_from_files_groups_or_editable_paths
             "--require-hashes",
             "--requirements=requirements.txt",
         ],
-        &["pip", "install", "cwl-example==1.2.3", "--require-hashes", "-e", "./unreviewed"],
+        &[
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "-e",
+            "./unreviewed",
+        ],
         &[
             "pip",
             "install",
@@ -67,8 +93,21 @@ fn uv_pip_cannot_source_undeclared_artifacts_from_files_groups_or_editable_paths
             "--require-hashes",
             "--editable=./unreviewed",
         ],
-        &["pip", "install", "cwl-example==1.2.3", "--require-hashes", "--group", "unreviewed"],
-        &["pip", "install", "cwl-example==1.2.3", "--require-hashes", "--group=unreviewed"],
+        &[
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "--group",
+            "unreviewed",
+        ],
+        &[
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "--group=unreviewed",
+        ],
         &[
             "pip",
             "install",
@@ -101,8 +140,7 @@ fn assert_indirect_source_blocked(executable: &str, arguments: &[&str]) {
         version: "1.2.3".to_string(),
         registry_url: "https://pypi.org/simple".to_string(),
         owner: "ContextualWisdomLab".to_string(),
-        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            .to_string(),
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         artifact_argument: "cwl-example==1.2.3".to_string(),
     };
     let policy = AdmissionPolicy {
@@ -111,8 +149,7 @@ fn assert_indirect_source_blocked(executable: &str, arguments: &[&str]) {
         allowed_executables: vec![executable.to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }],
         approved_artifacts: vec![ApprovedArtifact {
             ecosystem: artifact.ecosystem.clone(),
