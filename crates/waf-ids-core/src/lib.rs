@@ -14,6 +14,10 @@ pub struct AppData {
     #[serde(default)]
     pub operator_threat_keys: Vec<ThreatIndicatorKey>,
     pub dnsbl: Vec<DnsblEntry>,
+    /// Stable DNSBL identities created or overwritten through the operator API.
+    /// Feed refreshes must not replace or reap these addresses.
+    #[serde(default)]
+    pub operator_dnsbl_addresses: Vec<IpAddr>,
     pub events: Vec<SecurityEvent>,
     pub next_event_id: u64,
     #[serde(default)]
@@ -55,6 +59,7 @@ impl AppData {
                 ttl_seconds: 300,
                 prefix_len: None,
             }],
+            operator_dnsbl_addresses: Vec::new(),
             events: Vec::new(),
             next_event_id: 1,
             audit_logs: Vec::new(),
@@ -189,6 +194,10 @@ pub struct ThreatFeedStatus {
 pub struct ThreatFeedOwnership {
     pub feed_id: String,
     pub threat_keys: Vec<ThreatIndicatorKey>,
+    /// DNSBL keys use the same stable identity as [`upsert_dnsbl`]: address.
+    /// The default keeps predecessor state files readable.
+    #[serde(default)]
+    pub dnsbl_addresses: Vec<IpAddr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -573,6 +582,29 @@ pub fn replace_threat_feed_ownership(
         ownership.push(ThreatFeedOwnership {
             feed_id,
             threat_keys,
+            dnsbl_addresses: Vec::new(),
+        });
+        Vec::new()
+    }
+}
+
+/// Replaces one feed's DNSBL address snapshot and returns its preceding keys.
+/// Feed and threat ownership share one persisted aggregate so a refresh can
+/// reconcile both indicator kinds in the same AppData transaction.
+pub fn replace_threat_feed_dnsbl_ownership(
+    ownership: &mut Vec<ThreatFeedOwnership>,
+    feed_id: String,
+    dnsbl_addresses: Vec<IpAddr>,
+) -> Vec<IpAddr> {
+    if let Some(existing) = ownership.iter_mut().find(|item| item.feed_id == feed_id) {
+        let previous = existing.dnsbl_addresses.clone();
+        existing.dnsbl_addresses = dnsbl_addresses;
+        previous
+    } else {
+        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys: Vec::new(),
+            dnsbl_addresses,
         });
         Vec::new()
     }
@@ -1774,6 +1806,40 @@ mod tests {
     fn shannon_entropy_ranges_from_zero_to_high() {
         assert_eq!(shannon_entropy(b"aaaaaaaa"), 0.0);
         assert!(shannon_entropy(b"abcdefgh") > 2.9);
+    }
+
+    #[test]
+    fn replaces_dnsbl_feed_ownership_without_losing_threat_ownership() {
+        let mut ownership = Vec::new();
+        let threat_key = ThreatIndicatorKey {
+            indicator_type: "domain".to_string(),
+            value: "bad.example".to_string(),
+            source: "feed:a".to_string(),
+        };
+        replace_threat_feed_ownership(
+            &mut ownership,
+            "feed-a".to_string(),
+            vec![threat_key.clone()],
+        );
+        assert!(replace_threat_feed_dnsbl_ownership(
+            &mut ownership,
+            "feed-a".to_string(),
+            vec!["203.0.113.7".parse().unwrap()],
+        )
+        .is_empty());
+        assert_eq!(ownership[0].threat_keys, vec![threat_key]);
+        assert_eq!(
+            replace_threat_feed_dnsbl_ownership(
+                &mut ownership,
+                "feed-a".to_string(),
+                vec!["203.0.113.8".parse().unwrap()],
+            ),
+            vec!["203.0.113.7".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            ownership[0].dnsbl_addresses,
+            vec!["203.0.113.8".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[test]
