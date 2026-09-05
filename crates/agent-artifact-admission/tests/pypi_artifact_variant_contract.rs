@@ -4,8 +4,7 @@ use wardnet_agent_artifact_admission::{
 };
 
 const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const MANIFEST_DIGEST: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PACKAGE_NAME: &str = "example-package";
 const PACKAGE_VERSION: &str = "1.2.3";
 

@@ -40,8 +40,7 @@ fn pnpm_case(scope_arguments: &[&str]) -> (AdmissionPolicy, InstallIntent, Strin
         version: "1.2.3".to_string(),
         registry_url: "https://registry.npmjs.org".to_string(),
         owner: "ContextualWisdomLab".to_string(),
-        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            .to_string(),
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         artifact_argument: "@cwl/example@1.2.3".to_string(),
     };
     let policy = AdmissionPolicy {
@@ -50,8 +49,7 @@ fn pnpm_case(scope_arguments: &[&str]) -> (AdmissionPolicy, InstallIntent, Strin
         allowed_executables: vec!["pnpm".to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }],
         approved_artifacts: vec![ApprovedArtifact {
             ecosystem: artifact.ecosystem.clone(),

@@ -4,10 +4,8 @@ use wardnet_agent_artifact_admission::{
     validate_service_config,
 };
 
-const MANIFEST_SHA256: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const ARTIFACT_SHA256: &str =
-    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const MANIFEST_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ARTIFACT_SHA256: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const PACKAGE_NAME: &str = "example-package";
 const PACKAGE_VERSION: &str = "1.2.3";
 const REGISTRY_URL: &str = "https://pypi.org/simple";

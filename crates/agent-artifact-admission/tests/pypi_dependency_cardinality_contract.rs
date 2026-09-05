@@ -3,10 +3,8 @@ use wardnet_agent_artifact_admission::{
     InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
 };
 
-const ARTIFACT_DIGEST: &str =
-    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const MANIFEST_DIGEST: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
 
 #[test]
@@ -43,7 +41,10 @@ fn pypi_install_with_no_deps_preserves_the_reviewed_artifact_cardinality() {
     }
 }
 
-fn approved_pypi_install(executable: &str, include_no_deps: bool) -> (AdmissionPolicy, InstallIntent) {
+fn approved_pypi_install(
+    executable: &str,
+    include_no_deps: bool,
+) -> (AdmissionPolicy, InstallIntent) {
     let artifact = ArtifactCoordinate {
         ecosystem: "pypi".to_string(),
         name: "cwl-example".to_string(),
