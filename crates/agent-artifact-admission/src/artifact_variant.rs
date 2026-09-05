@@ -90,15 +90,20 @@ fn requests_unapproved_pypi_artifact_variant(intent: &InstallIntent) -> bool {
                 .first()
                 .is_some_and(|argument| argument == "install") =>
         {
-            arguments.iter().skip(1).any(requests_unapproved_pip_variant)
+            arguments
+                .iter()
+                .skip(1)
+                .any(requests_unapproved_pip_variant)
         }
-        "uv"
-            if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install") =>
+        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+            && arguments
+                .get(1)
+                .is_some_and(|argument| argument == "install") =>
         {
-            arguments.iter().skip(2).any(requests_unapproved_uv_pip_variant)
+            arguments
+                .iter()
+                .skip(2)
+                .any(requests_unapproved_uv_pip_variant)
         }
         _ => false,
     }
@@ -133,7 +138,10 @@ fn requests_unapproved_uv_pip_variant(argument: &String) -> bool {
 }
 
 fn matches_value_flag(argument: &str, flag: &str) -> bool {
-    argument == flag || argument.strip_prefix(flag).is_some_and(|suffix| suffix.starts_with('='))
+    argument == flag
+        || argument
+            .strip_prefix(flag)
+            .is_some_and(|suffix| suffix.starts_with('='))
 }
 
 /// Pip-compatible option parsers accept short options with their required
@@ -163,9 +171,7 @@ fn requests_all_tags_short_bundle(argument: &str) -> bool {
         Some(parts) => parts,
         None => (bundle, ""),
     };
-    if shorthands.chars().count() < 2
-        || !shorthands.chars().all(|flag| matches!(flag, 'a' | 'q'))
-    {
+    if shorthands.chars().count() < 2 || !shorthands.chars().all(|flag| matches!(flag, 'a' | 'q')) {
         return false;
     }
 
@@ -181,8 +187,5 @@ fn requests_all_tags_short_bundle(argument: &str) -> bool {
 }
 
 fn is_true_boolean(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "t" | "true"
-    )
+    matches!(value.to_ascii_lowercase().as_str(), "1" | "t" | "true")
 }
