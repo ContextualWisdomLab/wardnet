@@ -224,7 +224,21 @@ fn materialize_attribute(
             _ => false,
         })
         .unwrap_or(false);
-    if !to_ids {
+
+    // MISP publishes deletion state independently of `to_ids`: a formerly actionable
+    // attribute may retain `to_ids=true` while `deleted` marks it withdrawn. Omission is
+    // accepted for compatibility with active exports; any present unrecognized state fails
+    // closed instead of resurrecting withdrawn or structurally invalid enforcement data.
+    let active = attr
+        .get("deleted")
+        .map(|v| match v {
+            serde_json::Value::Bool(b) => !*b,
+            serde_json::Value::String(s) => s == "0" || s.eq_ignore_ascii_case("false"),
+            serde_json::Value::Number(n) => n.as_u64() == Some(0),
+            _ => false,
+        })
+        .unwrap_or(true);
+    if !to_ids || !active {
         return AttributeOutcome::Skipped;
     }
 
