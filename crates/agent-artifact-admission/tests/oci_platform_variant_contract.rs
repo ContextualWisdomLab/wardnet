@@ -4,16 +4,13 @@ use wardnet_agent_artifact_admission::{
 };
 
 const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const MANIFEST_DIGEST: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const IMAGE_NAME: &str = "ghcr.io/contextualwisdomlab/wardnet-runtime";
 
 #[test]
 fn caller_selected_platform_is_not_authorized_by_an_index_digest() {
     let (policy, mut intent) = approved_oci_pull("docker");
-    intent
-        .argv
-        .insert(2, "--platform=linux/arm64".to_string());
+    intent.argv.insert(2, "--platform=linux/arm64".to_string());
 
     let decision = admission_decision(&policy, &intent);
 
@@ -30,9 +27,7 @@ fn caller_selected_platform_is_not_authorized_by_an_index_digest() {
 #[test]
 fn podman_platform_selection_is_bound_by_the_same_oci_policy() {
     let (policy, mut intent) = approved_oci_pull("podman");
-    intent
-        .argv
-        .insert(2, "--platform=linux/amd64".to_string());
+    intent.argv.insert(2, "--platform=linux/amd64".to_string());
 
     let decision = admission_decision(&policy, &intent);
 
@@ -92,9 +87,7 @@ fn separated_platform_value_does_not_duplicate_artifact_reason() {
 fn non_pull_oci_command_remains_owned_by_the_existing_command_guard() {
     let (policy, mut intent) = approved_oci_pull("docker");
     intent.argv[1] = "push".to_string();
-    intent
-        .argv
-        .insert(2, "--platform=linux/arm64".to_string());
+    intent.argv.insert(2, "--platform=linux/arm64".to_string());
 
     let decision = admission_decision(&policy, &intent);
 
@@ -167,7 +160,11 @@ fn approved_oci_pull(executable: &str) -> (AdmissionPolicy, InstallIntent) {
         actor_id: "agent:wardnet:admission".to_string(),
         workspace_id: "ContextualWisdomLab/wardnet".to_string(),
         operation: "install".to_string(),
-        argv: vec![executable.to_string(), "pull".to_string(), artifact_argument],
+        argv: vec![
+            executable.to_string(),
+            "pull".to_string(),
+            artifact_argument,
+        ],
         manifest_sha256: MANIFEST_DIGEST.to_string(),
         source: InstructionSource {
             kind: InstructionSourceKind::ReviewedConfig,

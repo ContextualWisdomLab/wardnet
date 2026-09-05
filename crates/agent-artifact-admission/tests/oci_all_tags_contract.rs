@@ -4,8 +4,7 @@ use wardnet_agent_artifact_admission::{
 };
 
 const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const MANIFEST_DIGEST: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const IMAGE_NAME: &str = "ghcr.io/contextualwisdomlab/wardnet-runtime";
 
 #[test]
@@ -114,7 +113,11 @@ fn approved_oci_pull(executable: &str) -> (AdmissionPolicy, InstallIntent) {
         actor_id: "agent:wardnet:admission".to_string(),
         workspace_id: "ContextualWisdomLab/wardnet".to_string(),
         operation: "install".to_string(),
-        argv: vec![executable.to_string(), "pull".to_string(), artifact_argument],
+        argv: vec![
+            executable.to_string(),
+            "pull".to_string(),
+            artifact_argument,
+        ],
         manifest_sha256: MANIFEST_DIGEST.to_string(),
         source: InstructionSource {
             kind: InstructionSourceKind::ReviewedConfig,

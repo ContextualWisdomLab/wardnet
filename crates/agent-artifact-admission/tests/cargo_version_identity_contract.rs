@@ -3,10 +3,8 @@ use wardnet_agent_artifact_admission::{
     InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
 };
 
-const MANIFEST_SHA256: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const ARTIFACT_SHA256: &str =
-    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const MANIFEST_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ARTIFACT_SHA256: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 #[test]
 fn cargo_version_selector_cannot_override_reviewed_artifact_version() {

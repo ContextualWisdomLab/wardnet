@@ -4,17 +4,14 @@ use wardnet_agent_artifact_admission::{
 };
 
 const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const MANIFEST_DIGEST: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const IMAGE_NAME: &str = "ghcr.io/contextualwisdomlab/wardnet-runtime";
 
 #[test]
 fn podman_cannot_disable_registry_tls_verification() {
     for disabled in ["false", "FALSE", "f", "0"] {
         let (policy, mut intent) = approved_podman_pull();
-        intent
-            .argv
-            .insert(2, format!("--tls-verify={disabled}"));
+        intent.argv.insert(2, format!("--tls-verify={disabled}"));
 
         let decision = admission_decision(&policy, &intent);
 

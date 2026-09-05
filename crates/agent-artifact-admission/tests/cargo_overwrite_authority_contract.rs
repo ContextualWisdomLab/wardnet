@@ -3,10 +3,8 @@ use wardnet_agent_artifact_admission::{
     InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
 };
 
-const MANIFEST_SHA256: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const ARTIFACT_SHA256: &str =
-    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const MANIFEST_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ARTIFACT_SHA256: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const ARTIFACT_ARGUMENT: &str = "cwl-example@1.2.3";
 
 #[test]
@@ -29,11 +27,7 @@ fn cargo_overwrite_and_tracking_overrides_require_separate_review_authority() {
             ARTIFACT_ARGUMENT.to_string(),
             "--locked".to_string(),
         ];
-        argv.extend(
-            unreviewed_mutation
-                .iter()
-                .map(|value| (*value).to_string()),
-        );
+        argv.extend(unreviewed_mutation.iter().map(|value| (*value).to_string()));
         let intent = approved_cargo_intent(argv);
 
         let decision = admission_decision(&policy, &intent);
