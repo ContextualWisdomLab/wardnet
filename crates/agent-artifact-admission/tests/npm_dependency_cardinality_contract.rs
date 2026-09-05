@@ -3,10 +3,8 @@ use wardnet_agent_artifact_admission::{
     InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
 };
 
-const MANIFEST_DIGEST: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const ARTIFACT_DIGEST: &str =
-    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const ARTIFACT_ARGUMENT: &str = "@cwl/example@1.2.3";
 
 #[test]
