@@ -177,3 +177,51 @@ async fn feed_refresh_preserves_operator_managed_dnsbl_payload() {
     assert_eq!(entry.source, "operator");
     assert_eq!(entry.ttl_seconds, 86400);
 }
+
+#[tokio::test]
+async fn feed_import_does_not_overwrite_operator_dnsbl_or_count_a_skipped_write() {
+    let app = build_app(AppState::seeded(Some("secret".to_string())));
+    let address = "203.0.113.213";
+
+    let operator = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/dnsbl",
+            json!({
+                "address": address,
+                "code": "127.0.0.88",
+                "reason": "operator-owned payload",
+                "source": "operator",
+                "ttl_seconds": 86400,
+                "prefix_len": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(operator.status(), StatusCode::CREATED);
+
+    let imported = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/threat-feeds/import",
+            feed_payload("feed-a", "feed:a", &[address]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), StatusCode::CREATED);
+    let bytes = to_bytes(imported.into_body(), usize::MAX).await.unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["upserted_dnsbl"], 0);
+
+    let entries = dnsbl(&app);
+    let entry = entries
+        .iter()
+        .find(|entry| entry.address.to_string() == address)
+        .expect("operator-owned DNSBL entry must remain present");
+    assert_eq!(entry.code, "127.0.0.88");
+    assert_eq!(entry.reason, "operator-owned payload");
+    assert_eq!(entry.source, "operator");
+    assert_eq!(entry.ttl_seconds, 86400);
+}
