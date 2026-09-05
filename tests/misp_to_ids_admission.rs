@@ -34,18 +34,24 @@ fn deleted_misp_attributes_cannot_authorize_enforcement() {
     let material = misp_import::parse_misp_document(raw, "misp:test", 60).unwrap();
 
     assert_eq!(material.threats.len(), 3);
-    assert!(material
-        .threats
-        .iter()
-        .any(|threat| threat.value == "active-bool.example"));
-    assert!(material
-        .threats
-        .iter()
-        .any(|threat| threat.value == "active-string.example"));
-    assert!(material
-        .threats
-        .iter()
-        .any(|threat| threat.value == "active-omitted.example"));
+    assert!(
+        material
+            .threats
+            .iter()
+            .any(|threat| threat.value == "active-bool.example")
+    );
+    assert!(
+        material
+            .threats
+            .iter()
+            .any(|threat| threat.value == "active-string.example")
+    );
+    assert!(
+        material
+            .threats
+            .iter()
+            .any(|threat| threat.value == "active-omitted.example")
+    );
     assert_eq!(material.skipped_attributes, 3);
 }
 
@@ -98,13 +104,17 @@ fn deleted_or_ambiguous_misp_objects_cannot_authorize_nested_attributes() {
     let material = misp_import::parse_misp_document(raw, "misp:test", 60).unwrap();
 
     assert_eq!(material.threats.len(), 2);
-    assert!(material
-        .threats
-        .iter()
-        .any(|threat| threat.value == "active-object-bool.example"));
-    assert!(material
-        .threats
-        .iter()
-        .any(|threat| threat.value == "active-object-omitted.example"));
+    assert!(
+        material
+            .threats
+            .iter()
+            .any(|threat| threat.value == "active-object-bool.example")
+    );
+    assert!(
+        material
+            .threats
+            .iter()
+            .any(|threat| threat.value == "active-object-omitted.example")
+    );
     assert_eq!(material.skipped_attributes, 3);
 }
