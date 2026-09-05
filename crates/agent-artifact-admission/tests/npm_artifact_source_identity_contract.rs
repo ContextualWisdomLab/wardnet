@@ -1,7 +1,7 @@
 use wardnet_agent_artifact_admission::{
-    AdmissionPolicy, AdmissionServiceConfig, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate,
-    DecisionKind, InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
-    validate_service_config,
+    AdmissionPolicy, AdmissionServiceConfig, ApprovedArtifact, ApprovedManifest,
+    ArtifactCoordinate, DecisionKind, InstallIntent, InstructionSource, InstructionSourceKind,
+    admission_decision, validate_service_config,
 };
 
 const MANIFEST_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
