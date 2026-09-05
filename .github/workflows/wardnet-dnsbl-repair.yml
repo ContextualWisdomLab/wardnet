@@ -1,0 +1,427 @@
+name: Wardnet DNSBL ownership repair (temporary)
+
+on:
+  push:
+    branches:
+      - fix/misp-to-ids-fail-closed
+    paths:
+      - .github/workflows/wardnet-dnsbl-repair.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wardnet-dnsbl-repair-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout triggering head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Refuse stale-parent execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+      - name: Apply shared DNSBL ownership repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str, expected: int = 1) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} occurrences, found {count}: {old[:80]!r}")
+              file.write_text(text.replace(old, new))
+
+          core = "crates/waf-ids-core/src/lib.rs"
+          root = "src/lib.rs"
+
+          replace_exact(
+              core,
+              """    #[serde(default)]
+    pub operator_threat_keys: Vec<ThreatIndicatorKey>,
+    pub dnsbl: Vec<DnsblEntry>,
+""",
+              """    #[serde(default)]
+    pub operator_threat_keys: Vec<ThreatIndicatorKey>,
+    /// DNSBL identities independently managed through the operator API.
+    #[serde(default)]
+    pub operator_dnsbl_keys: Vec<DnsblEntryKey>,
+    pub dnsbl: Vec<DnsblEntry>,
+""",
+          )
+          replace_exact(
+              core,
+              """            operator_threat_keys: Vec::new(),
+            dnsbl: vec![DnsblEntry {
+""",
+              """            operator_threat_keys: Vec::new(),
+            operator_dnsbl_keys: Vec::new(),
+            dnsbl: vec![DnsblEntry {
+""",
+          )
+          replace_exact(
+              core,
+              """}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommercialProfile {
+""",
+              """}
+
+/// Stable DNSBL ownership identity. It deliberately matches [`upsert_dnsbl`],
+/// whose physical row identity is the IP address rather than payload metadata.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct DnsblEntryKey(pub IpAddr);
+
+/// Returns the durable ownership identity for a DNSBL entry.
+pub fn dnsbl_entry_key(entry: &DnsblEntry) -> DnsblEntryKey {
+    DnsblEntryKey(entry.address)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommercialProfile {
+""",
+          )
+          replace_exact(
+              core,
+              """pub struct ThreatFeedOwnership {
+    pub feed_id: String,
+    pub threat_keys: Vec<ThreatIndicatorKey>,
+}
+""",
+              """pub struct ThreatFeedOwnership {
+    pub feed_id: String,
+    pub threat_keys: Vec<ThreatIndicatorKey>,
+    /// DNSBL rows currently claimed by this feed snapshot.
+    #[serde(default)]
+    pub dnsbl_keys: Vec<DnsblEntryKey>,
+}
+""",
+          )
+          replace_exact(
+              core,
+              """        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys,
+        });
+        Vec::new()
+    }
+}
+
+pub fn record_audit_log""",
+              """        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys,
+            dnsbl_keys: Vec::new(),
+        });
+        Vec::new()
+    }
+}
+
+/// Replaces one feed's DNSBL snapshot ownership and returns its prior keys.
+pub fn replace_threat_feed_dnsbl_ownership(
+    ownership: &mut Vec<ThreatFeedOwnership>,
+    feed_id: String,
+    dnsbl_keys: Vec<DnsblEntryKey>,
+) -> Vec<DnsblEntryKey> {
+    if let Some(existing) = ownership.iter_mut().find(|item| item.feed_id == feed_id) {
+        let previous = existing.dnsbl_keys.clone();
+        existing.dnsbl_keys = dnsbl_keys;
+        previous
+    } else {
+        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys: Vec::new(),
+            dnsbl_keys,
+        });
+        Vec::new()
+    }
+}
+
+pub fn record_audit_log""",
+          )
+          replace_exact(
+              core,
+              """    #[test]
+    fn records_audit_logs_with_monotonic_ids() {
+""",
+              """    #[test]
+    fn replaces_threat_feed_dnsbl_ownership_and_returns_previous_keys() {
+        let first = DnsblEntryKey(\"203.0.113.1\".parse().unwrap());
+        let second = DnsblEntryKey(\"203.0.113.2\".parse().unwrap());
+        let mut ownership = Vec::new();
+
+        assert!(replace_threat_feed_dnsbl_ownership(
+            &mut ownership,
+            \"feed-a\".to_string(),
+            vec![first],
+        )
+        .is_empty());
+        assert_eq!(ownership[0].dnsbl_keys, vec![first]);
+
+        let previous = replace_threat_feed_dnsbl_ownership(
+            &mut ownership,
+            \"feed-a\".to_string(),
+            vec![second],
+        );
+        assert_eq!(previous, vec![first]);
+        assert_eq!(ownership[0].dnsbl_keys, vec![second]);
+
+        assert!(replace_threat_feed_dnsbl_ownership(
+            &mut ownership,
+            \"feed-b\".to_string(),
+            vec![first],
+        )
+        .is_empty());
+        assert_eq!(ownership.len(), 2);
+        assert!(ownership[1].threat_keys.is_empty());
+    }
+
+    #[test]
+    fn dnsbl_ownership_fields_default_when_deserializing_predecessor_state() {
+        let key = DnsblEntryKey(\"203.0.113.3\".parse().unwrap());
+        let mut data = AppData::seeded();
+        data.operator_dnsbl_keys.push(key);
+        data.threat_feed_ownership.push(ThreatFeedOwnership {
+            feed_id: \"legacy-feed\".to_string(),
+            threat_keys: Vec::new(),
+            dnsbl_keys: vec![key],
+        });
+
+        let mut legacy = serde_json::to_value(data).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove(\"operator_dnsbl_keys\");
+        object[\"threat_feed_ownership\"].as_array_mut().unwrap()[0]
+            .as_object_mut()
+            .unwrap()
+            .remove(\"dnsbl_keys\");
+
+        let loaded: AppData = serde_json::from_value(legacy).unwrap();
+        assert!(loaded.operator_dnsbl_keys.is_empty());
+        assert!(loaded.threat_feed_ownership[0].dnsbl_keys.is_empty());
+    }
+
+    #[test]
+    fn records_audit_logs_with_monotonic_ids() {
+""",
+          )
+
+          replace_exact(
+              root,
+              """    AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
+    enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
+    replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
+    threat_indicator_key, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
+""",
+              """    AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
+    dnsbl_entry_key, enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step,
+    record_audit_log, replace_threat_feed_dnsbl_ownership, replace_threat_feed_ownership,
+    select_route, signature_catalog, threat_feed_freshness_snapshot, threat_indicator_key,
+    upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
+""",
+          )
+          replace_exact(
+              root,
+              """    CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
+""",
+              """    CommercialProfile, CommercialReadiness, DnsblEntry, DnsblEntryKey, EnforcementMode,
+    LicenseStatus,
+""",
+          )
+          replace_exact(
+              root,
+              """            let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
+            record_successful_audit_log(
+""",
+              """            let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
+            mark_operator_dnsbl_key(data, &saved);
+            record_successful_audit_log(
+""",
+          )
+          replace_exact(
+              root,
+              """fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) {
+    let key = threat_indicator_key(indicator);
+    if !data.operator_threat_keys.contains(&key) {
+        data.operator_threat_keys.push(key);
+    }
+}
+
+async fn apply_threat_feed_import""",
+              """fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) {
+    let key = threat_indicator_key(indicator);
+    if !data.operator_threat_keys.contains(&key) {
+        data.operator_threat_keys.push(key);
+    }
+}
+
+fn mark_operator_dnsbl_key(data: &mut AppData, entry: &DnsblEntry) {
+    let key = dnsbl_entry_key(entry);
+    if !data.operator_dnsbl_keys.contains(&key) {
+        data.operator_dnsbl_keys.push(key);
+    }
+}
+
+async fn apply_threat_feed_import""",
+          )
+          replace_exact(
+              root,
+              """            let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect();
+            let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
+            let previous_keys: HashSet<_> = replace_threat_feed_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                threat_keys,
+            )
+            .into_iter()
+            .collect();
+""",
+              """            let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect();
+            let operator_dnsbl_owned: HashSet<_> =
+                data.operator_dnsbl_keys.iter().copied().collect();
+            let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
+            let previous_keys: HashSet<_> = replace_threat_feed_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                threat_keys,
+            )
+            .into_iter()
+            .collect();
+            let dnsbl_keys: Vec<_> = feed.dnsbl.iter().map(dnsbl_entry_key).collect();
+            let previous_dnsbl_keys: HashSet<_> = replace_threat_feed_dnsbl_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                dnsbl_keys,
+            )
+            .into_iter()
+            .collect();
+""",
+          )
+          replace_exact(
+              root,
+              """                });
+            }
+            let mut upserted_threats = 0usize;
+""",
+              """                });
+            }
+            if !previous_dnsbl_keys.is_empty() {
+                let still_dnsbl_owned: HashSet<_> = data
+                    .threat_feed_ownership
+                    .iter()
+                    .filter(|ownership| ownership.feed_id != feed.feed_id)
+                    .flat_map(|ownership| ownership.dnsbl_keys.iter().copied())
+                    .collect();
+                data.dnsbl.retain(|entry| {
+                    let key = dnsbl_entry_key(entry);
+                    !previous_dnsbl_keys.contains(&key)
+                        || still_dnsbl_owned.contains(&key)
+                        || operator_dnsbl_owned.contains(&key)
+                });
+            }
+            let mut upserted_threats = 0usize;
+""",
+          )
+          replace_exact(
+              root,
+              """            for entry in feed.dnsbl.iter().cloned() {
+                upsert_dnsbl(&mut data.dnsbl, entry);
+            }
+""",
+              """            let mut upserted_dnsbl = 0usize;
+            for entry in feed.dnsbl.iter().cloned() {
+                if operator_dnsbl_owned.contains(&dnsbl_entry_key(&entry)) {
+                    continue;
+                }
+                upsert_dnsbl(&mut data.dnsbl, entry);
+                upserted_dnsbl += 1;
+            }
+""",
+          )
+          replace_exact(
+              root,
+              """                upserted_threats,
+                upserted_dnsbl: feed.dnsbl.len(),
+""",
+              """                upserted_threats,
+                upserted_dnsbl,
+""",
+          )
+          replace_exact(
+              root,
+              """                operator_threat_keys: Vec::new(),
+                dnsbl: Vec::new(),
+""",
+              """                operator_threat_keys: Vec::new(),
+                operator_dnsbl_keys: Vec::new(),
+                dnsbl: Vec::new(),
+""",
+              expected=2,
+          )
+          replace_exact(
+              root,
+              """    #[tokio::test]
+    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
+""",
+              """    #[test]
+    fn operator_dnsbl_key_marking_is_idempotent() {
+        let mut data = AppData::seeded();
+        let entry = DnsblEntry {
+            address: \"203.0.113.245\".parse().unwrap(),
+            code: \"127.0.0.2\".to_string(),
+            reason: \"operator\".to_string(),
+            source: \"operator\".to_string(),
+            ttl_seconds: 300,
+            prefix_len: None,
+        };
+
+        mark_operator_dnsbl_key(&mut data, &entry);
+        mark_operator_dnsbl_key(&mut data, &entry);
+        assert_eq!(data.operator_dnsbl_keys, vec![dnsbl_entry_key(&entry)]);
+    }
+
+    #[tokio::test]
+    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
+""",
+          )
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Verify repaired source before push
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Test and lint repaired tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Commit only the causal repair and remove this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only | sort)"
+          expected=$'crates/waf-ids-core/src/lib.rs\nsrc/lib.rs'
+          test "${changed}" = "${expected}"
+          git rm .github/workflows/wardnet-dnsbl-repair.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/waf-ids-core/src/lib.rs src/lib.rs
+          git commit -m "fix(security): reconcile DNSBL feed ownership"
+          git fetch origin "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
