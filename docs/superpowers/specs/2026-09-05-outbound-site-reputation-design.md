@@ -96,8 +96,21 @@ Decision-cache keys include tenant, workload, purpose, direction, full canonical
 Keep three distinct dimensions:
 
 - Assessment: `known_malicious`, `suspicious`, or `unknown`.
-- Evidence health: `fresh`, `degraded`, `expired`, or `unavailable`, evaluated against required sources.
+- Evidence health: `fresh`, `degraded`, `expired`, or `unavailable`, evaluated against required sources. `degraded` means all required authorities remain healthy while only optional authority is degraded; required-source expiry is `expired`, and missing/unverifiable required authority is `unavailable`.
 - Policy result: `allow` or `deny`, with stable reason codes; monitor produces a separate shadow result.
+
+The following table is normative for protect-mode evaluation, `DecisionEnvelopeV1`, and the PEP. Higher rows take precedence and the retained assessment is not rewritten merely to explain a higher-precedence authority failure.
+
+| Contract/assessment and evidence health | Exact-scope business authorization | Wardnet action | Required reason | PEP consequence |
+| --- | --- | --- | --- | --- |
+| Invalid identity, schema, contract, binding, or required visibility | Any | `deny` | `invalid_contract` or the corresponding fail-closed contract/visibility error | No Wardnet grant; do not call an allow an invalid-contract result |
+| Any assessment with required evidence `expired` or `unavailable` | Any | `deny` | `required_authority_unavailable` | No Wardnet grant; business authorization cannot mask required-authority failure |
+| `known_malicious` with `fresh` or optional-only `degraded` health | Any | `deny` | `known_malicious` | Hard deny |
+| `suspicious` with `fresh` or optional-only `degraded` health | Any | `deny` | `suspicious` | Deny in the initial protect profile |
+| `unknown` with `fresh` or optional-only `degraded` health | Valid and exact-scope | `allow` | `business_authorization` | May continue to independent EgressWeave and audit gates; this is not transport authorization |
+| `unknown` with `fresh` or optional-only `degraded` health | Missing, expired, revoked, or out-of-scope | `deny` | `unknown_destination` | No Wardnet grant |
+
+`DecisionEnvelopeV1::validate()` must reject every cross-field combination that contradicts this table. In particular, `unknown_destination`, `invalid_contract`, `known_malicious`, `suspicious`, and `required_authority_unavailable` are denial reasons and cannot validate with `action=allow`; `business_authorization` is the only v1 allow reason and is valid only for an `unknown` assessment while required evidence health is `fresh` or optional-only `degraded`. Required evidence `expired` or `unavailable` always denies and uses `required_authority_unavailable`, even if an adverse assessment is retained for SOC explanation. The PEP consumes only a table-consistent Wardnet result and then independently requires EgressWeave allow, current binding, and durable audit reservation.
 
 A current eligible match from a reviewed enforcement-capable source can establish `known_malicious`. Non-enforcement evidence may establish `suspicious`; no active eligible match means `unknown`, not safe. Dedupe syndicated feeds by source lineage. Do not add duplicate severities or invent a weighted score. Domain age, registration novelty, geography, popularity, anti-bot behavior, and isolated HTTP failures are not hard-deny evidence.
 
