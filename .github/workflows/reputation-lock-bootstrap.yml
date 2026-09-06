@@ -18,8 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - name: Regenerate lockfile for the new workspace member
-        run: cargo generate-lockfile
+      - name: Add the workspace package without dependency upgrades
+        run: cargo check -p wardnet-reputation-core
       - name: Format the new Rust contract slice
         run: cargo fmt --all
       - name: Upload generated bootstrap output
