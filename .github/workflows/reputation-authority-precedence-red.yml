@@ -1,4 +1,4 @@
-name: Reputation authority precedence verification
+name: Reputation decision reason RED
 
 on:
   pull_request:
@@ -9,21 +9,19 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  red:
     runs-on: macos-15-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: e040201660c3a9d76deb91a81dd4c53b3ca9e5e2
+          ref: 8e75415a1116691f329040c1d79f09f0b7f4dc8e
           fetch-depth: 1
-      - name: Assert exact causal GREEN source
-        run: test "$(git rev-parse HEAD)" = "e040201660c3a9d76deb91a81dd4c53b3ca9e5e2"
+      - name: Assert exact hostile source
+        run: test "$(git rev-parse HEAD)" = "8e75415a1116691f329040c1d79f09f0b7f4dc8e"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
       - name: Check formatting
         run: cargo fmt --check
-      - name: Test reputation core
-        run: cargo test --locked -p wardnet-reputation-core
-      - name: Clippy reputation core
-        run: cargo clippy --locked -p wardnet-reputation-core --all-targets -- -D warnings
+      - name: Run decision reason regressions
+        run: cargo test --locked -p wardnet-reputation-core --test decision_binding
