@@ -1,0 +1,65 @@
+name: CI formatting causal repair
+
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - '.github/workflows/ci-format-causal-repair.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.pull_request.number == 166 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: true
+      - name: Assert exact repair parent
+        env:
+          EXPECTED_PARENT: 24bbd737ea554db4a5dce94326025daf0e3d76ab
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/ci-format-causal-repair.yml"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Reproduce exact-head formatting RED
+        run: |
+          set +e
+          cargo fmt --check
+          status=$?
+          set -e
+          test "$status" -ne 0
+      - name: Apply rustfmt causal repair
+        run: |
+          cargo fmt
+          changed="$(git diff --name-only | grep -v '^.github/workflows/ci-format-causal-repair.yml$' || true)"
+          test "$changed" = "tests/workflow_queue_contract.rs"
+      - name: Verify causal GREEN
+        run: |
+          cargo fmt --check
+          cargo test --locked --test workflow_queue_contract
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Remove one-shot workflow and push causal fix
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          TRIGGER_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          rm .github/workflows/ci-format-causal-repair.yml
+          test "$(git diff --name-only)" = "tests/workflow_queue_contract.rs"
+          git diff --check
+          git config user.name "wardnet-causal-repair"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(ci): apply rustfmt to source-head contract"
+          git fetch origin "$HEAD_REF"
+          test "$(git rev-parse FETCH_HEAD)" = "$TRIGGER_SHA"
+          git push origin "HEAD:$HEAD_REF"
