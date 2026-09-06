@@ -75,3 +75,20 @@ fn decision_envelope_rejects_untraceable_adverse_assessment() {
         "known-malicious decisions without evidence references must fail closed"
     );
 }
+
+#[test]
+fn decision_envelope_rejects_known_malicious_allow() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["assessment"] = json!("known_malicious");
+    value["action"] = json!("allow");
+    value["reason"] = json!("known_malicious");
+    value["evidence_refs"] = json!(["urn:wardnet:evidence:record-1"]);
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert!(
+        decision.validate().is_err(),
+        "known-malicious assessments must never serialize as an allow action"
+    );
+}
