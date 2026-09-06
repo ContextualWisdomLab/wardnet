@@ -6,7 +6,7 @@ description = "Rust-first WAF/IDS/AI SOC gateway with DNSBL and commercial readi
 license = "MIT"
 
 [workspace]
-members = [".", "crates/waf-ids-core"]
+members = [".", "crates/waf-ids-core", "crates/wardnet-reputation-core"]
 resolver = "3"
 
 [dependencies]
