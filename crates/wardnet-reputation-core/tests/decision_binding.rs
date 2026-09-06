@@ -169,3 +169,32 @@ fn decision_envelope_accepts_authority_failure_reason_over_adverse_assessment() 
         "higher-precedence required-authority failure must remain explainable without erasing the adverse assessment",
     );
 }
+
+#[test]
+fn decision_envelope_rejects_unknown_destination_reason_on_allow() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["action"] = json!("allow");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert!(
+        decision.validate().is_err(),
+        "unknown_destination describes a protect denial and must not validate as an allow reason"
+    );
+}
+
+#[test]
+fn decision_envelope_rejects_invalid_contract_reason_on_allow() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["action"] = json!("allow");
+    value["reason"] = json!("invalid_contract");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert!(
+        decision.validate().is_err(),
+        "invalid_contract is fail-closed and must never validate as an allow reason"
+    );
+}
