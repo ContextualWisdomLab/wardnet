@@ -3,8 +3,7 @@ use serde_json::json;
 use wardnet_reputation_core::{
     ContractValidationErrorV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
     DestinationSubjectV1, DirectionV1, EvaluationModeV1, EvidenceClassificationV1,
-    EvidenceRecordV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1, SourcePolicyV1,
-    SourceTenantScopeV1,
+    EvidenceRecordV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1, SourcePolicyV1, SourceTenantScopeV1,
 };
 
 const NOW: u64 = 1_788_652_800;
