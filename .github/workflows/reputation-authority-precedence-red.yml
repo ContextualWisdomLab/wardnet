@@ -1,4 +1,4 @@
-name: Reputation decision reason RED
+name: Reputation decision mapping verification
 
 on:
   pull_request:
@@ -9,19 +9,21 @@ permissions:
   contents: read
 
 jobs:
-  red:
+  verify:
     runs-on: macos-15-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: 8e75415a1116691f329040c1d79f09f0b7f4dc8e
+          ref: 94dc113b0b77033b695e61392197cfef2f325f21
           fetch-depth: 1
-      - name: Assert exact hostile source
-        run: test "$(git rev-parse HEAD)" = "8e75415a1116691f329040c1d79f09f0b7f4dc8e"
+      - name: Assert exact causal source
+        run: test "$(git rev-parse HEAD)" = "94dc113b0b77033b695e61392197cfef2f325f21"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
       - name: Check formatting
         run: cargo fmt --check
-      - name: Run decision reason regressions
-        run: cargo test --locked -p wardnet-reputation-core --test decision_binding
+      - name: Test reputation core
+        run: cargo test --locked -p wardnet-reputation-core
+      - name: Clippy reputation core
+        run: cargo clippy --locked -p wardnet-reputation-core --all-targets -- -D warnings
