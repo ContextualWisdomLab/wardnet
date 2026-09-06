@@ -446,6 +446,90 @@ fn reason_matches_action(action: PolicyActionV1, reason: DecisionReasonV1) -> bo
     }
 }
 
+/// Immutable, exact-scope Wardnet evidence for one reviewed business authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BusinessAuthorizationBindingV1 {
+    /// Contract schema identifier.
+    pub schema_version: String,
+    /// Immutable authorization identity.
+    pub authorization_id: String,
+    /// Monotonic immutable authorization revision; zero is invalid.
+    pub authorization_revision: u64,
+    /// Authority that issued or approved the authorization.
+    pub authority: String,
+    /// Origin system or record family from which the authorization was admitted.
+    pub origin: String,
+    /// Exact authenticated tenant to which the authorization applies.
+    pub tenant_id: String,
+    /// Exact authenticated workload to which the authorization applies.
+    pub workload_id: String,
+    /// Exact registered purpose to which the authorization applies.
+    pub purpose: String,
+    /// Exact reputation profile to which the authorization applies.
+    pub profile_id: String,
+    /// Exact canonical destination subject to which the authorization applies.
+    pub subject: DestinationSubjectV1,
+    /// Inclusive authorization validity start.
+    pub valid_from_unix: u64,
+    /// Inclusive authorization validity end.
+    pub valid_until_unix: u64,
+    /// Revoked authorizations can never grant continuation.
+    pub revoked: bool,
+    /// Human or governed authority identity that approved the authorization.
+    pub approver_id: String,
+    /// Auditable ticket, case, or decision record reference.
+    pub ticket_ref: String,
+    /// Bounded immutable provenance references for authorization evidence.
+    pub provenance_refs: Vec<String>,
+}
+
+impl BusinessAuthorizationBindingV1 {
+    /// Validate the authorization shape and lifecycle at an injected evaluation time.
+    pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.authorization_id, "business_authorization.authorization_id")?;
+        if self.authorization_revision == 0 {
+            return Err(ContractValidationErrorV1::InvalidBusinessAuthorizationRevision);
+        }
+        validate_text(&self.authority, "business_authorization.authority")?;
+        validate_text(&self.origin, "business_authorization.origin")?;
+        validate_text(&self.tenant_id, "business_authorization.tenant_id")?;
+        validate_text(&self.workload_id, "business_authorization.workload_id")?;
+        validate_text(&self.purpose, "business_authorization.purpose")?;
+        validate_text(&self.profile_id, "business_authorization.profile_id")?;
+        self.subject.validate()?;
+        validate_text(&self.approver_id, "business_authorization.approver_id")?;
+        validate_text(&self.ticket_ref, "business_authorization.ticket_ref")?;
+        validate_text_list(
+            &self.provenance_refs,
+            "business_authorization.provenance_refs",
+        )?;
+        if self.provenance_refs.is_empty() {
+            return Err(ContractValidationErrorV1::MissingBusinessAuthorizationProvenance);
+        }
+        if self.valid_from_unix > self.valid_until_unix {
+            return Err(ContractValidationErrorV1::InvalidTimeOrder);
+        }
+        if self.revoked {
+            return Err(ContractValidationErrorV1::RevokedBusinessAuthorization);
+        }
+        if now_unix < self.valid_from_unix || now_unix > self.valid_until_unix {
+            return Err(ContractValidationErrorV1::ExpiredBusinessAuthorization);
+        }
+        Ok(())
+    }
+
+    /// Require exact business scope to match the already-authenticated evaluated context.
+    fn matches_context(&self, context: &DestinationContextV1) -> bool {
+        self.tenant_id == context.tenant_id
+            && self.workload_id == context.workload_id
+            && self.purpose == context.purpose
+            && self.profile_id == context.profile_id
+            && self.subject == context.subject
+    }
+}
+
 /// Explainable pure-core decision envelope; it is not proof that traffic was actually blocked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -476,6 +560,8 @@ pub struct DecisionEnvelopeV1 {
     pub expires_at_unix: u64,
     /// Bounded producer evidence references used for explanation.
     pub evidence_refs: Vec<String>,
+    /// Exact business-authorization evidence required only for the corresponding allow reason.
+    pub business_authorization: Option<BusinessAuthorizationBindingV1>,
 }
 
 impl DecisionEnvelopeV1 {
@@ -509,6 +595,24 @@ impl DecisionEnvelopeV1 {
         }
         if !reason_matches_action(self.action, self.reason) {
             return Err(ContractValidationErrorV1::InconsistentActionReason);
+        }
+        match (self.reason, self.business_authorization.as_ref()) {
+            (DecisionReasonV1::BusinessAuthorization, Some(binding)) => {
+                binding.validate_at(self.evaluated_at_unix)?;
+                if !binding.matches_context(&self.context) {
+                    return Err(ContractValidationErrorV1::BusinessAuthorizationContextMismatch);
+                }
+                if self.expires_at_unix > binding.valid_until_unix {
+                    return Err(ContractValidationErrorV1::BusinessAuthorizationExpiryMismatch);
+                }
+            }
+            (DecisionReasonV1::BusinessAuthorization, None) => {
+                return Err(ContractValidationErrorV1::MissingBusinessAuthorization);
+            }
+            (_, Some(_)) => {
+                return Err(ContractValidationErrorV1::StrayBusinessAuthorization);
+            }
+            (_, None) => {}
         }
         if self.evaluated_at_unix > self.expires_at_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
@@ -554,4 +658,20 @@ pub enum ContractValidationErrorV1 {
     UnsafeAdverseAllow,
     /// Expired or unavailable required evidence attempts to serialize as an allow action.
     UnsafeUnhealthyEvidenceAllow,
+    /// A business-authorization allow carries no bound authorization evidence.
+    MissingBusinessAuthorization,
+    /// Authorization evidence is attached to a decision that does not use it.
+    StrayBusinessAuthorization,
+    /// Authorization revision zero cannot identify an immutable reviewed revision.
+    InvalidBusinessAuthorizationRevision,
+    /// Business authorization has no immutable provenance evidence.
+    MissingBusinessAuthorizationProvenance,
+    /// A revoked business authorization attempts to contribute to a decision.
+    RevokedBusinessAuthorization,
+    /// Business authorization is not valid at the decision evaluation time.
+    ExpiredBusinessAuthorization,
+    /// Business authorization scope differs from the authenticated evaluated context.
+    BusinessAuthorizationContextMismatch,
+    /// Decision lifetime extends beyond the bound business authorization lifetime.
+    BusinessAuthorizationExpiryMismatch,
 }
