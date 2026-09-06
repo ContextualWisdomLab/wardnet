@@ -16,9 +16,11 @@ Keeping the shifted mapping was rejected because it changes the meaning of MISP 
 
 ## Verification contract
 
-`tests/misp_threat_level_severity.rs` is the focused contract regression. It submits otherwise admissible MISP events using both string and numeric representations and requires `threat_level_id` 1, 2, and 3 to produce exactly `Severity::High`, `Severity::Medium`, and `Severity::Low`. The test was committed before the production mapping changed, so the predecessor implementation fails by returning Critical/High/Medium. Existing `to_ids` and deletion-state tests continue to exercise the independent fail-closed admission boundary.
+`tests/misp_threat_level_severity.rs` is the focused contract regression. It submits otherwise admissible MISP events using both string and numeric representations and requires `threat_level_id` 1, 2, and 3 to produce exactly `Severity::High`, `Severity::Medium`, and `Severity::Low`. RED `45c5c2d0fc87cf6897eabaed032231fb589185e8` preceded production GREEN `1502edf1cff801b1e4d31dfab1d4a0aad89ef489`; the inherited implementation returned Critical/High/Medium for the three defined source levels. Existing `to_ids`, deletion-state, shared DNSBL ownership, restart and persistence regressions remain inherited from the parent rather than copied into this adapter.
 
-Merge evidence must be produced on the exact current stacked head after the parent MISP admission delta is fixed in ancestry. Predecessor checks, review comments, or a locally inferred source mapping do not transfer as release evidence.
+The child has now non-force adopted the complete stable parent lineage. Parent exact `0c83cd5956f512d79c6600e823fcfa6d6f32af4e` already contains the shared DNSBL reconciliation source GREEN and protected-main adoption. Temporary child-restack run `34001140916` pinned that parent and the triggering child ref, merged the parent without rewriting history, formatted only the two expected severity-code/test files under the pinned Rust toolchain, ran full locked workspace tests and strict workspace Clippy successfully, removed the temporary workflow, and proved the final child-versus-parent delta is exactly three files: this decision record, `src/misp_import.rs`, and `tests/misp_threat_level_severity.rs`. The resulting two-parent merge is `e0a7d9034b8810fc4284beb57f990eb2c3ab7641`.
+
+That restack proves source/candidate compatibility, not protected merge readiness. Standard repository/security/review workflows must be acquired on the final human-authored exact head; queued, `action_required`, predecessor-head or temporary-workflow results cannot be promoted as exact-head gate evidence.
 
 ## Traceability and references
 
