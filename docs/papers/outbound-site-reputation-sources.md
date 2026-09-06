@@ -50,16 +50,16 @@ MITRE. (2026). *CWE-319: Cleartext transmission of sensitive information* (CWE V
 
 ## Repository evidence and ownership
 
-Inspected protected Wardnet commit: `5829a0f08d78de464dd24393ce5d0f25fba9d126`.
+Inspected protected Wardnet commit: `a52ccd0a24a727d9349bb32def7713882d8cad1e`.
 
-- [AGENTS.md](https://github.com/ContextualWisdomLab/wardnet/blob/5829a0f08d78de464dd24393ce5d0f25fba9d126/AGENTS.md): Rust-first, proven engines, configuration, research and governance constraints.
-- [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/5829a0f08d78de464dd24393ce5d0f25fba9d126/docs/architecture.md) and [core models](https://github.com/ContextualWisdomLab/wardnet/blob/5829a0f08d78de464dd24393ce5d0f25fba9d126/crates/waf-ids-core/src/lib.rs): actual gateway, ingestion, DNSBL and event baseline.
+- [AGENTS.md](https://github.com/ContextualWisdomLab/wardnet/blob/a52ccd0a24a727d9349bb32def7713882d8cad1e/AGENTS.md): Rust-first, proven engines, configuration, research and governance constraints.
+- [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/a52ccd0a24a727d9349bb32def7713882d8cad1e/docs/architecture.md) and [core models](https://github.com/ContextualWisdomLab/wardnet/blob/a52ccd0a24a727d9349bb32def7713882d8cad1e/crates/waf-ids-core/src/lib.rs): actual gateway, ingestion, DNSBL and event baseline.
 - [Wardnet #136](https://github.com/ContextualWisdomLab/wardnet/pull/136) and [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115): preserve consumer/feed evidence without a duplicate transport-policy owner.
 - [EgressWeave #237](https://github.com/ContextualWisdomLab/EgressWeave/issues/237): immutable Rust-compatible transport authorization contract. The [GitHub Releases listing](https://api.github.com/repos/ContextualWisdomLab/EgressWeave/releases?per_page=1) returned an empty array at review time; this observation is not a claim about every possible package registry.
 - [Wardnet #167](https://github.com/ContextualWisdomLab/wardnet/pull/167) and [#170](https://github.com/ContextualWisdomLab/wardnet/pull/170): ongoing MISP lifecycle and source-severity repairs, not presumed protected behavior.
 - [Wardnet #130](https://github.com/ContextualWisdomLab/wardnet/pull/130): sole product-gap ledger writer. The design PR adds separate documents and does not edit that ledger.
 
-Open PR/issue descriptions are dependency and ownership evidence as inspected on 2026-09-05, not immutable API releases or proof of shipped implementation. Re-read them before implementation.
+Open PR/issue descriptions are dependency and ownership evidence as inspected on 2026-09-06, not immutable API releases or proof of shipped implementation. Re-read them before implementation.
 
 ## Research artifact and redistribution decision
 
