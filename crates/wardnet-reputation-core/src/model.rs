@@ -492,7 +492,10 @@ impl BusinessAuthorizationBindingV1 {
     /// Validate the authorization shape and lifecycle at an injected evaluation time.
     pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
         validate_schema(&self.schema_version)?;
-        validate_text(&self.authorization_id, "business_authorization.authorization_id")?;
+        validate_text(
+            &self.authorization_id,
+            "business_authorization.authorization_id",
+        )?;
         if self.authorization_revision == 0 {
             return Err(ContractValidationErrorV1::InvalidBusinessAuthorizationRevision);
         }
