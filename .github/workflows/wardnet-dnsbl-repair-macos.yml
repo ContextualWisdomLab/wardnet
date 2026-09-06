@@ -1,0 +1,79 @@
+name: Wardnet DNSBL ownership repair (macOS rescue temporary)
+
+on:
+  push:
+    branches:
+      - fix/misp-to-ids-fail-closed
+    paths:
+      - .github/workflows/wardnet-dnsbl-repair-macos.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wardnet-dnsbl-repair-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: macos-15
+    steps:
+      - name: Checkout triggering head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Refuse stale-parent execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+      - name: Reuse the reviewed exact-count repair payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import re
+          from pathlib import Path
+
+          source = Path('.github/workflows/wardnet-dnsbl-repair.yml').read_text()
+          match = re.search(
+              r"printf '%s' '([A-Za-z0-9+/=]+)' \\| base64 -d >/tmp/wardnet-dnsbl-repair\\.py",
+              source,
+          )
+          if match is None:
+              raise SystemExit('reviewed DNSBL repair payload not found exactly once')
+          if len(re.findall(r"printf '%s' '[A-Za-z0-9+/=]+' \\| base64 -d >/tmp/wardnet-dnsbl-repair\\.py", source)) != 1:
+              raise SystemExit('reviewed DNSBL repair payload is ambiguous')
+          Path('/tmp/wardnet-dnsbl-repair.py').write_bytes(base64.b64decode(match.group(1), validate=True))
+          PY
+          python3 /tmp/wardnet-dnsbl-repair.py
+          cargo fmt --all
+          git diff --check
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Test and lint repaired tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Commit only the causal repair and remove temporary workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only | sort)"
+          expected=$'crates/waf-ids-core/src/lib.rs\nsrc/lib.rs'
+          test "${changed}" = "${expected}"
+          git rm .github/workflows/wardnet-dnsbl-repair.yml .github/workflows/wardnet-dnsbl-repair-macos.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/waf-ids-core/src/lib.rs src/lib.rs
+          git commit -m "fix(security): reconcile DNSBL feed ownership"
+          git fetch origin "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
