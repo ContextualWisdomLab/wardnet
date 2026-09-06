@@ -574,6 +574,8 @@ pub struct DecisionEnvelopeV1 {
     pub policy_id: String,
     /// Exact policy revision used for the decision.
     pub policy_revision: u64,
+    /// Policy mode bound to this decision; v1 decision envelopes are protect-only.
+    pub policy_mode: EvaluationModeV1,
     /// Immutable evidence snapshot generation evaluated by this decision.
     pub evidence_generation: String,
     /// Deterministic security assessment.
@@ -601,6 +603,9 @@ impl DecisionEnvelopeV1 {
         validate_text(&self.evaluation_id, "evaluation_id")?;
         self.context.validate()?;
         validate_text(&self.policy_id, "policy_id")?;
+        if self.policy_mode != EvaluationModeV1::Protect {
+            return Err(ContractValidationErrorV1::WrongDecisionMode);
+        }
         validate_text(&self.evidence_generation, "evidence_generation")?;
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
         if !reason_matches_assessment(self.assessment, self.evidence_health, self.reason) {
@@ -661,6 +666,8 @@ pub enum ContractValidationErrorV1 {
     UnsupportedSchema,
     /// Direction is not outbound.
     WrongDirection,
+    /// A decision envelope is not bound to protect policy mode.
+    WrongDecisionMode,
     /// A required bounded text field is blank.
     BlankField(&'static str),
     /// A bounded text or list field exceeds the v1 contract limit.

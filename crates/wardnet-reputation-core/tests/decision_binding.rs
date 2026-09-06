@@ -11,6 +11,7 @@ fn decision_json(workload_id: &str, evidence_generation: &str) -> Value {
         "evaluation_id": "eval-0001",
         "policy_id": "protect-default",
         "policy_revision": 1,
+        "policy_mode": "protect",
         "assessment": "unknown",
         "evidence_health": "fresh",
         "action": "deny",
@@ -73,11 +74,30 @@ fn add_business_authorization(value: &mut Value, workload_id: &str) {
 
 #[test]
 fn decision_envelope_requires_explicit_protect_policy_mode_binding() {
-    let value = decision_json("workload-example", "snapshot-42");
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value
+        .as_object_mut()
+        .expect("decision fixture must be an object")
+        .remove("policy_mode");
 
     assert!(
         serde_json::from_value::<DecisionEnvelopeV1>(value).is_err(),
         "an enforceable v1 decision without an explicit protect-policy mode binding must fail closed"
+    );
+}
+
+#[test]
+fn decision_envelope_rejects_monitor_mode_as_protect_authority() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["policy_mode"] = json!("monitor");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("known v1 policy mode should deserialize");
+
+    assert_eq!(
+        decision.validate(),
+        Err(ContractValidationErrorV1::WrongDecisionMode),
+        "monitor results must not serialize as protect authorization envelopes"
     );
 }
 

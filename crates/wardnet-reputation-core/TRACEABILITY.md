@@ -14,7 +14,8 @@ The v1 contract therefore chooses:
 - `Suspicious` for adverse evidence that does not establish the hard-threat condition;
 - `Unknown` when no eligible adverse match establishes safety;
 - a separate `EvidenceHealthV1` so source outage or expiry can fail closed without rewriting the underlying assessment;
-- a separate `PolicyActionV1`, because a Wardnet reputation allow only permits continuation to independent gates and is never executable EgressWeave transport authorization.
+- a separate `PolicyActionV1`, because a Wardnet reputation allow only permits continuation to independent gates and is never executable EgressWeave transport authorization;
+- an explicit `policy_mode=protect` binding on `DecisionEnvelopeV1`, because the Proposed protect contract and monitor/shadow semantics are different authorities. A monitor result may describe what policy would have done, but it cannot be decoded or validated as a protect grant merely because its assessment and action fields are otherwise coherent.
 
 Rejected alternatives are: treating `unknown` as benign, aggregating producer confidence into an invented probability, using HTTP success as an authorization signal, or allowing business authorization to override adverse evidence. These choices would erase provenance or conflate observation, policy, and enforcement authority.
 
