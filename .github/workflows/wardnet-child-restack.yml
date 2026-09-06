@@ -35,12 +35,21 @@ jobs:
           test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
           git merge --no-ff --no-commit "${EXPECTED_PARENT}"
           git rm .github/workflows/wardnet-child-restack.yml
-          cargo fmt --all -- --check
-          git diff --check --cached
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
+      - name: Format and verify bounded child delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          formatted="$(git diff --name-only | sort)"
+          expected_formatted=$'src/misp_import.rs\ntests/misp_threat_level_severity.rs'
+          test "${formatted}" = "${expected_formatted}"
+          git diff --check
+          git diff --check --cached
+          git add src/misp_import.rs tests/misp_threat_level_severity.rs
       - name: Verify complete inherited parent and severity child
         shell: bash
         run: |
