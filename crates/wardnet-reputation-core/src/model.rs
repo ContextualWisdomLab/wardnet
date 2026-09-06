@@ -413,6 +413,13 @@ impl DecisionEnvelopeV1 {
         validate_text(&self.policy_id, "policy_id")?;
         validate_text(&self.evidence_generation, "evidence_generation")?;
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
+        if matches!(
+            self.assessment,
+            ReputationAssessmentV1::KnownMalicious | ReputationAssessmentV1::Suspicious
+        ) && self.evidence_refs.is_empty()
+        {
+            return Err(ContractValidationErrorV1::MissingDecisionEvidence);
+        }
         if self.evaluated_at_unix > self.expires_at_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
         }
@@ -445,4 +452,6 @@ pub enum ContractValidationErrorV1 {
     EmptySourceEligibility,
     /// Evidence eligible for enforcement has no provenance reference.
     MissingEnforcementProvenance,
+    /// An adverse decision assessment has no evidence reference for SOC traceability.
+    MissingDecisionEvidence,
 }
