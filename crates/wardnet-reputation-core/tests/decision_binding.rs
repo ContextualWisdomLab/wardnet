@@ -39,6 +39,17 @@ fn decision_json(workload_id: &str, evidence_generation: &str) -> Value {
 }
 
 #[test]
+fn decision_envelope_rejects_unknown_wire_fields() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["transport_authorized"] = json!(true);
+
+    assert!(
+        serde_json::from_value::<DecisionEnvelopeV1>(value).is_err(),
+        "v1 decision readers must reject unknown transport or authorization claims instead of ignoring them"
+    );
+}
+
+#[test]
 fn decision_envelope_rejects_invalid_authenticated_context_binding() {
     let decision: DecisionEnvelopeV1 = serde_json::from_value(decision_json("", "snapshot-42"))
         .expect("v1 decision envelope should deserialize");
