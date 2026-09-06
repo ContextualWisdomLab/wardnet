@@ -25,7 +25,7 @@
 | Unauthorized management write | Route takeover or false blocking | `X-Admin-Token` write gate; multi-token RBAC with actor labels and readonly role; audit log for successful writes | SSO/OIDC, mTLS or identity proxy, SCIM |
 | Malicious threat feed import | False positives or broad blocks | Validation, route-scoped enforcement | Source signing, feed confidence, staged promotion |
 | State file corruption | Startup failure or stale policy | JSON parse failure surfaces startup error | Database, backup, schema migration |
-| Upstream SSRF through routes | Internal network exposure | Upstream scheme validation | Upstream allowlists, egress policy |
+| Upstream SSRF through routes | Internal network exposure | Shared outbound URL validation rejects credentials, fragments, and localhost/private literal destinations before proxy/fetch calls | DNS resolution allowlists, request-time rebinding checks, egress policy |
 | Gateway DoS | Availability loss | Rust memory safety, event retention limit | Rate limits, body limits, async event sink |
 | DNSBL abuse | Reputation damage | Loopback response-code validation | Authoritative DNS service, signing, publisher workflow |
 | Secret disclosure | Admin compromise | Support bundle excludes admin token; secrets bootstrapped into credential registry (`WAF_IDS_CREDENTIALS_PATH` preferred over long-lived env); health exposes source label only | External secret manager / SSO, rotation, access review |

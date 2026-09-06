@@ -99,7 +99,7 @@ When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling fil
 This baseline is suitable for local and controlled lab deployments. Internet-facing use still requires:
 
 - TLS termination and identity-aware admin access
-- upstream allowlists and egress controls
+- DNS-aware allowlists and request-time egress revalidation beyond the current literal-host fail-closed checks
 - durable database storage with backups
 - SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
@@ -107,3 +107,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement
+
+Current outbound guardrails reject destination URLs that include embedded credentials or fragments, require HTTPS off loopback, and fail closed when either literal IPs or request-time DNS resolution land on localhost/private/link-local/documentation address space before proxying gateway traffic or calling feed, Clearfolio, or SOC-LLM upstreams. This is still a first layer rather than a full egress platform: Wessels et al. (2024) show that incomplete SSRF defenses remain common when services rely on ad hoc validation rather than explicit request policy, and Jackson et al. (2007) explain why DNS rebinding defenses need request-time hostname revalidation rather than one-time parsing alone. Hostname allowlisting, DNS pinning, and audited proxy configuration remain follow-up controls.
+
+References: Wessels, M., Koch, S., Pellegrino, G., & Johns, M. (2024). *SSRF vs. developers: A study of SSRF-defenses in PHP applications*. https://trouge.net/papers/sec24_SSRF.pdf ; Jackson, C., Bortz, A., Boneh, D., & Mitchell, J. C. (2007). *Protecting browsers from DNS rebinding attacks*. https://web.eecs.umich.edu/~aprakash/eecs588/handouts/dns-rebinding.pdf. These links remain citation-only in this repository because this PR does not establish redistribution rights for the external paper PDFs.
