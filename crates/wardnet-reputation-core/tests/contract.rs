@@ -4,6 +4,7 @@ use wardnet_reputation_core::{
     ContractValidationErrorV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
     DestinationSubjectV1, DirectionV1, EvaluationModeV1, EvidenceClassificationV1,
     EvidenceRecordV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1, SourcePolicyV1,
+    SourceTenantScopeV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -38,6 +39,8 @@ fn source_policy() -> SourcePolicyV1 {
         enforcement_capable: true,
         permitted_subject_kinds: vec![DestinationSubjectKindV1::ExactHost],
         max_evidence_age_seconds: 3_600,
+        tenant_scope: SourceTenantScopeV1::ExplicitTenantSet,
+        allowed_tenant_ids: vec!["tenant-example".to_string()],
         allowed_purposes: vec!["package_metadata".to_string()],
     }
 }
@@ -238,6 +241,34 @@ fn rejects_source_policy_without_explicit_tenant_eligibility() {
         serde_json::from_value::<SourcePolicyV1>(value).is_err(),
         "a reviewed source must declare tenant eligibility explicitly instead of silently widening to every tenant"
     );
+}
+
+#[test]
+fn rejects_ambiguous_source_tenant_eligibility() {
+    let mut candidate = source_policy();
+    candidate.tenant_scope = SourceTenantScopeV1::ExplicitTenantSet;
+    candidate.allowed_tenant_ids.clear();
+    assert_eq!(
+        candidate.validate(),
+        Err(ContractValidationErrorV1::InvalidTenantEligibility)
+    );
+
+    let mut candidate = source_policy();
+    candidate.tenant_scope = SourceTenantScopeV1::AllAuthenticatedTenants;
+    assert_eq!(
+        candidate.validate(),
+        Err(ContractValidationErrorV1::InvalidTenantEligibility)
+    );
+}
+
+#[test]
+fn accepts_reviewed_all_authenticated_tenant_scope_without_tenant_list() {
+    let mut candidate = source_policy();
+    candidate.tenant_scope = SourceTenantScopeV1::AllAuthenticatedTenants;
+    candidate.allowed_tenant_ids.clear();
+    candidate
+        .validate()
+        .expect("explicit reviewed all-tenant eligibility remains a valid source policy");
 }
 
 #[derive(Debug, Deserialize)]
