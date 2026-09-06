@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
-use wardnet_reputation_core::{DecisionEnvelopeV1, REPUTATION_SCHEMA_V1};
+use wardnet_reputation_core::{
+    ContractValidationErrorV1, DecisionEnvelopeV1, REPUTATION_SCHEMA_V1,
+};
 
 const NOW: u64 = 1_788_652_800;
 
@@ -37,6 +39,8 @@ fn bound_allow_json() -> Value {
             "schema_version": REPUTATION_SCHEMA_V1,
             "authorization_id": "authz-policy-scope-0001",
             "authorization_revision": 3,
+            "policy_id": "protect-default",
+            "policy_revision": 7,
             "authority": "security-change-authority",
             "origin": "change-ticket",
             "tenant_id": "tenant-example",
@@ -74,8 +78,9 @@ fn changed_policy_identity_must_not_inherit_an_old_business_authorization() {
     let mut value = bound_allow_json();
     value["policy_id"] = json!("protect-replacement");
 
-    assert!(
-        decision(value).validate().is_err(),
+    assert_eq!(
+        decision(value).validate(),
+        Err(ContractValidationErrorV1::BusinessAuthorizationPolicyMismatch),
         "a business authorization reviewed for one policy identity must not authorize a different policy"
     );
 }
@@ -85,8 +90,9 @@ fn changed_policy_revision_must_not_inherit_an_old_business_authorization() {
     let mut value = bound_allow_json();
     value["policy_revision"] = json!(8);
 
-    assert!(
-        decision(value).validate().is_err(),
+    assert_eq!(
+        decision(value).validate(),
+        Err(ContractValidationErrorV1::BusinessAuthorizationPolicyMismatch),
         "a business authorization reviewed for one immutable policy revision must not survive policy revision drift"
     );
 }
