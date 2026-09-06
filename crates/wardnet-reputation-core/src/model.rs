@@ -423,6 +423,13 @@ impl DecisionEnvelopeV1 {
         if adverse_assessment && self.action == PolicyActionV1::Allow {
             return Err(ContractValidationErrorV1::UnsafeAdverseAllow);
         }
+        let unhealthy_required_authority = matches!(
+            self.evidence_health,
+            EvidenceHealthV1::Expired | EvidenceHealthV1::Unavailable
+        );
+        if unhealthy_required_authority && self.action == PolicyActionV1::Allow {
+            return Err(ContractValidationErrorV1::UnsafeUnhealthyEvidenceAllow);
+        }
         if self.evaluated_at_unix > self.expires_at_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
         }
@@ -459,4 +466,6 @@ pub enum ContractValidationErrorV1 {
     MissingDecisionEvidence,
     /// An adverse assessment attempts to serialize as an allow action.
     UnsafeAdverseAllow,
+    /// Expired or unavailable required evidence attempts to serialize as an allow action.
+    UnsafeUnhealthyEvidenceAllow,
 }
