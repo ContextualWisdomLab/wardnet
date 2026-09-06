@@ -511,6 +511,9 @@ impl BusinessAuthorizationBindingV1 {
         validate_text(&self.purpose, "business_authorization.purpose")?;
         validate_text(&self.profile_id, "business_authorization.profile_id")?;
         self.subject.validate()?;
+        if self.subject.scope != DestinationScopeV1::Exact {
+            return Err(ContractValidationErrorV1::NonExactBusinessAuthorizationScope);
+        }
         validate_text(
             &self.canonicalization_profile,
             "business_authorization.canonicalization_profile",
@@ -694,6 +697,8 @@ pub enum ContractValidationErrorV1 {
     StrayBusinessAuthorization,
     /// Authorization revision zero cannot identify an immutable reviewed revision.
     InvalidBusinessAuthorizationRevision,
+    /// Business authorization widens beyond the exact destination subject scope.
+    NonExactBusinessAuthorizationScope,
     /// Business authorization has no immutable provenance evidence.
     MissingBusinessAuthorizationProvenance,
     /// A revoked business authorization attempts to contribute to a decision.
