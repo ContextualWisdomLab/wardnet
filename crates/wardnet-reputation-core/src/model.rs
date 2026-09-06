@@ -367,6 +367,8 @@ pub enum DecisionReasonV1 {
     Suspicious,
     /// No adverse match exists, but the destination remains unknown without authorization.
     UnknownDestination,
+    /// An exact-scope business authorization permits an unknown destination to continue to other gates.
+    BusinessAuthorization,
     /// Required evidence or authority is unavailable or unverifiable.
     RequiredAuthorityUnavailable,
     /// Contract identity or version could not be validated.
@@ -390,8 +392,17 @@ fn reason_matches_assessment(
         ReputationAssessmentV1::Suspicious => reason == DecisionReasonV1::Suspicious,
         ReputationAssessmentV1::Unknown => matches!(
             reason,
-            DecisionReasonV1::UnknownDestination | DecisionReasonV1::InvalidContract
+            DecisionReasonV1::UnknownDestination
+                | DecisionReasonV1::BusinessAuthorization
+                | DecisionReasonV1::InvalidContract
         ),
+    }
+}
+
+fn reason_matches_action(action: PolicyActionV1, reason: DecisionReasonV1) -> bool {
+    match action {
+        PolicyActionV1::Allow => reason == DecisionReasonV1::BusinessAuthorization,
+        PolicyActionV1::Deny => reason != DecisionReasonV1::BusinessAuthorization,
     }
 }
 
@@ -437,6 +448,9 @@ impl DecisionEnvelopeV1 {
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
         if !reason_matches_assessment(self.assessment, self.evidence_health, self.reason) {
             return Err(ContractValidationErrorV1::InconsistentAssessmentReason);
+        }
+        if !reason_matches_action(self.action, self.reason) {
+            return Err(ContractValidationErrorV1::InconsistentActionReason);
         }
         let adverse_assessment = matches!(
             self.assessment,
@@ -491,6 +505,8 @@ pub enum ContractValidationErrorV1 {
     MissingDecisionEvidence,
     /// Decision assessment and machine-readable reason contradict each other.
     InconsistentAssessmentReason,
+    /// Decision action and machine-readable reason contradict each other.
+    InconsistentActionReason,
     /// An adverse assessment attempts to serialize as an allow action.
     UnsafeAdverseAllow,
     /// Expired or unavailable required evidence attempts to serialize as an allow action.
