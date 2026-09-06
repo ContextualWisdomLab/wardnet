@@ -214,6 +214,9 @@ impl EvidenceRecordV1 {
         validate_optional_text(self.marking.as_deref(), "marking")?;
         validate_text(&self.license_ref, "license_ref")?;
         validate_text_list(&self.provenance_refs, "provenance_refs")?;
+        if self.enforcement_eligible && self.provenance_refs.is_empty() {
+            return Err(ContractValidationErrorV1::MissingEnforcementProvenance);
+        }
         if self.observed_at_unix > self.received_at_unix
             || self.received_at_unix > now_unix
             || self.valid_from_unix > self.valid_until_unix
@@ -440,4 +443,6 @@ pub enum ContractValidationErrorV1 {
     InvalidConfidence,
     /// A source policy does not permit any subject kind or purpose.
     EmptySourceEligibility,
+    /// Evidence eligible for enforcement has no provenance reference.
+    MissingEnforcementProvenance,
 }
