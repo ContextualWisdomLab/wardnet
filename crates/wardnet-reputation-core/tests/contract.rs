@@ -225,6 +225,21 @@ fn rejects_empty_source_eligibility() {
     );
 }
 
+#[test]
+fn rejects_source_policy_without_explicit_tenant_eligibility() {
+    let mut value = serde_json::to_value(source_policy()).expect("source policy serializes");
+    let object = value
+        .as_object_mut()
+        .expect("source policy serializes as an object");
+    object.remove("tenant_scope");
+    object.remove("allowed_tenant_ids");
+
+    assert!(
+        serde_json::from_value::<SourcePolicyV1>(value).is_err(),
+        "a reviewed source must declare tenant eligibility explicitly instead of silently widening to every tenant"
+    );
+}
+
 #[derive(Debug, Deserialize)]
 struct ContractFixture {
     case_id: String,
