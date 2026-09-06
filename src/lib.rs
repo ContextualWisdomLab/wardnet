@@ -282,7 +282,7 @@ impl AppState {
             dnsbl_origin: self.dnsbl_origin.clone(),
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
-            admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+            admin_auth_configured: has_write_admin_credential(self),
         }
     }
 }
@@ -1104,7 +1104,7 @@ async fn evaluate_request(
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let body = {
         let data = state.inner.read().await;
-        prometheus_exposition(&kpi_snapshot_at(&data, now_unix()))
+        operational_prometheus_exposition(&state, &data, now_unix())
     };
     (
         [(
@@ -1113,6 +1113,72 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+fn operational_prometheus_exposition(state: &AppState, data: &AppData, now_unix: u64) -> String {
+    let kpis = kpi_snapshot_at(data, now_unix);
+    let readiness = commercial_readiness_snapshot_at(data, now_unix);
+    let routes_enabled = data.routes.iter().filter(|route| route.enabled).count();
+    let checks_passed = readiness
+        .checks
+        .iter()
+        .filter(|check| check.status == ReadinessStatus::Pass)
+        .count();
+    let checks_failed = readiness
+        .checks
+        .iter()
+        .filter(|check| check.status == ReadinessStatus::Fail)
+        .count();
+    let mut out = prometheus_exposition(&kpis);
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_commercial_ready",
+        "Enterprise sale readiness flag (1=ready, 0=blocked).",
+        usize::from(readiness.ready_for_enterprise_sale),
+    );
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_commercial_blockers",
+        "Current count of commercial-readiness blockers.",
+        readiness.blockers.len(),
+    );
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_readiness_checks_passed",
+        "Commercial-readiness checks currently passing.",
+        checks_passed,
+    );
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_readiness_checks_failed",
+        "Commercial-readiness checks currently failing.",
+        checks_failed,
+    );
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_gateway_ready",
+        "Kubernetes readiness-style route readiness (1=ready, 0=not ready).",
+        usize::from(routes_enabled > 0),
+    );
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_gateway_routes_enabled",
+        "Enabled gateway route count used by the readiness probe.",
+        routes_enabled,
+    );
+    append_prometheus_gauge(
+        &mut out,
+        "waf_ids_admin_auth_configured",
+        "Admin write authentication configured (1=write-capable credential configured, 0=no write-capable credential configured; readonly auth may still exist).",
+        usize::from(has_write_admin_credential(state)),
+    );
+    out
+}
+
+fn append_prometheus_gauge(out: &mut String, name: &str, help: &str, value: usize) {
+    out.push_str(&format!(
+        "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+    ));
 }
 
 async fn get_commercial_license(State(state): State<AppState>) -> Json<CommercialProfile> {
@@ -3707,6 +3773,41 @@ mod tests {
         );
         let body = body_text(response).await;
         assert!(body.contains("waf_ids_security_events_blocked"));
+        assert!(body.contains("waf_ids_commercial_ready 0"));
+        assert!(body.contains("waf_ids_commercial_blockers 4"));
+        assert!(body.contains("waf_ids_readiness_checks_passed 2"));
+        assert!(body.contains("waf_ids_readiness_checks_failed 4"));
+        assert!(body.contains("waf_ids_gateway_ready 1"));
+        assert!(body.contains("waf_ids_gateway_routes_enabled 1"));
+        assert!(body.contains("waf_ids_admin_auth_configured 0"));
+    }
+
+    #[tokio::test]
+    async fn admin_auth_metric_requires_a_write_capable_credential() {
+        let readonly_app = build_app(
+            AppState::seeded(None).with_admin_tokens(parse_admin_tokens("read:auditor:readonly")),
+        );
+        let readonly_health: HealthStatus =
+            json_body(app_request(&readonly_app, empty_request(Method::GET, "/healthz")).await)
+                .await;
+        assert!(!readonly_health.admin_auth_configured);
+        let readonly_body =
+            body_text(app_request(&readonly_app, empty_request(Method::GET, "/metrics")).await)
+                .await;
+        assert!(readonly_body.contains("waf_ids_admin_auth_configured 0"));
+        assert!(readonly_body.contains(
+            "# HELP waf_ids_admin_auth_configured Admin write authentication configured (1=write-capable credential configured, 0=no write-capable credential configured; readonly auth may still exist)."
+        ));
+
+        let writer_app = build_app(
+            AppState::seeded(None).with_admin_tokens(parse_admin_tokens("write:operator:write")),
+        );
+        let writer_health: HealthStatus =
+            json_body(app_request(&writer_app, empty_request(Method::GET, "/healthz")).await).await;
+        assert!(writer_health.admin_auth_configured);
+        let writer_body =
+            body_text(app_request(&writer_app, empty_request(Method::GET, "/metrics")).await).await;
+        assert!(writer_body.contains("waf_ids_admin_auth_configured 1"));
     }
 
     #[tokio::test]
@@ -7645,6 +7746,14 @@ mod tests {
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
+
+        let readonly = state
+            .clone()
+            .with_admin_tokens(parse_admin_tokens("tok:auditor:readonly"))
+            .with_credentials_source(CredentialSource::File);
+        let health = readonly.health_status();
+        assert_eq!(health.credentials_source, "file");
+        assert!(!health.admin_auth_configured);
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
