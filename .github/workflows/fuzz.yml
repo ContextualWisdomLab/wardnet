@@ -34,6 +34,12 @@ jobs:
       FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '300' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify checkout identity
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
