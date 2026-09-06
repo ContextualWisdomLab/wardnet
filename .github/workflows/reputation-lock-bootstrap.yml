@@ -1,0 +1,28 @@
+name: Reputation lock bootstrap
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wardnet-reputation-lock-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  generate-lock:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Regenerate lockfile for the new workspace member
+        run: cargo generate-lockfile
+      - name: Upload generated lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reputation-generated-lock
+          path: Cargo.lock
+          if-no-files-found: error
