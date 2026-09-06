@@ -43,6 +43,8 @@ fn business_authorization_json(workload_id: &str) -> Value {
         "schema_version": REPUTATION_SCHEMA_V1,
         "authorization_id": "authz-0001",
         "authorization_revision": 1,
+        "policy_id": "protect-default",
+        "policy_revision": 1,
         "authority": "security-change-authority",
         "origin": "change-ticket",
         "tenant_id": "tenant-example",
