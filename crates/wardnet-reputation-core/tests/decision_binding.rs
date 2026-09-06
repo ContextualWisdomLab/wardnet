@@ -56,6 +56,8 @@ fn business_authorization_json(workload_id: &str) -> Value {
             "value": "updates.example.invalid",
             "scope": "exact"
         },
+        "canonicalization_profile": "egressweave-offline-fixture",
+        "canonicalization_version": "1",
         "valid_from_unix": NOW - 60,
         "valid_until_unix": NOW + 120,
         "revoked": false,
