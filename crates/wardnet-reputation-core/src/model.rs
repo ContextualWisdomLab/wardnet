@@ -375,14 +375,22 @@ pub enum DecisionReasonV1 {
 
 fn reason_matches_assessment(
     assessment: ReputationAssessmentV1,
+    evidence_health: EvidenceHealthV1,
     reason: DecisionReasonV1,
 ) -> bool {
+    if matches!(
+        evidence_health,
+        EvidenceHealthV1::Expired | EvidenceHealthV1::Unavailable
+    ) {
+        return reason == DecisionReasonV1::RequiredAuthorityUnavailable;
+    }
+
     match assessment {
         ReputationAssessmentV1::KnownMalicious => reason == DecisionReasonV1::KnownMalicious,
         ReputationAssessmentV1::Suspicious => reason == DecisionReasonV1::Suspicious,
-        ReputationAssessmentV1::Unknown => !matches!(
+        ReputationAssessmentV1::Unknown => matches!(
             reason,
-            DecisionReasonV1::KnownMalicious | DecisionReasonV1::Suspicious
+            DecisionReasonV1::UnknownDestination | DecisionReasonV1::InvalidContract
         ),
     }
 }
@@ -427,7 +435,7 @@ impl DecisionEnvelopeV1 {
         validate_text(&self.policy_id, "policy_id")?;
         validate_text(&self.evidence_generation, "evidence_generation")?;
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
-        if !reason_matches_assessment(self.assessment, self.reason) {
+        if !reason_matches_assessment(self.assessment, self.evidence_health, self.reason) {
             return Err(ContractValidationErrorV1::InconsistentAssessmentReason);
         }
         let adverse_assessment = matches!(
