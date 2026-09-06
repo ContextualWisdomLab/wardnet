@@ -20,9 +20,15 @@ jobs:
           toolchain: stable
       - name: Regenerate lockfile for the new workspace member
         run: cargo generate-lockfile
-      - name: Upload generated lockfile
+      - name: Format the new Rust contract slice
+        run: cargo fmt --all
+      - name: Upload generated bootstrap output
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: reputation-generated-lock
-          path: Cargo.lock
+          name: reputation-bootstrap-output
+          path: |
+            Cargo.lock
+            crates/wardnet-reputation-core/src/lib.rs
+            crates/wardnet-reputation-core/src/model.rs
+            crates/wardnet-reputation-core/tests/contract.rs
           if-no-files-found: error
