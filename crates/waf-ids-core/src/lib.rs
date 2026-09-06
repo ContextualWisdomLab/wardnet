@@ -13,6 +13,9 @@ pub struct AppData {
     pub threats: Vec<ThreatIndicator>,
     #[serde(default)]
     pub operator_threat_keys: Vec<ThreatIndicatorKey>,
+    /// DNSBL identities independently managed through the operator API.
+    #[serde(default)]
+    pub operator_dnsbl_keys: Vec<DnsblEntryKey>,
     pub dnsbl: Vec<DnsblEntry>,
     pub events: Vec<SecurityEvent>,
     pub next_event_id: u64,
@@ -47,6 +50,7 @@ impl AppData {
                 ttl_seconds: 86_400,
             }],
             operator_threat_keys: Vec::new(),
+            operator_dnsbl_keys: Vec::new(),
             dnsbl: vec![DnsblEntry {
                 address: "203.0.113.10".parse().expect("seed IP address is valid"),
                 code: "127.0.0.2".to_string(),
@@ -138,6 +142,17 @@ pub struct DnsblEntry {
     pub prefix_len: Option<u8>,
 }
 
+/// Stable DNSBL ownership identity. It deliberately matches [`upsert_dnsbl`],
+/// whose physical row identity is the IP address rather than payload metadata.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct DnsblEntryKey(pub IpAddr);
+
+/// Returns the durable ownership identity for a DNSBL entry.
+pub fn dnsbl_entry_key(entry: &DnsblEntry) -> DnsblEntryKey {
+    DnsblEntryKey(entry.address)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommercialProfile {
     pub tenant_id: String,
@@ -189,6 +204,9 @@ pub struct ThreatFeedStatus {
 pub struct ThreatFeedOwnership {
     pub feed_id: String,
     pub threat_keys: Vec<ThreatIndicatorKey>,
+    /// DNSBL rows currently claimed by this feed snapshot.
+    #[serde(default)]
+    pub dnsbl_keys: Vec<DnsblEntryKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -573,6 +591,27 @@ pub fn replace_threat_feed_ownership(
         ownership.push(ThreatFeedOwnership {
             feed_id,
             threat_keys,
+            dnsbl_keys: Vec::new(),
+        });
+        Vec::new()
+    }
+}
+
+/// Replaces one feed's DNSBL snapshot ownership and returns its prior keys.
+pub fn replace_threat_feed_dnsbl_ownership(
+    ownership: &mut Vec<ThreatFeedOwnership>,
+    feed_id: String,
+    dnsbl_keys: Vec<DnsblEntryKey>,
+) -> Vec<DnsblEntryKey> {
+    if let Some(existing) = ownership.iter_mut().find(|item| item.feed_id == feed_id) {
+        let previous = existing.dnsbl_keys.clone();
+        existing.dnsbl_keys = dnsbl_keys;
+        previous
+    } else {
+        ownership.push(ThreatFeedOwnership {
+            feed_id,
+            threat_keys: Vec::new(),
+            dnsbl_keys,
         });
         Vec::new()
     }
@@ -1774,6 +1813,55 @@ mod tests {
     fn shannon_entropy_ranges_from_zero_to_high() {
         assert_eq!(shannon_entropy(b"aaaaaaaa"), 0.0);
         assert!(shannon_entropy(b"abcdefgh") > 2.9);
+    }
+
+    #[test]
+    fn replaces_threat_feed_dnsbl_ownership_and_returns_previous_keys() {
+        let first = DnsblEntryKey("203.0.113.1".parse().unwrap());
+        let second = DnsblEntryKey("203.0.113.2".parse().unwrap());
+        let mut ownership = Vec::new();
+
+        assert!(
+            replace_threat_feed_dnsbl_ownership(&mut ownership, "feed-a".to_string(), vec![first],)
+                .is_empty()
+        );
+        assert_eq!(ownership[0].dnsbl_keys, vec![first]);
+
+        let previous =
+            replace_threat_feed_dnsbl_ownership(&mut ownership, "feed-a".to_string(), vec![second]);
+        assert_eq!(previous, vec![first]);
+        assert_eq!(ownership[0].dnsbl_keys, vec![second]);
+
+        assert!(
+            replace_threat_feed_dnsbl_ownership(&mut ownership, "feed-b".to_string(), vec![first],)
+                .is_empty()
+        );
+        assert_eq!(ownership.len(), 2);
+        assert!(ownership[1].threat_keys.is_empty());
+    }
+
+    #[test]
+    fn dnsbl_ownership_fields_default_when_deserializing_predecessor_state() {
+        let key = DnsblEntryKey("203.0.113.3".parse().unwrap());
+        let mut data = AppData::seeded();
+        data.operator_dnsbl_keys.push(key);
+        data.threat_feed_ownership.push(ThreatFeedOwnership {
+            feed_id: "legacy-feed".to_string(),
+            threat_keys: Vec::new(),
+            dnsbl_keys: vec![key],
+        });
+
+        let mut legacy = serde_json::to_value(data).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("operator_dnsbl_keys");
+        object["threat_feed_ownership"].as_array_mut().unwrap()[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("dnsbl_keys");
+
+        let loaded: AppData = serde_json::from_value(legacy).unwrap();
+        assert!(loaded.operator_dnsbl_keys.is_empty());
+        assert!(loaded.threat_feed_ownership[0].dnsbl_keys.is_empty());
     }
 
     #[test]
