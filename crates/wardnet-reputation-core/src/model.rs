@@ -460,9 +460,6 @@ impl DecisionEnvelopeV1 {
         if !reason_matches_assessment(self.assessment, self.evidence_health, self.reason) {
             return Err(ContractValidationErrorV1::InconsistentAssessmentReason);
         }
-        if !reason_matches_action(self.action, self.reason) {
-            return Err(ContractValidationErrorV1::InconsistentActionReason);
-        }
         let adverse_assessment = matches!(
             self.assessment,
             ReputationAssessmentV1::KnownMalicious | ReputationAssessmentV1::Suspicious
@@ -479,6 +476,9 @@ impl DecisionEnvelopeV1 {
         );
         if unhealthy_required_authority && self.action == PolicyActionV1::Allow {
             return Err(ContractValidationErrorV1::UnsafeUnhealthyEvidenceAllow);
+        }
+        if !reason_matches_action(self.action, self.reason) {
+            return Err(ContractValidationErrorV1::InconsistentActionReason);
         }
         if self.evaluated_at_unix > self.expires_at_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
