@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use wardnet_reputation_core::{
     ContractValidationErrorV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
-    DestinationSubjectV1, DirectionV1, EvidenceClassificationV1, EvidenceRecordV1,
-    EvaluationModeV1, PolicySnapshotV1, SourcePolicyV1, REPUTATION_SCHEMA_V1,
+    DestinationSubjectV1, DirectionV1, EvaluationModeV1, EvidenceClassificationV1,
+    EvidenceRecordV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1, SourcePolicyV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -69,7 +69,10 @@ fn evidence() -> EvidenceRecordV1 {
 fn rejects_wrong_direction_and_unknown_schema() {
     let mut candidate = context();
     candidate.direction = DirectionV1::Inbound;
-    assert_eq!(candidate.validate(), Err(ContractValidationErrorV1::WrongDirection));
+    assert_eq!(
+        candidate.validate(),
+        Err(ContractValidationErrorV1::WrongDirection)
+    );
 
     let mut candidate = context();
     candidate.schema_version = "wardnet.reputation.v2".to_string();
@@ -185,13 +188,17 @@ fn exact_host_fixture_round_trips_stably() {
     assert_eq!(fixture.expected_reason, "unknown_destination");
     assert_eq!(fixture.expected_visibility, "exact_host");
     assert!(fixture.evidence.is_empty());
-    fixture.context.validate().expect("fixture context is valid");
+    fixture
+        .context
+        .validate()
+        .expect("fixture context is valid");
     fixture
         .source_policy
         .validate()
         .expect("fixture source policy is valid");
 
     let encoded = serde_json::to_string(&fixture.context).expect("context serializes");
-    let decoded: DestinationContextV1 = serde_json::from_str(&encoded).expect("context deserializes");
+    let decoded: DestinationContextV1 =
+        serde_json::from_str(&encoded).expect("context deserializes");
     assert_eq!(decoded, fixture.context);
 }
