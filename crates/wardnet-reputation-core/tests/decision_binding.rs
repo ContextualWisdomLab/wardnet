@@ -92,3 +92,19 @@ fn decision_envelope_rejects_known_malicious_allow() {
         "known-malicious assessments must never serialize as an allow action"
     );
 }
+
+#[test]
+fn decision_envelope_rejects_unavailable_required_authority_allow() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["evidence_health"] = json!("unavailable");
+    value["action"] = json!("allow");
+    value["reason"] = json!("required_authority_unavailable");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert!(
+        decision.validate().is_err(),
+        "required-authority outage must never serialize as a reputation allow"
+    );
+}
