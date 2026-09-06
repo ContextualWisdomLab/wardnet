@@ -456,6 +456,10 @@ pub struct BusinessAuthorizationBindingV1 {
     pub authorization_id: String,
     /// Monotonic immutable authorization revision; zero is invalid.
     pub authorization_revision: u64,
+    /// Exact reputation policy identity reviewed for this authorization.
+    pub policy_id: String,
+    /// Exact immutable reputation policy revision reviewed for this authorization.
+    pub policy_revision: u64,
     /// Authority that issued or approved the authorization.
     pub authority: String,
     /// Origin system or record family from which the authorization was admitted.
@@ -492,6 +496,7 @@ impl BusinessAuthorizationBindingV1 {
         if self.authorization_revision == 0 {
             return Err(ContractValidationErrorV1::InvalidBusinessAuthorizationRevision);
         }
+        validate_text(&self.policy_id, "business_authorization.policy_id")?;
         validate_text(&self.authority, "business_authorization.authority")?;
         validate_text(&self.origin, "business_authorization.origin")?;
         validate_text(&self.tenant_id, "business_authorization.tenant_id")?;
@@ -527,6 +532,11 @@ impl BusinessAuthorizationBindingV1 {
             && self.purpose == context.purpose
             && self.profile_id == context.profile_id
             && self.subject == context.subject
+    }
+
+    /// Require the authorization to have been reviewed for the exact immutable policy decision.
+    fn matches_policy(&self, policy_id: &str, policy_revision: u64) -> bool {
+        self.policy_id == policy_id && self.policy_revision == policy_revision
     }
 }
 
@@ -602,6 +612,9 @@ impl DecisionEnvelopeV1 {
                 if !binding.matches_context(&self.context) {
                     return Err(ContractValidationErrorV1::BusinessAuthorizationContextMismatch);
                 }
+                if !binding.matches_policy(&self.policy_id, self.policy_revision) {
+                    return Err(ContractValidationErrorV1::BusinessAuthorizationPolicyMismatch);
+                }
                 if self.expires_at_unix > binding.valid_until_unix {
                     return Err(ContractValidationErrorV1::BusinessAuthorizationExpiryMismatch);
                 }
@@ -672,6 +685,8 @@ pub enum ContractValidationErrorV1 {
     ExpiredBusinessAuthorization,
     /// Business authorization scope differs from the authenticated evaluated context.
     BusinessAuthorizationContextMismatch,
+    /// Business authorization was reviewed for a different policy identity or revision.
+    BusinessAuthorizationPolicyMismatch,
     /// Decision lifetime extends beyond the bound business authorization lifetime.
     BusinessAuthorizationExpiryMismatch,
 }
