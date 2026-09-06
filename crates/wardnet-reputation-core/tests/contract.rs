@@ -149,8 +149,9 @@ fn rejects_enforcement_evidence_without_provenance() {
     let mut candidate = evidence();
     candidate.provenance_refs.clear();
 
-    assert!(
-        candidate.validate_at(NOW).is_err(),
+    assert_eq!(
+        candidate.validate_at(NOW),
+        Err(ContractValidationErrorV1::MissingEnforcementProvenance),
         "enforcement-eligible evidence without provenance must fail closed"
     );
 }
