@@ -377,10 +377,14 @@ pub struct DecisionEnvelopeV1 {
     pub schema_version: String,
     /// Unique evaluation identifier.
     pub evaluation_id: String,
+    /// Authenticated request and canonical destination identity evaluated by this decision.
+    pub context: DestinationContextV1,
     /// Policy identifier used for the decision.
     pub policy_id: String,
     /// Exact policy revision used for the decision.
     pub policy_revision: u64,
+    /// Immutable evidence snapshot generation evaluated by this decision.
+    pub evidence_generation: String,
     /// Deterministic security assessment.
     pub assessment: ReputationAssessmentV1,
     /// Required evidence health.
@@ -402,7 +406,9 @@ impl DecisionEnvelopeV1 {
     pub fn validate(&self) -> Result<(), ContractValidationErrorV1> {
         validate_schema(&self.schema_version)?;
         validate_text(&self.evaluation_id, "evaluation_id")?;
+        self.context.validate()?;
         validate_text(&self.policy_id, "policy_id")?;
+        validate_text(&self.evidence_generation, "evidence_generation")?;
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
         if self.evaluated_at_unix > self.expires_at_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
