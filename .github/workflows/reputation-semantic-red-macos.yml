@@ -1,0 +1,24 @@
+name: Reputation semantic RED (macOS rescue)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wardnet-reputation-red-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  semantic-red:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Verify formatting before semantic RED
+        run: cargo fmt --all -- --check
+      - name: Execute hostile reputation contract tests
+        run: cargo test --locked -p wardnet-reputation-core
