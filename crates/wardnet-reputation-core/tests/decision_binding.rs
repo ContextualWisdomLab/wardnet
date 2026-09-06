@@ -198,3 +198,46 @@ fn decision_envelope_rejects_invalid_contract_reason_on_allow() {
         "invalid_contract is fail-closed and must never validate as an allow reason"
     );
 }
+
+#[test]
+fn decision_envelope_accepts_business_authorization_allow_with_fresh_evidence() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["action"] = json!("allow");
+    value["reason"] = json!("business_authorization");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    decision.validate().expect(
+        "unknown plus an exact-scope business authorization may continue when required evidence is fresh",
+    );
+}
+
+#[test]
+fn decision_envelope_accepts_business_authorization_allow_with_optional_degradation() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["evidence_health"] = json!("degraded");
+    value["action"] = json!("allow");
+    value["reason"] = json!("business_authorization");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    decision.validate().expect(
+        "optional-source degradation may coexist with an authorized unknown allow while required sources remain healthy",
+    );
+}
+
+#[test]
+fn decision_envelope_rejects_business_authorization_reason_on_deny() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["reason"] = json!("business_authorization");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert_eq!(
+        decision.validate(),
+        Err(ContractValidationErrorV1::InconsistentActionReason)
+    );
+}
