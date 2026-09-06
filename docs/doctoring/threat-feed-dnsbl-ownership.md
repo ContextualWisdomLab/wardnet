@@ -2,47 +2,56 @@
 
 ## Decision boundary
 
-`POST /api/threat-feeds/import` is a snapshot-reconciliation boundary, not an append-only DNSBL ingest path. A feed refresh may withdraw a previously published address. Wardnet must therefore distinguish four facts that the current global `Vec<DnsblEntry>` cannot express by itself:
+`POST /api/threat-feeds/import` is a snapshot-reconciliation boundary, not an append-only DNSBL ingest path. A feed refresh may withdraw a previously published address. Wardnet therefore distinguishes four facts that the global `Vec<DnsblEntry>` cannot express by itself:
 
 1. the stable DNSBL identity currently used by `upsert_dnsbl`;
 2. which feed snapshots still claim that identity;
 3. whether an operator independently owns that identity; and
 4. the current effective payload stored for that identity.
 
-The stable identity for this repair is the same identity the mutation primitive already enforces: IP `address`. Introducing a different ownership key would make reconciliation disagree with `upsert_dnsbl` and would permit two logical owners to mutate one physical row under incompatible identities.
+The stable identity is the same identity the mutation primitive already enforces: IP `address`. Introducing a different ownership key would make reconciliation disagree with `upsert_dnsbl` and would permit two logical owners to mutate one physical row under incompatible identities.
 
-## Required state model
+## Implemented state model
 
-The durable `AppData` authority must carry explicit DNSBL ownership rather than infer it from source strings, TTL, threat indicators, audit logs, or adapter-specific conventions.
+The durable `AppData` authority now carries explicit DNSBL ownership rather than inferring it from source strings, TTL, threat indicators, audit logs, or adapter-specific conventions.
 
-- Add a serializable/hashable `DnsblEntryKey` whose identity matches the global DNSBL upsert identity.
-- Add `dnsbl_keys` to each `ThreatFeedOwnership`, with `#[serde(default)]` so persisted predecessor state migrates without a destructive rewrite.
-- Add `operator_dnsbl_keys` to `AppData`, also `#[serde(default)]`.
-- `/api/dnsbl` writes mark the address as operator-owned before replacing the effective DNSBL payload.
-- A feed import replaces that feed's threat and DNSBL ownership sets as one snapshot mutation, then removes each previously-owned DNSBL row only when the address is absent from the new snapshot, absent from every other feed ownership set, and absent from operator ownership.
-- Feed upsert must not overwrite an operator-owned payload at the same stable address. This mirrors the existing threat-indicator rule that operator-managed payload wins over feed refresh.
+- `DnsblEntryKey(IpAddr)` is serializable/hashable and matches the global DNSBL upsert identity.
+- Each `ThreatFeedOwnership` carries `dnsbl_keys` with `#[serde(default)]`, so persisted predecessor state loads without a destructive rewrite.
+- `AppData` carries independent `operator_dnsbl_keys`, also with `#[serde(default)]`.
+- `/api/dnsbl` upsert and operator-key registration occur in the same `mutate_and_persist` mutation, so either the effective payload plus ownership persist together or the mutation rolls back.
+- A feed import replaces that feed's threat and DNSBL ownership sets as one snapshot mutation, then removes each previously owned DNSBL row only when no other feed and no operator owns the address.
+- Feed import skips effective-payload writes for operator-owned addresses and increments `upserted_dnsbl` only for writes it actually performs.
 
-Ownership metadata is internal control-plane state. It does not become threat intelligence, does not become a synthetic `ThreatIndicator`, and must not be encoded into `source`, audit-log text, or another bounded context. Those shortcuts were rejected because they would make authority implicit and break DDD naming/semantic boundaries.
+Ownership metadata is internal control-plane state. It does not become threat intelligence, does not become a synthetic `ThreatIndicator`, and is not encoded into `source`, audit-log text, or another bounded context. Those shortcuts were rejected because they would make authority implicit and break DDD naming and semantic boundaries.
 
 ## Replay, persistence, and idempotency
 
-A repeated identical feed snapshot must leave both ownership and effective DNSBL state unchanged apart from the feed freshness timestamp already owned by the import path. Restarting from persisted `AppData` must retain enough ownership to make the next refresh deterministic; an in-memory sidecar is therefore not sufficient. A refresh of feed A must never delete an address still owned by feed B. A later operator upsert at an address previously owned by a feed must survive withdrawal of that feed without payload rollback.
+A repeated identical feed snapshot leaves ownership and effective DNSBL state semantically unchanged apart from the feed freshness timestamp already owned by the import path. Restarting from persisted `AppData` retains enough ownership to make the next refresh deterministic; an in-memory sidecar is not sufficient. A refresh of feed A cannot delete an address still owned by feed B. A later operator upsert at an address previously owned by a feed survives withdrawal of that feed without payload rollback.
 
-The repair must remain inside Wardnet's shared threat-feed admission/control-plane path. MISP, STIX/TAXII, OpenCTI, KEV, and other adapters provide feed material but do not copy or reimplement reconciliation. This is why the valid review finding is repaired at `apply_threat_feed_import`, not inside `misp_import.rs`.
+The repair remains inside Wardnet's shared threat-feed admission/control-plane path. MISP, STIX/TAXII, OpenCTI, KEV, and other adapters provide feed material but do not copy or reimplement reconciliation. This is why the valid review finding was repaired at `apply_threat_feed_import`, not inside `misp_import.rs`.
 
-## Hostile RED contract
+## Hostile RED and causal GREEN
 
-`tests/threat_feed_dnsbl_ownership.rs` is the focused public-API regression. Exact RED `a639e626764e2caf593266dbf94d2b030626bbaf` proves the current state model lacks the first required cleanup behavior and cannot safely prove operator ownership:
+`tests/threat_feed_dnsbl_ownership.rs` is the focused public-API regression. The corrected hostile lineage reached exact RED `28d0ac12d37b4c97ea58b2d55831a6c1e7b9cf98`: the existing implementation failed stale feed withdrawal and operator-overwrite isolation while the valid shared-feed control remained preserved. The refresh requests retain unrelated valid material so they reach snapshot reconciliation without changing the existing contract that rejects a completely empty feed import.
 
-- import feed A with one DNSBL address, refresh A with an empty DNSBL snapshot, and require the withdrawn row to disappear;
+The hostile contract requires:
+
+- import feed A with a DNSBL address, refresh A without that DNSBL key, and require the withdrawn row to disappear;
 - import the same address from feeds A and B, withdraw it from A, and require the row to remain because B still owns it;
-- import an address from a feed, overwrite that address through the operator `/api/dnsbl` surface, withdraw the feed, and require the operator payload to survive byte-for-byte at the domain-field level.
+- import an address from a feed, overwrite that address through the operator `/api/dnsbl` surface, withdraw the feed, and require the operator payload to survive at the domain-field level;
+- reject feed overwrite of an operator-owned payload and report zero feed DNSBL writes for that skipped key.
 
-GREEN requires all three tests plus existing threat-feed ownership regressions to pass on the same exact head. A solution that merely stops gateway scoring while leaving stale `/api/dnsbl` state, relies on TTL expiry, synthesizes hidden threat indicators, or keeps ownership only in process memory does not satisfy the contract.
+`tests/threat_feed_dnsbl_persistence.rs` additionally covers restart-before-withdrawal, predecessor-state deserialization and persistence-failure rollback/retry. A solution that merely stops gateway scoring while leaving stale `/api/dnsbl` state, relies on TTL expiry, synthesizes hidden threat indicators, or keeps ownership only in process memory does not satisfy the contract.
 
-## Operational evidence
+The causal source repair was committed as `7042aa19267886e3af9c378dddd879929837877b`. Before that source-only commit was pushed, rescue run `34000662730` executed the resulting working tree: all locked workspace tests passed, including all four DNSBL ownership cases and all three persistence cases, and strict workspace Clippy passed. The workflow then verified that only `crates/waf-ids-core/src/lib.rs` and `src/lib.rs` were modified by the repair, removed both temporary repair workflows, and non-force pushed the causal commit. This is source-GREEN evidence, not a substitute for the required workflows on a later committed head.
 
-The current central runner queue can delay remote execution, but queued/pre-checkout state is non-passing evidence rather than a reason to weaken this invariant. Merge remains prohibited until the exact repaired head obtains the repository-owned CI/Fuzz and all then-live security, coverage, SBOM, provenance, review-thread, and branch-integrity gates required by the protected ruleset.
+## Protected-base compatibility and operational evidence
+
+Protected `main` advanced independently through #171 to `a52ccd0a24a727d9349bb32def7713882d8cad1e`. A bounded non-force restack run `34000892973` checked the then-current #167 head, verified both the feature ref and protected-main SHA were unchanged, merged that exact protected head without rewriting history, removed its temporary restack workflow, and ran the full locked workspace tests plus strict workspace Clippy successfully before pushing merge commit `d8b452cf1d609bb6e9c9a8a33f265c0a32dce7c9`. Thus the causal Rust repair is candidate-base compatible with #171's protected truth.
+
+The first standard required workflows on bot-authored source commit `7042aa1...` terminated `action_required` without jobs because that commit was produced by a `GITHUB_TOKEN` workflow; they are not GREEN evidence. A subsequent human-authored restack-control commit did trigger normal standard workflow materialization, with the Ubuntu CI lane entering the known queued class while the macOS restack runner acquired compute and completed. This narrows the runner evidence already handed to `.github#712`: the observed starvation is not an organization-wide inability to allocate any GitHub-hosted runner.
+
+Merge remains prohibited until the unchanged final committed head obtains the then-live repository/security/review/governance evidence required by the protected ruleset. Queued, `action_required`, predecessor-head, or working-tree evidence must not be promoted to an exact-head required-gate verdict.
 
 ## Security rationale
 
@@ -52,12 +61,16 @@ The general protection rationale remains the fail-safe-default principle documen
 
 ## Acceptance
 
-- `DnsblEntryKey` and its ownership fields are explicit, persisted, serde-defaulted, and code/API tests cover predecessor-state deserialization.
+The production behavior and causal source verification now satisfy these implementation criteria:
+
+- `DnsblEntryKey` and its ownership fields are explicit, persisted, serde-defaulted, and tests cover predecessor-state deserialization;
 - ownership replacement and stale-row removal happen inside the same `mutate_and_persist` transaction as the feed snapshot;
 - same-address multiple-feed ownership prevents premature deletion;
 - operator ownership prevents feed deletion and feed payload overwrite;
-- repeated snapshots are idempotent;
-- `upserted_dnsbl` reports actual feed writes, not merely requested input length when an operator-owned row is preserved;
+- persistence failure rolls ownership and effective state back before retry;
+- repeated snapshots are idempotent at the domain-state level;
+- `upserted_dnsbl` reports actual feed writes rather than requested input length when an operator-owned row is preserved;
 - existing threat ownership semantics remain unchanged;
-- no adapter-specific copy of reconciliation logic is introduced;
-- exact-current CI/Fuzz/security/coverage/SBOM/provenance/review evidence is terminal GREEN before merge.
+- no adapter-specific copy of reconciliation logic is introduced.
+
+Release/merge acceptance remains separate: exact-current CI/Fuzz/security/coverage/SBOM/provenance/review/thread/governance evidence must be terminal-valid before protected merge, followed by fresh protected-head release evidence before any release-ready claim.

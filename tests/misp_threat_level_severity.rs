@@ -31,8 +31,7 @@ fn misp_defined_threat_levels_preserve_source_severity() {
 #[test]
 fn undefined_and_missing_misp_levels_do_not_invent_stronger_source_truth() {
     let undefined = admitted_event("4", "undefined.example");
-    let undefined_material =
-        misp_import::parse_misp_document(&undefined, "misp:test", 60).unwrap();
+    let undefined_material = misp_import::parse_misp_document(&undefined, "misp:test", 60).unwrap();
     assert_eq!(undefined_material.threats[0].severity, Severity::Low);
 
     let missing = r#"{"Event":{"id":"severity-contract","Attribute":[{"type":"domain","value":"missing.example","to_ids":true,"deleted":false}]}}"#;

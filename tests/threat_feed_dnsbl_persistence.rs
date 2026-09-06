@@ -134,7 +134,7 @@ async fn predecessor_state_without_dnsbl_ownership_fields_remains_loadable() {
     // These keys are intentionally absent in the predecessor schema. The GREEN
     // implementation must add them with serde defaults rather than requiring a
     // one-shot migration that makes an existing Wardnet state file unreadable.
-    object.remove("operator_dnsbl_addresses");
+    object.remove("operator_dnsbl_keys");
     object.insert(
         "threat_feed_ownership".to_string(),
         json!([{"feed_id": "legacy-feed", "threat_keys": []}]),
