@@ -1,6 +1,6 @@
 # Outbound site reputation: research and source traceability
 
-Reviewed 2026-09-05. This register supports the [ADR](../adr/2026-09-05-outbound-site-reputation-engine.md) and [design](../superpowers/specs/2026-09-05-outbound-site-reputation-design.md). Engineering requirements and benchmark targets are Wardnet proposals, not claims that the cited systems or this repository already implement them.
+Reviewed 2026-09-06. This register supports the [ADR](../adr/2026-09-05-outbound-site-reputation-engine.md) and [design](../superpowers/specs/2026-09-05-outbound-site-reputation-design.md). Engineering requirements and benchmark targets are Wardnet proposals, not claims that the cited systems or this repository already implement them.
 
 ## R1. DNS reputation research
 
@@ -42,6 +42,12 @@ abuse.ch. (n.d.). *ThreatFox API*. Retrieved September 5, 2026, from https://thr
 
 **Application:** ThreatFox documents authenticated access and expiration of older indicators, illustrating why an imported IP must not remain a timeless verdict. Preserve source status and provenance rather than extending validity at every refresh. **Limit:** Provider-specific expiration is not a universal TTL for every source. Use the current access/usage contract, maintain TLS verification, and obtain any required commercial entitlement before production ingestion.
 
+## R7. Credential-bearing transport confidentiality
+
+MITRE. (2026). *CWE-319: Cleartext transmission of sensitive information* (CWE Version 4.20). https://cwe.mitre.org/data/definitions/319.html
+
+**Application:** CWE-319 identifies transmission of sensitive/security-critical data over cleartext channels as a confidentiality/integrity weakness and recommends reliable confidentiality-protecting cryptographic protocols for transmission. Wardnet therefore requires the released EgressWeave/PEP composition to prove authenticated encrypted transport before a credential-bearing hop; an initial HTTP request, HTTPS-to-HTTP downgrade, redirect, or retry must strip credentials before the unsafe hop or be rejected. **Limit:** Wardnet does not implement a second TLS stack or infer transport security from scheme text alone. The transport owner must supply the executable peer-bound proof, and deployment tests must observe zero credential bytes on cleartext paths.
+
 ## Repository evidence and ownership
 
 Inspected protected Wardnet commit: `5829a0f08d78de464dd24393ce5d0f25fba9d126`.
@@ -59,4 +65,4 @@ Open PR/issue descriptions are dependency and ownership evidence as inspected on
 
 No third-party PDF is committed in this documentation slice. USENIX makes the Notos paper openly accessible, but the reviewed page did not establish an explicit public-repository redistribution grant. The EXPOSURE institutional [copyright notice](https://www.eurecom.fr/en/publication/3281/copyright) permits personal use; that is not treated as permission to redistribute the full paper in this repository. Follow AGENTS.md's cite/link/original-summary fallback rather than infer rights from download availability.
 
-The STIX standard is cited in its normative HTML form; it is a standard, not an academic-paper substitute. Provider datasets, API examples and malicious samples are not vendored. Source-specific licensing, attribution, access controls and distribution markings must be recorded by any future adapter. This register contains original summaries and bibliographic references, not copied papers or datasets.
+The STIX standard and CWE entry are cited in their normative/authoritative web forms; they are standards/weakness taxonomies, not academic-paper substitutes. Provider datasets, API examples and malicious samples are not vendored. Source-specific licensing, attribution, access controls and distribution markings must be recorded by any future adapter. This register contains original summaries and bibliographic references, not copied papers or datasets.
