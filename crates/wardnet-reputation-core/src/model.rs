@@ -474,6 +474,10 @@ pub struct BusinessAuthorizationBindingV1 {
     pub profile_id: String,
     /// Exact canonical destination subject to which the authorization applies.
     pub subject: DestinationSubjectV1,
+    /// Exact external canonicalization profile under which the subject was reviewed.
+    pub canonicalization_profile: String,
+    /// Exact external canonicalization profile version under which the subject was reviewed.
+    pub canonicalization_version: String,
     /// Inclusive authorization validity start.
     pub valid_from_unix: u64,
     /// Inclusive authorization validity end.
@@ -507,6 +511,14 @@ impl BusinessAuthorizationBindingV1 {
         validate_text(&self.purpose, "business_authorization.purpose")?;
         validate_text(&self.profile_id, "business_authorization.profile_id")?;
         self.subject.validate()?;
+        validate_text(
+            &self.canonicalization_profile,
+            "business_authorization.canonicalization_profile",
+        )?;
+        validate_text(
+            &self.canonicalization_version,
+            "business_authorization.canonicalization_version",
+        )?;
         validate_text(&self.approver_id, "business_authorization.approver_id")?;
         validate_text(&self.ticket_ref, "business_authorization.ticket_ref")?;
         validate_text_list(
@@ -535,6 +547,8 @@ impl BusinessAuthorizationBindingV1 {
             && self.purpose == context.purpose
             && self.profile_id == context.profile_id
             && self.subject == context.subject
+            && self.canonicalization_profile == context.canonicalization_profile
+            && self.canonicalization_version == context.canonicalization_version
     }
 
     /// Require the authorization to have been reviewed for the exact immutable policy decision.
