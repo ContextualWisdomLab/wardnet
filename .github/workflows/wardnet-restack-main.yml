@@ -1,0 +1,61 @@
+name: Wardnet protected-main restack (temporary)
+
+on:
+  push:
+    branches:
+      - fix/misp-to-ids-fail-closed
+    paths:
+      - .github/workflows/wardnet-restack-main.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wardnet-restack-main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  restack:
+    runs-on: macos-15
+    steps:
+      - name: Checkout triggering head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Adopt the verified protected head without rewriting history
+        shell: bash
+        env:
+          EXPECTED_MAIN: a52ccd0a24a727d9349bb32def7713882d8cad1e
+        run: |
+          set -euo pipefail
+          git fetch origin main "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse origin/main)" = "${EXPECTED_MAIN}"
+          test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+          git merge --no-ff --no-commit "${EXPECTED_MAIN}"
+          git rm .github/workflows/wardnet-restack-main.yml
+          cargo fmt --all -- --check
+          git diff --check --cached
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Verify candidate-base compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Commit and push only if both refs stayed unchanged
+        shell: bash
+        env:
+          EXPECTED_MAIN: a52ccd0a24a727d9349bb32def7713882d8cad1e
+        run: |
+          set -euo pipefail
+          git fetch origin main "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse origin/main)" = "${EXPECTED_MAIN}"
+          test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: adopt protected main a52ccd0"
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
