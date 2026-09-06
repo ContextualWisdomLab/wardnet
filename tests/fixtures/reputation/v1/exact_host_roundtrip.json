@@ -1,0 +1,33 @@
+{
+  "case_id": "REP-CONTRACT-ROUNDTRIP-01",
+  "now_unix": 1788652800,
+  "context": {
+    "schema_version": "wardnet.reputation.v1",
+    "direction": "outbound",
+    "tenant_id": "tenant-example",
+    "workload_id": "workload-example",
+    "purpose": "package_metadata",
+    "operation_id": "op-0001",
+    "profile_id": "protect-default",
+    "subject": {
+      "kind": "exact_host",
+      "value": "updates.example.invalid",
+      "scope": "exact"
+    },
+    "canonicalization_profile": "egressweave-offline-fixture",
+    "canonicalization_version": "1"
+  },
+  "source_policy": {
+    "schema_version": "wardnet.reputation.v1",
+    "source_id": "reviewed-source",
+    "enforcement_capable": true,
+    "permitted_subject_kinds": ["exact_host"],
+    "max_evidence_age_seconds": 3600,
+    "allowed_purposes": ["package_metadata"]
+  },
+  "evidence": [],
+  "expected_assessment": "unknown",
+  "expected_action": "deny",
+  "expected_reason": "unknown_destination",
+  "expected_visibility": "exact_host"
+}
