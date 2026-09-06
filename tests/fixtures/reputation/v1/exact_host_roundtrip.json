@@ -23,6 +23,8 @@
     "enforcement_capable": true,
     "permitted_subject_kinds": ["exact_host"],
     "max_evidence_age_seconds": 3600,
+    "tenant_scope": "explicit_tenant_set",
+    "allowed_tenant_ids": ["tenant-example"],
     "allowed_purposes": ["package_metadata"]
   },
   "evidence": [],
