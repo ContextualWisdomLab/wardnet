@@ -60,3 +60,18 @@ fn decision_envelope_rejects_missing_evidence_generation_binding() {
         Err(ContractValidationErrorV1::BlankField("evidence_generation"))
     );
 }
+
+#[test]
+fn decision_envelope_rejects_untraceable_adverse_assessment() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["assessment"] = json!("known_malicious");
+    value["reason"] = json!("known_malicious");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert_eq!(
+        decision.validate(),
+        Err(ContractValidationErrorV1::MissingDecisionEvidence)
+    );
+}
