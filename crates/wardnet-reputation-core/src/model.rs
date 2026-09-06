@@ -373,6 +373,20 @@ pub enum DecisionReasonV1 {
     InvalidContract,
 }
 
+fn reason_matches_assessment(
+    assessment: ReputationAssessmentV1,
+    reason: DecisionReasonV1,
+) -> bool {
+    match assessment {
+        ReputationAssessmentV1::KnownMalicious => reason == DecisionReasonV1::KnownMalicious,
+        ReputationAssessmentV1::Suspicious => reason == DecisionReasonV1::Suspicious,
+        ReputationAssessmentV1::Unknown => !matches!(
+            reason,
+            DecisionReasonV1::KnownMalicious | DecisionReasonV1::Suspicious
+        ),
+    }
+}
+
 /// Explainable pure-core decision envelope; it is not proof that traffic was actually blocked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecisionEnvelopeV1 {
@@ -413,6 +427,9 @@ impl DecisionEnvelopeV1 {
         validate_text(&self.policy_id, "policy_id")?;
         validate_text(&self.evidence_generation, "evidence_generation")?;
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
+        if !reason_matches_assessment(self.assessment, self.reason) {
+            return Err(ContractValidationErrorV1::InconsistentAssessmentReason);
+        }
         let adverse_assessment = matches!(
             self.assessment,
             ReputationAssessmentV1::KnownMalicious | ReputationAssessmentV1::Suspicious
@@ -464,6 +481,8 @@ pub enum ContractValidationErrorV1 {
     MissingEnforcementProvenance,
     /// An adverse decision assessment has no evidence reference for SOC traceability.
     MissingDecisionEvidence,
+    /// Decision assessment and machine-readable reason contradict each other.
+    InconsistentAssessmentReason,
     /// An adverse assessment attempts to serialize as an allow action.
     UnsafeAdverseAllow,
     /// Expired or unavailable required evidence attempts to serialize as an allow action.
