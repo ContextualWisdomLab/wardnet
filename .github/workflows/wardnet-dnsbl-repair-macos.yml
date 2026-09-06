@@ -29,7 +29,7 @@ jobs:
           set -euo pipefail
           git fetch origin "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
           test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
-      - name: Decode and validate the reviewed exact-count repair payload
+      - name: Decode and repair the reviewed exact-count patch script
         shell: bash
         run: |
           set -euo pipefail
@@ -38,14 +38,33 @@ jobs:
           import re
           from pathlib import Path
 
-          source = Path('.github/workflows/wardnet-dnsbl-repair.yml').read_text()
+          workflow = Path('.github/workflows/wardnet-dnsbl-repair.yml').read_text()
           pattern = r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d >/tmp/wardnet-dnsbl-repair\.py"
-          matches = re.findall(pattern, source)
+          matches = re.findall(pattern, workflow)
           if len(matches) != 1:
               raise SystemExit(f'reviewed DNSBL repair payload count={len(matches)}, expected 1')
-          Path('/tmp/wardnet-dnsbl-repair.py').write_bytes(base64.b64decode(matches[0], validate=True))
+          script = base64.b64decode(matches[0], validate=True).decode()
+          fixes = (
+              (
+                  '                dnsbl: Vec::new(),\n"",\n    """                operator_threat_keys:',
+                  '                dnsbl: Vec::new(),\n""",\n    """                operator_threat_keys:',
+              ),
+              (
+                  '    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {\n"",\n    """    #[test]',
+                  '    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {\n""",\n    """    #[test]',
+              ),
+              (
+                  '    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {\n"",\n)',
+                  '    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {\n""",\n)',
+              ),
+          )
+          for old, new in fixes:
+              count = script.count(old)
+              if count != 1:
+                  raise SystemExit(f'patch-script quote repair expected 1 occurrence, found {count}: {old!r}')
+              script = script.replace(old, new)
+          Path('/tmp/wardnet-dnsbl-repair.py').write_text(script)
           PY
-          nl -ba /tmp/wardnet-dnsbl-repair.py | sed -n '315,370p'
           python3 -m py_compile /tmp/wardnet-dnsbl-repair.py
           python3 /tmp/wardnet-dnsbl-repair.py
           cargo fmt --all
