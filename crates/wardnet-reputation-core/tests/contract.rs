@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde_json::json;
 use wardnet_reputation_core::{
     ContractValidationErrorV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
     DestinationSubjectV1, DirectionV1, EvaluationModeV1, EvidenceClassificationV1,
@@ -153,6 +154,25 @@ fn rejects_enforcement_evidence_without_provenance() {
         candidate.validate_at(NOW),
         Err(ContractValidationErrorV1::MissingEnforcementProvenance),
         "enforcement-eligible evidence without provenance must fail closed"
+    );
+}
+
+#[test]
+fn rejects_unknown_evidence_fields_that_could_widen_scope() {
+    let mut value = serde_json::to_value(evidence()).expect("evidence serializes");
+    let object = value
+        .as_object_mut()
+        .expect("evidence contract serializes as an object");
+    object.remove("tenant_id");
+    object.insert(
+        "tenant_ids".to_string(),
+        json!(["tenant-example"]),
+    );
+
+    let decoded = serde_json::from_value::<EvidenceRecordV1>(value);
+    assert!(
+        decoded.is_err(),
+        "an unrecognized tenant restriction must fail closed instead of degrading to global evidence"
     );
 }
 
