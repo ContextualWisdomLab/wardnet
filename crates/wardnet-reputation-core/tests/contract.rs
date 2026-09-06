@@ -128,6 +128,26 @@ fn rejects_ambiguous_subject_scope() {
 }
 
 #[test]
+fn enforces_declared_observable_url_v1_limit() {
+    const URL_LIMIT_BYTES: usize = 8 * 1024;
+    let prefix = "https://updates.example.invalid/";
+
+    let mut candidate = context();
+    candidate.subject.kind = DestinationSubjectKindV1::ObservableUrl;
+    candidate.subject.value = format!("{prefix}{}", "a".repeat(URL_LIMIT_BYTES - prefix.len()));
+    candidate
+        .validate()
+        .expect("the proposed v1 contract accepts an observable URL through 8 KiB");
+
+    candidate.subject.value.push('a');
+    assert_eq!(
+        candidate.validate(),
+        Err(ContractValidationErrorV1::BoundExceeded("subject.value")),
+        "observable URLs above the declared 8 KiB contract limit must fail closed"
+    );
+}
+
+#[test]
 fn rejects_missing_required_source_policy() {
     let policy = PolicySnapshotV1 {
         schema_version: REPUTATION_SCHEMA_V1.to_string(),
