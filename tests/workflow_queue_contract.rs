@@ -40,9 +40,7 @@ fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
 fn local_pr_workflows_bind_checkout_to_the_exact_source_head() {
     for name in ["ci.yml", "fuzz.yml"] {
         let workflow = workflow_text(name);
-        assert!(workflow.contains(
-            "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
-        ));
+        assert!(workflow.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}"));
         assert!(workflow.contains(
             "EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
         ));
