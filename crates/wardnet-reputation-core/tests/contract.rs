@@ -145,6 +145,17 @@ fn rejects_invalid_evidence_time_order_and_confidence() {
 }
 
 #[test]
+fn rejects_enforcement_evidence_without_provenance() {
+    let mut candidate = evidence();
+    candidate.provenance_refs.clear();
+
+    assert!(
+        candidate.validate_at(NOW).is_err(),
+        "enforcement-eligible evidence without provenance must fail closed"
+    );
+}
+
+#[test]
 fn rejects_empty_source_eligibility() {
     let mut candidate = source_policy();
     candidate.permitted_subject_kinds.clear();
