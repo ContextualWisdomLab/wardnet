@@ -153,3 +153,19 @@ fn decision_envelope_accepts_consistent_suspicious_denial() {
         .validate()
         .expect("consistent suspicious deny must remain a valid reputation decision");
 }
+
+#[test]
+fn decision_envelope_accepts_authority_failure_reason_over_adverse_assessment() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["assessment"] = json!("suspicious");
+    value["evidence_health"] = json!("unavailable");
+    value["reason"] = json!("required_authority_unavailable");
+    value["evidence_refs"] = json!(["urn:wardnet:evidence:record-2"]);
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    decision.validate().expect(
+        "higher-precedence required-authority failure must remain explainable without erasing the adverse assessment",
+    );
+}
