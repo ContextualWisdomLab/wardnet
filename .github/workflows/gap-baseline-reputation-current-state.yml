@@ -1,0 +1,57 @@
+name: Gap baseline reputation current-state repair
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gap-baseline-reputation-current-state.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gap-baseline-reputation-current-state-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'codex/main-gap-followup'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Update exact reputation-state ledger
+        env:
+          EXPECTED_SOURCE_HEAD: ${{ github.event.pull_request.head.sha }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('docs/product-technical-gap-baseline.md')
+          text = path.read_text()
+          old = '''#175 is Draft at exact `45f2aecd40983b785c1e37489596af641dedcc84` on protected `main@a52ccd0...`. The Wardnet-owned pure contract slice includes explicit tenant scope, source/evidence identity, protect evaluation semantics and fail-closed error precedence without parsing URLs, resolving DNS, choosing proxies, establishing TLS or performing HTTP transport. Exact-head Fuzz `34035086713`, CI `34035086747`, Security `34035086722` and SAST `34035086714` are terminal success. CodeQL `34035086718` fails only at the delegated current-head verdict boundary; focused source-head/error-precedence verifier `34035086703/101491566401` remains queued. Its temporary verifier must be removed only after exact causal verification completes, followed by fresh exact-head gates on the cleanup head.'''
+          new = '''#175 remains Draft on protected `main@a52ccd0...`. A fresh design/code review found one concrete v1 contract drift: Proposed #173 declares an 8 KiB `ObservableUrl` bound while `DestinationSubjectV1::validate` applied the generic 1 KiB text bound to every subject kind. Test-only exact `dd5a82df0d5588b7f35003fb7447902c10641719` obtained hosted causal RED in CI `34060554728` / job `101560199069`: formatting passed, the workspace reached `wardnet-reputation-core/tests/contract.rs`, the exactly-8-KiB URL failed with `BoundExceeded("subject.value")`, and the other 13 reputation-contract tests passed. Current source is `0282c9d57058783b79cc9ba832ef319cbde7774e`, which contains only a bounded self-removing repair mechanism while production remains unchanged. Repair run `34061489186` is queued pre-steps; its write-authorized job executes no repository tests/code and may only add an 8 KiB `ObservableUrl` limit while retaining the generic 1 KiB host/address/identity bound, validate the two-path diff/current remote head, remove itself, and normal fast-forward push. No predecessor GREEN transfers. After the causal repair materializes, reacquire exact-current CI/Fuzz/security/SAST/CodeQL/review evidence and only then restack #176.'''
+          if text.count(old) != 1:
+              raise SystemExit('expected stale #175 baseline paragraph exactly once')
+          path.write_text(text.replace(old, new, 1))
+
+          workflow = Path('.github/workflows/gap-baseline-reputation-current-state.yml')
+          if not workflow.exists():
+              raise SystemExit('temporary baseline repair workflow is unexpectedly absent')
+          workflow.unlink()
+          PY
+          test "$(git diff --name-only | sort)" = $'.github/workflows/gap-baseline-reputation-current-state.yml\ndocs/product-technical-gap-baseline.md'
+          git diff --check
+          remote_head="$(git ls-remote origin "refs/heads/${SOURCE_BRANCH}" | cut -f1)"
+          test "$remote_head" = "$EXPECTED_SOURCE_HEAD"
+          git config user.name 'Seongho Bae'
+          git config user.email 'me@seonghobae.me'
+          git add docs/product-technical-gap-baseline.md .github/workflows/gap-baseline-reputation-current-state.yml
+          git commit -m 'docs(gaps): record reputation URL-bound RED'
+          git push origin "HEAD:${SOURCE_BRANCH}"
