@@ -1,0 +1,27 @@
+name: Reputation authority precedence RED
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reputation-authority-precedence-red.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  red:
+    runs-on: macos-15-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: f1ebc06a2c384e4c849dcaa7045e6cc9db14387e
+          fetch-depth: 1
+      - name: Assert exact RED source
+        run: test "$(git rev-parse HEAD)" = "f1ebc06a2c384e4c849dcaa7045e6cc9db14387e"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run authority-precedence regression
+        run: cargo test --locked -p wardnet-reputation-core decision_envelope_accepts_authority_failure_reason_over_adverse_assessment -- --exact
