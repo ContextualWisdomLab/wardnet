@@ -5,6 +5,50 @@ use serde::{Deserialize, Serialize};
 /// Wire schema identifier for the first Wardnet reputation contract family.
 pub const REPUTATION_SCHEMA_V1: &str = "wardnet.reputation.v1";
 
+const MAX_TEXT_BYTES_V1: usize = 1_024;
+const MAX_LIST_ITEMS_V1: usize = 64;
+
+fn validate_schema(schema_version: &str) -> Result<(), ContractValidationErrorV1> {
+    if schema_version == REPUTATION_SCHEMA_V1 {
+        Ok(())
+    } else {
+        Err(ContractValidationErrorV1::UnsupportedSchema)
+    }
+}
+
+fn validate_text(value: &str, field: &'static str) -> Result<(), ContractValidationErrorV1> {
+    if value.trim().is_empty() {
+        return Err(ContractValidationErrorV1::BlankField(field));
+    }
+    if value.len() > MAX_TEXT_BYTES_V1 {
+        return Err(ContractValidationErrorV1::BoundExceeded(field));
+    }
+    Ok(())
+}
+
+fn validate_optional_text(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<(), ContractValidationErrorV1> {
+    if let Some(value) = value {
+        validate_text(value, field)?;
+    }
+    Ok(())
+}
+
+fn validate_text_list(
+    values: &[String],
+    field: &'static str,
+) -> Result<(), ContractValidationErrorV1> {
+    if values.len() > MAX_LIST_ITEMS_V1 {
+        return Err(ContractValidationErrorV1::BoundExceeded(field));
+    }
+    for value in values {
+        validate_text(value, field)?;
+    }
+    Ok(())
+}
+
 /// Direction of the evaluated destination operation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +92,18 @@ pub struct DestinationSubjectV1 {
     pub scope: DestinationScopeV1,
 }
 
+impl DestinationSubjectV1 {
+    fn validate(&self) -> Result<(), ContractValidationErrorV1> {
+        validate_text(&self.value, "subject.value")?;
+        if self.scope == DestinationScopeV1::HostAndSubdomains
+            && self.kind != DestinationSubjectKindV1::ExactHost
+        {
+            return Err(ContractValidationErrorV1::AmbiguousSubjectScope);
+        }
+        Ok(())
+    }
+}
+
 /// Authenticated evaluation context after identity claims have been verified by the service edge.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DestinationContextV1 {
@@ -76,6 +132,21 @@ pub struct DestinationContextV1 {
 impl DestinationContextV1 {
     /// Validate the bounded contract shape without authenticating caller-controlled identity text.
     pub fn validate(&self) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        if self.direction != DirectionV1::Outbound {
+            return Err(ContractValidationErrorV1::WrongDirection);
+        }
+        validate_text(&self.tenant_id, "tenant_id")?;
+        validate_text(&self.workload_id, "workload_id")?;
+        validate_text(&self.purpose, "purpose")?;
+        validate_text(&self.operation_id, "operation_id")?;
+        validate_text(&self.profile_id, "profile_id")?;
+        self.subject.validate()?;
+        validate_text(&self.canonicalization_profile, "canonicalization_profile")?;
+        validate_text(
+            &self.canonicalization_version,
+            "canonicalization_version",
+        )?;
         Ok(())
     }
 }
@@ -135,7 +206,29 @@ pub struct EvidenceRecordV1 {
 
 impl EvidenceRecordV1 {
     /// Validate contract shape and time ordering at an injected evaluation time.
-    pub fn validate_at(&self, _now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+    pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.source_id, "source_id")?;
+        validate_text(&self.producer_record_id, "producer_record_id")?;
+        validate_text(
+            &self.producer_record_version,
+            "producer_record_version",
+        )?;
+        self.subject.validate()?;
+        validate_optional_text(self.producer_severity.as_deref(), "producer_severity")?;
+        validate_optional_text(self.tenant_id.as_deref(), "tenant_id")?;
+        validate_optional_text(self.marking.as_deref(), "marking")?;
+        validate_text(&self.license_ref, "license_ref")?;
+        validate_text_list(&self.provenance_refs, "provenance_refs")?;
+        if self.observed_at_unix > self.received_at_unix
+            || self.received_at_unix > now_unix
+            || self.valid_from_unix > self.valid_until_unix
+        {
+            return Err(ContractValidationErrorV1::InvalidTimeOrder);
+        }
+        if self.producer_confidence.is_some_and(|confidence| confidence > 100) {
+            return Err(ContractValidationErrorV1::InvalidConfidence);
+        }
         Ok(())
     }
 }
@@ -160,6 +253,17 @@ pub struct SourcePolicyV1 {
 impl SourcePolicyV1 {
     /// Validate source-policy shape without fetching or authenticating a source.
     pub fn validate(&self) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.source_id, "source_id")?;
+        if self.permitted_subject_kinds.is_empty() || self.allowed_purposes.is_empty() {
+            return Err(ContractValidationErrorV1::EmptySourceEligibility);
+        }
+        if self.permitted_subject_kinds.len() > MAX_LIST_ITEMS_V1 {
+            return Err(ContractValidationErrorV1::BoundExceeded(
+                "permitted_subject_kinds",
+            ));
+        }
+        validate_text_list(&self.allowed_purposes, "allowed_purposes")?;
         Ok(())
     }
 }
@@ -195,7 +299,24 @@ pub struct PolicySnapshotV1 {
 
 impl PolicySnapshotV1 {
     /// Validate the policy snapshot at an injected evaluation time.
-    pub fn validate_at(&self, _now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+    pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.policy_id, "policy_id")?;
+        if self.mode == EvaluationModeV1::Protect && self.required_sources.is_empty() {
+            return Err(ContractValidationErrorV1::EmptyRequiredSources);
+        }
+        validate_text_list(&self.required_sources, "required_sources")?;
+        for (index, source) in self.required_sources.iter().enumerate() {
+            if self.required_sources[..index].contains(source) {
+                return Err(ContractValidationErrorV1::DuplicateRequiredSource);
+            }
+        }
+        if self.valid_from_unix > self.valid_until_unix
+            || now_unix < self.valid_from_unix
+            || now_unix > self.valid_until_unix
+        {
+            return Err(ContractValidationErrorV1::InvalidTimeOrder);
+        }
         Ok(())
     }
 }
@@ -282,6 +403,13 @@ pub struct DecisionEnvelopeV1 {
 impl DecisionEnvelopeV1 {
     /// Validate a serialized decision envelope without treating it as an authenticated grant.
     pub fn validate(&self) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.evaluation_id, "evaluation_id")?;
+        validate_text(&self.policy_id, "policy_id")?;
+        validate_text_list(&self.evidence_refs, "evidence_refs")?;
+        if self.evaluated_at_unix > self.expires_at_unix {
+            return Err(ContractValidationErrorV1::InvalidTimeOrder);
+        }
         Ok(())
     }
 }
