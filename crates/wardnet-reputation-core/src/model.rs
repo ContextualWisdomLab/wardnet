@@ -91,6 +91,7 @@ pub enum DestinationScopeV1 {
 
 /// Canonical destination descriptor that Wardnet matches without reparsing network syntax.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DestinationSubjectV1 {
     /// Subject kind defining how the opaque canonical value may be matched.
     pub kind: DestinationSubjectKindV1,
@@ -115,6 +116,7 @@ impl DestinationSubjectV1 {
 
 /// Authenticated evaluation context after identity claims have been verified by the service edge.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DestinationContextV1 {
     /// Contract schema identifier.
     pub schema_version: String,
@@ -169,6 +171,7 @@ pub enum EvidenceClassificationV1 {
 
 /// Versioned source evidence retained with lifecycle and provenance semantics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceRecordV1 {
     /// Contract schema identifier.
     pub schema_version: String,
@@ -244,6 +247,7 @@ impl EvidenceRecordV1 {
 
 /// Policy attached to one reviewed evidence source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SourcePolicyV1 {
     /// Contract schema identifier.
     pub schema_version: String,
@@ -289,6 +293,7 @@ pub enum EvaluationModeV1 {
 
 /// Immutable reputation policy revision consumed by the pure core.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PolicySnapshotV1 {
     /// Contract schema identifier.
     pub schema_version: String,
@@ -374,7 +379,7 @@ pub enum DecisionReasonV1 {
     KnownMalicious,
     /// Suspicious evidence caused the initial protect profile to deny.
     Suspicious,
-    /// No adverse match exists, but the destination remains unknown without authorization.
+    /// No active eligible adverse match exists, and no exact-scope authorization applies.
     UnknownDestination,
     /// An exact-scope business authorization permits an unknown destination to continue to other gates.
     BusinessAuthorization,
@@ -419,6 +424,7 @@ fn reason_matches_action(action: PolicyActionV1, reason: DecisionReasonV1) -> bo
 
 /// Explainable pure-core decision envelope; it is not proof that traffic was actually blocked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionEnvelopeV1 {
     /// Contract schema identifier.
     pub schema_version: String,
