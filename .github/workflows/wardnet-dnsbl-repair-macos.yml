@@ -29,7 +29,7 @@ jobs:
           set -euo pipefail
           git fetch origin "${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
           test "$(git rev-parse "origin/${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
-      - name: Reuse the reviewed exact-count repair payload
+      - name: Decode and validate the reviewed exact-count repair payload
         shell: bash
         run: |
           set -euo pipefail
@@ -45,6 +45,8 @@ jobs:
               raise SystemExit(f'reviewed DNSBL repair payload count={len(matches)}, expected 1')
           Path('/tmp/wardnet-dnsbl-repair.py').write_bytes(base64.b64decode(matches[0], validate=True))
           PY
+          nl -ba /tmp/wardnet-dnsbl-repair.py | sed -n '315,370p'
+          python3 -m py_compile /tmp/wardnet-dnsbl-repair.py
           python3 /tmp/wardnet-dnsbl-repair.py
           cargo fmt --all
           git diff --check
