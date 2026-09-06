@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
-use wardnet_reputation_core::{ContractValidationErrorV1, DecisionEnvelopeV1, REPUTATION_SCHEMA_V1};
+use wardnet_reputation_core::{
+    ContractValidationErrorV1, DecisionEnvelopeV1, REPUTATION_SCHEMA_V1,
+};
 
 const NOW: u64 = 1_788_652_800;
 
@@ -38,8 +40,9 @@ fn decision_json(workload_id: &str, evidence_generation: &str) -> Value {
 
 #[test]
 fn decision_envelope_rejects_invalid_authenticated_context_binding() {
-    let decision: DecisionEnvelopeV1 = serde_json::from_value(decision_json("", "snapshot-42"))
-        .expect("v1 decision envelope should deserialize");
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(decision_json("", "snapshot-42"))
+            .expect("v1 decision envelope should deserialize");
 
     assert_eq!(
         decision.validate(),
