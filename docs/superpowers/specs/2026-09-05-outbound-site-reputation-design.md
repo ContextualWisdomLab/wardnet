@@ -43,15 +43,21 @@ For a **protect** profile:
 permit = authenticated_context
       AND wardnet_action_is_allow
       AND egress_transport_is_allow
+      AND current_applicable_evidence_state
+      AND healthy_required_source_state
       AND same_target_context_and_current_authorities
       AND required_audit_reservation_succeeded
 ```
+
+`current_applicable_evidence_state` does not mean that every allowed destination has a matching threat indicator. A no-match destination remains `unknown`; it may receive the Wardnet allow only when an exact-scope valid business authorization applies and all required evidence authorities are healthy. The authorization changes policy action, not maliciousness assessment. This is the same contract used by the ADR and REP-02 acceptance case.
 
 The diagram is a logical composition, not permission for unchecked DNS between evaluation and connect. Domain and observable-URL evidence can be checked before resolution; address evidence must be checked against each actual candidate peer before it can be used. The released integration must support an authorize-and-connect operation or an equivalently strong peer-bound execution contract. A preflight URL check followed by an ordinary independent HTTP client is unacceptable.
 
 Bind evaluation and execution to tenant, authenticated workload, purpose, operation nonce, canonical target/profile, policy revision, evidence generation, transport-contract version, connection peer where applicable, and expiry. The PEP must verify authenticity, audience and binding of out-of-process receipts; a digest alone does not authenticate a receipt. Missing or unsupported contract versions, replay, target substitution, or peer mismatch deny protected traffic.
 
 Re-evaluate every redirect and retry that changes connection or authority. Connection pooling and HTTP/2 coalescing must not grant a different origin prior approval. Credentials are never forwarded to a new origin merely because the first hop was allowed. Source changes invalidate positive caches. Initial protected tunnel leases are bounded to 60 seconds; renewal rechecks both authorities. A deployment must terminate newly denied active leases within that bound or report that persistent-flow protection is unsupported. The bound is a proposed requirement, not a measured capability.
+
+Every hop that carries an authorization header, cookie, client credential, tenant-scoped secret, or equivalent security-sensitive credential must use authenticated encrypted transport under the released transport-owner contract. This applies to the initial request, redirects, retries, proxy hops, and protocol transitions. Plain `http://`, an HTTPS-to-HTTP downgrade, a redirect/retry target whose authenticated encryption cannot be established, or a peer/authority mismatch must cause the credential to be stripped before that hop or the request to be rejected; a credential-bearing cleartext fallback is never permitted. The PEP must not reinterpret TLS itself, but it must require and verify the EgressWeave receipt/operation contract that proves this property before releasing credential-bearing payload. This addresses the cleartext-sensitive-data weakness class described by CWE-319 [R7].
 
 ## 4. Destination and evidence contracts
 
