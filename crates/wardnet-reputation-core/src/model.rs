@@ -245,6 +245,16 @@ impl EvidenceRecordV1 {
     }
 }
 
+/// Reviewed tenant-eligibility semantics for one reputation evidence source.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceTenantScopeV1 {
+    /// The reviewed source may contribute for any authenticated tenant.
+    AllAuthenticatedTenants,
+    /// The reviewed source may contribute only for an explicit bounded tenant set.
+    ExplicitTenantSet,
+}
+
 /// Policy attached to one reviewed evidence source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -259,6 +269,10 @@ pub struct SourcePolicyV1 {
     pub permitted_subject_kinds: Vec<DestinationSubjectKindV1>,
     /// Maximum evidence age allowed by Wardnet policy, in seconds.
     pub max_evidence_age_seconds: u64,
+    /// Explicit reviewed tenant-scope mode; omission is invalid on the v1 wire.
+    pub tenant_scope: SourceTenantScopeV1,
+    /// Bounded tenant identifiers when `tenant_scope` is `explicit_tenant_set`.
+    pub allowed_tenant_ids: Vec<String>,
     /// Purposes for which this source may contribute; empty is invalid.
     pub allowed_purposes: Vec<String>,
 }
@@ -275,6 +289,16 @@ impl SourcePolicyV1 {
             return Err(ContractValidationErrorV1::BoundExceeded(
                 "permitted_subject_kinds",
             ));
+        }
+        validate_text_list(&self.allowed_tenant_ids, "allowed_tenant_ids")?;
+        match self.tenant_scope {
+            SourceTenantScopeV1::AllAuthenticatedTenants if !self.allowed_tenant_ids.is_empty() => {
+                return Err(ContractValidationErrorV1::InvalidTenantEligibility);
+            }
+            SourceTenantScopeV1::ExplicitTenantSet if self.allowed_tenant_ids.is_empty() => {
+                return Err(ContractValidationErrorV1::InvalidTenantEligibility);
+            }
+            _ => {}
         }
         validate_text_list(&self.allowed_purposes, "allowed_purposes")?;
         Ok(())
@@ -516,6 +540,8 @@ pub enum ContractValidationErrorV1 {
     InvalidConfidence,
     /// A source policy does not permit any subject kind or purpose.
     EmptySourceEligibility,
+    /// A source policy tenant-scope mode contradicts its explicit tenant set.
+    InvalidTenantEligibility,
     /// Evidence eligible for enforcement has no provenance reference.
     MissingEnforcementProvenance,
     /// An adverse decision assessment has no evidence reference for SOC traceability.
