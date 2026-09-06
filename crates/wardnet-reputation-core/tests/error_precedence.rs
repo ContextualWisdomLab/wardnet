@@ -40,6 +40,7 @@ fn base_decision() -> DecisionEnvelopeV1 {
         evaluated_at_unix: NOW,
         expires_at_unix: NOW + 60,
         evidence_refs: Vec::new(),
+        business_authorization: None,
     }
 }
 
