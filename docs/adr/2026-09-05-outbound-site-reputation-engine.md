@@ -3,7 +3,7 @@
 - Date: 2026-09-05
 - Status: Proposed for architectural review; not an implemented capability.
 - Scope: Wardnet security policy, threat evidence, and SOC accountability for outbound destinations.
-- Baseline: `main@5829a0f08d78de464dd24393ce5d0f25fba9d126`.
+- Baseline: `main@a52ccd0a24a727d9349bb32def7713882d8cad1e`.
 - Product request: prevent internal users, services, and agents from contacting external services with adverse security reputation.
 
 ## Context
@@ -12,7 +12,7 @@ Wardnet already owns WAF/IDS/SOC gateway decisions, threat-intelligence ingestio
 
 The objection to using Wardnet as a generic website-reputation utility is valid when it means putting crawler rankings, extraction difficulty, or an unrelated HTTP client into the WAF. It does not exclude a distinct security responsibility: deciding whether an identified internal workload may contact an external destination under current threat intelligence and organizational policy. This decision complements ingress WAF and IDS observations rather than reinterpreting them.
 
-Current owner evidence in [Wardnet #136](https://github.com/ContextualWisdomLab/wardnet/pull/136), [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115), and [EgressWeave #237](https://github.com/ContextualWisdomLab/EgressWeave/issues/237) assigns reusable outbound HTTP destination/address, DNS, redirect, proxy, TLS, and resource authorization to EgressWeave. This ADR does not reverse that boundary. The EgressWeave GitHub Releases listing returned no releases during the 2026-09-05 review; an immutable compatible Rust-consumer contract is an integration prerequisite, not a reason to defer Wardnet's domain design or offline implementation.
+Current owner evidence in [Wardnet #136](https://github.com/ContextualWisdomLab/wardnet/pull/136), [#115](https://github.com/ContextualWisdomLab/wardnet/pull/115), and [EgressWeave #237](https://github.com/ContextualWisdomLab/EgressWeave/issues/237) assigns reusable outbound HTTP destination/address, DNS, redirect, proxy, TLS, and resource authorization to EgressWeave. This ADR does not reverse that boundary. The EgressWeave GitHub Releases listing returned no releases during the 2026-09-06 review; an immutable compatible Rust-consumer contract is an integration prerequisite, not a reason to defer Wardnet's domain design or offline implementation.
 
 ## Decision
 
