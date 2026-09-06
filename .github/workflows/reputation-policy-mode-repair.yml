@@ -1,0 +1,109 @@
+name: Reputation policy-mode causal repair
+
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - '.github/workflows/reputation-policy-mode-repair.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.pull_request.number == 176 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: true
+      - name: Assert exact repair parent
+        env:
+          EXPECTED_PARENT: eab552e2e91168267ef16dac71593832a03825ee
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/reputation-policy-mode-repair.yml"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Execute hostile policy-mode RED
+        run: |
+          set +e
+          cargo test --locked -p wardnet-reputation-core --test decision_binding decision_envelope_requires_explicit_protect_policy_mode_binding
+          status=$?
+          set -e
+          test "$status" -ne 0
+      - name: Apply minimal policy-mode binding repair
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one replacement anchor in {path!r}: {old!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          model = "crates/wardnet-reputation-core/src/model.rs"
+          tests = "crates/wardnet-reputation-core/tests/decision_binding.rs"
+          trace = "crates/wardnet-reputation-core/TRACEABILITY.md"
+
+          replace_once(
+              model,
+              '''    /// Exact policy revision used for the decision.\n    pub policy_revision: u64,\n    /// Immutable evidence snapshot generation evaluated by this decision.\n''',
+              '''    /// Exact policy revision used for the decision.\n    pub policy_revision: u64,\n    /// Policy mode bound to this decision; v1 decision envelopes are protect-only.\n    pub policy_mode: EvaluationModeV1,\n    /// Immutable evidence snapshot generation evaluated by this decision.\n''',
+          )
+          replace_once(
+              model,
+              '''        validate_text(&self.policy_id, "policy_id")?;\n        validate_text(&self.evidence_generation, "evidence_generation")?;\n''',
+              '''        validate_text(&self.policy_id, "policy_id")?;\n        if self.policy_mode != EvaluationModeV1::Protect {\n            return Err(ContractValidationErrorV1::WrongDecisionMode);\n        }\n        validate_text(&self.evidence_generation, "evidence_generation")?;\n''',
+          )
+          replace_once(
+              model,
+              '''    /// Direction is not outbound.\n    WrongDirection,\n''',
+              '''    /// Direction is not outbound.\n    WrongDirection,\n    /// A decision envelope is not bound to protect policy mode.\n    WrongDecisionMode,\n''',
+          )
+          replace_once(
+              tests,
+              '''        "policy_id": "protect-default",\n        "policy_revision": 1,\n        "assessment": "unknown",\n''',
+              '''        "policy_id": "protect-default",\n        "policy_revision": 1,\n        "policy_mode": "protect",\n        "assessment": "unknown",\n''',
+          )
+          replace_once(
+              tests,
+              '''#[test]\nfn decision_envelope_requires_explicit_protect_policy_mode_binding() {\n    let value = decision_json("workload-example", "snapshot-42");\n\n    assert!(\n        serde_json::from_value::<DecisionEnvelopeV1>(value).is_err(),\n        "an enforceable v1 decision without an explicit protect-policy mode binding must fail closed"\n    );\n}\n''',
+              '''#[test]\nfn decision_envelope_requires_explicit_protect_policy_mode_binding() {\n    let mut value = decision_json("workload-example", "snapshot-42");\n    value\n        .as_object_mut()\n        .expect("decision fixture must be an object")\n        .remove("policy_mode");\n\n    assert!(\n        serde_json::from_value::<DecisionEnvelopeV1>(value).is_err(),\n        "an enforceable v1 decision without an explicit protect-policy mode binding must fail closed"\n    );\n}\n\n#[test]\nfn decision_envelope_rejects_monitor_mode_as_protect_authority() {\n    let mut value = decision_json("workload-example", "snapshot-42");\n    value["policy_mode"] = json!("monitor");\n\n    let decision: DecisionEnvelopeV1 =\n        serde_json::from_value(value).expect("known v1 policy mode should deserialize");\n\n    assert_eq!(\n        decision.validate(),\n        Err(ContractValidationErrorV1::WrongDecisionMode),\n        "monitor results must not serialize as protect authorization envelopes"\n    );\n}\n''',
+          )
+          replace_once(
+              trace,
+              '''- a separate `PolicyActionV1`, because a Wardnet reputation allow only permits continuation to independent gates and is never executable EgressWeave transport authorization.\n\nRejected alternatives are:''',
+              '''- a separate `PolicyActionV1`, because a Wardnet reputation allow only permits continuation to independent gates and is never executable EgressWeave transport authorization;\n- an explicit `policy_mode=protect` binding on `DecisionEnvelopeV1`, because the Proposed protect contract and monitor/shadow semantics are different authorities. A monitor result may describe what policy would have done, but it cannot be decoded or validated as a protect grant merely because its assessment and action fields are otherwise coherent.\n\nRejected alternatives are:''',
+          )
+          PY
+          cargo fmt
+      - name: Verify causal GREEN and full workspace
+        run: |
+          cargo test --locked -p wardnet-reputation-core --test decision_binding
+          cargo test --locked -p wardnet-reputation-core
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo fmt --check
+      - name: Remove one-shot workflow and push causal fix
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          TRIGGER_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          rm .github/workflows/reputation-policy-mode-repair.yml
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' '.github/workflows/reputation-policy-mode-repair.yml' 'crates/wardnet-reputation-core/TRACEABILITY.md' 'crates/wardnet-reputation-core/src/model.rs' 'crates/wardnet-reputation-core/tests/decision_binding.rs' | sort)"
+          git diff --check
+          git config user.name "wardnet-causal-repair"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(reputation): bind protect policy mode in decisions"
+          git fetch origin "$HEAD_REF"
+          test "$(git rev-parse FETCH_HEAD)" = "$TRIGGER_SHA"
+          git push origin "HEAD:$HEAD_REF"
