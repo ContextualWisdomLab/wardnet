@@ -37,6 +37,20 @@ fn local_pr_workflows_cancel_only_superseded_heads_of_the_same_pull_request() {
 }
 
 #[test]
+fn local_pr_workflows_bind_checkout_to_the_exact_source_head() {
+    for name in ["ci.yml", "fuzz.yml"] {
+        let workflow = workflow_text(name);
+        assert!(workflow.contains(
+            "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
+        ));
+        assert!(workflow.contains(
+            "EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
+        ));
+        assert!(workflow.contains("test \"$(git rev-parse HEAD)\" = \"$EXPECTED_HEAD_SHA\""));
+    }
+}
+
+#[test]
 fn fuzz_keeps_path_filtered_validation_without_state_transition_cancellation() {
     let workflow = workflow_text("fuzz.yml");
     assert!(workflow.contains("    paths:\n"));
