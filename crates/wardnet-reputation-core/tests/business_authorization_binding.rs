@@ -88,7 +88,9 @@ fn business_authorization_allow_requires_an_exact_authorization_binding() {
 fn exact_current_business_authorization_binding_is_accepted() {
     decision(bound_business_authorized_allow_json())
         .validate()
-        .expect("a current non-revoked authorization exactly bound to the evaluated context is valid");
+        .expect(
+            "a current non-revoked authorization exactly bound to the evaluated context is valid",
+        );
 }
 
 #[test]
