@@ -98,3 +98,15 @@ fn changed_policy_revision_must_not_inherit_an_old_business_authorization() {
         "a business authorization reviewed for one immutable policy revision must not survive policy revision drift"
     );
 }
+
+#[test]
+fn zero_policy_revision_must_fail_closed_even_when_authorization_matches() {
+    let mut value = bound_allow_json();
+    value["policy_revision"] = json!(0);
+    value["business_authorization"]["policy_revision"] = json!(0);
+
+    assert!(
+        decision(value).validate().is_err(),
+        "policy revision zero must not become a valid immutable policy identity merely because the authorization carries the same zero value"
+    );
+}
