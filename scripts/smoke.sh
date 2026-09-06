@@ -31,7 +31,7 @@ start_server() {
     cd "$ROOT_DIR"
     BIND_ADDR="127.0.0.1:$PORT" \
       ADMIN_TOKEN="$ADMIN_TOKEN_VALUE" \
-      WAF_IDS_STATE_PATH="$STATE_FILE" \
+      WARDNET_STATE_PATH="$STATE_FILE" \
       DNSBL_ORIGIN="dnsbl.test" \
       EVENT_LIMIT="5" \
       cargo run --quiet
@@ -78,7 +78,7 @@ assert_json_field "$health" 'data["persistence"] == "file"'
 assert_json_field "$health" 'data["dnsbl_origin"] == "dnsbl.test"'
 assert_json_field "$health" 'data["event_limit"] == 5'
 
-curl -fsS "$BASE_URL/admin" | grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway"
+curl -fsS "$BASE_URL/admin" | grep -q "<h1>Wardnet</h1>"
 
 unauthorized_code="$(
   curl -sS -o /dev/null -w '%{http_code}' \

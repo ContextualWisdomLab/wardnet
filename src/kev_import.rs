@@ -7,10 +7,10 @@
 //!
 //! The catalog is CVE-centric: entries carry no IP/domain/URL/hash
 //! observable, so `dnsbl` stays empty. It is kept on [`KevImportMaterial`]
-//! only for parity with the shared [`waf_ids_core::ThreatFeedImport`] shape
+//! only for parity with the shared [`wardnet_core::ThreatFeedImport`] shape
 //! every adapter in this family produces.
 
-use waf_ids_core::{DnsblEntry, Severity, ThreatIndicator};
+use wardnet_core::{DnsblEntry, Severity, ThreatIndicator};
 
 /// Parsed KEV import ready for the existing threat-feed upsert path.
 #[derive(Debug, Clone, PartialEq, Eq)]

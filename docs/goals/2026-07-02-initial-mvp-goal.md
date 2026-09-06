@@ -12,7 +12,7 @@ Create and publish a concrete ContextualWisdomLab WAF/IDS/AI SOC project MVP tha
 
 ## Acceptance Criteria
 
-- Repository exists under `ContextualWisdomLab/waf-ids-ai-soc`.
+- Repository exists under `ContextualWisdomLab/wardnet`.
 - `cargo test` passes locally and in CI.
 - `cargo fmt --check` passes locally and in CI.
 - `GET /admin` renders a management console.

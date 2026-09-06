@@ -14,7 +14,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use waf_ids_core::{export_dnsbl_zone, validate_dnsbl, DnsblEntry};
+use wardnet_core::{export_dnsbl_zone, validate_dnsbl, DnsblEntry};
 
 /// A response code drawn from the raw fuzz bytes: arbitrary strings plus real IP
 /// literals (loopback, non-loopback IPv4, IPv6) so the zone A-record invariant

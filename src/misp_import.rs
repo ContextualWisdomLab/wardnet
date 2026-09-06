@@ -8,7 +8,7 @@
 
 use std::net::IpAddr;
 
-use waf_ids_core::{DnsblEntry, Severity, ThreatIndicator};
+use wardnet_core::{DnsblEntry, Severity, ThreatIndicator};
 
 /// Parsed MISP import ready for the existing threat-feed upsert path.
 #[derive(Debug, Clone, PartialEq, Eq)]

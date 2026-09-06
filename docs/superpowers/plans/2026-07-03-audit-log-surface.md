@@ -4,7 +4,7 @@
 
 **Goal:** Add buyer-verifiable management audit logs for admin write operations without storing secrets.
 
-**Architecture:** Store audit records in `AppData` so file persistence and support-bundle export use the existing atomic state boundary. Keep audit record creation deterministic in `waf-ids-core`; keep HTTP header parsing and endpoint routing in `src/lib.rs`.
+**Architecture:** Store audit records in `AppData` so file persistence and support-bundle export use the existing atomic state boundary. Keep audit record creation deterministic in `wardnet-core`; keep HTTP header parsing and endpoint routing in `src/lib.rs`.
 
 **Tech Stack:** Rust 2024, Axum 0.8, Serde, Tokio, existing JSON state persistence.
 
@@ -15,15 +15,15 @@
 - Audit logs must not persist `X-Admin-Token` or request bodies.
 - Audit logs must cover successful admin writes to routes, threats, DNSBL entries, commercial license metadata, and threat feed imports.
 - Failed authorization or validation must not create audit records.
-- Audit records must survive restart when `WAF_IDS_STATE_PATH` is configured.
+- Audit records must survive restart when `WARDNET_STATE_PATH` is configured.
 
 ---
 
 ### Task 1: Core Audit Model
 
 **Files:**
-- Modify: `crates/waf-ids-core/src/lib.rs`
-- Test: `crates/waf-ids-core/src/lib.rs`
+- Modify: `crates/wardnet-core/src/lib.rs`
+- Test: `crates/wardnet-core/src/lib.rs`
 
 **Interfaces:**
 - Produces: `AuditLogEntry { id, timestamp_unix, actor, action, resource, resource_id, outcome }`
@@ -173,7 +173,7 @@ Expected: PASS.
 ### Task 3: Buyer Evidence And Smoke Coverage
 
 **Files:**
-- Modify: `crates/waf-ids-core/src/lib.rs`
+- Modify: `crates/wardnet-core/src/lib.rs`
 - Modify: `src/lib.rs`
 - Modify: `scripts/smoke.sh`
 - Modify: `docs/commercial/20b-krw-sale-readiness.md`

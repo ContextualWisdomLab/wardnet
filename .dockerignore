@@ -2,6 +2,7 @@ target
 .git
 .github
 .DS_Store
+wardnet-state.local.json
 waf-ids-state.local.json
 *.profraw
 *.profdata

@@ -6,7 +6,7 @@ The runtime already exposes commercial readiness, feed freshness, SOC NDJSON exp
 
 ## Design
 
-Keep the evidence manifest in `waf-ids-core` because it is deterministic domain evidence assembled from existing `AppData`, KPI, and readiness snapshots.
+Keep the evidence manifest in `wardnet-core` because it is deterministic domain evidence assembled from existing `AppData`, KPI, and readiness snapshots.
 
 The app crate remains responsible only for:
 

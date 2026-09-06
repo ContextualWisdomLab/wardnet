@@ -3,7 +3,7 @@
 ## Artifact
 
 - FigJam: https://www.figma.com/board/JExziD87eUWKLERECUGhWQ?utm_source=codex&utm_content=edit_in_figjam&oai_id=&request_id=a97d2861-82f8-4d43-9d16-27e07b13b10c&architecture=true
-- Title: WAF IDS AI SOC 2B KRW Product Architecture
+- Title: Wardnet 2B KRW Product Architecture
 - Added section: `Freshness and SOC Export Evidence`
 - Added diagram: `Buyer Evidence Manifest Runtime Map`
 - Figma Code Connect: not used
@@ -15,8 +15,8 @@ flowchart LR
   buyer["Enterprise Buyer Lab"] --> console["Web Admin Console"]
   operator["SOC Operator"] --> console
   console --> api["Management API"]
-  api --> app["waf-ids-ai-soc App Crate"]
-  app --> core["waf-ids-core Domain Crate"]
+  api --> app["wardnet App Crate"]
+  app --> core["wardnet-core Domain Crate"]
   core --> scoring["Scoring and Readiness"]
   core --> dnsbl["DNSBL Zone Export"]
   core --> kpis["SOC KPI Snapshot"]

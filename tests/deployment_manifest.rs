@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-const MANIFEST: &str = include_str!("../deploy/kubernetes/waf-ids-ai-soc.yaml");
+const MANIFEST: &str = include_str!("../deploy/kubernetes/wardnet.yaml");
 const PRODUCTION_GUIDE: &str = include_str!("../docs/deployment/production.md");
 
 /// Secret coordinates the gateway Deployment must consume for `ADMIN_TOKEN`.
@@ -208,7 +208,7 @@ fn named_list_item_block<'a>(
         .collect()
 }
 
-/// Locate `ADMIN_TOKEN` on the `waf-ids-ai-soc` gateway container only.
+/// Locate `ADMIN_TOKEN` on the `wardnet` gateway container only.
 ///
 /// Duplicate entries, literal fallback values, and `secretKeyRef.optional: true`
 /// are treated as absent (fail closed).
@@ -219,7 +219,7 @@ fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_
             return None;
         }
 
-        if mapping_value(&lines, "metadata:", 0, "name:") != Some("waf-ids-ai-soc") {
+        if mapping_value(&lines, "metadata:", 0, "name:") != Some("wardnet") {
             return None;
         }
 
@@ -302,8 +302,8 @@ fn deployment_requires_the_external_admin_secret_contract() {
     assert_eq!(
         external_admin_secret_ref(MANIFEST),
         Some(ExternalAdminSecretRef {
-            namespace: "waf-ids-ai-soc",
-            secret_name: "waf-ids-ai-soc-admin",
+            namespace: "wardnet",
+            secret_name: "wardnet-admin",
             secret_key: "ADMIN_TOKEN",
         })
     );
@@ -314,7 +314,7 @@ fn decoy_secret_text_cannot_satisfy_the_structural_contract() {
     let decoy_manifest = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
+  name: wardnet
   namespace: another-namespace
 spec:
   template:
@@ -327,15 +327,15 @@ spec:
                 secretKeyRef:
                   name: another-secret
                   key: ANOTHER_KEY
-# name: waf-ids-ai-soc-admin
+# name: wardnet-admin
 # key: ADMIN_TOKEN
 "#;
 
     assert_ne!(
         external_admin_secret_ref(decoy_manifest),
         Some(ExternalAdminSecretRef {
-            namespace: "waf-ids-ai-soc",
-            secret_name: "waf-ids-ai-soc-admin",
+            namespace: "wardnet",
+            secret_name: "wardnet-admin",
             secret_key: "ADMIN_TOKEN",
         })
     );
@@ -347,7 +347,7 @@ fn another_deployment_cannot_satisfy_the_target_secret_contract() {
 kind: Deployment
 metadata:
   name: unrelated-worker
-  namespace: waf-ids-ai-soc
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -357,14 +357,14 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -381,7 +381,7 @@ spec:
     assert_eq!(
         external_admin_secret_ref(reverse_order_manifest),
         Some(ExternalAdminSecretRef {
-            namespace: "waf-ids-ai-soc",
+            namespace: "wardnet",
             secret_name: "wrong-secret",
             secret_key: "WRONG_KEY",
         })
@@ -393,8 +393,8 @@ fn init_container_cannot_satisfy_the_gateway_secret_contract() {
     let init_container_decoy = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -404,7 +404,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
       containers:
         - name: gateway
@@ -419,7 +419,7 @@ spec:
     assert_eq!(
         external_admin_secret_ref(init_container_decoy),
         Some(ExternalAdminSecretRef {
-            namespace: "waf-ids-ai-soc",
+            namespace: "wardnet",
             secret_name: "wrong-secret",
             secret_key: "WRONG_KEY",
         })
@@ -431,8 +431,8 @@ fn optional_admin_secret_reference_fails_closed() {
     let optional_secret = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -442,7 +442,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: true
 "#;
@@ -455,8 +455,8 @@ fn explicitly_required_admin_secret_reference_is_accepted() {
     let required_secret = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -466,7 +466,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
 "#;
@@ -474,8 +474,8 @@ spec:
     assert_eq!(
         external_admin_secret_ref(required_secret),
         Some(ExternalAdminSecretRef {
-            namespace: "waf-ids-ai-soc",
-            secret_name: "waf-ids-ai-soc-admin",
+            namespace: "wardnet",
+            secret_name: "wardnet-admin",
             secret_key: "ADMIN_TOKEN",
         })
     );
@@ -486,8 +486,8 @@ fn duplicate_admin_token_entries_fail_closed() {
     let duplicate_admin_token = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -497,7 +497,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
             - name: ADMIN_TOKEN
@@ -512,8 +512,8 @@ fn quoted_duplicate_admin_token_entries_fail_closed() {
     let double_quoted_duplicate = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -523,7 +523,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
             - name: "ADMIN_TOKEN"
@@ -532,8 +532,8 @@ spec:
     let single_quoted_duplicate = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -543,7 +543,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
             - name: 'ADMIN_TOKEN'
@@ -559,8 +559,8 @@ fn commented_quoted_duplicate_admin_token_entries_fail_closed() {
     let commented_duplicate = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -570,7 +570,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
             - name: "ADMIN_TOKEN" # duplicated fallback entry
@@ -585,8 +585,8 @@ fn hex_escaped_duplicate_admin_token_entries_fail_closed() {
     let escaped_duplicate = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -596,7 +596,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
             - name: "\x41DMIN_TOKEN"
@@ -611,8 +611,8 @@ fn unicode_escaped_duplicate_admin_token_entries_fail_closed() {
     let escaped_duplicate = r#"apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waf-ids-ai-soc
-  namespace: waf-ids-ai-soc
+  name: wardnet
+  namespace: wardnet
 spec:
   template:
     spec:
@@ -622,7 +622,7 @@ spec:
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: waf-ids-ai-soc-admin
+                  name: wardnet-admin
                   key: ADMIN_TOKEN
                   optional: false
             - name: "\u0041DMIN_TOKEN"
@@ -635,7 +635,7 @@ spec:
 #[test]
 fn fresh_install_bootstraps_namespace_before_secret_provisioning() {
     let namespace_bootstrap =
-        "kubectl create namespace waf-ids-ai-soc --dry-run=client -o yaml | kubectl apply -f -";
+        "kubectl create namespace wardnet --dry-run=client -o yaml | kubectl apply -f -";
     let bootstrap_index = PRODUCTION_GUIDE
         .find(namespace_bootstrap)
         .expect("fresh-install instructions must create the namespace idempotently first");

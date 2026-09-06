@@ -4,7 +4,7 @@
 
 **Goal:** Upgrade the MVP into a standalone program-complete baseline with persistent state, deterministic management writes, smoke verification, and updated CI/docs.
 
-**Architecture:** Keep the app as one Rust Axum binary. Add file-backed JSON persistence behind optional `WAF_IDS_STATE_PATH`, strengthen validators and upserts, retain gateway events with a cap, and prove the end-to-end control loop through a shell smoke test.
+**Architecture:** Keep the app as one Rust Axum binary. Add file-backed JSON persistence behind optional `WARDNET_STATE_PATH`, strengthen validators and upserts, retain gateway events with a cap, and prove the end-to-end control loop through a shell smoke test.
 
 **Tech Stack:** Rust 2024, Axum 0.8, Tokio, Serde/Serde JSON, Reqwest rustls, Bash/curl for smoke verification, GitHub Actions CI.
 
@@ -14,7 +14,7 @@
 - Do not implement fake WAF/IDS engines; keep Coraza/OWASP CRS and Suricata as future real adapters.
 - Default bind address remains `127.0.0.1:8080`.
 - `ADMIN_TOKEN` protects management writes when configured.
-- `WAF_IDS_STATE_PATH` is optional; absence means seeded in-memory mode.
+- `WARDNET_STATE_PATH` is optional; absence means seeded in-memory mode.
 - CI must run `cargo fmt --check`, `cargo test --locked`, and `cargo clippy --locked -- -D warnings`.
 
 ---
@@ -31,7 +31,7 @@
 - Produces: `AppState::load(config: AppConfig) -> Result<AppState, String>`
 - Produces: `AppState::seeded(admin_token: Option<String>) -> AppState` for existing tests
 
-- [x] Add environment parsing for `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
+- [x] Add environment parsing for `WARDNET_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
 - [x] Serialize/deserialize `AppData`.
 - [x] Load state from JSON file when configured; seed and write the file when it does not exist.
 - [x] Persist successful management writes.

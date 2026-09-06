@@ -17,7 +17,7 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 - A failing **`trivy-fs` is a REAL finding, not a flake.** Read the job log — it prints each finding's rule id / severity / file — or the run's SARIF results, then **remediate**:
   - Rust dependency CVE → bump the crate (`cargo update -p <crate>`, adjust `Cargo.toml`) and commit the updated `Cargo.lock`.
   - Container/OS finding → fix the base image or package in the `Dockerfile`.
-  - k8s/IaC misconfig → fix `deploy/kubernetes/waf-ids-ai-soc.yaml` or `deploy/docker-compose.yml`.
+  - k8s/IaC misconfig → fix `deploy/kubernetes/wardnet.yaml` or `deploy/docker-compose.yml`.
   - Genuine false positive only → add a narrow, commented entry to `.trivyignore` (see the existing `AVD-KSV-0125` note for the expected style). Never broaden it to silence a real vuln.
 - Do **not** weaken or disable the gate. A local scan with a stale DB misses findings: run `trivy --download-db-only` first, then scan the **merge ref**, not just the PR head (e.g. `trivy fs --scanners vuln,misconfig --severity CRITICAL,HIGH --ignore-unfixed .`).
 - Gating is by the Security Scan **job result**, not the `code_scanning` rule. That org ruleset is intentionally **CodeQL-only** (multiple code-scanning tools can't converge on one PR ref) — do **not** add tools to it.
@@ -36,7 +36,7 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 
 - Org rule: do **not** read config/secrets from raw environment variables (`std::env::var` / `os.getenv`) at runtime. Read them from a KV / credential registry. Org Actions secrets (e.g. `OPENAI_API_KEY`) flow **into** the KV via a bootstrap/CI step; runtime reads from the KV — env is only transport into the KV, never the runtime source.
 - Reference implementation: xtrmLLMBatchPython's pgcrypto-encrypted Postgres credential registry (`get_credential(name)`). Reuse that pattern (a DB-backed KV is fine) unless a dedicated KV is adopted.
-- **Secrets path:** Admin tokens (`ADMIN_TOKEN` / `ADMIN_TOKENS`, optional `WAF_IDS_CREDENTIALS_PATH` JSON) bootstrap a process-local `CredentialRegistry` (`get_credential`) at startup; runtime auth reads the registry, not env. **Remaining deviation:** non-secret operational config (`BIND_ADDR`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, `EVENT_LIMIT`, `RATE_LIMIT`, …) still reads env directly — migrate those behind the same registry/KV when a durable credential store is adopted.
+- **Secrets path:** Admin tokens (`ADMIN_TOKEN` / `ADMIN_TOKENS`, optional `WARDNET_CREDENTIALS_PATH` JSON) bootstrap a process-local `CredentialRegistry` (`get_credential`) at startup; runtime auth reads the registry, not env. **Remaining deviation:** non-secret operational config (`BIND_ADDR`, `WARDNET_STATE_PATH`, `DNSBL_ORIGIN`, `EVENT_LIMIT`, `RATE_LIMIT`, …) still reads env directly — migrate those behind the same registry/KV when a durable credential store is adopted.
 
 ### This repo's role in the ecosystem
 

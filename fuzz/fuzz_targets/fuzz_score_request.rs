@@ -1,5 +1,5 @@
 #![no_main]
-//! Fuzz the core WAF request scorer: `waf_ids_core::score_request`.
+//! Fuzz the core WAF request scorer: `wardnet_core::score_request`.
 //!
 //! This is the primary untrusted-input surface (surfaced via CodeGraph:
 //! `codegraph_explore "score_request anomaly_signal normalize decode ..."`).
@@ -16,7 +16,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr};
-use waf_ids_core::{score_request, DnsblEntry, Severity, ThreatIndicator};
+use wardnet_core::{score_request, DnsblEntry, Severity, ThreatIndicator};
 
 #[derive(Arbitrary, Debug)]
 struct Indicator {

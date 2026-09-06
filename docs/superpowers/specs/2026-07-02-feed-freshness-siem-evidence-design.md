@@ -25,7 +25,7 @@ Strengthen the 2B KRW buyer-lab package with evidence that threat updates are fr
 
 Keep the existing Rust workspace boundary:
 
-- `crates/waf-ids-core`: pure freshness classification, KPI counts, and readiness checks.
+- `crates/wardnet-core`: pure freshness classification, KPI counts, and readiness checks.
 - `src/lib.rs`: Axum routes, NDJSON event export, support bundle assembly, admin console, and HTTP tests.
 - `scripts/smoke.sh`: buyer-lab verification of freshness, readiness, support bundle, and event export.
 

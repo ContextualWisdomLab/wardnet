@@ -8,8 +8,8 @@ The previous delivery completed the published MVP: a Rust Axum gateway with web 
 
 The program is complete for this baseline when all of these are true:
 
-1. The service can load and persist routes, threat indicators, DNSBL entries, events, and the next event id through a JSON state file configured by `WAF_IDS_STATE_PATH`.
-2. If `WAF_IDS_STATE_PATH` is absent, the service still runs in seeded in-memory mode for demos and tests.
+1. The service can load and persist routes, threat indicators, DNSBL entries, events, and the next event id through a JSON state file configured by `WARDNET_STATE_PATH`.
+2. If `WARDNET_STATE_PATH` is absent, the service still runs in seeded in-memory mode for demos and tests.
 3. The health endpoint reports persistence mode, DNSBL origin, and event retention settings.
 4. Management writes require `ADMIN_TOKEN` when configured, validate records, upsert deterministic records, and persist successful changes before returning.
 5. Gateway events are retained with a configurable cap and persisted when file-backed state is enabled.

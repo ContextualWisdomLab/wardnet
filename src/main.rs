@@ -1,5 +1,5 @@
 // The gateway entrypoint is intentionally a thin shim: all configuration
-// parsing, binding, and serving live in `waf_ids_ai_soc::run_from_env` so they
+// parsing, binding, and serving live in `wardnet::run_from_env` so they
 // are unit-testable, while this file is covered end-to-end by `tests/binary.rs`.
 #[cfg(not(test))]
 #[tokio::main]
@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // container runtimes and the e2e test harness do) cannot race the OS-level
     // handler installation and fall through to the default "kill" disposition.
     let shutdown = install_shutdown_signal();
-    waf_ids_ai_soc::run_from_env(Box::pin(shutdown)).await
+    wardnet::run_from_env(Box::pin(shutdown)).await
 }
 
 #[cfg(all(not(test), unix))]

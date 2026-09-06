@@ -1,4 +1,4 @@
-# WAF IDS AI SOC MVP Implementation Plan
+# Wardnet MVP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -89,5 +89,5 @@
 - [x] Add CI for formatting and tests.
 - [x] Add Scorecard workflow and Dependabot baseline.
 - [x] Run final local verification.
-- [x] Create `ContextualWisdomLab/waf-ids-ai-soc` if absent.
+- [x] Create `ContextualWisdomLab/wardnet` if absent.
 - [x] Push the initial implementation to `main`.

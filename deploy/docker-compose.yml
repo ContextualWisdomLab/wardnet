@@ -1,18 +1,18 @@
 services:
-  waf-ids-ai-soc:
+  wardnet:
     build:
       context: ..
-    image: contextualwisdomlab/waf-ids-ai-soc:local
+    image: contextualwisdomlab/wardnet:local
     environment:
       BIND_ADDR: 0.0.0.0:8080
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
       DNSBL_ORIGIN: ${DNSBL_ORIGIN:-dnsbl.local}
       EVENT_LIMIT: ${EVENT_LIMIT:-1000}
-      WAF_IDS_STATE_PATH: /var/lib/waf-ids-ai-soc/state.json
+      WARDNET_STATE_PATH: /var/lib/wardnet/state.json
     ports:
       - "8080:8080"
     volumes:
-      - waf_ids_state:/var/lib/waf-ids-ai-soc
+      - wardnet_state:/var/lib/wardnet
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -21,4 +21,4 @@ services:
       start_period: 10s
 
 volumes:
-  waf_ids_state:
+  wardnet_state:

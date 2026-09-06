@@ -1,3 +1,5 @@
 /target
+/wardnet-state*.json
+# Temporary migration alias; remove with WAF_IDS_STATE_PATH support.
 /waf-ids-state*.json
 /runtime-state*.json

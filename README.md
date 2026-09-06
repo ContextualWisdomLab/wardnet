@@ -1,11 +1,11 @@
-# WAF IDS AI SOC
+# Wardnet
 
 Rust-first gateway and SOC control-plane baseline for ContextualWisdomLab.
 
 The project starts small on purpose:
 
 - web-managed API gateway routes
-- reusable `waf-ids-core` domain crate inside the same Cargo workspace
+- reusable `wardnet-core` domain crate inside the same Cargo workspace
 - request scoring from threat indicators and DNSBL entries
 - monitor/block enforcement modes
 - RFC 5782-style DNSBL zone export
@@ -21,7 +21,7 @@ It does not pretend to be a full WAF, IDS, SIEM, or SOAR yet. Production WAF and
 
 ## Completion Baseline
 
-The program-complete baseline means the binary can run by itself, keep operator-managed routes/threats/DNSBL entries/events across restart when `WAF_IDS_STATE_PATH` is configured, enforce monitor/block decisions, export DNSBL records, and prove that loop through `scripts/smoke.sh`.
+The program-complete baseline means the binary can run by itself, keep operator-managed routes/threats/DNSBL entries/events across restart when `WARDNET_STATE_PATH` is configured, enforce monitor/block decisions, export DNSBL records, and prove that loop through `scripts/smoke.sh`.
 
 It is still not a hardened internet-facing deployment. Use TLS, identity-aware access, upstream allowlists, and route rollback procedures before production traffic.
 
@@ -66,15 +66,17 @@ Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
 - `ADMIN_TOKEN`: optional write token for management writes via `X-Admin-Token`
-- `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
+- `WARDNET_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
+
+Existing deployments can follow the [Wardnet rename migration](docs/migrations/wardnet-rename.md).
 
 Example with persistent local state:
 
 ```bash
 ADMIN_TOKEN=dev-secret \
-WAF_IDS_STATE_PATH=./waf-ids-state.local.json \
+WARDNET_STATE_PATH=./wardnet-state.local.json \
 DNSBL_ORIGIN=dnsbl.example \
 cargo run
 ```
@@ -170,11 +172,11 @@ Deployment assets:
 
 - `Dockerfile`
 - `deploy/docker-compose.yml`
-- `deploy/kubernetes/waf-ids-ai-soc.yaml`
+- `deploy/kubernetes/wardnet.yaml`
 
 ## Workspace
 
-- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and buyer evidence manifests.
+- `crates/wardnet-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and buyer evidence manifests.
 - `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests.
 - `src/main.rs`: process configuration and server startup.
 

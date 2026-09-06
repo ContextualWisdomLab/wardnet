@@ -8,7 +8,7 @@
 
 use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr};
-use waf_ids_core::{
+use wardnet_core::{
     AppData, DnsblEntry, Severity, ThreatIndicator, export_dnsbl_zone, score_request,
     validate_dnsbl,
 };

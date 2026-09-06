@@ -1335,31 +1335,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
-name = "waf-ids-ai-soc"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures-util",
- "proptest",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "waf-ids-core",
-]
-
-[[package]]
-name = "waf-ids-core"
-version = "0.1.0"
-dependencies = [
- "percent-encoding",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "wait-timeout"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1375,6 +1350,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
 dependencies = [
  "try-lock",
+]
+
+[[package]]
+name = "wardnet"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "proptest",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "wardnet-core",
+]
+
+[[package]]
+name = "wardnet-core"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

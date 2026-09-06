@@ -1,5 +1,5 @@
 #![no_main]
-//! Fuzz the admin-token config parser: `waf_ids_ai_soc::parse_admin_tokens`.
+//! Fuzz the admin-token config parser: `wardnet::parse_admin_tokens`.
 //!
 //! This parses the `ADMIN_TOKENS` operator config string
 //! (`token:actor[:role],...`) into an RBAC principal map. Malformed or
@@ -9,7 +9,7 @@
 //!   * every actor value is non-empty (defaults to "admin").
 
 use libfuzzer_sys::fuzz_target;
-use waf_ids_ai_soc::parse_admin_tokens;
+use wardnet::parse_admin_tokens;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(raw) = std::str::from_utf8(data) else {

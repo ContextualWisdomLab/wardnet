@@ -1,4 +1,4 @@
-# WAF IDS AI SOC — Design System
+# Wardnet — Design System
 
 Canonical reference for the admin console UI. Tokens and components are implemented
 as vanilla HTML/CSS/JS embedded in the binary (`ADMIN_HTML` in `src/lib.rs`, served

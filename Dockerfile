@@ -13,21 +13,21 @@ RUN apt-get update \
     ca-certificates=20230311+deb12u1 \
     curl=7.88.1-10+deb12u14 \
   && rm -rf /var/lib/apt/lists/* \
-  && groupadd --gid 10001 wafids \
-  && useradd --uid 10001 --gid 10001 --create-home --home-dir /var/lib/waf-ids-ai-soc wafids
+  && groupadd --gid 10001 wardnet \
+  && useradd --uid 10001 --gid 10001 --create-home --home-dir /var/lib/wardnet wardnet
 
-COPY --from=build /app/target/release/waf-ids-ai-soc /usr/local/bin/waf-ids-ai-soc
+COPY --from=build /app/target/release/wardnet /usr/local/bin/wardnet
 
 ENV BIND_ADDR=127.0.0.1:8080 \
     DNSBL_ORIGIN=dnsbl.local \
     EVENT_LIMIT=1000 \
-    WAF_IDS_STATE_PATH=/var/lib/waf-ids-ai-soc/state.json
+    WARDNET_STATE_PATH=/var/lib/wardnet/state.json
 
 EXPOSE 8080
-VOLUME ["/var/lib/waf-ids-ai-soc"]
-USER wafids
+VOLUME ["/var/lib/wardnet"]
+USER wardnet
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -fsS "http://${BIND_ADDR}/healthz" || exit 1
 
-ENTRYPOINT ["/usr/local/bin/waf-ids-ai-soc"]
+ENTRYPOINT ["/usr/local/bin/wardnet"]
