@@ -192,6 +192,18 @@ fn business_authorization_subject_is_exactly_bound() {
 }
 
 #[test]
+fn business_authorization_must_not_widen_to_subdomains() {
+    let mut value = bound_business_authorized_allow_json();
+    value["context"]["subject"]["scope"] = json!("host_and_subdomains");
+    value["business_authorization"]["subject"]["scope"] = json!("host_and_subdomains");
+
+    assert!(
+        decision(value).validate().is_err(),
+        "the exact-scope business-exception contract must not become a host-and-subdomains authorization"
+    );
+}
+
+#[test]
 fn decision_cannot_outlive_its_business_authorization() {
     let mut value = bound_business_authorized_allow_json();
     value["business_authorization"]["valid_until_unix"] = json!(NOW + 30);
