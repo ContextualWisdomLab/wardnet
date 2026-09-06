@@ -72,6 +72,16 @@ fn add_business_authorization(value: &mut Value, workload_id: &str) {
 }
 
 #[test]
+fn decision_envelope_requires_explicit_protect_policy_mode_binding() {
+    let value = decision_json("workload-example", "snapshot-42");
+
+    assert!(
+        serde_json::from_value::<DecisionEnvelopeV1>(value).is_err(),
+        "an enforceable v1 decision without an explicit protect-policy mode binding must fail closed"
+    );
+}
+
+#[test]
 fn decision_envelope_rejects_unknown_wire_fields() {
     let mut value = decision_json("workload-example", "snapshot-42");
     value["transport_authorized"] = json!(true);
