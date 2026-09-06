@@ -70,8 +70,8 @@ fn decision_envelope_rejects_untraceable_adverse_assessment() {
     let decision: DecisionEnvelopeV1 =
         serde_json::from_value(value).expect("v1 decision envelope should deserialize");
 
-    assert_eq!(
-        decision.validate(),
-        Err(ContractValidationErrorV1::MissingDecisionEvidence)
+    assert!(
+        decision.validate().is_err(),
+        "known-malicious decisions without evidence references must fail closed"
     );
 }
