@@ -1,4 +1,8 @@
 //! Versioned, transport-neutral outbound site-reputation domain contracts.
+//!
+//! Contract terminology, research/standards grounding, rejected alternatives, and the explicit
+//! separation from executable transport authorization are recorded in
+//! [TRACEABILITY.md](../TRACEABILITY.md).
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +12,7 @@ pub const REPUTATION_SCHEMA_V1: &str = "wardnet.reputation.v1";
 const MAX_TEXT_BYTES_V1: usize = 1_024;
 const MAX_LIST_ITEMS_V1: usize = 64;
 
+/// Rejects contract schema identities outside the explicitly supported v1 family.
 fn validate_schema(schema_version: &str) -> Result<(), ContractValidationErrorV1> {
     if schema_version == REPUTATION_SCHEMA_V1 {
         Ok(())
@@ -16,6 +21,7 @@ fn validate_schema(schema_version: &str) -> Result<(), ContractValidationErrorV1
     }
 }
 
+/// Applies the shared nonblank and byte-bound contract to one required text field.
 fn validate_text(value: &str, field: &'static str) -> Result<(), ContractValidationErrorV1> {
     if value.trim().is_empty() {
         return Err(ContractValidationErrorV1::BlankField(field));
@@ -26,6 +32,7 @@ fn validate_text(value: &str, field: &'static str) -> Result<(), ContractValidat
     Ok(())
 }
 
+/// Applies required-text validation only when an optional producer field is present.
 fn validate_optional_text(
     value: Option<&str>,
     field: &'static str,
@@ -36,6 +43,7 @@ fn validate_optional_text(
     Ok(())
 }
 
+/// Bounds a repeated text field before validating every element with the shared text contract.
 fn validate_text_list(
     values: &[String],
     field: &'static str,
@@ -93,6 +101,7 @@ pub struct DestinationSubjectV1 {
 }
 
 impl DestinationSubjectV1 {
+    /// Rejects blank subjects and prevents subdomain scope from being attached to non-host kinds.
     fn validate(&self) -> Result<(), ContractValidationErrorV1> {
         validate_text(&self.value, "subject.value")?;
         if self.scope == DestinationScopeV1::HostAndSubdomains
@@ -375,6 +384,7 @@ pub enum DecisionReasonV1 {
     InvalidContract,
 }
 
+/// Checks that the reason describes the assessment, with authority-health failure taking precedence.
 fn reason_matches_assessment(
     assessment: ReputationAssessmentV1,
     evidence_health: EvidenceHealthV1,
@@ -399,6 +409,7 @@ fn reason_matches_assessment(
     }
 }
 
+/// Checks whether a machine-readable reason is coherent with the reputation-only policy action.
 fn reason_matches_action(action: PolicyActionV1, reason: DecisionReasonV1) -> bool {
     match action {
         PolicyActionV1::Allow => reason == DecisionReasonV1::BusinessAuthorization,
