@@ -53,6 +53,42 @@ cargo run
 Health reports `credentials_source` (`file` / `env` / `none`) and
 `admin_auth_configured` (boolean) without exposing secret values.
 
+## Trusted proxy client IP attribution
+
+Forwarded client IP headers are untrusted by default. Gateway rate limiting,
+DNSBL matching, and event attribution use the direct peer address unless that
+peer matches `TRUSTED_PROXY_CIDRS`.
+
+```bash
+TRUSTED_PROXY_CIDRS=192.0.2.0/24,2001:db8::/32 \
+cargo run
+```
+
+When a peer is trusted, Wardnet parses the complete `X-Forwarded-For` chain
+from right to left and picks the first hop that is not itself a trusted proxy.
+If the header is absent, Wardnet may use `X-Real-IP` from that same trusted
+context. If any forwarded hop is empty or invalid, the whole chain is rejected
+and Wardnet falls back to the direct peer without consulting `X-Real-IP`.
+
+Wardnet follows the trust-boundary model documented by RFC 7239 and common
+edge proxies. RFC 7239 defines forwarded metadata as proxy-added information,
+which means the application must first trust the direct peer before treating
+the header as evidence. NGINX documents recursive resolution as "the last
+non-trusted address" in the chain, and Envoy documents trusted CIDR handling
+from the right side of `X-Forwarded-For` toward the client.
+
+Reference links:
+
+- RFC 7239, *Forwarded HTTP extension*:
+  <https://datatracker.ietf.org/doc/html/rfc7239>
+- NGINX `ngx_http_realip_module`:
+  <https://nginx.org/en/docs/http/ngx_http_realip_module.html>
+- Envoy HTTP header manipulation:
+  <https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/headers>
+
+For an implementation-oriented source note, see
+`docs/papers/trusted-proxy-client-ip-attribution-sources.md`.
+
 ## Health Check
 
 ```bash
