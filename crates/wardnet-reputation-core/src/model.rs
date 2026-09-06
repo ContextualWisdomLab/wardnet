@@ -413,12 +413,15 @@ impl DecisionEnvelopeV1 {
         validate_text(&self.policy_id, "policy_id")?;
         validate_text(&self.evidence_generation, "evidence_generation")?;
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
-        if matches!(
+        let adverse_assessment = matches!(
             self.assessment,
             ReputationAssessmentV1::KnownMalicious | ReputationAssessmentV1::Suspicious
-        ) && self.evidence_refs.is_empty()
-        {
+        );
+        if adverse_assessment && self.evidence_refs.is_empty() {
             return Err(ContractValidationErrorV1::MissingDecisionEvidence);
+        }
+        if adverse_assessment && self.action == PolicyActionV1::Allow {
+            return Err(ContractValidationErrorV1::UnsafeAdverseAllow);
         }
         if self.evaluated_at_unix > self.expires_at_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
@@ -454,4 +457,6 @@ pub enum ContractValidationErrorV1 {
     MissingEnforcementProvenance,
     /// An adverse decision assessment has no evidence reference for SOC traceability.
     MissingDecisionEvidence,
+    /// An adverse assessment attempts to serialize as an allow action.
+    UnsafeAdverseAllow,
 }
