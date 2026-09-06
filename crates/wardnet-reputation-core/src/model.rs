@@ -143,10 +143,7 @@ impl DestinationContextV1 {
         validate_text(&self.profile_id, "profile_id")?;
         self.subject.validate()?;
         validate_text(&self.canonicalization_profile, "canonicalization_profile")?;
-        validate_text(
-            &self.canonicalization_version,
-            "canonicalization_version",
-        )?;
+        validate_text(&self.canonicalization_version, "canonicalization_version")?;
         Ok(())
     }
 }
@@ -210,10 +207,7 @@ impl EvidenceRecordV1 {
         validate_schema(&self.schema_version)?;
         validate_text(&self.source_id, "source_id")?;
         validate_text(&self.producer_record_id, "producer_record_id")?;
-        validate_text(
-            &self.producer_record_version,
-            "producer_record_version",
-        )?;
+        validate_text(&self.producer_record_version, "producer_record_version")?;
         self.subject.validate()?;
         validate_optional_text(self.producer_severity.as_deref(), "producer_severity")?;
         validate_optional_text(self.tenant_id.as_deref(), "tenant_id")?;
@@ -226,7 +220,10 @@ impl EvidenceRecordV1 {
         {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
         }
-        if self.producer_confidence.is_some_and(|confidence| confidence > 100) {
+        if self
+            .producer_confidence
+            .is_some_and(|confidence| confidence > 100)
+        {
             return Err(ContractValidationErrorV1::InvalidConfidence);
         }
         Ok(())
