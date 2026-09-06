@@ -108,3 +108,48 @@ fn decision_envelope_rejects_unavailable_required_authority_allow() {
         "required-authority outage must never serialize as a reputation allow"
     );
 }
+
+#[test]
+fn decision_envelope_rejects_known_malicious_with_non_adverse_reason() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["assessment"] = json!("known_malicious");
+    value["reason"] = json!("unknown_destination");
+    value["evidence_refs"] = json!(["urn:wardnet:evidence:record-1"]);
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert!(
+        decision.validate().is_err(),
+        "known-malicious assessments must not serialize with a contradictory SOC reason"
+    );
+}
+
+#[test]
+fn decision_envelope_rejects_adverse_reason_for_unknown_assessment() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["reason"] = json!("suspicious");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    assert!(
+        decision.validate().is_err(),
+        "adverse SOC reasons must not be detached from the matching adverse assessment"
+    );
+}
+
+#[test]
+fn decision_envelope_accepts_consistent_suspicious_denial() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["assessment"] = json!("suspicious");
+    value["reason"] = json!("suspicious");
+    value["evidence_refs"] = json!(["urn:wardnet:evidence:record-2"]);
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("v1 decision envelope should deserialize");
+
+    decision
+        .validate()
+        .expect("consistent suspicious deny must remain a valid reputation decision");
+}
