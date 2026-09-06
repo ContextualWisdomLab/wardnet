@@ -39,15 +39,11 @@ jobs:
           from pathlib import Path
 
           source = Path('.github/workflows/wardnet-dnsbl-repair.yml').read_text()
-          match = re.search(
-              r"printf '%s' '([A-Za-z0-9+/=]+)' \\| base64 -d >/tmp/wardnet-dnsbl-repair\\.py",
-              source,
-          )
-          if match is None:
-              raise SystemExit('reviewed DNSBL repair payload not found exactly once')
-          if len(re.findall(r"printf '%s' '[A-Za-z0-9+/=]+' \\| base64 -d >/tmp/wardnet-dnsbl-repair\\.py", source)) != 1:
-              raise SystemExit('reviewed DNSBL repair payload is ambiguous')
-          Path('/tmp/wardnet-dnsbl-repair.py').write_bytes(base64.b64decode(match.group(1), validate=True))
+          pattern = r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d >/tmp/wardnet-dnsbl-repair\.py"
+          matches = re.findall(pattern, source)
+          if len(matches) != 1:
+              raise SystemExit(f'reviewed DNSBL repair payload count={len(matches)}, expected 1')
+          Path('/tmp/wardnet-dnsbl-repair.py').write_bytes(base64.b64decode(matches[0], validate=True))
           PY
           python3 /tmp/wardnet-dnsbl-repair.py
           cargo fmt --all
