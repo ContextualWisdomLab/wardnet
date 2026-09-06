@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use wardnet_reputation_core::{
     ContractValidationErrorV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
@@ -64,6 +64,21 @@ fn evidence() -> EvidenceRecordV1 {
         license_ref: "synthetic-fixture".to_string(),
         provenance_refs: vec!["urn:wardnet:test:record-1".to_string()],
     }
+}
+
+fn assert_unknown_field_rejected<T>(candidate: T, field: &str)
+where
+    T: Serialize + DeserializeOwned,
+{
+    let mut value = serde_json::to_value(candidate).expect("contract serializes");
+    value
+        .as_object_mut()
+        .expect("wire contract serializes as an object")
+        .insert(field.to_string(), json!(true));
+    assert!(
+        serde_json::from_value::<T>(value).is_err(),
+        "v1 wire contract must reject unknown field {field}"
+    );
 }
 
 #[test]
@@ -164,15 +179,32 @@ fn rejects_unknown_evidence_fields_that_could_widen_scope() {
         .as_object_mut()
         .expect("evidence contract serializes as an object");
     object.remove("tenant_id");
-    object.insert(
-        "tenant_ids".to_string(),
-        json!(["tenant-example"]),
-    );
+    object.insert("tenant_ids".to_string(), json!(["tenant-example"]));
 
     let decoded = serde_json::from_value::<EvidenceRecordV1>(value);
     assert!(
         decoded.is_err(),
         "an unrecognized tenant restriction must fail closed instead of degrading to global evidence"
+    );
+}
+
+#[test]
+fn rejects_unknown_fields_across_nondecision_v1_wire_structs() {
+    assert_unknown_field_rejected(subject(), "unexpected_subject_field");
+    assert_unknown_field_rejected(context(), "caller_authenticated");
+    assert_unknown_field_rejected(evidence(), "unexpected_evidence_scope");
+    assert_unknown_field_rejected(source_policy(), "fallback_allow");
+    assert_unknown_field_rejected(
+        PolicySnapshotV1 {
+            schema_version: REPUTATION_SCHEMA_V1.to_string(),
+            policy_id: "protect-default".to_string(),
+            revision: 1,
+            mode: EvaluationModeV1::Protect,
+            required_sources: vec!["reviewed-source".to_string()],
+            valid_from_unix: NOW - 60,
+            valid_until_unix: NOW + 600,
+        },
+        "unknown_policy_extension",
     );
 }
 
