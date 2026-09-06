@@ -46,8 +46,8 @@ Fixture convention: every case includes `case_id`, fixed `now_unix`, canonical p
 **Consumes:** validated canonical context, policy, evidence snapshot, injected time.
 **Produces:** deterministic `evaluate(context, policy, evidence, now) -> DecisionEnvelopeV1`; cache entries cannot bypass revalidation.
 
-- [ ] Write RED table-driven tests for the acceptance matrix below. In particular, no-match is unknown, business allow cannot defeat hard deny, and duplicate syndicated evidence cannot change a decision by arithmetic accumulation.
-- [ ] Implement exact subject matching, explicit subdomain scope, source eligibility, stable reasons, and deny precedence. No substring or registrable-domain widening; no `BLOCK_SCORE` reuse.
+- [ ] Write RED table-driven tests for the acceptance matrix below. In particular, no-match is `unknown`; without scoped authorization protect denies, while the same no-match case with an exact-scope valid business authorization and healthy required sources may produce the Wardnet allow. Business allow cannot defeat hard deny, and duplicate syndicated evidence cannot change a decision by arithmetic accumulation.
+- [ ] Implement exact subject matching, explicit subdomain scope, source eligibility, stable reasons, and deny precedence. Keep maliciousness assessment, required-source health, and policy reason separate so a higher-precedence authority failure can explain a deny without rewriting an existing adverse assessment. No substring or registrable-domain widening; no `BLOCK_SCORE` reuse.
 - [ ] Implement tenant/context/revision-bound cache keys, finite cardinality, minimum expiry, and invalidation. Add property tests: unrelated tenant evidence never changes a result; record permutation preserves a decision; adding a duplicate never raises confidence.
 - [ ] Run focused tests and workspace gates, then commit. Add libFuzzer targets and stable property mirrors for the new untrusted structures in a Wardnet-owned fuzz change; do not copy central workflows.
 
@@ -69,10 +69,11 @@ Fixture convention: every case includes `case_id`, fixed `now_unix`, canonical p
 **Consumes:** an immutable compatible EgressWeave release, Task 4 decisions, authenticated PEP context.
 **Produces:** an owner-backed pre-connect/pre-send gate with actual-peer and per-hop correlation. The exact foreign API is selected by its owner, not invented in this plan.
 
-- [ ] Verify release/schema/artifact identity, provenance, compatibility, end-to-end deadline, and peer-bound execution guarantees. If any is absent, leave integration unavailable; continue offline work only.
+- [ ] Verify release/schema/artifact identity, provenance, compatibility, end-to-end deadline, peer-bound execution guarantees, and authenticated encrypted transport semantics for credential-bearing hops. If any is absent, leave integration unavailable; continue offline work only.
 - [ ] Port the useful hostile requirements from #136 as black-box consumer vectors, not its local transport implementation. Preserve Wardnet-owned source refresh behavior from #115 through the released ACL, not its direct client.
 - [ ] Start controlled DNS/HTTP fixtures and record RED tests for rebinding, mixed peers, malicious second redirect, ambient proxy influence, pool/coalesced-origin reuse, stale/replayed grants, and stalled DNS exceeding the whole operation deadline.
-- [ ] Implement the thin ACL and PEP composition. Require zero denied-destination connections/payload hits as appropriate, not merely a deny response after transmission.
+- [ ] Add credential-path RED cases for an initial `http://` target, HTTPS-to-HTTP downgrade, redirected credential-bearing request, and retry to a target whose authenticated encryption cannot be established. The required result is credential stripping before that hop or rejection with zero cleartext credential bytes observed by the fixture; successful cleartext fallback is never acceptable.
+- [ ] Implement the thin ACL and PEP composition. Require zero denied-destination connections/payload hits as appropriate, not merely a deny response after transmission. The PEP consumes the released transport proof; it does not create a second TLS policy implementation.
 - [ ] Verify 60-second maximum protected tunnel lease and denial propagation, transport outage fail-closed behavior, and incompatible release rejection. Run all gates and commit without deploying automatically.
 
 ## Task 6: Operations, coverage, and controlled activation
@@ -92,7 +93,7 @@ Fixture convention: every case includes `case_id`, fixed `now_unix`, canonical p
 | ID | Hostile or realistic input | Required observation |
 | --- | --- | --- |
 | REP-01 | Active eligible C2/phishing indicator plus business allow | Hard deny; zero denied-target payload hits |
-| REP-02 | No eligible match | Unknown, not safe; protect denies without scoped authorization |
+| REP-02 | No eligible match, with and without exact-scope valid business authorization | Assessment remains `unknown`; protect denies without authorization, while exact authorization plus healthy required sources may yield the Wardnet allow subject to independent transport and audit gates |
 | REP-03 | Expired/revoked evidence reimported or HTTP 304 received | No renewed eligibility; required-source failure cannot allow |
 | REP-04 | MISP invalid/missing `to_ids` or deleted enclosing Object | No admitted enforcement indicator |
 | REP-05 | Older source version after tombstone; truncated replacement | No resurrection or partial snapshot publication |
@@ -109,6 +110,7 @@ Fixture convention: every case includes `case_id`, fixed `now_unix`, canonical p
 | REP-16 | Secret-bearing URL, cookie, source credential | No secret in logs, exports, error text or provider query |
 | REP-17 | Newly denied persistent connection | Terminated within supported 60-second lease bound |
 | REP-18 | Duplicate/permuted syndicated evidence | No manufactured independent votes or probability |
+| REP-19 | Credential-bearing initial HTTP, HTTPS-to-HTTP downgrade, redirect, or retry without authenticated encryption | Strip credentials before the unsafe hop or reject; fixture observes zero credential bytes on cleartext transport |
 
 ## Verification and merge discipline
 
