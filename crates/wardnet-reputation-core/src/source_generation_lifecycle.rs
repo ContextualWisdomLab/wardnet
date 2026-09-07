@@ -186,11 +186,8 @@ impl EvidenceSnapshotV1 {
             _ => return Err(SourceGenerationLifecycleErrorV1::SnapshotCursorMismatch),
         };
 
-        let evidence_snapshot = self.replace_source(
-            replacement,
-            next_evidence_generation,
-            now_unix,
-        )?;
+        let evidence_snapshot =
+            self.replace_source(replacement, next_evidence_generation, now_unix)?;
 
         Ok(SourceReplacementTransitionV1 {
             evidence_snapshot,
