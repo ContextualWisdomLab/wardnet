@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-09-07. Re-read live refs, PRs, reviews/threads, exact-head checks, rulesets, security evidence and releases before any merge, release, restack or foreign-owner handoff. This file is Wardnet's sole commercial/product-technical current-state ledger; predecessor evidence is retained only when it is causal RED/repair lineage and is never promoted as current-head GREEN.
+Snapshot date: 2026-09-08. Re-read live refs, PRs, reviews/threads, exact-head checks, rulesets, security evidence and releases before any merge, release, restack or foreign-owner handoff. This file is Wardnet's sole commercial/product-technical current-state ledger; predecessor evidence is retained only when it is causal RED/repair lineage and is never promoted as current-head GREEN.
 
 ## Authority boundary
 
@@ -14,7 +14,9 @@ Fresh GitHub Release inventory remains empty for Wardnet and EgressWeave. Mutabl
 
 ## Protected truth, governance and control plane
 
-Protected/default Wardnet truth remains `main@a52ccd0a24a727d9349bb32def7713882d8cad1e` from merged #171. The protected branch requires the repository `rust` status. Organization governance still has a structurally incompatible generic approving-review requirement under the declared solo-maintainer model; `.github#772` remains the canonical owner path. Self-approval, model/bot-as-human approval and routine administrator bypass are forbidden, and product PRs are not used as merge-policy probes.
+Protected/default Wardnet truth remains `main@a52ccd0a24a727d9349bb32def7713882d8cad1e` from merged #171. Main push CI `33998430723`, Scorecard `33998430707`, and scheduled Fuzz on the same protected source have terminal success. Protected truth is therefore stable source evidence, but it is not an immutable Wardnet release identity because GitHub Releases remains empty.
+
+The protected branch requires the repository `rust` status. Organization governance still has a structurally incompatible generic approving-review requirement under the declared solo-maintainer model; `.github#772` remains the canonical owner path. Self-approval, model/bot-as-human approval and routine administrator bypass are forbidden, and product PRs are not used as merge-policy probes.
 
 Runner/materialization remains `.github#712` authority. A queued exact-head run is incomplete evidence. Leaf branches do not manufacture success through no-op commits, repeated reruns or temporary verifier workflows; current-head evidence is preserved while owner-plane queue health is repaired.
 
@@ -38,33 +40,35 @@ Exact CI `34071995169`, Fuzz `34071995140`, Security `34071995181`, and SAST `34
 
 ### Business authorization child #176
 
-#176 remains open/Draft and mergeable on exact parent `#175@9de0ea568...`. Live head is now `5d7166da2034d450f37ab69d37fbbb9d1301e287`. The retained security delta binds business authorization to exact policy/canonicalization/subject/scope/authorization revision/approver-ticket/provenance/validity and `policy_mode=protect`, while preserving the parent 32-reference decision cap and 8 KiB observable-URL invariant.
+#176 remains open/Draft and mergeable on exact parent `#175@9de0ea568...`. Live head is `5d7166da2034d450f37ab69d37fbbb9d1301e287`. The retained security delta binds business authorization to exact policy/canonicalization/subject/scope/authorization revision/approver-ticket/provenance/validity and `policy_mode=protect`, while preserving the parent 32-reference decision cap and 8 KiB observable-URL invariant.
 
-Earlier ordinary CI exposed two independent stale test fixtures missing the already-required `policy_mode`; those failures are causal integration REDs. The post-`0a79c8af...` movement to `5d7166da...` is one additional test-fixture line in `business_authorization_policy_scope.rs`, not a production-authority change. Exact current CI `34125618252` and Fuzz `34125618251` are terminal success. Because root #175 has not integrated into protected truth and current Draft guards do not materialize all security/review lanes, #176 remains Draft and cannot inherit #175's merge evidence.
+Earlier ordinary CI exposed independent stale test fixtures missing the already-required `policy_mode`; those failures are causal integration REDs. The post-`0a79c8af...` movement to `5d7166da...` is one additional test-fixture line in `business_authorization_policy_scope.rs`, not a production-authority change. Exact current CI `34125618252` and Fuzz `34125618251` are terminal success. Because root #175 has not integrated into protected truth and current Draft guards do not materialize all security/review lanes, #176 remains Draft and cannot inherit #175's merge evidence.
 
 ### Decision freshness child #178
 
 #178 remains open/Draft and mergeable on exact current parent `#176@5d7166da2034d450f37ab69d37fbbb9d1301e287`; live head is `43faf199fde4a74a1f74a3c544f56f5f4e3b23e5`. This confirms the moved parent was adopted non-force rather than treated as a race.
 
-The child retains executed RED `76fa9a0e23a68853f5fa14c6cd9bad10a4b51a7b` and minimal GREEN `4a88e8a7f4b324c2593f3b1a4aa3e5d791fe80e9`, adding deterministic injected-time `DecisionEnvelopeV1::validate_at(now_unix)` without ambient clock or transport authority. It stays Draft behind #176/#175 and must reacquire its own exact-current integration/security/review evidence after each parent movement.
+The child retains executed RED `76fa9a0e23a68853f5fa14c6cd9bad10a4b51a7b` and minimal GREEN `4a88e8a7f4b324c2593f3b1a4aa3e5d791fe80e9`, adding deterministic injected-time `DecisionEnvelopeV1::validate_at(now_unix)` without ambient clock or transport authority. Exact-current CI `34130786226` and Fuzz `34130786225` are terminal success on current head. It stays Draft behind #176/#175 and must reacquire its own integration/security/review evidence after protected-parent movement.
 
 ### Evidence-snapshot health child #179
 
-#179 remains open/Draft and mergeable on exact parent `#178@43faf199fde4a74a1f74a3c544f56f5f4e3b23e5`; current head is `1702cad96336ed9d546e6ebbb64c80186605c02d`.
+#179 remains open/Draft and mergeable on exact parent `#178@43faf199fde4a74a1f74a3c544f56f5f4e3b23e5`; current head is `b6fceb680f172393e01fc2a6e27fa54ecf87d9d6`.
 
 The first test-only RED `af23e1a...` reached CI but stopped at formatting and is not the causal semantic RED. Rustfmt-only head `12e2cac1ea56283bf1da992fc625706f9863f68b` then acquired a real runner in CI `34114942581` / job `101719447845`: checkout and formatting passed, and `cargo test --locked --workspace` failed exactly because `EvidenceSnapshotV1`, `SourceSnapshotV1`, `DuplicateSourceSnapshot`, `MissingSourceSnapshot`, and `DuplicateEvidenceRecord` did not yet exist.
 
-Current production GREEN `1702cad...` adds only the bounded snapshot model and the hostile test. A complete authenticated source generation may contain zero adverse records; duplicate source snapshots, orphan evidence, duplicate producer record identities and future/inverted snapshot time order fail closed. Structural validation does not invent provider availability or transport authorization; later evaluation must compare represented source state with reviewed required-source policy and classify `fresh`/`expired`/`unavailable` without extending TTL.
+Production GREEN `1702cad...` adds only the bounded snapshot model and hostile test. A complete authenticated source generation may contain zero adverse records; duplicate source snapshots, orphan evidence, duplicate producer record identities and future/inverted snapshot time order fail closed. Structural validation does not invent provider availability or transport authorization; later evaluation must compare represented source state with reviewed required-source policy and classify `fresh`/`expired`/`unavailable` without extending TTL.
 
-Fresh current-head CI `34130881874` and Fuzz `34130881882` are queued/non-passing. Production GREEN exists only because a semantic RED executed first; it is not merge authority until exact-current GREEN executes.
+Ordinary exact-head CI `34130881874` on `1702cad...` later exposed a real rustfmt defect before tests/Clippy; Fuzz `34130881882` was terminal success. The formatting failure was repaired causally and only by `b6fceb680f172393e01fc2a6e27fa54ecf87d9d6`, which collapses the reported `validate_text` call to rustfmt form without semantic change. Fresh exact-current CI `34142364612` and Fuzz `34142364593` have materialized and are queued/non-passing. No predecessor result transfers to `b6fceb...`.
 
 ## Gateway route-segment admission #180 / #181
 
-Protected `main@a52ccd0a...` still uses lexical route-prefix matching, so `/api` can capture `/apix` and `/api/admin` can capture `/api/administrator`, binding a request to the wrong route/enforcement/upstream authority before later controls. RFC 3986 §3.3 supplies the segment boundary.
+Protected `main@a52ccd0a...` uses lexical route-prefix matching, so `/api` can capture `/apix` and `/api/admin` can capture `/api/administrator`, binding a request to the wrong route/enforcement/upstream authority before later controls. RFC 3986 §3.3 supplies the segment boundary.
 
-Draft #181 is the bounded RED lane at exact `93d097626d96f9adaffc267f47be162c397355f3` on protected main. Its only changed path is `crates/waf-ids-core/tests/route_path_segment_boundary.rs`; production code remains untouched. The hostile regression requires exact/slash-delimited descendant matching, rejects `/apix` and `/api-v2`, requires `/api/administrator` to fall back to `/api` rather than `/api/admin`, and preserves longest valid match, `/` catch-all, trailing-slash prefixes and disabled-route behavior.
+Draft #181 executed the required hostile RED on exact test-only head `93d097626d96f9adaffc267f47be162c397355f3`. CI `34129793580` / rust job `101766902311` reached the new suite after checkout/toolchain/fmt and pre-existing crate tests. Two cases failed exactly on lexical sibling capture while root/trailing-slash compatibility passed; Fuzz `34129793534` was terminal success. This is the causal RED.
 
-Exact CI `34129793580` / rust job `101766902311` is queued pre-checkout with `steps=null`; Fuzz `34129793534`, Security `34129793543`, SAST `34129793525`, and CodeQL `34129793524` are also queued. The exact specimen has been handed to `.github#712`. Production GREEN remains withheld until this hostile RED executes; then only the Wardnet route-selection predicate may change.
+Minimal causal GREEN is now exact `fc5645bb2e661f9af63d84b1d08e939b3d7ab3fe`. The production delta changes only `crates/waf-ids-core/src/lib.rs::select_route`: an enabled prefix matches an exact path or slash-delimited descendant, while root `/`, trailing-slash compatibility, disabled-route behavior and longest valid match are preserved. Fresh compare against protected main is `behind_by=0`; effective delta is exactly the 77-line hostile regression plus the 8-line predicate repair. `RouteConfig` and EgressWeave-owned outbound authorization are unchanged.
+
+Exact-current CI `34141693656`, Fuzz `34141693771`, Security `34141693787`, SAST `34141693672`, and CodeQL `34141693695` are materialized but queued/non-passing at this snapshot. No predecessor GREEN transfers. Keep Draft until the unchanged exact head obtains all then-live gates; if runner acquisition becomes the first failing boundary, advance `.github#712` rather than source-churn or rerun-storm.
 
 ## Other current security/product lanes
 
