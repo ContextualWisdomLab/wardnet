@@ -11,6 +11,7 @@ fn business_authorized_allow_json() -> Value {
         "evaluation_id": "eval-business-authorization",
         "policy_id": "protect-default",
         "policy_revision": 1,
+        "policy_mode": "protect",
         "assessment": "unknown",
         "evidence_health": "fresh",
         "action": "allow",
