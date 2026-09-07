@@ -139,6 +139,42 @@ fn complete_empty_replacement_advances_only_one_source_and_preserves_unrelated_s
 }
 
 #[test]
+fn complete_nonempty_replacement_publishes_only_the_new_source_generation() {
+    let prior = prior_snapshot();
+    let replacement = replacement_batch(
+        SourceBatchCompletenessV1::Complete,
+        Some("generation-8"),
+        vec![
+            member("required-source", "generation-9", "required-3"),
+            member("required-source", "generation-9", "required-4"),
+        ],
+    );
+
+    let next = prior
+        .replace_source(replacement, "evidence-generation-9", NOW)
+        .expect("a complete non-empty replacement must publish atomically");
+
+    let required_records: Vec<_> = next
+        .records
+        .iter()
+        .filter(|member| member.record.source_id == "required-source")
+        .collect();
+    assert_eq!(required_records.len(), 2);
+    assert!(required_records.iter().all(|member| {
+        member.source_generation == "generation-9"
+            && matches!(
+                member.record.producer_record_id.as_str(),
+                "required-3" | "required-4"
+            )
+    }));
+    assert!(next.records.iter().any(|member| {
+        member.record.source_id == "unrelated-source"
+            && member.source_generation == "generation-3"
+            && member.record.producer_record_id == "unrelated-1"
+    }));
+}
+
+#[test]
 fn replacement_rejects_mixed_source_or_generation_membership_atomically() {
     let prior = prior_snapshot();
 
@@ -231,6 +267,60 @@ fn source_creation_and_replacement_expectations_fail_closed_when_contradictory()
     assert_eq!(
         prior.replace_source(replace_absent, "evidence-generation-9", NOW),
         Err(SourceReplacementErrorV1::PreviousSourceGenerationMismatch)
+    );
+}
+
+#[test]
+fn replacement_rejects_invalid_batch_contract_fields_before_publication() {
+    let prior = prior_snapshot();
+
+    let mut wrong_schema = replacement_batch(
+        SourceBatchCompletenessV1::Complete,
+        Some("generation-8"),
+        Vec::new(),
+    );
+    wrong_schema.schema_version = "wardnet.reputation.v2".to_owned();
+    assert_eq!(
+        prior.replace_source(wrong_schema, "evidence-generation-9", NOW),
+        Err(SourceReplacementErrorV1::Contract(
+            ContractValidationErrorV1::UnsupportedSchema
+        ))
+    );
+
+    for expected_previous_source_generation in [" ".to_owned(), "x".repeat(1_025)] {
+        let mut invalid_expectation = replacement_batch(
+            SourceBatchCompletenessV1::Complete,
+            Some("generation-8"),
+            Vec::new(),
+        );
+        invalid_expectation.expected_previous_source_generation =
+            Some(expected_previous_source_generation.clone());
+        let expected_error = if expected_previous_source_generation.trim().is_empty() {
+            ContractValidationErrorV1::BlankField(
+                "source_replacement.expected_previous_source_generation",
+            )
+        } else {
+            ContractValidationErrorV1::BoundExceeded(
+                "source_replacement.expected_previous_source_generation",
+            )
+        };
+        assert_eq!(
+            prior.replace_source(invalid_expectation, "evidence-generation-9", NOW),
+            Err(SourceReplacementErrorV1::Contract(expected_error))
+        );
+    }
+
+    let mut future_source = replacement_batch(
+        SourceBatchCompletenessV1::Complete,
+        Some("generation-8"),
+        Vec::new(),
+    );
+    future_source.source_snapshot.completed_at_unix = NOW + 1;
+    assert_eq!(
+        prior.replace_source(future_source, "evidence-generation-9", NOW),
+        Err(SourceReplacementErrorV1::Contract(
+            ContractValidationErrorV1::InvalidTimeOrder
+        ))
     );
 }
 
