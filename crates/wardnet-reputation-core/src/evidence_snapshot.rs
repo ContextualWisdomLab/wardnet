@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    BaseEvidenceSnapshotV1, ContractValidationErrorV1, EvidenceRecordV1, SourceSnapshotV1,
-    REPUTATION_SCHEMA_V1,
+    BaseEvidenceSnapshotV1, ContractValidationErrorV1, EvidenceRecordV1, REPUTATION_SCHEMA_V1,
+    SourceSnapshotV1,
 };
 
 const MAX_SOURCE_GENERATION_BYTES_V1: usize = 1_024;
@@ -207,9 +207,8 @@ impl EvidenceSnapshotV1 {
             return Err(SourceReplacementErrorV1::PreviousSourceGenerationMismatch);
         }
 
-        let mut source_snapshots = Vec::with_capacity(
-            self.source_snapshots.len() + usize::from(prior_source.is_none()),
-        );
+        let mut source_snapshots =
+            Vec::with_capacity(self.source_snapshots.len() + usize::from(prior_source.is_none()));
         source_snapshots.extend(
             self.source_snapshots
                 .iter()
