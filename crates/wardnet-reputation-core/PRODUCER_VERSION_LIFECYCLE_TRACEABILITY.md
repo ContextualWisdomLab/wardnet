@@ -8,7 +8,7 @@ A generation-bound evidence snapshot can prove that a record belongs to the exac
 
 Wardnet owns security evidence admission and reputation-policy semantics. It does not fetch feeds, interpret executable destination transport, authorize egress, persist another service's domain truth, or own quarantine execution. Source adapters authenticate producer responses and normalize source-specific ordering semantics. The generic core treats `producer_record_version` as opaque and does not infer ordering lexically or numerically.
 
-The lifecycle cursor is deterministic admission state only. This slice does not claim durable cursor persistence, transactionality, source-batch atomic publication, pagination completeness, authentication of the cursor itself, or source-specific ordinal derivation. Those controls remain explicit prerequisites before a storage/adapter boundary can claim complete Task 2 lifecycle enforcement.
+The lifecycle cursor is deterministic admission state only. It does not claim durable cursor persistence, transactionality, pagination completeness, authentication of the cursor itself, or source-specific ordinal derivation. The later atomic source-replacement child adds a pure complete-generation snapshot transition, documented in `SOURCE_REPLACEMENT_TRACEABILITY.md`; that transition likewise does not turn this in-memory lifecycle cursor into durable authenticated storage state.
 
 ## Alternatives
 
@@ -39,4 +39,4 @@ The production candidate must obtain fresh unchanged-head formatting, locked wor
 
 ## Follow-up
 
-The next storage/adapter slices must bind the cursor to authenticated durable source state, prove atomic complete-generation replacement, distinguish full-snapshot absence from delta-feed absence, reject incomplete pagination/truncated replacement, and preserve the last-known-good generation without extending evidence freshness after refresh failure. These must remain behind the canonical source-adapter and storage boundaries rather than being simulated in this pure crate.
+The pure atomic source-replacement child now distinguishes complete empty state from incomplete replacement, rejects partial publication, exact-CAS binds an existing source generation, and preserves unrelated last-known-good records. Remaining storage/adapter work must bind both the lifecycle cursor and accepted snapshot to authenticated durable source state in one crash-safe transaction, prove provider pagination/completeness, preserve source-specific ordering semantics, and avoid extending evidence freshness after refresh failure or a provider not-modified outcome. These controls remain behind the canonical source-adapter and storage boundaries rather than being simulated in the pure crate.
