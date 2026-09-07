@@ -215,7 +215,6 @@ impl EvidenceSnapshotV1 {
                 .filter(|snapshot| snapshot.source_id != source_id)
                 .cloned(),
         );
-        source_snapshots.push(replacement.source_snapshot);
 
         let retained_record_count = self
             .records
@@ -230,6 +229,7 @@ impl EvidenceSnapshotV1 {
                 .cloned(),
         );
         records.extend(replacement.records);
+        source_snapshots.push(replacement.source_snapshot);
 
         let candidate = Self {
             schema_version: self.schema_version.clone(),
