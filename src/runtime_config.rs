@@ -359,4 +359,30 @@ mod tests {
         );
         std::fs::remove_dir_all(&temp).unwrap();
     }
+
+    #[test]
+    /// Importing `std::env` must not bypass the direct runtime-env fitness gate.
+    fn aliased_runtime_env_module_read_is_detected_by_architecture_fitness_gate() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "wardnet-runtime-config-alias-{}-{unique}",
+            std::process::id()
+        ));
+        let nested = temp.join("gateway").join("delivery");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("aliased_leak.rs"),
+            "use std::env; fn bypass() { let _ = env::var(\"BIND_ADDR\"); }",
+        )
+        .unwrap();
+
+        assert_eq!(
+            direct_runtime_env_read_offenders(&temp),
+            vec![PathBuf::from("gateway/delivery/aliased_leak.rs")]
+        );
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
 }
