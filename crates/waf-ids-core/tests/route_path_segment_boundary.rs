@@ -1,4 +1,4 @@
-use waf_ids_core::{EnforcementMode, RouteConfig, select_route};
+use waf_ids_core::{select_route, EnforcementMode, RouteConfig};
 
 fn route(id: &str, path_prefix: &str, enabled: bool) -> RouteConfig {
     RouteConfig {
@@ -15,7 +15,10 @@ fn route(id: &str, path_prefix: &str, enabled: bool) -> RouteConfig {
 fn route_prefix_matches_only_exact_path_or_descendant_segment() {
     let routes = vec![route("api", "/api", true)];
 
-    assert_eq!(select_route(&routes, "/api").map(|route| route.id.as_str()), Some("api"));
+    assert_eq!(
+        select_route(&routes, "/api").map(|route| route.id.as_str()),
+        Some("api")
+    );
     assert_eq!(
         select_route(&routes, "/api/items").map(|route| route.id.as_str()),
         Some("api")
