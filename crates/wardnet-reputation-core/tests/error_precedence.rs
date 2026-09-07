@@ -1,7 +1,8 @@
 use wardnet_reputation_core::{
     ContractValidationErrorV1, DecisionEnvelopeV1, DecisionReasonV1, DestinationContextV1,
     DestinationScopeV1, DestinationSubjectKindV1, DestinationSubjectV1, DirectionV1,
-    EvidenceHealthV1, PolicyActionV1, REPUTATION_SCHEMA_V1, ReputationAssessmentV1,
+    EvaluationModeV1, EvidenceHealthV1, PolicyActionV1, REPUTATION_SCHEMA_V1,
+    ReputationAssessmentV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -32,6 +33,7 @@ fn base_decision() -> DecisionEnvelopeV1 {
         context: context(),
         policy_id: "protect-default".to_owned(),
         policy_revision: 1,
+        policy_mode: EvaluationModeV1::Protect,
         evidence_generation: "snapshot-42".to_owned(),
         assessment: ReputationAssessmentV1::Unknown,
         evidence_health: EvidenceHealthV1::Fresh,
