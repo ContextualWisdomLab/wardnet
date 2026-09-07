@@ -81,7 +81,7 @@ fn live_validation_accepts_the_inclusive_current_window() {
     decision
         .validate_at(NOW)
         .expect("the exact evaluation instant is inside the decision validity window");
-    decision
-        .validate_at(NOW + 60)
-        .expect("the declared expiry instant remains inclusive like the other v1 validity intervals");
+    decision.validate_at(NOW + 60).expect(
+        "the declared expiry instant remains inclusive like the other v1 validity intervals",
+    );
 }
