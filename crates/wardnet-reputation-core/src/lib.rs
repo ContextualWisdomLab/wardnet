@@ -17,7 +17,6 @@ pub use model::{
     BusinessAuthorizationBindingV1, ContractValidationErrorV1, DecisionEnvelopeV1,
     DecisionReasonV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
     DestinationSubjectV1, DirectionV1, EvaluationModeV1, EvidenceClassificationV1,
-    EvidenceHealthV1, EvidenceRecordV1, PolicyActionV1, PolicySnapshotV1,
-    REPUTATION_SCHEMA_V1, ReputationAssessmentV1, SourcePolicyV1, SourceSnapshotV1,
-    SourceTenantScopeV1,
+    EvidenceHealthV1, EvidenceRecordV1, PolicyActionV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1,
+    ReputationAssessmentV1, SourcePolicyV1, SourceSnapshotV1, SourceTenantScopeV1,
 };
