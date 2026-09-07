@@ -27,6 +27,7 @@ fn bound_allow_json() -> Value {
         },
         "policy_id": "protect-default",
         "policy_revision": 7,
+        "policy_mode": "protect",
         "evidence_generation": "snapshot-42",
         "assessment": "unknown",
         "evidence_health": "fresh",
