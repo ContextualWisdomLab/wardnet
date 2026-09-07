@@ -22,6 +22,8 @@ Runner/materialization remains `.github#712` authority. A queued run is incomple
 
 Delegated CodeQL terminal-status publication remains `.github#1929` authority. The current central issue is still open: identity/matrix defects have had partial owner repairs, but unchanged consumer heads still supply examples where leaf dispatch succeeds without an authenticated terminal receipt being reconciled back to the required job. Wardnet keeps those failures non-passing and does not substitute predecessor/native/model evidence.
 
+Central Strix remains source/repository-scan authority, not a Wardnet runtime substitute. Fresh inspection of `.github/workflows/strix.yml@main` shows the trusted quick gate scans `__PR_SCOPE__`/repository data and does not yet expose a generic isolated live-service target. Wardnet #11 therefore remains open, and `.github#2027` now owns the reusable exact-head live-target contract needed to start Wardnet on an isolated listener, exercise it with Strix, and return an attack→Wardnet-detection receipt without copying the central workflow or selecting a direct provider/model fallback.
+
 ## Outbound destination reputation
 
 ### Proposed architecture #173
@@ -94,7 +96,15 @@ Fresh review found two additional replay-integrity defects and repaired them tes
 
 Current documentation head `7f715a843236bcb79452fc1b3c84d50f34da9981` has exact CI `34162018684` / rust job `101865605262` terminal **SUCCESS** through checkout, toolchain, formatting, locked tests and strict Clippy. Exact Fuzz `34162018692` / fuzz job `101865650619` is terminal **SUCCESS** on the same head after the bounded targets completed on GitHub-hosted `ubuntu-24.04`; no crash artifact was produced. Formal review count and inline review-thread count are both zero. No predecessor GREEN is promoted.
 
-The pure transition still does not prove durable transactionality. The next Wardnet-owned storage/adapter slice must atomically bind authenticated provider pagination/completeness, durable producer lifecycle cursors, the accepted immutable evidence snapshot, crash recovery, retry/idempotency and last-known-good publication; refresh failure or provider not-modified outcomes must not manufacture newer evidence freshness.
+### Source-generation ABA replay child #191
+
+#191 remains open/Draft on exact parent `#189@7f715a843236bcb79452fc1b3c84d50f34da9981`; current exact head is `9d42b7da750570a970785242b7f26072e89a558e`.
+
+The causal hostile fixture established that a complete source can validly advance and then be replayed back to an earlier generation unless Wardnet retains an authenticated monotonic source-generation cursor instead of reasoning over opaque generation text. The bounded repair adds `SourceGenerationLifecycleCursorV1`, adapter-authenticated normalized ordinals, exact token/ordinal collision and stale-replay rejection, source-identity and completion-time monotonicity, and `EvidenceSnapshotV1::replace_source_with_lifecycle`, which requires the retained cursor to match the source generation already represented by the immutable evidence snapshot and returns the next snapshot plus next cursor together. It remains a pure domain transition; it does not claim durable database transactionality, provider fetching, EgressWeave transport authority, Context Graph/EA mutation or LLM/provider ownership.
+
+A real hosted current-head CI run first exposed only deterministic rustfmt drift after the semantic/module-boundary repairs. The exact rustfmt diff was applied without behavior change. Current exact CI `34168771438` / rust job `101884940390` is terminal **SUCCESS** through exact checkout, formatting, locked workspace tests and strict Clippy on hosted `ubuntu-24.04`. Exact Fuzz `34168771365` / fuzz job `101884940193` is currently **IN PROGRESS** on the unchanged head after successful checkout/toolchain/cargo-fuzz setup; no Fuzz GREEN is claimed until terminal completion. Formal review and inline thread counts were zero at the latest read.
+
+The remaining reputation buyer gap is now the durable Wardnet storage/adapter transaction: authenticate/normalize provider generation ordinals, bind provider pagination/completeness, persist both producer-record and source-generation lifecycle cursors with the accepted immutable evidence snapshot, provide crash recovery/retry/idempotency and last-known-good publication, and ensure refresh failure or provider not-modified outcomes cannot manufacture newer evidence freshness.
 
 ## Gateway route-segment admission #180 / #181
 
@@ -104,13 +114,25 @@ Draft #181 executed the hostile RED on exact `93d097626d96f9adaffc267f47be162c39
 
 Exact-current CI `34141693656`, Fuzz `34141693771`, Security `34141693787`, and SAST `34141693672` are terminal success. CodeQL `34141693695` remains terminal failure only at delegated receipt reconciliation after a later exact dispatch succeeded. That owner specimen remains under `.github#1929`; no source churn or broad rerun is causal.
 
+## Fresh protected-main adoption maintenance
+
+Three bounded non-overlapping candidates were stale by exactly protected #171's ADR-only advance and were repaired non-destructively on 2026-09-08 rather than force-rebased or closed:
+
+- #134 support-bundle regression now exact `ce58b6ec2968f314ea223ddb9ff7228fc4222e44`, merge base protected `a52ccd0...`, `behind_by=0`, with the same sole `src/lib.rs` +38-line test delta. Fresh CI/Fuzz/Security/SAST/CodeQL runs are queued and predecessor evidence does not transfer.
+- #162 commercial-authority separation now exact `81a1705c04dd3cae4ea4e6466ae09b9c956517d6`, merge base protected `a52ccd0...`, `behind_by=0`, with the same six-file 2B-KRW-customer versus USD-20B-quality authority delta. Fresh exact-head CI/Security/SAST/CodeQL runs are queued.
+- #144 Kubernetes source-path migration now exact `f5383585d3588d7b63b00a11bba61fa0d875743e`, merge base protected `a52ccd0...`, `behind_by=0`; protected #171's two ADR blobs were adopted while the 13-path path/deployment/docs/test delta remained unchanged. Fresh CI/Fuzz/Security/SAST/CodeQL runs are queued.
+
+Queued states are lane-local non-passing evidence, not reasons for no-op commits or rerun storms. Their owning PR/issue bodies now bind the exact new heads and current runs.
+
 ## Agent Artifact Admission and other security lanes
 
 #129 remains open/Draft at exact `14c0af32e7e4f68c682d55a1b1117629fa940336` with CI `34020063254`, Fuzz `34020063220`, Security `34020063214`, and SAST `34020063245` terminal success. CodeQL `34020063240` remains the same central delegated-verdict failure. Its Rust-first admission receipt is policy authority only; retrieved-byte integrity, AppGuardrail static analysis, quarantine hostile execution, Noema activation, EgressWeave transport and CO provider orchestration stay separate canonical authorities.
 
-#167/#170 retain MISP/DNSBL source ownership and threat-level translation work; delegated CodeQL remains central-owner evidence. #140 remains the single Runtime Configuration owner; #155 remains the fail-closed non-loopback management-authentication prerequisite; #93 remains the deterministic persistence-fault seam; #127 still needs material browser accessibility/state evidence.
+#167/#170 retain MISP/DNSBL source ownership and threat-level translation work; delegated CodeQL remains central-owner evidence. #140 is the single Runtime Configuration owner at exact `13da5928e22d195b5a2f3cbfcee415060747125b`: hostile RED proved `use std::env; ... env::var(...)` bypassed the recursive architecture-fitness detector; the minimal repair now rejects direct/aliased/grouped `std::env` imports. Exact CI `34166154917`, Fuzz `34166154875`, Security `34166154889`, and SAST `34166154908` are terminal success; CodeQL `34166154874` remains central delegated-receipt failure. #155 remains the fail-closed non-loopback management-authentication prerequisite; #93 remains the deterministic persistence-fault seam; #127 still needs material browser accessibility/state evidence.
 
-Release blockers remain #80 PostgreSQL production authority/RLS/tenant isolation, #81 transactional outbox/idempotent workers, #82 Keyverse identity/approval, #83 bounded distributed admission/trusted attribution, #84 immutable signed release/promotion/rollback, #85 telemetry/SLO/incident/restore, #86 proven Coraza/CRS + Suricata enforcement, and #11 deployed Strix attack-path evidence.
+#77 Rust-toolchain/reproducibility foundation remains exact `2856babd52b3131845a347c6d005b031b7099986` on current protected main. Exact CI `34019585668`, Security `34019585622`, and SAST `34019585640` are terminal success; all review threads are resolved. CodeQL `34019585679` fails only at the central current-head receipt boundary after a successful dispatch request, so source churn is not causal. #164 remains its dependent release-evidence child until #77 reaches protected truth.
+
+Release blockers remain #80 PostgreSQL production authority/RLS/tenant isolation, #81 transactional outbox/idempotent workers, #82 Keyverse identity/approval, #83 bounded distributed admission/trusted attribution, #84 immutable signed release/promotion/rollback, #85 telemetry/SLO/incident/restore, #86 proven Coraza/CRS + Suricata enforcement, and #11 deployed Strix attack-path evidence. For #11, `.github#2027` now owns the missing reusable isolated live-service Strix target; a source-only scan is explicitly non-completion.
 
 ## Context Fabric / EA read-only inventory
 
@@ -120,7 +142,7 @@ Architecture-relevant Wardnet technology/lifecycle/risk/ownership/remediation ch
 
 ## Buyer-visible gap order
 
-Authority and safety remain ahead of feature breadth. Current release-blocking order is: satisfiable protected governance and exact-head control-plane evidence; protected management authentication; durable outbound-reputation source admission/storage that crash-safely couples authenticated completeness, producer lifecycle cursor state and the accepted immutable evidence snapshot, plus immutable EgressWeave authorization/evidence integration; deployed Strix attack-path evidence and proven Coraza/CRS + Suricata enforcement; Agent Artifact Admission; PostgreSQL production authority/RLS/tenant isolation; transactional outbox/idempotent workers; Keyverse-backed identity/approval and distributed admission/trusted attribution; immutable package/image/SBOM/provenance/reproducibility/promotion/rollback; production telemetry/SLO/incident/restore evidence; then one immutable protected Wardnet release identity.
+Authority and safety remain ahead of feature breadth. Current release-blocking order is: satisfiable protected governance and exact-head control-plane evidence; protected management authentication; durable outbound-reputation source admission/storage that crash-safely couples authenticated completeness, producer-record and source-generation lifecycle cursor state and the accepted immutable evidence snapshot, plus immutable EgressWeave authorization/evidence integration; deployed Strix live-service attack→detection evidence through `.github#2027` and proven Coraza/CRS + Suricata enforcement; Agent Artifact Admission; PostgreSQL production authority/RLS/tenant isolation; transactional outbox/idempotent workers; Keyverse-backed identity/approval and distributed admission/trusted attribution; immutable package/image/SBOM/provenance/reproducibility/promotion/rollback; production telemetry/SLO/incident/restore evidence; then one immutable protected Wardnet release identity.
 
 The USD 20 billion ambition is a product-quality bar, not pricing, ARR or billing truth. Prefer a modular monolith until transaction/isolation/scale/deployment/reuse evidence justifies a split.
 
