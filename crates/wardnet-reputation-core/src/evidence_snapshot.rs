@@ -11,6 +11,25 @@ use crate::model::{
     BaseEvidenceSnapshotV1, ContractValidationErrorV1, EvidenceRecordV1, SourceSnapshotV1,
 };
 
+const MAX_SOURCE_GENERATION_BYTES_V1: usize = 1_024;
+
+/// Apply the v1 required-text bound before an admitted generation participates in matching.
+fn validate_admitted_source_generation(
+    source_generation: &str,
+) -> Result<(), ContractValidationErrorV1> {
+    if source_generation.trim().is_empty() {
+        return Err(ContractValidationErrorV1::BlankField(
+            "snapshot_record.source_generation",
+        ));
+    }
+    if source_generation.len() > MAX_SOURCE_GENERATION_BYTES_V1 {
+        return Err(ContractValidationErrorV1::BoundExceeded(
+            "snapshot_record.source_generation",
+        ));
+    }
+    Ok(())
+}
+
 /// One admitted evidence record plus the exact completed source generation that admitted it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -38,11 +57,15 @@ pub struct EvidenceSnapshotV1 {
 impl EvidenceSnapshotV1 {
     /// Validate aggregate completeness, exact source-generation membership, and replay-safe identity.
     ///
-    /// The pre-existing aggregate validator remains the single authority for v1 schema, text/list
-    /// bounds, source uniqueness, record validation, completion ordering, and producer-record
-    /// replay checks. This wrapper adds only the missing exact-generation invariant rather than
-    /// duplicating those rules in a second implementation.
+    /// The pre-existing aggregate validator remains the single authority for v1 schema, source
+    /// snapshot/record text bounds, list bounds, source uniqueness, record validation, completion
+    /// ordering, and producer-record replay checks. This wrapper validates its own admission-only
+    /// generation field before matching, then adds only the missing exact-generation invariant.
     pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+        for member in &self.records {
+            validate_admitted_source_generation(&member.source_generation)?;
+        }
+
         let base_snapshot = BaseEvidenceSnapshotV1 {
             schema_version: self.schema_version.clone(),
             evidence_generation: self.evidence_generation.clone(),
