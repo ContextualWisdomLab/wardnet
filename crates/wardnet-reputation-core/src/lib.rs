@@ -9,7 +9,7 @@
 
 mod evidence_snapshot;
 pub mod live_validation;
-mod model;
+pub mod model;
 
 pub use evidence_snapshot::*;
 pub use live_validation::*;
