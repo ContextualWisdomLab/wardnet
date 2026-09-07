@@ -1,7 +1,7 @@
 use wardnet_reputation_core::{
-    ContractValidationErrorV1, EvidenceSnapshotV1, REPUTATION_SCHEMA_V1,
-    SourceBatchCompletenessV1, SourceGenerationLifecycleCursorV1,
-    SourceGenerationLifecycleErrorV1, SourceReplacementBatchV1, SourceSnapshotV1,
+    ContractValidationErrorV1, EvidenceSnapshotV1, REPUTATION_SCHEMA_V1, SourceBatchCompletenessV1,
+    SourceGenerationLifecycleCursorV1, SourceGenerationLifecycleErrorV1, SourceReplacementBatchV1,
+    SourceSnapshotV1,
 };
 
 const NOW: u64 = 1_788_652_800;
