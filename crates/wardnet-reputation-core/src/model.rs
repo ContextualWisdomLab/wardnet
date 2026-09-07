@@ -329,12 +329,13 @@ impl EvidenceSnapshotV1 {
 
         for (index, record) in self.records.iter().enumerate() {
             record.validate_at(now_unix)?;
-            if !self
+            let source_snapshot = self
                 .source_snapshots
                 .iter()
-                .any(|snapshot| snapshot.source_id == record.source_id)
-            {
-                return Err(ContractValidationErrorV1::MissingSourceSnapshot);
+                .find(|snapshot| snapshot.source_id == record.source_id)
+                .ok_or(ContractValidationErrorV1::MissingSourceSnapshot)?;
+            if record.received_at_unix > source_snapshot.completed_at_unix {
+                return Err(ContractValidationErrorV1::InvalidTimeOrder);
             }
             if self.records[..index].iter().any(|prior| {
                 prior.source_id == record.source_id
