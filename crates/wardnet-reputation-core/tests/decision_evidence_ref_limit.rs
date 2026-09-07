@@ -11,9 +11,10 @@ fn decision_with_evidence_refs(count: usize) -> DecisionEnvelopeV1 {
         .collect();
     let value: Value = json!({
         "schema_version": REPUTATION_SCHEMA_V1,
-        "evaluation_id": "eval-evidence-limit",
+        "evaluation_id": "eval-evidence-limit-child",
         "policy_id": "protect-default",
         "policy_revision": 1,
+        "policy_mode": "protect",
         "assessment": "suspicious",
         "evidence_health": "fresh",
         "action": "deny",
@@ -27,7 +28,7 @@ fn decision_with_evidence_refs(count: usize) -> DecisionEnvelopeV1 {
             "tenant_id": "tenant-example",
             "workload_id": "workload-example",
             "purpose": "package_metadata",
-            "operation_id": "op-evidence-limit",
+            "operation_id": "op-evidence-limit-child",
             "profile_id": "protect-default",
             "subject": {
                 "kind": "exact_host",
@@ -55,6 +56,6 @@ fn decision_envelope_rejects_more_than_declared_32_evidence_references() {
     assert_eq!(
         decision_with_evidence_refs(33).validate(),
         Err(ContractValidationErrorV1::BoundExceeded("evidence_refs")),
-        "the pure core must not silently widen the proposed v1 decision contract beyond 32 returned evidence references"
+        "the child contract must not widen its parent v1 decision envelope beyond 32 returned evidence references"
     );
 }

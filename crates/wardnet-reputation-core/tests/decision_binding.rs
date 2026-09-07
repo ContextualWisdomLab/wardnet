@@ -11,6 +11,7 @@ fn decision_json(workload_id: &str, evidence_generation: &str) -> Value {
         "evaluation_id": "eval-0001",
         "policy_id": "protect-default",
         "policy_revision": 1,
+        "policy_mode": "protect",
         "assessment": "unknown",
         "evidence_health": "fresh",
         "action": "deny",
@@ -36,6 +37,68 @@ fn decision_json(workload_id: &str, evidence_generation: &str) -> Value {
         },
         "evidence_generation": evidence_generation
     })
+}
+
+fn business_authorization_json(workload_id: &str) -> Value {
+    json!({
+        "schema_version": REPUTATION_SCHEMA_V1,
+        "authorization_id": "authz-0001",
+        "authorization_revision": 1,
+        "policy_id": "protect-default",
+        "policy_revision": 1,
+        "authority": "security-change-authority",
+        "origin": "change-ticket",
+        "tenant_id": "tenant-example",
+        "workload_id": workload_id,
+        "purpose": "package_metadata",
+        "profile_id": "protect-default",
+        "subject": {
+            "kind": "exact_host",
+            "value": "updates.example.invalid",
+            "scope": "exact"
+        },
+        "canonicalization_profile": "egressweave-offline-fixture",
+        "canonicalization_version": "1",
+        "valid_from_unix": NOW - 60,
+        "valid_until_unix": NOW + 120,
+        "revoked": false,
+        "approver_id": "approver-example",
+        "ticket_ref": "SEC-1234",
+        "provenance_refs": ["urn:wardnet:authorization:authz-0001:1"]
+    })
+}
+
+fn add_business_authorization(value: &mut Value, workload_id: &str) {
+    value["business_authorization"] = business_authorization_json(workload_id);
+}
+
+#[test]
+fn decision_envelope_requires_explicit_protect_policy_mode_binding() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value
+        .as_object_mut()
+        .expect("decision fixture must be an object")
+        .remove("policy_mode");
+
+    assert!(
+        serde_json::from_value::<DecisionEnvelopeV1>(value).is_err(),
+        "an enforceable v1 decision without an explicit protect-policy mode binding must fail closed"
+    );
+}
+
+#[test]
+fn decision_envelope_rejects_monitor_mode_as_protect_authority() {
+    let mut value = decision_json("workload-example", "snapshot-42");
+    value["policy_mode"] = json!("monitor");
+
+    let decision: DecisionEnvelopeV1 =
+        serde_json::from_value(value).expect("known v1 policy mode should deserialize");
+
+    assert_eq!(
+        decision.validate(),
+        Err(ContractValidationErrorV1::WrongDecisionMode),
+        "monitor results must not serialize as protect authorization envelopes"
+    );
 }
 
 #[test]
@@ -215,6 +278,7 @@ fn decision_envelope_accepts_business_authorization_allow_with_fresh_evidence() 
     let mut value = decision_json("workload-example", "snapshot-42");
     value["action"] = json!("allow");
     value["reason"] = json!("business_authorization");
+    add_business_authorization(&mut value, "workload-example");
 
     let decision: DecisionEnvelopeV1 =
         serde_json::from_value(value).expect("v1 decision envelope should deserialize");
@@ -230,6 +294,7 @@ fn decision_envelope_accepts_business_authorization_allow_with_optional_degradat
     value["evidence_health"] = json!("degraded");
     value["action"] = json!("allow");
     value["reason"] = json!("business_authorization");
+    add_business_authorization(&mut value, "workload-example");
 
     let decision: DecisionEnvelopeV1 =
         serde_json::from_value(value).expect("v1 decision envelope should deserialize");

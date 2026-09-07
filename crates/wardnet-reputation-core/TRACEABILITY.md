@@ -14,7 +14,8 @@ The v1 contract therefore chooses:
 - `Suspicious` for adverse evidence that does not establish the hard-threat condition;
 - `Unknown` when no eligible adverse match establishes safety;
 - a separate `EvidenceHealthV1` so source outage or expiry can fail closed without rewriting the underlying assessment;
-- a separate `PolicyActionV1`, because a Wardnet reputation allow only permits continuation to independent gates and is never executable EgressWeave transport authorization.
+- a separate `PolicyActionV1`, because a Wardnet reputation allow only permits continuation to independent gates and is never executable EgressWeave transport authorization;
+- an explicit `policy_mode=protect` binding on `DecisionEnvelopeV1`, because the Proposed protect contract and monitor/shadow semantics are different authorities. A monitor result may describe what policy would have done, but it cannot be decoded or validated as a protect grant merely because its assessment and action fields are otherwise coherent.
 
 Rejected alternatives are: treating `unknown` as benign, aggregating producer confidence into an invented probability, using HTTP success as an authorization signal, or allowing business authorization to override adverse evidence. These choices would erase provenance or conflate observation, policy, and enforcement authority.
 
@@ -32,13 +33,25 @@ The rejected alternative was permissive unknown-field decoding for forward compa
 
 As of 2026-09-06, NIST SP 800-218 Rev. 1 / SSDF 1.2 is still an Initial Public Draft rather than a final replacement. It is tracked for forward awareness, while the final SSDF 1.1 remains the normative NIST citation used for this implemented decision.
 
+## Business-authorization evidence binding
+
+A `business_authorization` reason is security-relevant policy evidence, not a magic enum that can create authority by itself. NIST CSF 2.0 PR.AA-05 describes access permissions, entitlements, and authorizations as things that are defined in policy, managed, enforced, reviewed, and constrained by least privilege. NIST SP 800-53 Rev. 5, current Release 5.2.0, keeps access enforcement and audit/accountability as explicit control families; AC-3 requires approved authorizations to be enforced and AU controls require enough event content to support accountability. Those publications do not prescribe Wardnet's wire fields, so this implementation is a local control mapping rather than a claim that NIST defines this schema.
+
+`BusinessAuthorizationBindingV1` therefore makes an allow explainable and bounded by carrying an immutable authorization identity and nonzero revision; the exact reviewed Wardnet policy identity and immutable policy revision; authority and origin; exact tenant, workload, purpose, profile, canonical destination subject, and the external canonicalization profile/version under which that subject was reviewed; validity and revocation state; approver and ticket references; and bounded provenance. Validation fails closed when the binding is missing, attached to a decision that does not use it, revoked, outside its validity interval, lacks provenance, mismatches any authenticated context dimension or canonicalization identity, was reviewed for a different policy identity or revision, or expires before the decision envelope does. A policy replacement, canonicalization-profile change, or canonicalization-version change cannot inherit an older business grant without a newly reviewed binding even when the resulting opaque subject string happens to remain equal.
+
+The exact-subject and canonicalization-identity comparison deliberately consumes the `DestinationSubjectV1`, `canonicalization_profile`, and `canonicalization_version` already supplied to Wardnet by the owning canonicalization boundary. Wardnet does not interpret the external profile, reimplement its normalization rules, parse URLs, resolve DNS, validate peers, follow redirects, choose proxies, establish TLS, or authorize transport. Those executable and canonicalization semantics remain EgressWeave-owned; Wardnet only binds its own authorization evidence to the immutable external identity it actually reviewed. Likewise, the binding cannot override `KnownMalicious`, `Suspicious`, expired required evidence, or unavailable required authority: the existing adverse and authority-health fail-closed checks retain precedence before business-authorization validation.
+
+Rejected alternatives were: allowing `reason=business_authorization` with no evidence; accepting tenant-only or host-only grants that silently widen workload/purpose/profile scope; allowing a grant reviewed under one policy revision to survive policy replacement; binding only the opaque subject while allowing its external canonicalization semantics to drift; allowing a decision to outlive its authorization; and treating an approver/ticket string alone as provenance. Each would make the serialized decision look more authoritative than the evidence actually supports.
+
 ## Source handling
 
-The ACM article is cited by DOI and bibliographic metadata only. Its publisher access is not assumed to grant redistribution rights, so no article PDF is copied into this repository. NIST CSF 2.0 and SSDF 1.1 are linked to official NIST publications. Future local copies must be added only when redistribution terms are verified.
+The ACM article is cited by DOI and bibliographic metadata only. Its publisher access is not assumed to grant redistribution rights, so no article PDF is copied into this repository. NIST CSF 2.0, SP 800-53 Rev. 5 Release 5.2.0, and SSDF 1.1 are linked to official NIST publications. Future local copies must be added only when redistribution terms are verified.
 
 ## References
 
 Chandola, V., Banerjee, A., & Kumar, V. (2009). Anomaly detection: A survey. *ACM Computing Surveys, 41*(3), Article 15. https://doi.org/10.1145/1541880.1541882
+
+Joint Task Force. (2020). *Security and privacy controls for information systems and organizations* (NIST Special Publication 800-53 Rev. 5; Release 5.2.0, August 27, 2025). National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-53r5
 
 MITRE. (n.d.). *CWE-20: Improper input validation* (Version 4.20). Retrieved September 6, 2026, from https://cwe.mitre.org/data/definitions/20.html
 
