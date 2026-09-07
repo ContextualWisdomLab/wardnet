@@ -1,0 +1,36 @@
+name: Reputation decision evidence reference limit RED
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reputation-evidence-ref-limit-red.yml'
+      - 'crates/wardnet-reputation-core/src/model.rs'
+      - 'crates/wardnet-reputation-core/tests/decision_evidence_ref_limit.rs'
+
+concurrency:
+  group: wardnet-reputation-evidence-ref-limit-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Assert exact PR source
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Prove decision evidence reference limit RED
+        run: cargo test --locked -p wardnet-reputation-core --test decision_evidence_ref_limit
