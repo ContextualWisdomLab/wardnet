@@ -1,8 +1,8 @@
 use serde_json::json;
 use wardnet_reputation_core::{
     ContractValidationErrorV1, EvidenceRecordV1, EvidenceSnapshotRecordV1, EvidenceSnapshotV1,
-    SourceBatchCompletenessV1, SourceReplacementBatchV1, SourceReplacementErrorV1,
-    SourceSnapshotV1, REPUTATION_SCHEMA_V1,
+    REPUTATION_SCHEMA_V1, SourceBatchCompletenessV1, SourceReplacementBatchV1,
+    SourceReplacementErrorV1, SourceSnapshotV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -46,11 +46,7 @@ fn source_snapshot(source_id: &str, generation: &str) -> SourceSnapshotV1 {
     }
 }
 
-fn member(
-    source_id: &str,
-    generation: &str,
-    producer_record_id: &str,
-) -> EvidenceSnapshotRecordV1 {
+fn member(source_id: &str, generation: &str, producer_record_id: &str) -> EvidenceSnapshotRecordV1 {
     EvidenceSnapshotRecordV1 {
         source_generation: generation.to_owned(),
         record: evidence(source_id, producer_record_id),
@@ -85,8 +81,7 @@ fn replacement_batch(
     SourceReplacementBatchV1 {
         schema_version: REPUTATION_SCHEMA_V1.to_owned(),
         completeness,
-        expected_previous_source_generation: expected_previous_source_generation
-            .map(str::to_owned),
+        expected_previous_source_generation: expected_previous_source_generation.map(str::to_owned),
         source_snapshot: source_snapshot("required-source", "generation-9"),
         records,
     }
@@ -129,10 +124,11 @@ fn complete_empty_replacement_advances_only_one_source_and_preserves_unrelated_s
     assert!(next.source_snapshots.iter().any(|snapshot| {
         snapshot.source_id == "unrelated-source" && snapshot.source_generation == "generation-3"
     }));
-    assert!(next
-        .records
-        .iter()
-        .all(|member| member.record.source_id != "required-source"));
+    assert!(
+        next.records
+            .iter()
+            .all(|member| member.record.source_id != "required-source")
+    );
     assert!(next.records.iter().any(|member| {
         member.record.source_id == "unrelated-source"
             && member.source_generation == "generation-3"
@@ -148,7 +144,11 @@ fn replacement_rejects_mixed_source_or_generation_membership_atomically() {
 
     for records in [
         vec![member("unrelated-source", "generation-9", "foreign-record")],
-        vec![member("required-source", "generation-8", "stale-generation")],
+        vec![member(
+            "required-source",
+            "generation-8",
+            "stale-generation",
+        )],
     ] {
         let replacement = replacement_batch(
             SourceBatchCompletenessV1::Complete,
