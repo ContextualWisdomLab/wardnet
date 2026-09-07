@@ -85,7 +85,8 @@ fn replacement_batch(
     SourceReplacementBatchV1 {
         schema_version: REPUTATION_SCHEMA_V1.to_owned(),
         completeness,
-        expected_previous_source_generation: expected_previous_source_generation.map(str::to_owned),
+        expected_previous_source_generation: expected_previous_source_generation
+            .map(str::to_owned),
         source_snapshot: source_snapshot("required-source", "generation-9"),
         records,
     }
