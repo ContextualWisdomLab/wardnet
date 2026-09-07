@@ -42,8 +42,10 @@ The Deployment binds `ADMIN_TOKEN` only through that `secretKeyRef` with `option
 After the external secret controller reports successful synchronization, apply the complete manifest. Its Namespace object remains in the declarative asset so later applies retain the same ownership boundary:
 
 ```bash
-kubectl apply -f deploy/kubernetes/waf-ids-ai-soc.yaml
+kubectl apply -f deploy/kubernetes/wardnet.yaml
 ```
+
+The repository path changed from `deploy/kubernetes/waf-ids-ai-soc.yaml` to `deploy/kubernetes/wardnet.yaml`. This is a source-tree/operator path migration only: namespace, Deployment, Service, PVC, image, labels, ports, probes, security context, and Secret coordinates remain unchanged, so applying the renamed file updates the same in-cluster resources. Update scripts, GitOps sources, and packaging rules that referenced the old path before rollout. Rollback to a repository version before this path migration uses that version's old filename; do not create parallel Kubernetes resources as a workaround.
 
 When rotating `ADMIN_TOKEN`, wait for the updated Secret to synchronize, then restart the Deployment because environment-variable-backed Secret values are fixed when a container starts. Verify the rollout and readiness before revoking the previous token:
 
