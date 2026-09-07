@@ -258,6 +258,9 @@ impl EvidenceRecordV1 {
         {
             return Err(ContractValidationErrorV1::InvalidConfidence);
         }
+        if self.enforcement_eligible && (self.revoked || self.deleted) {
+            return Err(ContractValidationErrorV1::LifecycleIneligibleEnforcementEvidence);
+        }
         Ok(())
     }
 }
@@ -801,6 +804,8 @@ pub enum ContractValidationErrorV1 {
     InvalidTenantEligibility,
     /// Evidence eligible for enforcement has no provenance reference.
     MissingEnforcementProvenance,
+    /// Revoked or deleted producer evidence attempts to remain enforcement eligible.
+    LifecycleIneligibleEnforcementEvidence,
     /// An adverse decision assessment has no evidence reference for SOC traceability.
     MissingDecisionEvidence,
     /// Decision assessment and machine-readable reason contradict each other.
