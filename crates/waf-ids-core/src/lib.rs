@@ -596,7 +596,22 @@ pub fn record_audit_log(data: &mut AppData, entry: NewAuditLogEntry) -> AuditLog
 pub fn select_route<'a>(routes: &'a [RouteConfig], path: &str) -> Option<&'a RouteConfig> {
     routes
         .iter()
-        .filter(|route| route.enabled && path.starts_with(&route.path_prefix))
+        .filter(|route| {
+            if !route.enabled {
+                return false;
+            }
+
+            let prefix = route.path_prefix.as_str();
+            if prefix == "/" {
+                return path.starts_with('/');
+            }
+            if path == prefix {
+                return true;
+            }
+
+            path.strip_prefix(prefix)
+                .is_some_and(|remainder| prefix.ends_with('/') || remainder.starts_with('/'))
+        })
         .max_by_key(|route| route.path_prefix.len())
 }
 
@@ -1397,15 +1412,6 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
         if let IpAddr::V4(address) = entry.address {
-            // The response code is emitted as a bare, unquoted A-record token, so
-            // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers
-            // live in 127.0.0.0/8). `validate_dnsbl` enforces this at the
-            // create/import boundary, but the persisted-state deserializer is an
-            // untrusted surface that is not re-validated on load, so a state file
-            // can carry a code outside 127/8, an IPv6 literal, or a zone-injection
-            // string (e.g. a newline plus a forged `IN TXT` line). Re-enforce the
-            // invariant here and re-render the canonical form so no non-loopback,
-            // non-IPv4, or attacker-controlled bytes survive into the zone.
             let code = match IpAddr::from_str(&entry.code) {
                 Ok(IpAddr::V4(code)) if code.octets()[0] == 127 => code,
                 _ => continue,
@@ -1422,12 +1428,6 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     out
 }
 
-/// Sanitize a DNS zone origin so operator/threat-feed input can never break out
-/// of the generated zone file. A legitimate origin is a domain name, so only
-/// letters, digits, `-`, `_`, and `.` are kept; every other byte (newline,
-/// quote, space, control char) is dropped. Leading/trailing dots are trimmed
-/// because the caller re-appends the root dot. Empty input falls back to the
-/// RFC 6761 reserved `.invalid` TLD, which is guaranteed non-resolvable.
 fn sanitize_zone_origin(origin: &str) -> String {
     let filtered: String = origin
         .trim()
@@ -1452,10 +1452,6 @@ fn escape_txt(value: &str) -> String {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            // Control characters (notably raw newlines) would otherwise terminate
-            // the single-line TXT record and let a crafted reason/source inject
-            // subsequent zone lines. Emit them as BIND decimal escapes (`\DDD`)
-            // so the payload stays on one fully-quoted line.
             c if c.is_control() => {
                 let mut buf = [0u8; 4];
                 for &b in c.encode_utf8(&mut buf).as_bytes() {
@@ -1504,10 +1500,6 @@ mod tests {
 
     #[test]
     fn score_request_never_content_matches_cve_indicators() {
-        // A CVE indicator (e.g. from a CISA KEV import) is vulnerability
-        // metadata, not a request-content signature: a security-tooling
-        // request can legitimately carry the literal CVE string, and that
-        // must never contribute to the block score.
         let threats = vec![ThreatIndicator {
             value: "CVE-2021-44228".to_string(),
             indicator_type: "cve".to_string(),
@@ -1529,14 +1521,6 @@ mod tests {
 
     #[test]
     fn score_request_saturates_instead_of_overflowing_on_many_matches() {
-        // Regression: `score` is a u16 accumulator. With enough matching
-        // indicators (each Critical = 100), a plain `+=` overflows u16 (>65535):
-        // a debug/overflow-checked build panics -- violating the WAF invariant
-        // that scoring never panics on arbitrary input -- and a release build
-        // wraps the score down to a tiny value, silently letting a maximally
-        // malicious request slip under the block threshold. Saturating
-        // arithmetic must clamp the score at u16::MAX so the request still
-        // scores as blockable. 700 * 100 = 70000 exceeds u16::MAX (65535).
         let threats: Vec<ThreatIndicator> = (0..700)
             .map(|i| ThreatIndicator {
                 value: "attack".to_string(),
@@ -1553,9 +1537,6 @@ mod tests {
         assert!(scored.score >= BLOCK_SCORE);
     }
 
-    /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
-    /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
-    /// so regressions in zone escaping fail as a plain unit test too.
     fn assert_txt_quotes_escaped(zone: &str) {
         for line in zone.lines().filter(|l| l.contains(" IN TXT ")) {
             let start = line.find('"').expect("TXT record has an opening quote");
@@ -1580,9 +1561,6 @@ mod tests {
 
     #[test]
     fn export_dnsbl_zone_resists_origin_zone_injection() {
-        // Reproduces the fuzz crash: a crafted origin carrying a newline plus a
-        // forged `IN TXT` line with bare double quotes must not break out of the
-        // generated zone.
         let zone = export_dnsbl_zone(
             "dn\nner\"\"\"\"\"\"\"\" IN TXT \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\";eed",
             &[DnsblEntry {
@@ -1595,16 +1573,12 @@ mod tests {
             }],
         );
         assert!(zone.starts_with("$ORIGIN "));
-        // The origin is sanitized down to DNS-safe characters on a single line.
         assert_eq!(zone.lines().next().unwrap(), "$ORIGIN dnnerINTXTeed.");
         assert_txt_quotes_escaped(&zone);
     }
 
     #[test]
     fn export_dnsbl_zone_escapes_quotes_and_backslashes_in_reason() {
-        // Reason carrying both a backslash and a double quote must be escaped so
-        // the quote stays inside the payload (`\"`) and the backslash is doubled
-        // (`\\`); this also exercises the escaped-quote path of the checker.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
             &[DnsblEntry {
@@ -1622,8 +1596,6 @@ mod tests {
 
     #[test]
     fn export_dnsbl_zone_rejects_non_ip_code_injection() {
-        // A `code` that is not a valid IP literal would become a bare A-record
-        // token; a newline-bearing value must be dropped, never rendered.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
             &[
@@ -1645,7 +1617,6 @@ mod tests {
                 },
             ],
         );
-        // The malformed-code entry is skipped entirely; the valid one renders.
         assert!(!zone.contains("pwned"));
         assert!(zone.contains("20.2.0.192 IN A 127.0.0.9"));
         assert_txt_quotes_escaped(&zone);
@@ -1653,21 +1624,11 @@ mod tests {
 
     #[test]
     fn export_dnsbl_zone_omits_non_loopback_response_codes() {
-        // `validate_dnsbl` gates the create/import path to `127.0.0.0/8`, but the
-        // persisted-state deserializer (a documented untrusted-input surface) is
-        // NOT re-validated on load, so a state file can carry a DNSBL entry whose
-        // `code` is a valid IP outside 127/8 — or an IPv6 literal. The zone export
-        // is the output boundary that publishes each code as a bare A-record
-        // token, so it must re-enforce the "response code in 127.0.0.0/8"
-        // invariant itself: a non-loopback IPv4 answer breaks RFC 5782 semantics
-        // for every DNSBL consumer, and an IPv6 literal yields a syntactically
-        // invalid A record that fails the whole authoritative zone load.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
             &[
                 DnsblEntry {
                     address: "192.0.2.10".parse().unwrap(),
-                    // Valid IPv4, but NOT in 127.0.0.0/8.
                     code: "8.8.8.8".to_string(),
                     reason: "spoofed".to_string(),
                     source: "state-file".to_string(),
@@ -1676,7 +1637,6 @@ mod tests {
                 },
                 DnsblEntry {
                     address: "192.0.2.20".parse().unwrap(),
-                    // IPv6 literal — never a legal A-record response code.
                     code: "::1".to_string(),
                     reason: "spoofed6".to_string(),
                     source: "state-file".to_string(),
@@ -1685,7 +1645,6 @@ mod tests {
                 },
                 DnsblEntry {
                     address: "192.0.2.30".parse().unwrap(),
-                    // Valid loopback code — must still render.
                     code: "127.0.0.4".to_string(),
                     reason: "ok".to_string(),
                     source: "state-file".to_string(),
@@ -1694,16 +1653,8 @@ mod tests {
                 },
             ],
         );
-        // No non-loopback or non-IPv4 answer may escape into the published zone.
-        assert!(
-            !zone.contains("IN A 8.8.8.8"),
-            "non-127/8 A record leaked into zone: {zone}"
-        );
-        assert!(
-            !zone.contains("IN A ::1"),
-            "IPv6 A record leaked into zone: {zone}"
-        );
-        // Every emitted A record's response code is an IPv4 loopback address.
+        assert!(!zone.contains("IN A 8.8.8.8"), "non-127/8 A record leaked into zone: {zone}");
+        assert!(!zone.contains("IN A ::1"), "IPv6 DNSBL response code published: {zone}");
         for line in zone.lines().filter(|l| l.contains(" IN A ")) {
             let code = line.rsplit(" IN A ").next().unwrap().trim();
             match IpAddr::from_str(code).expect("A-record code is an IP literal") {
@@ -1715,15 +1666,12 @@ mod tests {
                 IpAddr::V6(_) => panic!("IPv6 DNSBL response code published: {code}"),
             }
         }
-        // The legitimate loopback entry is unaffected.
         assert!(zone.contains("30.2.0.192 IN A 127.0.0.4"));
         assert_txt_quotes_escaped(&zone);
     }
 
     #[test]
     fn export_dnsbl_zone_escapes_control_chars_in_reason() {
-        // A raw newline in reason/source must be neutralized so the TXT record
-        // stays on one line and cannot inject subsequent zone entries.
         let zone = export_dnsbl_zone(
             "dnsbl.example",
             &[DnsblEntry {
@@ -1735,8 +1683,6 @@ mod tests {
                 prefix_len: None,
             }],
         );
-        // No raw newline survives inside the TXT payload: the whole record,
-        // including the injected `IN TXT` text, stays on a single line.
         assert_eq!(zone.lines().filter(|l| l.contains(" IN TXT ")).count(), 1);
         assert!(zone.contains("\\010"));
         assert_txt_quotes_escaped(&zone);
@@ -1754,18 +1700,15 @@ mod tests {
 
     #[test]
     fn anomaly_signal_flags_metacharacters_and_entropy() {
-        // Metacharacter density on a short payload (entropy check length-gated out).
         let (score, reason) = anomaly_signal("a<b>c'd\"e(f)g;h|i&j").unwrap();
         assert_eq!(score, 15);
         assert!(reason.contains("metacharacters"));
 
-        // High-entropy encoded blob (40+ bytes, no metacharacters).
         let blob = "aGVsbG8Xd29ybGQ0Zm9vYmFyMTIzNDU2Nzg5MDBhYmNkZWZn";
         let (score, reason) = anomaly_signal(blob).unwrap();
         assert_eq!(score, 10);
         assert!(reason.contains("entropy"));
 
-        // Long but low-entropy (repeated byte) and ordinary short text: not flagged.
         assert!(anomaly_signal(&"a".repeat(60)).is_none());
         assert!(anomaly_signal("/account/profile?tab=settings").is_none());
     }
