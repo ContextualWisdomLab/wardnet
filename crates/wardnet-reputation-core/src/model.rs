@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const REPUTATION_SCHEMA_V1: &str = "wardnet.reputation.v1";
 
 const MAX_TEXT_BYTES_V1: usize = 1_024;
+const MAX_OBSERVABLE_URL_BYTES_V1: usize = 8 * 1_024;
 const MAX_LIST_ITEMS_V1: usize = 64;
 const MAX_DECISION_EVIDENCE_REFS_V1: usize = 32;
 
@@ -22,15 +23,24 @@ fn validate_schema(schema_version: &str) -> Result<(), ContractValidationErrorV1
     }
 }
 
-/// Applies the shared nonblank and byte-bound contract to one required text field.
-fn validate_text(value: &str, field: &'static str) -> Result<(), ContractValidationErrorV1> {
+/// Applies a nonblank byte-bound contract to one required text field.
+fn validate_text_with_limit(
+    value: &str,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<(), ContractValidationErrorV1> {
     if value.trim().is_empty() {
         return Err(ContractValidationErrorV1::BlankField(field));
     }
-    if value.len() > MAX_TEXT_BYTES_V1 {
+    if value.len() > max_bytes {
         return Err(ContractValidationErrorV1::BoundExceeded(field));
     }
     Ok(())
+}
+
+/// Applies the shared nonblank and byte-bound contract to one required text field.
+fn validate_text(value: &str, field: &'static str) -> Result<(), ContractValidationErrorV1> {
+    validate_text_with_limit(value, field, MAX_TEXT_BYTES_V1)
 }
 
 /// Applies required-text validation only when an optional producer field is present.
@@ -105,7 +115,13 @@ pub struct DestinationSubjectV1 {
 impl DestinationSubjectV1 {
     /// Rejects blank subjects and prevents subdomain scope from being attached to non-host kinds.
     fn validate(&self) -> Result<(), ContractValidationErrorV1> {
-        validate_text(&self.value, "subject.value")?;
+        let max_bytes = match self.kind {
+            DestinationSubjectKindV1::ObservableUrl => MAX_OBSERVABLE_URL_BYTES_V1,
+            DestinationSubjectKindV1::ExactHost | DestinationSubjectKindV1::ActualAddress => {
+                MAX_TEXT_BYTES_V1
+            }
+        };
+        validate_text_with_limit(&self.value, "subject.value", max_bytes)?;
         if self.scope == DestinationScopeV1::HostAndSubdomains
             && self.kind != DestinationSubjectKindV1::ExactHost
         {
