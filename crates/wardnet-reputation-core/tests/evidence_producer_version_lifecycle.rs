@@ -1,6 +1,7 @@
 use serde_json::json;
 use wardnet_reputation_core::{
-    ContractValidationErrorV1, EvidenceRecordV1, ProducerRecordLifecycleCursorV1,
+    ContractValidationErrorV1, EvidenceRecordV1, ProducerLifecycleValidationErrorV1,
+    ProducerRecordLifecycleCursorV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -59,7 +60,7 @@ fn older_active_version_cannot_replay_after_tombstone() {
 
     assert_eq!(
         current.admit(&replay, 7, NOW),
-        Err(ContractValidationErrorV1::StaleProducerRecordVersion)
+        Err(ProducerLifecycleValidationErrorV1::StaleProducerRecordVersion)
     );
 }
 
@@ -71,7 +72,7 @@ fn tombstoned_identity_cannot_be_reactivated_at_same_or_newer_ordinal() {
         let replay = evidence("required-source", "record-1", version, false, false, true);
         assert_eq!(
             current.admit(&replay, ordinal, NOW),
-            Err(ContractValidationErrorV1::TombstoneResurrection),
+            Err(ProducerLifecycleValidationErrorV1::TombstoneResurrection),
             "tombstoned producer identity must remain terminal at ordinal {ordinal}"
         );
     }
@@ -112,7 +113,7 @@ fn equal_ordinal_with_different_opaque_version_token_fails_closed() {
 
     assert_eq!(
         current.admit(&collision, 8, NOW),
-        Err(ContractValidationErrorV1::ProducerRecordVersionCollision)
+        Err(ProducerLifecycleValidationErrorV1::ProducerRecordVersionCollision)
     );
 }
 
@@ -126,7 +127,46 @@ fn lifecycle_cursor_rejects_different_source_or_record_identity() {
     ] {
         assert_eq!(
             current.admit(&candidate, 9, NOW),
-            Err(ContractValidationErrorV1::LifecycleIdentityMismatch)
+            Err(ProducerLifecycleValidationErrorV1::LifecycleIdentityMismatch)
         );
     }
+}
+
+#[test]
+fn lifecycle_cursor_and_candidate_contracts_fail_closed_before_transition() {
+    let mut invalid_schema = cursor("8", 8, false);
+    invalid_schema.schema_version = "wardnet.reputation.v2".to_owned();
+    let active = evidence("required-source", "record-1", "9", false, false, true);
+    assert_eq!(
+        invalid_schema.admit(&active, 9, NOW),
+        Err(ProducerLifecycleValidationErrorV1::Contract(
+            ContractValidationErrorV1::UnsupportedSchema
+        ))
+    );
+
+    let mut blank_identity = cursor("8", 8, false);
+    blank_identity.source_id = "   ".to_owned();
+    assert_eq!(
+        blank_identity.admit(&active, 9, NOW),
+        Err(ProducerLifecycleValidationErrorV1::Contract(
+            ContractValidationErrorV1::BlankField("source_id")
+        ))
+    );
+
+    let mut oversized_version = cursor("8", 8, false);
+    oversized_version.producer_record_version = "x".repeat(1_025);
+    assert_eq!(
+        oversized_version.admit(&active, 9, NOW),
+        Err(ProducerLifecycleValidationErrorV1::Contract(
+            ContractValidationErrorV1::BoundExceeded("producer_record_version")
+        ))
+    );
+
+    let lifecycle_invalid = evidence("required-source", "record-1", "9", true, false, true);
+    assert_eq!(
+        cursor("8", 8, false).admit(&lifecycle_invalid, 9, NOW),
+        Err(ProducerLifecycleValidationErrorV1::Contract(
+            ContractValidationErrorV1::LifecycleIneligibleEnforcementEvidence
+        ))
+    );
 }
