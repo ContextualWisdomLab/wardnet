@@ -96,6 +96,8 @@ pub enum SourceReplacementErrorV1 {
     SourceReplacementIdentityMismatch,
     /// Create/replace compare-and-swap expectation does not match the represented prior state.
     PreviousSourceGenerationMismatch,
+    /// An existing source attempted to publish changed state under its prior immutable generation.
+    ReusedSourceGeneration,
     /// A changed immutable snapshot attempted to reuse the prior Wardnet evidence generation.
     ReusedEvidenceGeneration,
     /// The resulting immutable snapshot violates an existing v1 contract invariant.
@@ -163,10 +165,11 @@ impl EvidenceSnapshotV1 {
     ///
     /// The method is pure: it never mutates the prior snapshot. Replacement is compare-and-swap
     /// bound to the exact prior source generation (or source absence for creation), without trying
-    /// to order opaque generation identifiers. A complete empty generation is valid and removes
-    /// only the prior records owned by that source. The constructed candidate is then delegated to
-    /// [`Self::validate_at`] so existing list, schema, time, duplicate, provenance, lifecycle, and
-    /// exact-generation invariants remain authoritative.
+    /// to order opaque generation identifiers. Existing sources must publish a distinct immutable
+    /// generation identity. A complete empty generation is valid and removes only the prior records
+    /// owned by that source. The constructed candidate is then delegated to [`Self::validate_at`]
+    /// so existing list, schema, time, duplicate, provenance, lifecycle, and exact-generation
+    /// invariants remain authoritative.
     pub fn replace_source(
         &self,
         replacement: SourceReplacementBatchV1,
@@ -205,6 +208,9 @@ impl EvidenceSnapshotV1 {
         let prior_generation = prior_source.map(|snapshot| snapshot.source_generation.as_str());
         if prior_generation != replacement.expected_previous_source_generation.as_deref() {
             return Err(SourceReplacementErrorV1::PreviousSourceGenerationMismatch);
+        }
+        if prior_generation.is_some_and(|prior_generation| prior_generation == source_generation) {
+            return Err(SourceReplacementErrorV1::ReusedSourceGeneration);
         }
 
         let mut source_snapshots =
