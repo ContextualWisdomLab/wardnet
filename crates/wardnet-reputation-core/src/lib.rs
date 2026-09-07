@@ -4,6 +4,13 @@
 //! environment access, or LLM work. Executable outbound target interpretation remains an
 //! EgressWeave responsibility; this crate only accepts already-canonical offline descriptors.
 //!
+//! The generation-bound evidence snapshot is the sole public v1 snapshot authority. The
+//! superseded unbound aggregate must not remain constructible through the compatibility module:
+//!
+//! ```compile_fail
+//! use wardnet_reputation_core::model::EvidenceSnapshotV1;
+//! ```
+//!
 //! The research, standards, rejected alternatives, and evidence-handling rationale for this
 //! contract boundary are recorded in the adjacent [TRACEABILITY.md](../TRACEABILITY.md).
 
