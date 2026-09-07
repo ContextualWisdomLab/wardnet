@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use wardnet_reputation_core::{
-    ContractValidationErrorV1, DecisionEnvelopeV1, REPUTATION_SCHEMA_V1,
+    DecisionEnvelopeV1, DecisionLiveValidationErrorV1, REPUTATION_SCHEMA_V1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -52,7 +52,7 @@ fn live_validation_rejects_an_expired_decision_without_breaking_archival_validat
         .expect("structural validation must remain usable for retained audit evidence");
     assert_eq!(
         decision.validate_at(NOW + 61),
-        Err(ContractValidationErrorV1::DecisionOutsideValidityWindow),
+        Err(DecisionLiveValidationErrorV1::DecisionOutsideValidityWindow),
         "a structurally valid but expired decision must not be reusable as current policy evidence"
     );
 }
@@ -69,7 +69,7 @@ fn live_validation_rejects_a_future_decision() {
         .expect("a future-dated envelope is structurally coherent archival data");
     assert_eq!(
         decision.validate_at(NOW),
-        Err(ContractValidationErrorV1::DecisionOutsideValidityWindow),
+        Err(DecisionLiveValidationErrorV1::DecisionOutsideValidityWindow),
         "a decision must not be consumed before its recorded evaluation time"
     );
 }

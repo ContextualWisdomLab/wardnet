@@ -7,6 +7,8 @@
 //! The research, standards, rejected alternatives, and evidence-handling rationale for this
 //! contract boundary are recorded in the adjacent [TRACEABILITY.md](../TRACEABILITY.md).
 
+pub mod live_validation;
 pub mod model;
 
+pub use live_validation::*;
 pub use model::*;
