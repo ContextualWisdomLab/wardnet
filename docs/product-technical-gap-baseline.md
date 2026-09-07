@@ -66,6 +66,16 @@ Exact-current CI `34152467045` / rust job `101837405034` is terminal **SUCCESS**
 
 Issue #182 remains open intentionally until protected integration; feature-branch GREEN is not completion.
 
+### Evidence lifecycle enforcement child #185
+
+#185 remains open/Draft and mergeable on exact parent `#183@1b183e784750d56d4cbeda469d2ced75811ae08c`; exact head is `b2169d465aa15da9da78f5c42b785e44a4bc664d`.
+
+Test-only hostile RED `f5d8f28d32cabca23a90acf86e578faeac703791` changed only `tests/evidence_lifecycle_enforcement.rs` while production remained byte-identical to #183. Hosted CI `34154105805` / rust job `101842225780` acquired a GitHub-hosted runner, passed checkout/toolchain/fmt, then failed at the workspace Test step because revoked or deleted producer evidence could still retain `enforcement_eligible=true`.
+
+The minimal repair makes `EvidenceRecordV1::validate_at` return typed `LifecycleIneligibleEnforcementEvidence` when enforcement eligibility contradicts either producer lifecycle flag. It does not rewrite evidence: revoked/deleted records remain valid historical evidence when `enforcement_eligible=false`. `EVIDENCE_LIFECYCLE_TRACEABILITY.md` records the bounded-context decision, rejected alternatives and RED receipt. The slice deliberately does not claim cross-generation monotonic producer-version/tombstone admission; that requires explicit source-admission state transition semantics rather than a guess inside the stateless record validator.
+
+Exact-current CI `34154846345` / rust job `101844429388` is terminal **SUCCESS** through exact checkout, formatting, locked workspace tests and strict Clippy. Exact-current Fuzz `34154846324` / fuzz job `101844430502` is terminal **SUCCESS** across all four bounded 60-second targets with no crash artifact. Formal review count is 0 and inline review-thread count is 0. #185 stays Draft behind `#175 -> #176 -> #178 -> #179 -> #183`; parent movement invalidates integration evidence and requires non-force restack/revalidation. Issue #184 remains open until protected integration.
+
 ## Gateway route-segment admission #180 / #181
 
 Protected `main@a52ccd0a...` uses lexical route-prefix matching, so `/api` can capture `/apix` and `/api/admin` can capture `/api/administrator`, binding a request to the wrong route/enforcement/upstream authority. RFC 3986 §3.3 supplies the path-segment boundary.
@@ -90,7 +100,7 @@ Architecture-relevant Wardnet technology/lifecycle/risk/ownership/remediation ch
 
 ## Buyer-visible gap order
 
-Authority and safety remain ahead of feature breadth. Current release-blocking order is: satisfiable protected governance and exact-head control-plane evidence; protected management authentication; outbound reputation contract completion plus immutable EgressWeave authorization/evidence integration; deployed Strix attack-path evidence and proven Coraza/CRS + Suricata enforcement; Agent Artifact Admission; PostgreSQL production authority/RLS/tenant isolation; transactional outbox/idempotent workers; Keyverse-backed identity/approval and distributed admission/trusted attribution; immutable package/image/SBOM/provenance/reproducibility/promotion/rollback; production telemetry/SLO/incident/restore evidence; then one immutable protected Wardnet release identity.
+Authority and safety remain ahead of feature breadth. Current release-blocking order is: satisfiable protected governance and exact-head control-plane evidence; protected management authentication; outbound reputation contract completion, including cross-generation producer-version/tombstone admission, plus immutable EgressWeave authorization/evidence integration; deployed Strix attack-path evidence and proven Coraza/CRS + Suricata enforcement; Agent Artifact Admission; PostgreSQL production authority/RLS/tenant isolation; transactional outbox/idempotent workers; Keyverse-backed identity/approval and distributed admission/trusted attribution; immutable package/image/SBOM/provenance/reproducibility/promotion/rollback; production telemetry/SLO/incident/restore evidence; then one immutable protected Wardnet release identity.
 
 The USD 20 billion ambition is a product-quality bar, not pricing, ARR or billing truth. Prefer a modular monolith until transaction/isolation/scale/deployment/reuse evidence justifies a split.
 
