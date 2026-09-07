@@ -14,7 +14,9 @@
 //! The research, standards, rejected alternatives, and evidence-handling rationale for this
 //! contract boundary are recorded in the adjacent [TRACEABILITY.md](../TRACEABILITY.md). Exact
 //! source-generation membership and its hostile replay evidence are recorded in
-//! [SOURCE_GENERATION_TRACEABILITY.md](../SOURCE_GENERATION_TRACEABILITY.md).
+//! [SOURCE_GENERATION_TRACEABILITY.md](../SOURCE_GENERATION_TRACEABILITY.md). Producer lifecycle
+//! state and enforcement-eligibility invariants are recorded in
+//! [EVIDENCE_LIFECYCLE_TRACEABILITY.md](../EVIDENCE_LIFECYCLE_TRACEABILITY.md).
 
 mod evidence_snapshot;
 pub mod live_validation;
