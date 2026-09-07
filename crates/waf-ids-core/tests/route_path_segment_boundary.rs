@@ -1,4 +1,4 @@
-use waf_ids_core::{select_route, EnforcementMode, RouteConfig};
+use waf_ids_core::{EnforcementMode, RouteConfig, select_route};
 
 fn route(id: &str, path_prefix: &str, enabled: bool) -> RouteConfig {
     RouteConfig {
@@ -42,13 +42,11 @@ fn narrower_route_cannot_capture_a_sibling_path_segment() {
     ];
 
     assert_eq!(
-        select_route(&routes, "/api/admin/users")
-            .map(|route| route.id.as_str()),
+        select_route(&routes, "/api/admin/users").map(|route| route.id.as_str()),
         Some("admin")
     );
     assert_eq!(
-        select_route(&routes, "/api/administrator")
-            .map(|route| route.id.as_str()),
+        select_route(&routes, "/api/administrator").map(|route| route.id.as_str()),
         Some("api"),
         "the /api/admin route must not capture the sibling /api/administrator segment"
     );
@@ -58,8 +56,7 @@ fn narrower_route_cannot_capture_a_sibling_path_segment() {
 fn root_and_trailing_slash_prefixes_keep_existing_hierarchical_semantics() {
     let root_only = vec![route("root", "/", true)];
     assert_eq!(
-        select_route(&root_only, "/anything/here")
-            .map(|route| route.id.as_str()),
+        select_route(&root_only, "/anything/here").map(|route| route.id.as_str()),
         Some("root")
     );
 
@@ -73,8 +70,7 @@ fn root_and_trailing_slash_prefixes_keep_existing_hierarchical_semantics() {
         Some("api")
     );
     assert_eq!(
-        select_route(&routes, "/api/admin/users")
-            .map(|route| route.id.as_str()),
+        select_route(&routes, "/api/admin/users").map(|route| route.id.as_str()),
         Some("api"),
         "disabled narrower routes must remain ignored"
     );
