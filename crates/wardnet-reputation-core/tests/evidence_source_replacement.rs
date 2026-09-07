@@ -178,6 +178,23 @@ fn source_replacement_is_compare_and_swap_bound_to_exact_prior_generation() {
 }
 
 #[test]
+fn source_replacement_cannot_rewrite_the_same_immutable_source_generation() {
+    let prior = prior_snapshot();
+    let replacement = SourceReplacementBatchV1 {
+        schema_version: REPUTATION_SCHEMA_V1.to_owned(),
+        completeness: SourceBatchCompletenessV1::Complete,
+        expected_previous_source_generation: Some("generation-8".to_owned()),
+        source_snapshot: source_snapshot("required-source", "generation-8"),
+        records: Vec::new(),
+    };
+
+    assert_eq!(
+        prior.replace_source(replacement, "evidence-generation-9", NOW),
+        Err(SourceReplacementErrorV1::ReusedSourceGeneration)
+    );
+}
+
+#[test]
 fn source_creation_and_replacement_expectations_fail_closed_when_contradictory() {
     let prior = prior_snapshot();
     let create_existing = replacement_batch(
