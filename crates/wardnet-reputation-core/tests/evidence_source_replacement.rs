@@ -231,6 +231,22 @@ fn source_replacement_cannot_rewrite_the_same_immutable_source_generation() {
 }
 
 #[test]
+fn source_replacement_cannot_move_completion_time_backwards() {
+    let prior = prior_snapshot();
+    let mut replacement = replacement_batch(
+        SourceBatchCompletenessV1::Complete,
+        Some("generation-8"),
+        Vec::new(),
+    );
+    replacement.source_snapshot.completed_at_unix = NOW - 31;
+
+    assert_eq!(
+        prior.replace_source(replacement, "evidence-generation-9", NOW),
+        Err(SourceReplacementErrorV1::SourceCompletionRegression)
+    );
+}
+
+#[test]
 fn source_creation_and_replacement_expectations_fail_closed_when_contradictory() {
     let prior = prior_snapshot();
     let create_existing = replacement_batch(
