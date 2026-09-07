@@ -11,6 +11,7 @@ pub const REPUTATION_SCHEMA_V1: &str = "wardnet.reputation.v1";
 
 const MAX_TEXT_BYTES_V1: usize = 1_024;
 const MAX_LIST_ITEMS_V1: usize = 64;
+const MAX_DECISION_EVIDENCE_REFS_V1: usize = 32;
 
 /// Rejects contract schema identities outside the explicitly supported v1 family.
 fn validate_schema(schema_version: &str) -> Result<(), ContractValidationErrorV1> {
@@ -607,6 +608,9 @@ impl DecisionEnvelopeV1 {
             return Err(ContractValidationErrorV1::WrongDecisionMode);
         }
         validate_text(&self.evidence_generation, "evidence_generation")?;
+        if self.evidence_refs.len() > MAX_DECISION_EVIDENCE_REFS_V1 {
+            return Err(ContractValidationErrorV1::BoundExceeded("evidence_refs"));
+        }
         validate_text_list(&self.evidence_refs, "evidence_refs")?;
         if !reason_matches_assessment(self.assessment, self.evidence_health, self.reason) {
             return Err(ContractValidationErrorV1::InconsistentAssessmentReason);
