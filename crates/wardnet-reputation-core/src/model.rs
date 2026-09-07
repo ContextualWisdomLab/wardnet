@@ -283,10 +283,7 @@ impl SourceSnapshotV1 {
     pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
         validate_schema(&self.schema_version)?;
         validate_text(&self.source_id, "source_snapshot.source_id")?;
-        validate_text(
-            &self.source_generation,
-            "source_snapshot.source_generation",
-        )?;
+        validate_text(&self.source_generation, "source_snapshot.source_generation")?;
         if self.completed_at_unix > now_unix || self.completed_at_unix > self.valid_until_unix {
             return Err(ContractValidationErrorV1::InvalidTimeOrder);
         }
