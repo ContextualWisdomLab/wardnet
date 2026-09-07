@@ -58,6 +58,12 @@ When parent #176 advanced with the test-only fixture repair, #178 adopted that e
 
 The live-validation contract must not authenticate the envelope, establish audience binding, parse/authorize URLs, resolve DNS/peers, follow redirects, choose proxies/TLS or claim transport enforcement. Keep #178 Draft behind #176 and reacquire all exact-current evidence after every parent movement.
 
+### Evidence snapshot health child #179
+
+#179 is the next Draft child on exact parent `#178@2cd872d14b7d9e194d59163ac0cdafa63757d44f`. Current exact head `af23e1a32068c3b4e2dee63c25b7f6a0482dd647` is intentionally RED-only: its sole delta is `crates/wardnet-reputation-core/tests/evidence_snapshot.rs`, which imports not-yet-implemented `EvidenceSnapshotV1` / `SourceSnapshotV1` contracts and hostile error variants. The prerequisite prevents the later evaluator from treating absence as healthy by requiring a complete authenticated source snapshot—even when it contains zero adverse records—and rejects duplicate current-source snapshots, evidence without a complete corresponding source snapshot, future/inverted snapshot validity, and duplicate producer-record identity inside one immutable aggregate.
+
+Ordinary current-head CI `34101552107` and Fuzz `34101552050` are queued. CI job `101676914363` is pre-checkout on `ubuntu-24.04` with `steps=[]`, `runner_id=0` and no runner/group identity. This exact specimen is already advanced on canonical runner owner `.github#712`; it is incomplete evidence, not a source defect or RED execution. Do not add the production GREEN until this exact hostile test executes terminally, and do not manufacture execution through a no-op commit, temporary verifier, runner-label churn or predecessor verdict.
+
 EgressWeave issue #237 remains the canonical Rust-consumer owner path for immutable outbound authorization/evidence. EgressWeave still has no GitHub Release. Wardnet #136/#115 remain preservation/evidence lanes until a compatible immutable owner release exists; do not promote their local destination/DNS/redirect/proxy/TLS implementation.
 
 ## Other current security/product lanes
