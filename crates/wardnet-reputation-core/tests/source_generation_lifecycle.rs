@@ -68,7 +68,9 @@ fn source_generation_lifecycle_rejects_aba_replay_after_a_valid_advance() {
             "evidence-generation-9",
             NOW,
         )
-        .expect("a newer authenticated source generation must advance snapshot and cursor together");
+        .expect(
+            "a newer authenticated source generation must advance snapshot and cursor together",
+        );
 
     let replay = replacement(
         "required-source",
@@ -166,17 +168,17 @@ fn source_creation_requires_absent_cursor_and_returns_the_initial_cursor_atomica
     let create = replacement("new-source", None, "generation-1", NOW - 20);
 
     let created = prior
-        .replace_source_with_lifecycle(
-            None,
-            create,
-            1,
-            "evidence-generation-9",
-            NOW,
-        )
+        .replace_source_with_lifecycle(None, create, 1, "evidence-generation-9", NOW)
         .expect("source creation must return snapshot and initial lifecycle cursor together");
 
     assert_eq!(created.source_generation_cursor.source_id, "new-source");
-    assert_eq!(created.source_generation_cursor.source_generation, "generation-1");
-    assert_eq!(created.source_generation_cursor.source_generation_ordinal, 1);
+    assert_eq!(
+        created.source_generation_cursor.source_generation,
+        "generation-1"
+    );
+    assert_eq!(
+        created.source_generation_cursor.source_generation_ordinal,
+        1
+    );
     assert_eq!(created.source_generation_cursor.completed_at_unix, NOW - 20);
 }
