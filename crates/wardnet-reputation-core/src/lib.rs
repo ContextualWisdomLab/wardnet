@@ -19,6 +19,8 @@
 //! [EVIDENCE_LIFECYCLE_TRACEABILITY.md](../EVIDENCE_LIFECYCLE_TRACEABILITY.md). Cross-generation
 //! producer-version replay and terminal tombstone admission are recorded in
 //! [PRODUCER_VERSION_LIFECYCLE_TRACEABILITY.md](../PRODUCER_VERSION_LIFECYCLE_TRACEABILITY.md).
+//! Atomic complete-source replacement, exact prior-generation CAS, and immutable source-generation
+//! identity are recorded in [SOURCE_REPLACEMENT_TRACEABILITY.md](../SOURCE_REPLACEMENT_TRACEABILITY.md).
 
 mod evidence_snapshot;
 mod lifecycle;
