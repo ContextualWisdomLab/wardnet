@@ -262,6 +262,95 @@ impl EvidenceRecordV1 {
     }
 }
 
+/// Completeness marker for one authenticated reputation source generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSnapshotV1 {
+    /// Contract schema identifier.
+    pub schema_version: String,
+    /// Stable reviewed source identifier.
+    pub source_id: String,
+    /// Immutable source generation identifier represented by this completed snapshot.
+    pub source_generation: String,
+    /// Time Wardnet completed admission of this source generation.
+    pub completed_at_unix: u64,
+    /// Time after which this source generation is no longer current for policy evaluation.
+    pub valid_until_unix: u64,
+}
+
+impl SourceSnapshotV1 {
+    /// Validate source-generation identity and temporal ordering without inventing source health.
+    pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.source_id, "source_snapshot.source_id")?;
+        validate_text(
+            &self.source_generation,
+            "source_snapshot.source_generation",
+        )?;
+        if self.completed_at_unix > now_unix || self.completed_at_unix > self.valid_until_unix {
+            return Err(ContractValidationErrorV1::InvalidTimeOrder);
+        }
+        Ok(())
+    }
+}
+
+/// Immutable aggregate proving which source generations were completely admitted for evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceSnapshotV1 {
+    /// Contract schema identifier.
+    pub schema_version: String,
+    /// Immutable Wardnet evidence generation identifier.
+    pub evidence_generation: String,
+    /// Completed source generations represented by this aggregate.
+    pub source_snapshots: Vec<SourceSnapshotV1>,
+    /// Bounded evidence records admitted from the represented sources.
+    pub records: Vec<EvidenceRecordV1>,
+}
+
+impl EvidenceSnapshotV1 {
+    /// Validate aggregate completeness, source membership, and replay-safe record identity.
+    pub fn validate_at(&self, now_unix: u64) -> Result<(), ContractValidationErrorV1> {
+        validate_schema(&self.schema_version)?;
+        validate_text(&self.evidence_generation, "evidence_generation")?;
+        if self.source_snapshots.len() > MAX_LIST_ITEMS_V1 {
+            return Err(ContractValidationErrorV1::BoundExceeded("source_snapshots"));
+        }
+        if self.records.len() > MAX_LIST_ITEMS_V1 {
+            return Err(ContractValidationErrorV1::BoundExceeded("records"));
+        }
+
+        for (index, source_snapshot) in self.source_snapshots.iter().enumerate() {
+            source_snapshot.validate_at(now_unix)?;
+            if self.source_snapshots[..index]
+                .iter()
+                .any(|prior| prior.source_id == source_snapshot.source_id)
+            {
+                return Err(ContractValidationErrorV1::DuplicateSourceSnapshot);
+            }
+        }
+
+        for (index, record) in self.records.iter().enumerate() {
+            record.validate_at(now_unix)?;
+            if !self
+                .source_snapshots
+                .iter()
+                .any(|snapshot| snapshot.source_id == record.source_id)
+            {
+                return Err(ContractValidationErrorV1::MissingSourceSnapshot);
+            }
+            if self.records[..index].iter().any(|prior| {
+                prior.source_id == record.source_id
+                    && prior.producer_record_id == record.producer_record_id
+            }) {
+                return Err(ContractValidationErrorV1::DuplicateEvidenceRecord);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Reviewed tenant-eligibility semantics for one reputation evidence source.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -700,6 +789,12 @@ pub enum ContractValidationErrorV1 {
     EmptyRequiredSources,
     /// A required-source identifier appears more than once.
     DuplicateRequiredSource,
+    /// A completed source identity appears more than once in one evidence snapshot.
+    DuplicateSourceSnapshot,
+    /// An evidence record has no completed source snapshot in the immutable aggregate.
+    MissingSourceSnapshot,
+    /// A producer record identity appears more than once in one evidence snapshot.
+    DuplicateEvidenceRecord,
     /// A producer confidence value exceeds the preserved 0-100 range.
     InvalidConfidence,
     /// A source policy does not permit any subject kind or purpose.
