@@ -26,15 +26,14 @@ mod model_impl;
 /// The generation-unbound snapshot aggregate is intentionally excluded because
 /// [`EvidenceSnapshotV1`] is now the sole public snapshot authority.
 pub mod model {
+    pub(crate) use super::model_impl::EvidenceSnapshotV1 as BaseEvidenceSnapshotV1;
     pub use super::model_impl::{
         BusinessAuthorizationBindingV1, ContractValidationErrorV1, DecisionEnvelopeV1,
         DecisionReasonV1, DestinationContextV1, DestinationScopeV1, DestinationSubjectKindV1,
         DestinationSubjectV1, DirectionV1, EvaluationModeV1, EvidenceClassificationV1,
-        EvidenceHealthV1, EvidenceRecordV1, PolicyActionV1, PolicySnapshotV1,
-        REPUTATION_SCHEMA_V1, ReputationAssessmentV1, SourcePolicyV1, SourceSnapshotV1,
-        SourceTenantScopeV1,
+        EvidenceHealthV1, EvidenceRecordV1, PolicyActionV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1,
+        ReputationAssessmentV1, SourcePolicyV1, SourceSnapshotV1, SourceTenantScopeV1,
     };
-    pub(crate) use super::model_impl::EvidenceSnapshotV1 as BaseEvidenceSnapshotV1;
 }
 
 pub use evidence_snapshot::*;
