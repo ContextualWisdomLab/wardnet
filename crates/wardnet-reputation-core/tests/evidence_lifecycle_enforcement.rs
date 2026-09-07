@@ -1,5 +1,5 @@
 use serde_json::json;
-use wardnet_reputation_core::EvidenceSnapshotV1;
+use wardnet_reputation_core::{ContractValidationErrorV1, EvidenceSnapshotV1};
 
 const NOW: u64 = 1_788_652_800;
 
@@ -58,9 +58,10 @@ fn revoked_or_deleted_records_cannot_remain_enforcement_eligible() {
         (true, true, "revoked-and-deleted"),
     ] {
         let snapshot = snapshot_with_lifecycle(revoked, deleted, true);
-        assert!(
-            snapshot.validate_at(NOW).is_err(),
-            "{case_name} evidence must fail closed when it still claims enforcement eligibility"
+        assert_eq!(
+            snapshot.validate_at(NOW),
+            Err(ContractValidationErrorV1::LifecycleIneligibleEnforcementEvidence),
+            "{case_name} evidence must fail closed with the lifecycle-specific contract error"
         );
     }
 }
