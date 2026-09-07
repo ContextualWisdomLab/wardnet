@@ -68,14 +68,7 @@ fn tombstoned_identity_cannot_be_reactivated_at_same_or_newer_ordinal() {
     let current = cursor("8", 8, true);
 
     for (version, ordinal) in [("8", 8), ("9", 9)] {
-        let replay = evidence(
-            "required-source",
-            "record-1",
-            version,
-            false,
-            false,
-            true,
-        );
+        let replay = evidence("required-source", "record-1", version, false, false, true);
         assert_eq!(
             current.admit(&replay, ordinal, NOW),
             Err(ContractValidationErrorV1::TombstoneResurrection),
