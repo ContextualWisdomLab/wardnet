@@ -7,6 +7,10 @@ on:
       - 'crates/wardnet-reputation-core/src/model.rs'
       - 'crates/wardnet-reputation-core/tests/error_precedence.rs'
 
+concurrency:
+  group: wardnet-reputation-error-precedence-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
