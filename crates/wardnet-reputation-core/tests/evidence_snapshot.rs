@@ -1,7 +1,7 @@
 use wardnet_reputation_core::{
     ContractValidationErrorV1, DestinationScopeV1, DestinationSubjectKindV1, DestinationSubjectV1,
-    EvidenceClassificationV1, EvidenceRecordV1, EvidenceSnapshotV1, REPUTATION_SCHEMA_V1,
-    SourceSnapshotV1,
+    EvidenceClassificationV1, EvidenceRecordV1, EvidenceSnapshotRecordV1, EvidenceSnapshotV1,
+    REPUTATION_SCHEMA_V1, SourceSnapshotV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -48,6 +48,17 @@ fn evidence(source_id: &str, record_id: &str) -> EvidenceRecordV1 {
     }
 }
 
+fn snapshot_record(
+    source_id: &str,
+    source_generation: &str,
+    record_id: &str,
+) -> EvidenceSnapshotRecordV1 {
+    EvidenceSnapshotRecordV1 {
+        source_generation: source_generation.to_string(),
+        record: evidence(source_id, record_id),
+    }
+}
+
 fn snapshot() -> EvidenceSnapshotV1 {
     EvidenceSnapshotV1 {
         schema_version: REPUTATION_SCHEMA_V1.to_string(),
@@ -86,7 +97,11 @@ fn duplicate_source_snapshots_fail_closed() {
 #[test]
 fn orphan_evidence_without_a_complete_source_snapshot_fails_closed() {
     let mut candidate = snapshot();
-    candidate.records.push(evidence("other-source", "record-1"));
+    candidate.records.push(snapshot_record(
+        "other-source",
+        "source-generation-42",
+        "record-1",
+    ));
 
     assert_eq!(
         candidate.validate_at(NOW),
@@ -98,8 +113,12 @@ fn orphan_evidence_without_a_complete_source_snapshot_fails_closed() {
 #[test]
 fn evidence_received_after_source_completion_fails_closed() {
     let mut candidate = snapshot();
-    let mut late_record = evidence("required-source", "record-after-completion");
-    late_record.received_at_unix = NOW - 10;
+    let mut late_record = snapshot_record(
+        "required-source",
+        "source-generation-42",
+        "record-after-completion",
+    );
+    late_record.record.received_at_unix = NOW - 10;
     candidate.records.push(late_record);
 
     assert_eq!(
@@ -129,12 +148,16 @@ fn future_or_inverted_source_snapshot_time_fails_closed() {
 #[test]
 fn duplicate_producer_record_identity_fails_closed() {
     let mut candidate = snapshot();
-    candidate
-        .records
-        .push(evidence("required-source", "record-1"));
-    candidate
-        .records
-        .push(evidence("required-source", "record-1"));
+    candidate.records.push(snapshot_record(
+        "required-source",
+        "source-generation-42",
+        "record-1",
+    ));
+    candidate.records.push(snapshot_record(
+        "required-source",
+        "source-generation-42",
+        "record-1",
+    ));
 
     assert_eq!(
         candidate.validate_at(NOW),
