@@ -96,6 +96,20 @@ fn orphan_evidence_without_a_complete_source_snapshot_fails_closed() {
 }
 
 #[test]
+fn evidence_received_after_source_completion_fails_closed() {
+    let mut candidate = snapshot();
+    let mut late_record = evidence("required-source", "record-after-completion");
+    late_record.received_at_unix = NOW - 10;
+    candidate.records.push(late_record);
+
+    assert_eq!(
+        candidate.validate_at(NOW),
+        Err(ContractValidationErrorV1::InvalidTimeOrder),
+        "a snapshot cannot claim a source generation completed before Wardnet received evidence included in that generation"
+    );
+}
+
+#[test]
 fn future_or_inverted_source_snapshot_time_fails_closed() {
     let mut future = snapshot();
     future.source_snapshots[0].completed_at_unix = NOW + 1;
