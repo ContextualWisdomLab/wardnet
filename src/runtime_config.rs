@@ -180,6 +180,47 @@ pub fn parse_u64_env(
 }
 
 #[cfg(test)]
+/// Detect syntax that imports or directly calls the process-environment API.
+///
+/// Importing `std::env` outside the two bootstrap adapters is itself forbidden:
+/// otherwise aliases can hide later `var`/`var_os` calls from a literal-call
+/// scan. Whitespace is ignored so normal rustfmt layouts and grouped imports
+/// cannot change the architecture result.
+fn source_uses_runtime_env(source: &str) -> bool {
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+
+    if compact.contains("std::env::var(")
+        || compact.contains("std::env::var_os(")
+        || compact.contains("usestd::env;")
+        || compact.contains("usestd::envas")
+        || compact.contains("usestd::env::")
+    {
+        return true;
+    }
+
+    let mut remaining = compact.as_str();
+    const GROUP_PREFIX: &str = "usestd::{";
+    while let Some(start) = remaining.find(GROUP_PREFIX) {
+        let group = &remaining[start + GROUP_PREFIX.len()..];
+        let Some(end) = group.find("};") else {
+            break;
+        };
+        if group[..end].split(',').any(|entry| {
+            let entry = entry.trim_matches(['{', '}']);
+            entry == "env" || entry.starts_with("envas") || entry.starts_with("env::")
+        }) {
+            return true;
+        }
+        remaining = &group[end + 2..];
+    }
+
+    false
+}
+
+#[cfg(test)]
 /// Walk the Rust source tree and return any file that performs direct runtime
 /// environment reads outside the approved bootstrap adapters.
 fn direct_runtime_env_read_offenders(root: &Path) -> Vec<PathBuf> {
@@ -195,11 +236,11 @@ fn direct_runtime_env_read_offenders(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            if rel == Path::new("credentials.rs") || rel == Path::new("runtime_config.rs") {
+                continue;
+            }
             let source = std::fs::read_to_string(&path).unwrap();
-            if (source.contains("std::env::var(") || source.contains("std::env::var_os("))
-                && rel != Path::new("credentials.rs")
-                && rel != Path::new("runtime_config.rs")
-            {
+            if source_uses_runtime_env(&source) {
                 offenders.push(rel);
             }
         }
@@ -332,6 +373,21 @@ mod tests {
             offenders.is_empty(),
             "direct runtime env reads escaped bootstrap adapters: {offenders:?}"
         );
+    }
+
+    #[test]
+    /// The detector rejects direct calls and both direct and grouped env imports.
+    fn runtime_env_syntax_detector_covers_alias_forms() {
+        assert!(source_uses_runtime_env(
+            "fn bypass() { let _ = std::env::var_os(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use std::env as process_env; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use std::{fmt, env as process_env}; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(!source_uses_runtime_env("use std::fmt; fn harmless() {}"));
     }
 
     #[test]
