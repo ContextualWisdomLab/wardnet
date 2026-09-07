@@ -1,5 +1,5 @@
 use serde_json::json;
-use wardnet_reputation_core::EvidenceSnapshotV1;
+use wardnet_reputation_core::{ContractValidationErrorV1, EvidenceSnapshotV1};
 
 const NOW: u64 = 1_788_652_800;
 
@@ -64,4 +64,19 @@ fn record_bound_to_the_completed_source_generation_is_valid() {
     current
         .validate_at(NOW)
         .expect("a record bound to the represented completed source generation remains valid");
+}
+
+#[test]
+fn admitted_source_generation_is_bounded_before_membership_matching() {
+    let oversized_generation = "g".repeat(1_025);
+    let snapshot: EvidenceSnapshotV1 = serde_json::from_value(snapshot_json(&oversized_generation))
+        .expect("oversized untrusted text reaches explicit contract validation");
+
+    assert_eq!(
+        snapshot.validate_at(NOW),
+        Err(ContractValidationErrorV1::BoundExceeded(
+            "snapshot_record.source_generation"
+        )),
+        "membership matching must not accept or scan an unbounded source-generation identity"
+    );
 }
