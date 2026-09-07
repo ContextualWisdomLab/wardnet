@@ -8,8 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    ContractValidationErrorV1, EvidenceRecordV1, EvidenceSnapshotV1 as BaseEvidenceSnapshotV1,
-    SourceSnapshotV1,
+    BaseEvidenceSnapshotV1, ContractValidationErrorV1, EvidenceRecordV1, SourceSnapshotV1,
 };
 
 /// One admitted evidence record plus the exact completed source generation that admitted it.
