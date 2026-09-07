@@ -46,7 +46,11 @@ fn source_snapshot(source_id: &str, generation: &str) -> SourceSnapshotV1 {
     }
 }
 
-fn member(source_id: &str, generation: &str, producer_record_id: &str) -> EvidenceSnapshotRecordV1 {
+fn member(
+    source_id: &str,
+    generation: &str,
+    producer_record_id: &str,
+) -> EvidenceSnapshotRecordV1 {
     EvidenceSnapshotRecordV1 {
         source_generation: generation.to_owned(),
         record: evidence(source_id, producer_record_id),
