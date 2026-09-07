@@ -16,9 +16,12 @@
 //! source-generation membership and its hostile replay evidence are recorded in
 //! [SOURCE_GENERATION_TRACEABILITY.md](../SOURCE_GENERATION_TRACEABILITY.md). Producer lifecycle
 //! state and enforcement-eligibility invariants are recorded in
-//! [EVIDENCE_LIFECYCLE_TRACEABILITY.md](../EVIDENCE_LIFECYCLE_TRACEABILITY.md).
+//! [EVIDENCE_LIFECYCLE_TRACEABILITY.md](../EVIDENCE_LIFECYCLE_TRACEABILITY.md). Cross-generation
+//! producer-version replay and terminal tombstone admission are recorded in
+//! [PRODUCER_VERSION_LIFECYCLE_TRACEABILITY.md](../PRODUCER_VERSION_LIFECYCLE_TRACEABILITY.md).
 
 mod evidence_snapshot;
+mod lifecycle;
 pub mod live_validation;
 #[path = "model.rs"]
 mod model_impl;
@@ -39,6 +42,7 @@ pub mod model {
 }
 
 pub use evidence_snapshot::*;
+pub use lifecycle::*;
 pub use live_validation::*;
 pub use model::{
     BusinessAuthorizationBindingV1, ContractValidationErrorV1, DecisionEnvelopeV1,
