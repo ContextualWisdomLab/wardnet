@@ -1,7 +1,7 @@
 use wardnet_reputation_core::{
-    EvidenceSnapshotV1, REPUTATION_SCHEMA_V1, SourceBatchCompletenessV1,
-    SourceGenerationLifecycleCursorV1, SourceGenerationLifecycleErrorV1, SourceReplacementBatchV1,
-    SourceSnapshotV1,
+    ContractValidationErrorV1, EvidenceSnapshotV1, REPUTATION_SCHEMA_V1,
+    SourceBatchCompletenessV1, SourceGenerationLifecycleCursorV1,
+    SourceGenerationLifecycleErrorV1, SourceReplacementBatchV1, SourceSnapshotV1,
 };
 
 const NOW: u64 = 1_788_652_800;
@@ -91,6 +91,20 @@ fn source_generation_lifecycle_rejects_aba_replay_after_a_valid_advance() {
 }
 
 #[test]
+fn source_generation_lifecycle_rejects_lower_distinct_ordinal() {
+    let retained = cursor("required-source", "generation-8", 8);
+
+    assert_eq!(
+        retained.admit(
+            &source_snapshot("required-source", "generation-7-other", NOW - 20),
+            7,
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::StaleSourceGenerationOrdinal)
+    );
+}
+
+#[test]
 fn source_generation_lifecycle_rejects_ordinal_token_collision_and_token_rebinding() {
     let retained = cursor("required-source", "generation-8", 8);
 
@@ -135,6 +149,67 @@ fn source_generation_lifecycle_rejects_identity_and_completion_substitution() {
 }
 
 #[test]
+fn source_generation_lifecycle_preserves_bounded_typed_validation() {
+    let retained = cursor("required-source", "generation-8", 8);
+
+    let mut invalid_schema = source_snapshot("required-source", "generation-9", NOW - 20);
+    invalid_schema.schema_version = "wardnet.reputation.v999".to_owned();
+    assert_eq!(
+        retained.admit(&invalid_schema, 9, NOW),
+        Err(SourceGenerationLifecycleErrorV1::Contract(
+            ContractValidationErrorV1::UnsupportedSchema
+        ))
+    );
+
+    assert_eq!(
+        retained.admit(&source_snapshot(" ", "generation-9", NOW - 20), 9, NOW),
+        Err(SourceGenerationLifecycleErrorV1::Contract(
+            ContractValidationErrorV1::BlankField("source_snapshot.source_id")
+        ))
+    );
+
+    let oversized_generation = "x".repeat(1_025);
+    assert_eq!(
+        retained.admit(
+            &source_snapshot("required-source", &oversized_generation, NOW - 20),
+            9,
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::Contract(
+            ContractValidationErrorV1::BoundExceeded("source_snapshot.source_generation")
+        ))
+    );
+
+    assert_eq!(
+        retained.admit(
+            &source_snapshot("required-source", "generation-9", NOW + 1),
+            9,
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::Contract(
+            ContractValidationErrorV1::InvalidTimeOrder
+        ))
+    );
+}
+
+#[test]
+fn source_generation_lifecycle_rejects_invalid_retained_cursor_contract() {
+    let mut retained = cursor("required-source", "generation-8", 8);
+    retained.source_id = " ".to_owned();
+
+    assert_eq!(
+        retained.admit(
+            &source_snapshot("required-source", "generation-9", NOW - 20),
+            9,
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::Contract(
+            ContractValidationErrorV1::BlankField("source_snapshot.source_id")
+        ))
+    );
+}
+
+#[test]
 fn replacement_requires_retained_cursor_to_match_the_represented_snapshot() {
     let prior = snapshot("required-source", "generation-8", NOW - 30);
     let wrong_cursor = cursor("required-source", "generation-7", 7);
@@ -150,6 +225,44 @@ fn replacement_requires_retained_cursor_to_match_the_represented_snapshot() {
             Some(&wrong_cursor),
             next,
             9,
+            "evidence-generation-9",
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::SnapshotCursorMismatch)
+    );
+}
+
+#[test]
+fn replacement_rejects_missing_or_spurious_cursor_for_snapshot_membership() {
+    let prior = snapshot("required-source", "generation-8", NOW - 30);
+    assert_eq!(
+        prior.replace_source_with_lifecycle(
+            None,
+            replacement(
+                "required-source",
+                Some("generation-8"),
+                "generation-9",
+                NOW - 20,
+            ),
+            9,
+            "evidence-generation-9",
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::SnapshotCursorMismatch)
+    );
+
+    let empty = EvidenceSnapshotV1 {
+        schema_version: REPUTATION_SCHEMA_V1.to_owned(),
+        evidence_generation: "evidence-generation-8".to_owned(),
+        source_snapshots: Vec::new(),
+        records: Vec::new(),
+    };
+    let retained = cursor("new-source", "generation-0", 0);
+    assert_eq!(
+        empty.replace_source_with_lifecycle(
+            Some(&retained),
+            replacement("new-source", None, "generation-1", NOW - 20),
+            1,
             "evidence-generation-9",
             NOW,
         ),
