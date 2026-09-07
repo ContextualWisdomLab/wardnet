@@ -48,6 +48,14 @@ Ordinary current-head CI `34090230570` / job `101642039514` on `35c2fc98...` mat
 
 After #175 reaches protected `main`, re-read every intervening protected parent delta, non-force adopt the exact protected parent while retaining only the valid authorization/policy-mode/evidence-cap child slice, and reacquire every then-live repository/security/CodeQL/review/thread/candidate-base/governance gate before Ready/merge.
 
+### Decision freshness child #178
+
+#178 is a Draft child of exact `#176@35c2fc98ff1cd1257fa77a273dbe4f628ce6ba52`. Proposed #173 requires protected execution to reject replay and bind continuation to the declared decision lifetime, while `DecisionEnvelopeV1::validate()` intentionally remains structural validation for serialized/retained evidence rather than an authenticated live grant. The child therefore introduces a separate injected-time live-validation contract instead of adding ambient clock access or duplicating expiry checks in future PEP/adapters.
+
+Hostile/current-window RED commit `1961cca0ecfd3c6d590c7814e330786bb33a8c87` requires an expired envelope and a future-dated envelope to fail live validation while preserving structural archival validation, and requires the evaluation/expiry instants to remain inclusive. Purpose-bounded verifier head `878a93bd70864618c4332da2a4a529e27ebe9d5d` adds only a read-only exact-PR-head `macos-15` verifier. At the fresh read, focused run `34092726493` / job `101649474309`, repository CI `34092726540`, and Fuzz `34092726584` are all queued before execution. No executed RED, GREEN or merge-readiness is claimed. The independent macOS queue specimen is recorded on `.github#712`; do not guess another runner selector or churn production source merely to manufacture execution.
+
+The minimal GREEN, once the causal RED executes, is limited to a deterministic `DecisionEnvelopeV1::validate_at(now_unix)` current-window check, one typed validation error and matching traceability. It must preserve `validate()` archival semantics and must not authenticate the envelope, establish audience binding, parse/authorize URLs, resolve DNS/peers, follow redirects, choose proxies/TLS or claim transport enforcement. Keep #178 Draft behind #176 and reacquire all exact-current evidence after every parent movement.
+
 EgressWeave issue #237 remains the canonical Rust-consumer owner path for immutable outbound authorization/evidence. EgressWeave still has no GitHub Release. Wardnet #136/#115 remain preservation/evidence lanes until a compatible immutable owner release exists; do not promote their local destination/DNS/redirect/proxy/TLS implementation.
 
 ## Other current security/product lanes
