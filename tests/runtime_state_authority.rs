@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use waf_ids_ai_soc::RuntimeConfiguration;
+use waf_ids_ai_soc::{DeploymentMode, RuntimeConfiguration, StateAuthority};
 
 fn runtime(production: bool, authority: &str, state_path: Option<&str>) -> RuntimeConfiguration {
     let deployment_mode = if production {
@@ -25,6 +25,19 @@ fn runtime(production: bool, authority: &str, state_path: Option<&str>) -> Runti
         deployment_mode,
         state_authority,
     }
+}
+
+#[test]
+fn state_authority_types_are_nameable_from_the_public_crate_surface() {
+    fn assert_public_types(mode: DeploymentMode, authority: StateAuthority) {
+        assert_eq!(mode, DeploymentMode::Production);
+        assert_eq!(authority, StateAuthority::Postgres);
+    }
+
+    assert_public_types(
+        RuntimeConfiguration::PRODUCTION_MODE,
+        RuntimeConfiguration::POSTGRES_AUTHORITY,
+    );
 }
 
 #[test]
