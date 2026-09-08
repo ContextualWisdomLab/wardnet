@@ -66,6 +66,11 @@ jobs:
           if text.count(import_needle) != 1:
               raise SystemExit("tenant-context import insertion point is not unique")
           text = text.replace(import_needle, import_replacement, 1)
+          lint_needle = 'assert!(TenantId::parse(&"x".repeat(257)).is_err());'
+          lint_replacement = 'assert!(TenantId::parse("x".repeat(257)).is_err());'
+          if text.count(lint_needle) != 1:
+              raise SystemExit("strict-Clippy tenant-length insertion point is not unique")
+          text = text.replace(lint_needle, lint_replacement, 1)
 
           marker = '''#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
           async fn concurrent_pooled_transactions_keep_tenant_context_independent() {'''
@@ -120,7 +125,7 @@ jobs:
           PY
 
           cargo fmt
-          cargo generate-lockfile
+          cargo test --no-run --workspace
           cargo test --locked --workspace
           cargo clippy --locked --workspace --all-targets -- -D warnings
           git diff --check
