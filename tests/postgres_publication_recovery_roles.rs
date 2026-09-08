@@ -256,7 +256,8 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         "runtime publication must remain unavailable before role reconvergence"
     );
 
-    let owner_transfer_marker = "ALTER FUNCTION public.wardnet_publish_reputation_source_generation(";
+    let owner_transfer_marker =
+        "ALTER FUNCTION public.wardnet_publish_reputation_source_generation(";
     assert!(
         role_installer.contains(owner_transfer_marker),
         "failure injection marker must track the publication owner transfer"
@@ -286,7 +287,16 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
     );
 
     assert_success(
-        run_docker(&["exec", &container.name, "mkdir", "-p", "/tmp/wardnet-recovery"], None),
+        run_docker(
+            &[
+                "exec",
+                &container.name,
+                "mkdir",
+                "-p",
+                "/tmp/wardnet-recovery",
+            ],
+            None,
+        ),
         "create recovery staging directory",
     );
     let installer_target = format!(
