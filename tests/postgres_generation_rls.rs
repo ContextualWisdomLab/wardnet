@@ -1,10 +1,13 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
+const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
+static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct PostgresContainer {
     name: String,
@@ -108,7 +111,11 @@ fn psql(container: &PostgresContainer, sql: &str) -> Output {
 }
 
 fn start_postgres() -> PostgresContainer {
-    let name = format!("wardnet-postgres-generation-{}", std::process::id());
+    let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        "wardnet-postgres-generation-{}-{sequence}",
+        std::process::id()
+    );
     let output = run_docker(
         &[
             "run",
@@ -334,4 +341,120 @@ fn source_generation_history_is_tenant_scoped_and_replay_safe() {
         ),
         "transaction-local tenant context must clear before connection reuse",
     );
+}
+
+#[test]
+fn generation_admission_defines_exact_idempotent_replay_and_divergent_conflict() {
+    let schema_migration = std::fs::read_to_string(MIGRATION_PATH)
+        .expect("source-generation schema migration must exist");
+    let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
+        .expect("source-generation admission migration must exist");
+    if !require_docker_or_skip() {
+        return;
+    }
+
+    let container = start_postgres();
+    assert_success(
+        psql(
+            &container,
+            "CREATE ROLE wardnet_runtime_test NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;",
+        ),
+        "create non-owner admission role",
+    );
+    assert_success(
+        psql(&container, &schema_migration),
+        "apply generation schema",
+    );
+    assert_success(
+        psql(&container, &admission_migration),
+        "apply generation admission migration",
+    );
+    assert_success(
+        psql(
+            &container,
+            "GRANT SELECT, INSERT ON reputation_source_generation TO wardnet_runtime_test; GRANT EXECUTE ON FUNCTION wardnet_admit_reputation_source_generation(text, text, text, bigint, bigint, text) TO wardnet_runtime_test;",
+        ),
+        "grant only admission privileges",
+    );
+
+    let committed = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT wardnet_admit_reputation_source_generation('tenant-a', 'urlhaus', 'generation-8', 8, 100, 'receipt-8')",
+            ),
+        ),
+        "first exact binding must commit",
+    );
+    assert_eq!(committed.trim(), "committed");
+
+    let replay = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT wardnet_admit_reputation_source_generation('tenant-a', 'urlhaus', 'generation-8', 8, 100, 'receipt-8')",
+            ),
+        ),
+        "exact committed binding must replay idempotently",
+    );
+    assert_eq!(replay.trim(), "replay");
+
+    let divergent_replay = assert_failure(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT wardnet_admit_reputation_source_generation('tenant-a', 'urlhaus', 'generation-8', 8, 100, 'different-receipt')",
+            ),
+        ),
+        "same generation identity with divergent immutable evidence must fail",
+    );
+    assert!(
+        divergent_replay.contains("reputation_source_generation_replay_conflict"),
+        "divergent exact replay must have a stable conflict class, got: {divergent_replay}"
+    );
+
+    let aba_replay = assert_failure(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT wardnet_admit_reputation_source_generation('tenant-a', 'urlhaus', 'generation-8', 10, 300, 'receipt-replay')",
+            ),
+        ),
+        "historical token rebinding must fail through the admission boundary",
+    );
+    assert!(
+        aba_replay.contains("reputation_source_generation_replay_conflict"),
+        "ABA replay must have a stable conflict class, got: {aba_replay}"
+    );
+
+    let ordinal_collision = assert_failure(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT wardnet_admit_reputation_source_generation('tenant-a', 'urlhaus', 'other-token', 8, 300, 'other-receipt')",
+            ),
+        ),
+        "ordinal rebinding must fail through the admission boundary",
+    );
+    assert!(
+        ordinal_collision.contains("reputation_source_generation_ordinal_conflict"),
+        "ordinal collision must have a stable conflict class, got: {ordinal_collision}"
+    );
+
+    let row_count = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT count(*) FROM reputation_source_generation WHERE source_id = 'urlhaus'",
+            ),
+        ),
+        "conflicts must not create additional history rows",
+    );
+    assert_eq!(row_count.trim(), "1");
 }
