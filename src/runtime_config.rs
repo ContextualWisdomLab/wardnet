@@ -309,21 +309,25 @@ pub fn parse_u64_env(
 #[cfg(test)]
 /// Detect syntax that imports or directly calls the process-environment API.
 ///
-/// Importing `std::env` outside the two bootstrap adapters is itself forbidden:
-/// otherwise aliases can hide later `var`/`var_os` calls from a literal-call
-/// scan. Whitespace is ignored so normal rustfmt layouts and grouped imports
-/// cannot change the architecture result.
+/// Importing `std::env` or aliasing the `std` root outside the two bootstrap
+/// adapters is itself forbidden: otherwise aliases can hide later `var`/`var_os`
+/// calls from a literal-call scan. Whitespace and an optional leading `::` on
+/// `use` paths are normalized, grouped `self as ...` root aliases are rejected,
+/// and `extern crate std as ...` is treated as the same forbidden authority.
 fn source_uses_runtime_env(source: &str) -> bool {
     let compact = source
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
+    let compact = compact.replace("use::std", "usestd");
 
     if compact.contains("std::env::var(")
         || compact.contains("std::env::var_os(")
         || compact.contains("usestd::env;")
         || compact.contains("usestd::envas")
         || compact.contains("usestd::env::")
+        || compact.contains("usestdas")
+        || compact.contains("externcratestdas")
     {
         return true;
     }
@@ -337,7 +341,10 @@ fn source_uses_runtime_env(source: &str) -> bool {
         };
         if group[..end].split(',').any(|entry| {
             let entry = entry.trim_matches(['{', '}']);
-            entry == "env" || entry.starts_with("envas") || entry.starts_with("env::")
+            entry == "env"
+                || entry.starts_with("envas")
+                || entry.starts_with("env::")
+                || entry.starts_with("selfas")
         }) {
             return true;
         }
@@ -566,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    /// The detector rejects direct calls and both direct and grouped env imports.
+    /// The detector rejects direct calls and direct, grouped, or root aliases.
     fn runtime_env_syntax_detector_covers_alias_forms() {
         assert!(source_uses_runtime_env(
             "fn bypass() { let _ = std::env::var_os(\"BIND_ADDR\"); }"
@@ -576,6 +583,18 @@ mod tests {
         ));
         assert!(source_uses_runtime_env(
             "use std::{fmt, env as process_env}; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use std as standard; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use ::std::env as process_env; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use std::{self as standard}; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "extern crate std as standard; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
         ));
         assert!(!source_uses_runtime_env("use std::fmt; fn harmless() {}"));
     }
