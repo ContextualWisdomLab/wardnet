@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const MIGRATION_ENTRYPOINT_IN_CONTAINER: &str =
     "/wardnet/deploy/postgresql/reputation_state_migrate.sql";
-const ROLE_INSTALLER_IN_CONTAINER: &str =
-    "/wardnet/deploy/postgresql/reputation_state_roles.sql";
+const ROLE_INSTALLER_IN_CONTAINER: &str = "/wardnet/deploy/postgresql/reputation_state_roles.sql";
 const PRINCIPAL_MAPPER_IN_CONTAINER: &str =
     "/wardnet/deploy/postgresql/reputation_state_runtime_principal.sql";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
