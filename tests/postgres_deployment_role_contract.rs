@@ -219,7 +219,9 @@ fn deployment_installs_idempotent_least_privilege_reputation_state_roles() {
         "publish through deployed runtime capability",
     );
     assert!(
-        mediated_publication.lines().any(|line| line.trim() == "committed"),
+        mediated_publication
+            .lines()
+            .any(|line| line.trim() == "committed"),
         "runtime capability must retain function-mediated publication"
     );
 
@@ -257,7 +259,9 @@ fn deployment_installs_idempotent_least_privilege_reputation_state_roles() {
         "read last-known-good state after denied direct mutations",
     );
     assert!(
-        persisted.lines().any(|line| line.trim() == "generation-1:1"),
+        persisted
+            .lines()
+            .any(|line| line.trim() == "generation-1:1"),
         "denied direct mutations must leave the function-mediated last-known-good head unchanged"
     );
 }
