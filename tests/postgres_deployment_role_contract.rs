@@ -323,10 +323,22 @@ fn recovery_reconverges_publication_capability_after_schema_rollback_and_reapply
         return;
     };
 
-    assert_success(psql(&container, &generation_migration), "apply migration 0001");
-    assert_success(psql(&container, &admission_migration), "apply migration 0002");
-    assert_success(psql(&container, &publication_migration), "apply migration 0003");
-    assert_success(psql(&container, &role_install), "install least-privilege roles");
+    assert_success(
+        psql(&container, &generation_migration),
+        "apply migration 0001",
+    );
+    assert_success(
+        psql(&container, &admission_migration),
+        "apply migration 0002",
+    );
+    assert_success(
+        psql(&container, &publication_migration),
+        "apply migration 0003",
+    );
+    assert_success(
+        psql(&container, &role_install),
+        "install least-privilege roles",
+    );
 
     let initial_publication = assert_success(
         psql(
@@ -335,7 +347,11 @@ fn recovery_reconverges_publication_capability_after_schema_rollback_and_reapply
         ),
         "publish before recovery rehearsal",
     );
-    assert!(initial_publication.lines().any(|line| line.trim() == "committed"));
+    assert!(
+        initial_publication
+            .lines()
+            .any(|line| line.trim() == "committed")
+    );
 
     assert_success(
         psql(&container, &publication_rollback),
