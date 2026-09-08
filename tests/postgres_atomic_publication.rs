@@ -191,8 +191,9 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
         .expect("source-generation schema migration must exist");
     let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
         .expect("source-generation admission migration must exist");
-    let publication_migration = std::fs::read_to_string(PUBLICATION_MIGRATION_PATH)
-        .expect("atomic source-publication migration must exist before PostgreSQL authority is enabled");
+    let publication_migration = std::fs::read_to_string(PUBLICATION_MIGRATION_PATH).expect(
+        "atomic source-publication migration must exist before PostgreSQL authority is enabled",
+    );
     if !require_docker_or_skip() {
         return;
     }
@@ -416,7 +417,10 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
     });
 
     let outcomes = [writer_a, writer_b];
-    let successes = outcomes.iter().filter(|output| output.status.success()).count();
+    let successes = outcomes
+        .iter()
+        .filter(|output| output.status.success())
+        .count();
     let conflicts = outcomes
         .iter()
         .filter(|output| {
@@ -425,7 +429,10 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
                     .contains("reputation_source_publication_conflict")
         })
         .count();
-    assert_eq!(successes, 1, "exactly one competing publication must commit");
+    assert_eq!(
+        successes, 1,
+        "exactly one competing publication must commit"
+    );
     assert_eq!(
         conflicts, 1,
         "exactly one competing publication must fail with the stable CAS conflict"
