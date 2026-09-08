@@ -216,7 +216,7 @@ fn runtime_principal_mapping_is_external_identity_least_privilege_and_injection_
         ),
         "inspect unmapped application login",
     );
-    assert_eq!(before.trim(), "false:false:false:false:false:false");
+    assert_eq!(before.trim(), "f:f:f:f:f:f");
 
     assert_success(
         map_runtime_principal(&container, "wardnet_app"),
@@ -233,7 +233,7 @@ fn runtime_principal_mapping_is_external_identity_least_privilege_and_injection_
         ),
         "inspect mapped application login",
     );
-    assert_eq!(after.trim(), "true:false:true:false:true:false:1");
+    assert_eq!(after.trim(), "t:f:t:f:t:f:1");
 
     assert_success(
         psql(
@@ -254,7 +254,7 @@ fn runtime_principal_mapping_is_external_identity_least_privilege_and_injection_
         ),
         "inspect rejected privileged principal",
     );
-    assert_eq!(privileged_membership.trim(), "false");
+    assert_eq!(privileged_membership.trim(), "f");
 
     let hostile = "wardnet_hostile; CREATE ROLE wardnet_injected";
     assert_success(
@@ -275,5 +275,5 @@ fn runtime_principal_mapping_is_external_identity_least_privilege_and_injection_
         ),
         "inspect hostile-name mapping",
     );
-    assert_eq!(hostile_result.trim(), "true:true");
+    assert_eq!(hostile_result.trim(), "t:t");
 }
