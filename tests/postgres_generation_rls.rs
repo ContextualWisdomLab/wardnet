@@ -44,7 +44,10 @@ fn require_docker_or_skip() -> bool {
 
 fn run_docker(args: &[&str], stdin: Option<&str>) -> Output {
     let mut command = Command::new("docker");
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     }
@@ -57,7 +60,9 @@ fn run_docker(args: &[&str], stdin: Option<&str>) -> Output {
             .write_all(input.as_bytes())
             .expect("docker stdin must accept SQL");
     }
-    child.wait_with_output().expect("docker command must finish")
+    child
+        .wait_with_output()
+        .expect("docker command must finish")
 }
 
 fn assert_success(output: Output, context: &str) -> String {
@@ -156,8 +161,9 @@ fn tenant_sql(tenant_id: &str, statement: &str) -> String {
 
 #[test]
 fn source_generation_history_is_tenant_scoped_and_replay_safe() {
-    let migration = std::fs::read_to_string(MIGRATION_PATH)
-        .expect("PostgreSQL source-generation migration must exist before production authority is enabled");
+    let migration = std::fs::read_to_string(MIGRATION_PATH).expect(
+        "PostgreSQL source-generation migration must exist before production authority is enabled",
+    );
     if !require_docker_or_skip() {
         return;
     }
@@ -170,7 +176,10 @@ fn source_generation_history_is_tenant_scoped_and_replay_safe() {
         ),
         "create non-owner runtime role",
     );
-    assert_success(psql(&container, &migration), "apply source-generation migration");
+    assert_success(
+        psql(&container, &migration),
+        "apply source-generation migration",
+    );
     assert_success(
         psql(
             &container,
