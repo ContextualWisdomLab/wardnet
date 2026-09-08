@@ -183,11 +183,7 @@ fn start_postgres() -> Option<PostgresContainer> {
     }
 }
 
-fn publication_sql(
-    expected_prior: Option<&str>,
-    generation: &str,
-    ordinal: i64,
-) -> String {
+fn publication_sql(expected_prior: Option<&str>, generation: &str, ordinal: i64) -> String {
     let prior = expected_prior
         .map(|value| format!("'{value}'"))
         .unwrap_or_else(|| "NULL".to_string());
@@ -324,10 +320,7 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
         ),
         "inspect recovered owner with runtime publication held closed",
     );
-    assert_eq!(
-        recovered_but_gated.trim(),
-        "t:t:t:t:t:t:t:t:t:t:t:t:t:t"
-    );
+    assert_eq!(recovered_but_gated.trim(), "t:t:t:t:t:t:t:t:t:t:t:t:t:t");
     assert!(
         !publish_as_runtime(&container, None, "generation-2", 2)
             .status
