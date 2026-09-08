@@ -38,6 +38,14 @@ jobs:
 
           state = Path("src/postgres_state.rs")
           text = state.read_text()
+          import_needle = "use tokio_postgres::{Client, Config, Host, NoTls, Socket, SslMode};"
+          import_replacement = (
+              "use tokio_postgres::config::{Host, SslMode};\n"
+              "use tokio_postgres::{Client, Config, NoTls, Socket};"
+          )
+          if text.count(import_needle) != 1:
+              raise SystemExit("tokio-postgres config import insertion point is not unique")
+          text = text.replace(import_needle, import_replacement, 1)
           public_tls = "    pub async fn connect_with_tls<T>("
           crate_tls = "    pub(crate) async fn connect_with_tls<T>("
           if text.count(public_tls) != 1:
