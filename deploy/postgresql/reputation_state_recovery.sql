@@ -33,8 +33,11 @@ SELECT
 \elif :publication_boundary_complete
     \echo 'Wardnet publication schema is complete; reconverging capability roles.'
 \else
-    \echo 'Wardnet recovery refused: partial publication schema requires diagnosis.'
-    \quit 3
+    DO $wardnet_partial_recovery$
+    BEGIN
+        RAISE EXCEPTION 'Wardnet recovery refused: partial publication schema requires diagnosis.';
+    END
+    $wardnet_partial_recovery$;
 \endif
 
 \ir reputation_state_roles.sql
