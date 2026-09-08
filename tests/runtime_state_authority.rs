@@ -37,11 +37,7 @@ fn production_mode_rejects_file_authority_even_on_loopback() {
 
 #[test]
 fn production_mode_requires_postgres_authority() {
-    let config = runtime(
-        DeploymentMode::Production,
-        StateAuthority::Postgres,
-        None,
-    );
+    let config = runtime(DeploymentMode::Production, StateAuthority::Postgres, None);
 
     config
         .validate_state_authority()
