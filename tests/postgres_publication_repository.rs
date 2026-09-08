@@ -234,10 +234,10 @@ fn publication(
         generation,
         ordinal,
         1_700_000_000 + ordinal,
-        &format!("provenance-{generation}"),
-        &format!("snapshot-{generation}"),
-        &format!("complete-{generation}"),
-        &format!("lifecycle-{generation}"),
+        format!("provenance-{generation}"),
+        format!("snapshot-{generation}"),
+        format!("complete-{generation}"),
+        format!("lifecycle-{generation}"),
     )
     .expect("fixture publication must validate")
 }
