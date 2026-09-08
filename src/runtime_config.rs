@@ -8,7 +8,27 @@
 use crate::{AppConfig, CRED_ADMIN_TOKEN, CredentialRegistry};
 #[cfg(test)]
 use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
+
+/// Deployment intent used to select fail-closed state-authority invariants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentMode {
+    /// Local or single-node operation where memory/file state remains valid.
+    Standalone,
+    /// Commercial production operation, which requires PostgreSQL authority.
+    Production,
+}
+
+/// Canonical state authority selected for the Wardnet process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateAuthority {
+    /// Process-local volatile state; valid only for standalone operation.
+    Memory,
+    /// Atomic JSON-file state; valid only for standalone operation.
+    File,
+    /// Durable PostgreSQL authority required by production operation.
+    Postgres,
+}
 
 /// Immutable bootstrap snapshot for non-secret Wardnet runtime settings.
 ///
@@ -17,8 +37,8 @@ use std::path::PathBuf;
 /// `RuntimeConfiguration` struct literals with that field must now bootstrap
 /// secret-file selection through [`CredentialRegistry::bootstrap_from_env`] or
 /// [`CredentialRegistry::bootstrap_secrets`] and keep
-/// `RuntimeConfiguration` limited to non-secret listener, DNSBL, and retention
-/// settings.
+/// `RuntimeConfiguration` limited to non-secret listener, DNSBL, retention, and
+/// explicit state-authority settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfiguration {
     /// Socket address the gateway binds during process startup.
@@ -35,6 +55,10 @@ pub struct RuntimeConfiguration {
     pub rate_limit_window: u64,
     /// Maximum accepted HTTP request body size in bytes.
     pub max_body_bytes: usize,
+    /// Explicit deployment intent; never inferred from listener topology.
+    pub deployment_mode: DeploymentMode,
+    /// Explicit or standalone-compatible canonical state authority.
+    pub state_authority: StateAuthority,
 }
 
 impl RuntimeConfiguration {
@@ -46,6 +70,16 @@ impl RuntimeConfiguration {
     pub const DEFAULT_RATE_LIMIT_WINDOW: u64 = 60;
     /// Default maximum accepted request body size in bytes.
     pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
+    /// Standalone deployment marker for callers that construct a snapshot.
+    pub const STANDALONE_MODE: DeploymentMode = DeploymentMode::Standalone;
+    /// Production deployment marker for callers that construct a snapshot.
+    pub const PRODUCTION_MODE: DeploymentMode = DeploymentMode::Production;
+    /// In-memory state authority marker for standalone callers.
+    pub const MEMORY_AUTHORITY: StateAuthority = StateAuthority::Memory;
+    /// File state authority marker for standalone callers.
+    pub const FILE_AUTHORITY: StateAuthority = StateAuthority::File;
+    /// PostgreSQL state authority marker for production callers.
+    pub const POSTGRES_AUTHORITY: StateAuthority = StateAuthority::Postgres;
 
     /// Load the process-edge runtime snapshot from environment bootstrap input.
     ///
@@ -73,8 +107,16 @@ impl RuntimeConfiguration {
         let rate_limit_raw = lookup("RATE_LIMIT");
         let rate_limit_window_raw = lookup("RATE_LIMIT_WINDOW");
         let max_body_bytes_raw = lookup("MAX_BODY_BYTES");
+        let deployment_mode_raw = lookup("WARDNET_DEPLOYMENT_MODE");
+        let state_authority_raw = lookup("WARDNET_STATE_AUTHORITY");
+        let deployment_mode = parse_deployment_mode(deployment_mode_raw.as_deref())?;
+        let state_authority = parse_state_authority(
+            deployment_mode,
+            state_authority_raw.as_deref(),
+            state_path.as_deref(),
+        )?;
 
-        Ok(Self {
+        let config = Self {
             bind_addr,
             state_path,
             dnsbl_origin,
@@ -94,7 +136,58 @@ impl RuntimeConfiguration {
                 max_body_bytes_raw.as_deref(),
                 Self::DEFAULT_MAX_BODY_BYTES as u64,
             )? as usize,
-        })
+            deployment_mode,
+            state_authority,
+        };
+        config.validate_state_authority()?;
+        config.ensure_state_backend_available()?;
+        Ok(config)
+    }
+
+    /// Validate that deployment intent and selected state authority cannot
+    /// silently downgrade production to process memory or a local JSON file.
+    pub fn validate_state_authority(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.deployment_mode == DeploymentMode::Production
+            && self.state_authority != StateAuthority::Postgres
+        {
+            return Err(invalid_configuration(
+                "production deployment requires PostgreSQL state authority",
+            ));
+        }
+
+        match self.state_authority {
+            StateAuthority::File
+                if self
+                    .state_path
+                    .as_deref()
+                    .is_none_or(|path| path.as_os_str().is_empty()) =>
+            {
+                Err(invalid_configuration(
+                    "file state authority requires an explicit non-empty state path",
+                ))
+            }
+            StateAuthority::Memory | StateAuthority::Postgres if self.state_path.is_some() => {
+                Err(invalid_configuration(
+                    "WAF_IDS_STATE_PATH is only valid when file state authority is selected",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Reject a declared authority whose storage adapter is not present yet.
+    ///
+    /// This keeps the #80 PostgreSQL migration testable without allowing a
+    /// production `postgres` declaration to fall through to in-memory state.
+    /// The later PostgreSQL repository slice removes this guard only when the
+    /// durable adapter is actually wired into startup.
+    pub fn ensure_state_backend_available(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.state_authority == StateAuthority::Postgres {
+            return Err(invalid_configuration(
+                "PostgreSQL state authority selected, but the durable PostgreSQL adapter is not available",
+            ));
+        }
+        Ok(())
     }
 
     /// Derive the application configuration from this non-secret snapshot and
@@ -108,6 +201,40 @@ impl RuntimeConfiguration {
             dnsbl_origin: self.dnsbl_origin.clone(),
             event_limit: self.event_limit,
         }
+    }
+}
+
+fn invalid_configuration(message: &str) -> Box<dyn std::error::Error> {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into()
+}
+
+fn parse_deployment_mode(raw: Option<&str>) -> Result<DeploymentMode, Box<dyn std::error::Error>> {
+    match raw {
+        None | Some("standalone") => Ok(DeploymentMode::Standalone),
+        Some("production") => Ok(DeploymentMode::Production),
+        Some(value) => Err(invalid_configuration(&format!(
+            "WARDNET_DEPLOYMENT_MODE must be standalone or production, got {value:?}"
+        ))),
+    }
+}
+
+fn parse_state_authority(
+    deployment_mode: DeploymentMode,
+    raw: Option<&str>,
+    state_path: Option<&StdPath>,
+) -> Result<StateAuthority, Box<dyn std::error::Error>> {
+    match raw {
+        Some("memory") => Ok(StateAuthority::Memory),
+        Some("file") => Ok(StateAuthority::File),
+        Some("postgres") => Ok(StateAuthority::Postgres),
+        Some(value) => Err(invalid_configuration(&format!(
+            "WARDNET_STATE_AUTHORITY must be memory, file, or postgres, got {value:?}"
+        ))),
+        None if deployment_mode == DeploymentMode::Production => Err(invalid_configuration(
+            "WARDNET_STATE_AUTHORITY must be explicitly set to postgres in production",
+        )),
+        None if state_path.is_some() => Ok(StateAuthority::File),
+        None => Ok(StateAuthority::Memory),
     }
 }
 
@@ -293,6 +420,8 @@ mod tests {
             config.max_body_bytes,
             RuntimeConfiguration::DEFAULT_MAX_BODY_BYTES
         );
+        assert_eq!(config.deployment_mode, DeploymentMode::Standalone);
+        assert_eq!(config.state_authority, StateAuthority::Memory);
     }
 
     #[test]
@@ -316,6 +445,65 @@ mod tests {
         assert_eq!(config.rate_limit, 5);
         assert_eq!(config.rate_limit_window, 30);
         assert_eq!(config.max_body_bytes, 4096);
+        assert_eq!(config.deployment_mode, DeploymentMode::Standalone);
+        assert_eq!(config.state_authority, StateAuthority::File);
+    }
+
+    #[test]
+    /// Production state authority must be explicit, PostgreSQL-backed, and unavailable until wired.
+    fn runtime_configuration_requires_explicit_postgres_in_production() {
+        assert!(runtime_from_pairs(&[("WARDNET_DEPLOYMENT_MODE", "production")]).is_err());
+        assert!(
+            runtime_from_pairs(&[
+                ("WARDNET_DEPLOYMENT_MODE", "production"),
+                ("WARDNET_STATE_AUTHORITY", "file"),
+                ("WAF_IDS_STATE_PATH", "state.json"),
+            ])
+            .is_err()
+        );
+        assert!(
+            runtime_from_pairs(&[
+                ("WARDNET_DEPLOYMENT_MODE", "production"),
+                ("WARDNET_STATE_AUTHORITY", "postgres"),
+            ])
+            .is_err(),
+            "production must fail closed until the PostgreSQL adapter is wired"
+        );
+
+        let config = RuntimeConfiguration {
+            bind_addr: RuntimeConfiguration::DEFAULT_BIND_ADDR.to_string(),
+            state_path: None,
+            dnsbl_origin: AppConfig::DEFAULT_DNSBL_ORIGIN.to_string(),
+            event_limit: AppConfig::DEFAULT_EVENT_LIMIT,
+            rate_limit: RuntimeConfiguration::DEFAULT_RATE_LIMIT,
+            rate_limit_window: RuntimeConfiguration::DEFAULT_RATE_LIMIT_WINDOW,
+            max_body_bytes: RuntimeConfiguration::DEFAULT_MAX_BODY_BYTES,
+            deployment_mode: DeploymentMode::Production,
+            state_authority: StateAuthority::Postgres,
+        };
+        config.validate_state_authority().unwrap();
+        assert!(config.ensure_state_backend_available().is_err());
+    }
+
+    #[test]
+    /// Unknown authority names and ambiguous dormant file paths fail closed.
+    fn runtime_configuration_rejects_invalid_or_ambiguous_state_authority() {
+        assert!(
+            runtime_from_pairs(&[("WARDNET_DEPLOYMENT_MODE", "cluster")]).is_err(),
+            "unknown deployment intent must not fall back to standalone"
+        );
+        assert!(
+            runtime_from_pairs(&[("WARDNET_STATE_AUTHORITY", "sqlite")]).is_err(),
+            "unknown state authority must not fall back to memory"
+        );
+        assert!(
+            runtime_from_pairs(&[
+                ("WARDNET_STATE_AUTHORITY", "memory"),
+                ("WAF_IDS_STATE_PATH", "state.json"),
+            ])
+            .is_err(),
+            "a dormant file path beside memory authority is split authority"
+        );
     }
 
     #[test]
@@ -342,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    /// AppConfig combines non-secret runtime values with registry-backed secrets.
+    /// AppConfig combines standalone file state with registry-backed secrets.
     fn runtime_configuration_builds_app_config_from_registry() {
         let runtime = RuntimeConfiguration {
             bind_addr: RuntimeConfiguration::DEFAULT_BIND_ADDR.to_string(),
@@ -352,6 +540,8 @@ mod tests {
             rate_limit: 7,
             rate_limit_window: 90,
             max_body_bytes: 1024,
+            deployment_mode: DeploymentMode::Standalone,
+            state_authority: StateAuthority::File,
         };
         let credentials = CredentialRegistry::bootstrap_secrets(
             None,

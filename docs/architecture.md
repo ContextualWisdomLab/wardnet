@@ -9,7 +9,12 @@ flowchart LR
   api --> app["App Crate"]
   app --> core["waf-ids-core"]
   core --> state["Runtime State"]
-  state --> file["Optional JSON State File"]
+  state --> memory["In-memory State\nStandalone only"]
+  state --> file["Optional JSON State File\nStandalone only"]
+  runtime["RuntimeConfiguration"] --> authority["Explicit State Authority"]
+  authority --> memory
+  authority --> file
+  authority -. "Production requires; startup fails closed until adapter exists" .-> postgres["PostgreSQL Authority\n#80 durable adapter pending"]
   client["HTTP Client"] --> gateway["Rust Gateway"]
   gateway --> scorer["Threat and DNSBL Scorer"]
   scorer --> core
@@ -27,10 +32,10 @@ flowchart LR
 
 ## Components
 
-- `src/runtime_config.rs`: runtime-configuration supporting subdomain bootstrap. Reads non-secret process settings from env once, validates them into an immutable `RuntimeConfiguration`, and passes that snapshot inward to `run_from_env`.
+- `src/runtime_config.rs`: runtime-configuration supporting subdomain bootstrap. Reads non-secret process settings from env once, validates them into an immutable `RuntimeConfiguration`, and passes that snapshot inward to `run_from_env`. Deployment intent and state authority are explicit: standalone may use memory or file state, while production requires an explicit PostgreSQL authority declaration. Until #80 wires the durable PostgreSQL adapter, selecting it fails before listener startup rather than downgrading to memory/file persistence.
 - `src/credentials.rs`: secret bootstrap adapter. Reads `ADMIN_TOKEN`, `ADMIN_TOKENS`, and optional `WAF_IDS_CREDENTIALS_PATH` only at the process edge, then exposes a process-local `CredentialRegistry`.
 - `src/main.rs`: thin process entrypoint and shutdown-signal installation.
-- `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests.
+- `src/lib.rs`: Axum app, routing, management APIs, standalone JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests.
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
@@ -56,16 +61,24 @@ flowchart LR
 - Saltzer, J. H., & Schroeder, M. D. (1975). The protection of information in
   computer systems. *Proceedings of the IEEE, 63*(9), 1278-1308.
   https://doi.org/10.1109/PROC.1975.9939 - least privilege and fail-safe
-  defaults support keeping secret bootstrap in `CredentialRegistry` and making
-  application code consume one validated non-secret snapshot instead of reading
-  mutable environment variables throughout the runtime.
+  defaults support keeping secret bootstrap in `CredentialRegistry`, making
+  deployment/state authority explicit, and rejecting unavailable production
+  authority instead of silently falling back to a weaker state backend.
+- Souppaya, M., Scarfone, K., & Dodson, D. (2022). *Secure Software Development
+  Framework (SSDF) version 1.1: Recommendations for mitigating the risk of
+  software vulnerabilities* (NIST Special Publication 800-218). National
+  Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218.
+  SP 800-218 version 1.1 remains the current final SSDF; NIST published SP
+  800-218 Rev. 1 / SSDF 1.2 as an Initial Public Draft in December 2025, so the
+  draft informs future review but is not represented here as final normative
+  authority.
 - Barker, E. (2020). *Recommendation for key management: Part 1-General* (NIST
   Special Publication 800-57 Part 1 Rev. 5). National Institute of Standards
   and Technology. https://doi.org/10.6028/NIST.SP.800-57pt1r5 -
   [`papers/nist-sp-800-57-part-1-rev-5.pdf`](papers/nist-sp-800-57-part-1-rev-5.pdf).
   The protected-storage, access-control, replacement, and recovery lifecycle
   maps to Wardnet's split between secret bootstrap inputs and non-secret
-  listener, DNSBL, and retention settings.
+  listener, DNSBL, retention, deployment, and state-authority settings.
 - Krause, A., Klemmer, J. H., Huaman, N., Wermke, D., Acar, Y., & Fahl, S.
   (2023). Pushed by accident: A mixed-methods study on strategies of handling
   secret information in source code repositories. In *32nd USENIX Security
@@ -83,13 +96,13 @@ flowchart LR
 
 ## Security Boundaries
 
-- Default bind address is localhost.
+- Default bind address is localhost. Production intent is never inferred from this address because a production process may legitimately listen on loopback behind a proxy or sidecar.
 - Remote management requires `ADMIN_TOKEN` plus external TLS and identity controls.
 - Runtime configuration is loaded once at bootstrap and handed inward as an immutable snapshot; application code does not read operational env vars directly.
-- `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone operation. Without it, the service uses seeded in-memory state.
-- File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
+- Standalone mode may use seeded in-memory state or JSON state selected by `WAF_IDS_STATE_PATH`. File-backed writes use temporary sibling files followed by atomic rename, and management API mutations roll back in memory if the state file cannot be replaced.
+- Production mode requires `WARDNET_STATE_AUTHORITY=postgres`. The current selector deliberately rejects startup because the #80 durable PostgreSQL repository/RLS/migration adapter has not landed; this fail-closed prerequisite is not a claim that PostgreSQL persistence is already implemented.
 - Block mode is route-scoped to avoid global accidental enforcement.
-- JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
+- JSON persistence is a standalone baseline durability mechanism, not a substitute for the production database, tenant-isolation policy, backup/restore plan, or audited change workflow required by #80/#192.
 - Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.
 - The reusable core remains in-repo as a workspace crate. A git submodule is intentionally deferred until an independently versioned engine, SDK, or adapter needs a separate release lifecycle.
 
