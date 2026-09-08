@@ -1,11 +1,13 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
 const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
+static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct PostgresContainer {
     name: String,
@@ -109,7 +111,11 @@ fn psql(container: &PostgresContainer, sql: &str) -> Output {
 }
 
 fn start_postgres() -> PostgresContainer {
-    let name = format!("wardnet-postgres-generation-{}", std::process::id());
+    let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        "wardnet-postgres-generation-{}-{sequence}",
+        std::process::id()
+    );
     let output = run_docker(
         &[
             "run",
