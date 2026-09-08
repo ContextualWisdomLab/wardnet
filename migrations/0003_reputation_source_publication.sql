@@ -3,8 +3,14 @@
 -- Publication couples immutable generation identity, evidence/completeness
 -- references, producer lifecycle identity, and the last-known-good pointer in
 -- one PostgreSQL transaction. The production runtime adapter remains disabled
--- until its separate repository, pooling, migration, and recovery contracts
--- are complete.
+-- until its separate repository, pooling, migration, recovery, and database
+-- role-provisioning contracts are complete.
+--
+-- The publication function is SECURITY DEFINER so the runtime role can receive
+-- EXECUTE without receiving direct INSERT/UPDATE authority over publication
+-- state. Before production PostgreSQL authority is enabled, deployment must
+-- transfer this function to a dedicated NOSUPERUSER/NOBYPASSRLS state-owner
+-- role. This migration intentionally does not create cluster roles.
 
 CREATE TABLE reputation_source_publication (
     tenant_id text NOT NULL
@@ -126,8 +132,8 @@ CREATE FUNCTION public.wardnet_publish_reputation_source_generation(
 )
 RETURNS text
 LANGUAGE plpgsql
-SECURITY INVOKER
-SET search_path = pg_catalog, public
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     existing_publication public.reputation_source_publication%ROWTYPE;
@@ -281,4 +287,4 @@ COMMENT ON FUNCTION public.wardnet_publish_reputation_source_generation(
     text,
     text
 ) IS
-    'Atomically admits and publishes one evidence-complete source generation using exact-prior compare-and-swap semantics.';
+    'Atomically admits and publishes one evidence-complete source generation using exact-prior compare-and-swap semantics. Production ownership must be a dedicated NOSUPERUSER/NOBYPASSRLS state role; runtime receives EXECUTE, not direct mutation privileges.';
