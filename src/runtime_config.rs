@@ -387,6 +387,12 @@ mod tests {
         assert!(source_uses_runtime_env(
             "use std::{fmt, env as process_env}; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
         ));
+        assert!(source_uses_runtime_env(
+            "use std as standard; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use ::std::env as process_env; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
+        ));
         assert!(!source_uses_runtime_env("use std::fmt; fn harmless() {}"));
     }
 
