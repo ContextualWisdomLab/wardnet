@@ -197,7 +197,10 @@ fn recovery_does_not_expose_runtime_publication_while_old_evidence_is_missing() 
         .expect("publication rollback migration must exist");
     let migration = std::fs::read_to_string(PUBLICATION_MIGRATION_PATH)
         .expect("publication migration must exist");
-    assert_success(psql(&container, &rollback), "roll publication boundary back");
+    assert_success(
+        psql(&container, &rollback),
+        "roll publication boundary back",
+    );
     assert_success(psql(&container, &migration), "reapply publication boundary");
 
     assert_success(
