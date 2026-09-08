@@ -1,4 +1,4 @@
-name: Branch PostgreSQL Green Materialization
+name: Branch PostgreSQL Green Finalization
 
 on:
   push:
@@ -6,17 +6,23 @@ on:
       - chatgpt/postgres-tenant-context-red
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: wardnet-postgres-tenant-context-finalization
+  cancel-in-progress: false
 
 jobs:
-  materialize:
+  finalize:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           toolchain: stable
-      - name: Materialize generated integration delta
+      - name: Materialize the reviewed GREEN delta
         shell: bash
         run: |
           python3 - <<'PY'
@@ -29,6 +35,14 @@ jobs:
           if text.count(needle) != 1:
               raise SystemExit("src/lib.rs module insertion point is not unique")
           lib.write_text(text.replace(needle, replacement, 1))
+
+          state = Path("src/postgres_state.rs")
+          text = state.read_text()
+          public_tls = "    pub async fn connect_with_tls<T>("
+          crate_tls = "    pub(crate) async fn connect_with_tls<T>("
+          if text.count(public_tls) != 1:
+              raise SystemExit("TLS constructor visibility insertion point is not unique")
+          state.write_text(text.replace(public_tls, crate_tls, 1))
 
           test = Path("tests/postgres_tenant_context_pool.rs")
           text = test.read_text()
@@ -92,12 +106,20 @@ jobs:
               raise SystemExit("cancellation test insertion point is not unique")
           test.write_text(text.replace(marker, cancellation, 1))
           PY
+
           cargo fmt
           cargo generate-lockfile
-          tar -czf postgres-green-materialized.tgz src/lib.rs Cargo.lock tests/postgres_tenant_context_pool.rs
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: postgres-green-materialized
-          path: postgres-green-materialized.tgz
-          if-no-files-found: error
-          retention-days: 1
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          git diff --check
+
+      - name: Commit exact tested materialization and remove the completed helper
+        shell: bash
+        run: |
+          git rm .github/workflows/branch-postgres-green-materialize.yml
+          git add Cargo.lock src/lib.rs src/postgres_state.rs tests/postgres_tenant_context_pool.rs
+          git diff --cached --check
+          git config user.name "Wardnet commercial-development writer"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "fix(state): materialize tenant session boundary"
+          git push origin HEAD:chatgpt/postgres-tenant-context-red
