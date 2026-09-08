@@ -176,7 +176,8 @@ fn publish_generation_one(container: &PostgresContainer) {
 }
 
 #[test]
-fn publication_migration_can_roll_back_to_admission_and_reapply_without_losing_generation_history() {
+fn publication_migration_can_roll_back_to_admission_and_reapply_without_losing_generation_history()
+{
     let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
         .expect("source-generation schema migration must exist");
     let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
