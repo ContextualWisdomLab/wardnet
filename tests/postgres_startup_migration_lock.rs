@@ -341,4 +341,34 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
         "inspect refused future schema version",
     );
     assert_eq!(future_preserved.trim(), "5");
+
+    assert_success(
+        psql(
+            &container,
+            "UPDATE public.wardnet_schema_version SET schema_version = 4 WHERE component = 'reputation_state'; ALTER TABLE public.reputation_source_generation DROP COLUMN provenance_ref;",
+        ),
+        "inject structurally partial current-version schema",
+    );
+    let partial = psql_file(&container, MIGRATION_ENTRYPOINT_IN_CONTAINER);
+    assert!(
+        !partial.status.success(),
+        "startup must fail closed when a migration-owned current-version table has lost a required column"
+    );
+    let partial_diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&partial.stdout),
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    assert!(
+        partial_diagnostic.contains("partial reputation-state schema"),
+        "structural drift must be classified as partial schema requiring diagnosis"
+    );
+    let partial_preserved = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT count(*) = 0 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reputation_source_generation' AND column_name = 'provenance_ref'), (SELECT schema_version = 4 FROM public.wardnet_schema_version WHERE component = 'reputation_state'));",
+        ),
+        "inspect refused structural partial schema",
+    );
+    assert_eq!(partial_preserved.trim(), "t:t");
 }
