@@ -91,6 +91,44 @@ fn source_generation_lifecycle_rejects_aba_replay_after_a_valid_advance() {
 }
 
 #[test]
+fn source_generation_lifecycle_rejects_aba_token_rebinding_at_a_newer_ordinal() {
+    let prior = snapshot("required-source", "generation-8", NOW - 30);
+    let retained = cursor("required-source", "generation-8", 8);
+
+    let advanced = prior
+        .replace_source_with_lifecycle(
+            Some(&retained),
+            replacement(
+                "required-source",
+                Some("generation-8"),
+                "generation-9",
+                NOW - 20,
+            ),
+            9,
+            "evidence-generation-9",
+            NOW,
+        )
+        .expect("generation 9 must be admitted before exercising multi-hop ABA replay");
+
+    let replay = replacement(
+        "required-source",
+        Some("generation-9"),
+        "generation-8",
+        NOW - 10,
+    );
+    assert_eq!(
+        advanced.evidence_snapshot.replace_source_with_lifecycle(
+            Some(&advanced.source_generation_cursor),
+            replay,
+            10,
+            "evidence-generation-10",
+            NOW,
+        ),
+        Err(SourceGenerationLifecycleErrorV1::ReusedSourceGeneration)
+    );
+}
+
+#[test]
 fn source_generation_lifecycle_rejects_lower_distinct_ordinal() {
     let retained = cursor("required-source", "generation-8", 8);
 
