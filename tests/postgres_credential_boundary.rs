@@ -119,11 +119,7 @@ fn non_string_credentials_file_postgres_dsn_fails_closed() {
 
     for (label, malformed_value) in malformed_values {
         let path = temp_credentials_path(label);
-        std::fs::write(
-            &path,
-            format!(r#"{{"postgres_dsn":{malformed_value}}}"#),
-        )
-        .unwrap();
+        std::fs::write(&path, format!(r#"{{"postgres_dsn":{malformed_value}}}"#)).unwrap();
 
         let error = CredentialRegistry::bootstrap_secrets_with_postgres(
             Some(&path),
