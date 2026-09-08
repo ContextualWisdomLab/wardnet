@@ -185,8 +185,8 @@ pub fn parse_u64_env(
 /// Importing `std::env` or aliasing the `std` root outside the two bootstrap
 /// adapters is itself forbidden: otherwise aliases can hide later `var`/`var_os`
 /// calls from a literal-call scan. Whitespace and an optional leading `::` on
-/// `use` paths are normalized, and `extern crate std as ...` is treated as the
-/// same forbidden root-alias authority.
+/// `use` paths are normalized, grouped `self as ...` root aliases are rejected,
+/// and `extern crate std as ...` is treated as the same forbidden authority.
 fn source_uses_runtime_env(source: &str) -> bool {
     let compact = source
         .chars()
@@ -214,7 +214,10 @@ fn source_uses_runtime_env(source: &str) -> bool {
         };
         if group[..end].split(',').any(|entry| {
             let entry = entry.trim_matches(['{', '}']);
-            entry == "env" || entry.starts_with("envas") || entry.starts_with("env::")
+            entry == "env"
+                || entry.starts_with("envas")
+                || entry.starts_with("env::")
+                || entry.starts_with("selfas")
         }) {
             return true;
         }
