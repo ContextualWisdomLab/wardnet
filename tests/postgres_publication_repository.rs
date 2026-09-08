@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use waf_ids_ai_soc::postgres_state::{
-    PostgresStateError, PostgresTenantPool, PublicationOutcome, ReputationSourcePublication,
-    TenantId,
+    PostgresStateError, PostgresTenantPool, PublicationAuditContext, PublicationOutcome,
+    ReputationSourcePublication, TenantId,
 };
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
@@ -300,5 +300,51 @@ async fn typed_repository_rejects_historical_aba_and_keeps_last_known_good_publi
             Err(PostgresStateError::PublicationConflict)
         ),
         "same ordinal bound to a different token must fail closed: {ordinal_collision:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_publication_is_attributable_and_exact_replay_does_not_duplicate_audit() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("loopback integration pool must connect");
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+    let publication = publication(None, "generation-8", 8)
+        .with_audit_context(
+            PublicationAuditContext::new("subject:feed-sync", "decision:publish-generation-8")
+                .expect("audit context must validate"),
+        );
+
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &publication)
+            .await
+            .expect("audited publication must commit"),
+        PublicationOutcome::Committed
+    );
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &publication)
+            .await
+            .expect("byte-identical audited publication must replay"),
+        PublicationOutcome::Replay
+    );
+
+    let audit = assert_success(
+        psql(
+            &container,
+            "SELECT tenant_id || '|' || source_id || '|' || source_generation || '|' || actor_subject_id || '|' || decision_id || '|' || count(*)::text FROM public.reputation_source_publication_audit GROUP BY tenant_id, source_id, source_generation, actor_subject_id, decision_id;",
+        ),
+        "read authoritative publication audit",
+    );
+    assert_eq!(
+        audit.trim(),
+        "tenant-a|urlhaus|generation-8|subject:feed-sync|decision:publish-generation-8|1",
+        "one committed publication must have exactly one attributable audit record and exact replay must not duplicate it"
     );
 }
