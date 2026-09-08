@@ -27,6 +27,7 @@ mod lifecycle;
 pub mod live_validation;
 #[path = "model.rs"]
 mod model_impl;
+mod source_generation_lifecycle;
 
 /// Compatibility namespace for the unaffected v1 model contracts.
 ///
@@ -53,3 +54,4 @@ pub use model::{
     EvidenceHealthV1, EvidenceRecordV1, PolicyActionV1, PolicySnapshotV1, REPUTATION_SCHEMA_V1,
     ReputationAssessmentV1, SourcePolicyV1, SourceSnapshotV1, SourceTenantScopeV1,
 };
+pub use source_generation_lifecycle::*;
