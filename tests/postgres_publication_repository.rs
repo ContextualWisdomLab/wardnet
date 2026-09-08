@@ -180,7 +180,10 @@ fn start_postgres() -> Option<PostgresContainer> {
         thread::sleep(Duration::from_millis(500));
     }
 
-    let rendered = assert_success(run_docker(&["port", &name, "5432/tcp"], None), "resolve port");
+    let rendered = assert_success(
+        run_docker(&["port", &name, "5432/tcp"], None),
+        "resolve port",
+    );
     let host_port = rendered
         .trim()
         .rsplit(':')
