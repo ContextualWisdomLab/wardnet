@@ -8,6 +8,7 @@
 - Added a structural regression contract that rejects shipped administrator Secret objects, placeholder credentials, decoy workloads, init-container false positives, and optional administrator Secret references.
 - Added an explicit runtime deployment/state-authority contract: standalone operation may select memory or JSON-file state, while production requires `WARDNET_STATE_AUTHORITY=postgres` and never infers production from the listener address. Until #80 wires the durable PostgreSQL repository/RLS/migration adapter, selecting PostgreSQL fails before listener startup instead of silently downgrading to a weaker state backend.
 - Added the first durable PostgreSQL source-generation schema: immutable tenant/source generation and ordinal identities, default-deny forced RLS, transaction-local tenant admission, and credential-free provenance references. The production repository adapter remains disabled until its separate port and transaction contracts are complete.
+- Added the next durable PostgreSQL publication boundary: immutable publication evidence, exact-prior compare-and-swap, strictly increasing source-generation ordinals, atomic last-known-good advancement, rollback-safe failure semantics, tenant-scoped forced RLS, and a least-privilege `SECURITY DEFINER` capability so the runtime role does not receive direct publication mutation authority. Production PostgreSQL selection remains disabled pending #80 deployment-role, repository, pooling, migration/recovery, and backup/restore acceptance.
 
 ### Operations
 
