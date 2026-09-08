@@ -18,36 +18,32 @@ fn postgres_dsn_is_kept_in_the_secret_registry() {
         None,
         None,
         None,
-        Some("postgresql://wardnet_runtime:secret@db.internal/wardnet".to_string()),
+        Some("postgres-dsn-unit-test-value".to_string()),
     )
     .unwrap();
 
     assert_eq!(
         registry.get_credential(CRED_POSTGRES_DSN),
-        Some("postgresql://wardnet_runtime:secret@db.internal/wardnet")
+        Some("postgres-dsn-unit-test-value")
     );
 }
 
 #[test]
 fn credentials_file_overrides_environment_postgres_dsn() {
     let path = temp_credentials_path("postgres-dsn");
-    std::fs::write(
-        &path,
-        r#"{"postgres_dsn":"postgresql://wardnet_runtime:file-secret@db.internal/wardnet"}"#,
-    )
-    .unwrap();
+    std::fs::write(&path, r#"{"postgres_dsn":"postgres-dsn-file-value"}"#).unwrap();
 
     let registry = CredentialRegistry::bootstrap_secrets_with_postgres(
         Some(&path),
         None,
         None,
-        Some("postgresql://wardnet_runtime:env-secret@db.internal/wardnet".to_string()),
+        Some("postgres-dsn-env-value".to_string()),
     )
     .unwrap();
 
     assert_eq!(
         registry.get_credential(CRED_POSTGRES_DSN),
-        Some("postgresql://wardnet_runtime:file-secret@db.internal/wardnet")
+        Some("postgres-dsn-file-value")
     );
 
     let _ = std::fs::remove_file(path);
@@ -55,13 +51,9 @@ fn credentials_file_overrides_environment_postgres_dsn() {
 
 #[test]
 fn empty_postgres_dsn_is_not_registered() {
-    let registry = CredentialRegistry::bootstrap_secrets_with_postgres(
-        None,
-        None,
-        None,
-        Some(String::new()),
-    )
-    .unwrap();
+    let registry =
+        CredentialRegistry::bootstrap_secrets_with_postgres(None, None, None, Some(String::new()))
+            .unwrap();
 
     assert_eq!(registry.get_credential(CRED_POSTGRES_DSN), None);
 }
