@@ -177,7 +177,8 @@ BEGIN
     FOR UPDATE;
 
     IF FOUND THEN
-        IF p_expected_prior_generation IS DISTINCT FROM current_head.source_generation THEN
+        IF p_expected_prior_generation IS DISTINCT FROM current_head.source_generation
+           OR p_source_generation_ordinal <= current_head.source_generation_ordinal THEN
             RAISE EXCEPTION USING
                 ERRCODE = '40001',
                 MESSAGE = 'reputation_source_publication_conflict';
