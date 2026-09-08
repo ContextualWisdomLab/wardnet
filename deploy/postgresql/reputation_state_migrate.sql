@@ -47,6 +47,17 @@ SELECT
         AND to_regprocedure(
             'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
         ) IS NOT NULL
+        AND (
+            SELECT count(*) = 3
+            FROM pg_catalog.pg_class
+            WHERE oid IN (
+                to_regclass('public.reputation_source_generation'),
+                to_regclass('public.reputation_source_publication'),
+                to_regclass('public.reputation_source_publication_head')
+            )
+              AND relrowsecurity
+              AND relforcerowsecurity
+        )
         AND to_regclass('public.wardnet_schema_version') IS NULL AS supported_v3_schema,
     to_regclass('public.reputation_source_generation') IS NOT NULL
         AND EXISTS (
@@ -66,6 +77,17 @@ SELECT
         AND to_regprocedure(
             'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
         ) IS NOT NULL
+        AND (
+            SELECT count(*) = 3
+            FROM pg_catalog.pg_class
+            WHERE oid IN (
+                to_regclass('public.reputation_source_generation'),
+                to_regclass('public.reputation_source_publication'),
+                to_regclass('public.reputation_source_publication_head')
+            )
+              AND relrowsecurity
+              AND relforcerowsecurity
+        )
         AND to_regclass('public.wardnet_schema_version') IS NOT NULL AS versioned_schema
 \gset
 
@@ -133,6 +155,17 @@ SELECT
         AND to_regprocedure(
             'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
         ) IS NOT NULL
+        AND (
+            SELECT count(*) = 3
+            FROM pg_catalog.pg_class
+            WHERE oid IN (
+                to_regclass('public.reputation_source_generation'),
+                to_regclass('public.reputation_source_publication'),
+                to_regclass('public.reputation_source_publication_head')
+            )
+              AND relrowsecurity
+              AND relforcerowsecurity
+        )
         AND to_regclass('public.wardnet_schema_version') IS NOT NULL
         AND (
             SELECT count(*) = 1
