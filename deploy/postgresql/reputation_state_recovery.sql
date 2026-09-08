@@ -1,15 +1,42 @@
--- Re-converge Wardnet's least-privilege reputation publication authority after
--- schema rollback/reapply or restore has recreated publication functions.
+-- Re-converge Wardnet's publication schema and least-privilege authority from
+-- supported recovery states without normalizing an unknown partial boundary.
 --
--- Schema recovery and capability-role recovery are intentionally separate:
--- migrations own schema objects, while reputation_state_roles.sql remains the
--- canonical deployment-time owner for cluster roles and positive grants. This
--- recovery sequencer reuses that owner and may only make the boundary stricter
--- by withholding runtime publication while authoritative evidence is missing.
+-- Migrations remain the canonical schema owner and reputation_state_roles.sql
+-- remains the canonical owner for cluster roles and positive grants. This file
+-- sequences those owners and may only make the resulting runtime capability
+-- stricter while authoritative publication evidence is missing.
 --
--- `\ir` resolves relative to this script, so operators can stage/run the two
--- deployment artifacts together without depending on the caller's cwd.
+-- `\ir` resolves relative to this script, so the recovery tree can be staged
+-- and executed independently of the caller's working directory.
 \set ON_ERROR_STOP on
+
+-- The supported inputs are deliberately narrow:
+--   * complete 0002: the entire publication boundary is absent; or
+--   * complete 0003: publication tables and the outer capability all exist.
+-- Anything between those states needs diagnosis. Speculatively applying 0003
+-- over a partial shape would turn an interrupted/foreign schema into authority.
+SELECT
+    to_regclass('public.reputation_source_publication') IS NULL
+        AND to_regclass('public.reputation_source_publication_head') IS NULL
+        AND to_regprocedure(
+            'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
+        ) IS NULL AS publication_boundary_absent,
+    to_regclass('public.reputation_source_publication') IS NOT NULL
+        AND to_regclass('public.reputation_source_publication_head') IS NOT NULL
+        AND to_regprocedure(
+            'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
+        ) IS NOT NULL AS publication_boundary_complete
+\gset
+
+\if :publication_boundary_absent
+    \ir ../../migrations/0003_reputation_source_publication.sql
+\elif :publication_boundary_complete
+    \echo 'Wardnet publication schema is complete; reconverging capability roles.'
+\else
+    \echo 'Wardnet recovery refused: partial publication schema requires diagnosis.'
+    \quit 3
+\endif
+
 \ir reputation_state_roles.sql
 
 -- A supported 0003 rollback intentionally removes publication history and the
