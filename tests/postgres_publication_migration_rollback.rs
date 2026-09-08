@@ -383,7 +383,8 @@ fn failed_admission_migration_rolls_back_all_admission_owned_ddl() {
         .expect("source-generation schema migration must exist");
     let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
         .expect("source-generation admission migration must exist");
-    let failure_marker = "REVOKE ALL ON FUNCTION public.wardnet_admit_reputation_source_generation(";
+    let failure_marker =
+        "REVOKE ALL ON FUNCTION public.wardnet_admit_reputation_source_generation(";
     assert!(
         admission_migration.contains(failure_marker),
         "failure injection marker must follow admission-function creation"
