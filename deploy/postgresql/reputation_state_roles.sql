@@ -9,6 +9,11 @@
 -- only the table/function privileges needed by that bounded transaction. The
 -- runtime capability receives read access and outer-function EXECUTE, never
 -- direct mutation or inner-admission authority.
+--
+-- The full installation is one explicit transaction so an ownership-transfer
+-- or privilege failure cannot strand capability roles or temporary authority.
+
+BEGIN;
 
 DO $wardnet_roles$
 BEGIN
@@ -134,3 +139,5 @@ REVOKE EXECUTE ON FUNCTION public.wardnet_admit_reputation_source_generation(
     bigint,
     text
 ) FROM wardnet_runtime;
+
+COMMIT;
