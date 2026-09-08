@@ -3,8 +3,9 @@
 --
 -- Schema recovery and capability-role recovery are intentionally separate:
 -- migrations own schema objects, while reputation_state_roles.sql remains the
--- canonical deployment-time owner for cluster roles and grants. Keep this file
--- as sequencing only; do not duplicate role or privilege statements here.
+-- canonical deployment-time owner for cluster roles and positive grants. This
+-- recovery sequencer reuses that owner and may only make the boundary stricter
+-- by withholding runtime publication while authoritative evidence is missing.
 --
 -- `\ir` resolves relative to this script, so operators can stage/run the two
 -- deployment artifacts together without depending on the caller's cwd.
@@ -15,10 +16,11 @@
 -- last-known-good head while preserving admitted generation identity. Reapply
 -- plus role convergence must not turn that surviving identity into permission
 -- to establish an unrelated `expected_prior = NULL` head. Withhold the runtime
--- publication capability until authoritative publication evidence has been
--- restored. The deployment/recovery principal may replay verified evidence via
--- the SECURITY DEFINER capability; rerunning this script then re-enables the
--- bounded runtime grant through the canonical role installer above.
+-- publication capability globally while any recovered source chain has durable
+-- generation identity but no authoritative publication head. The deployment /
+-- recovery principal may replay verified evidence through the SECURITY DEFINER
+-- capability; rerunning this script then re-enables the bounded runtime grant
+-- through the canonical role installer once every such evidence gap is closed.
 DO $wardnet_recovery$
 BEGIN
     IF EXISTS (
