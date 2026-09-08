@@ -201,9 +201,7 @@ fn invalid_configuration(message: &str) -> Box<dyn std::error::Error> {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into()
 }
 
-fn parse_deployment_mode(
-    raw: Option<&str>,
-) -> Result<DeploymentMode, Box<dyn std::error::Error>> {
+fn parse_deployment_mode(raw: Option<&str>) -> Result<DeploymentMode, Box<dyn std::error::Error>> {
     match raw {
         None | Some("standalone") => Ok(DeploymentMode::Standalone),
         Some("production") => Ok(DeploymentMode::Production),
