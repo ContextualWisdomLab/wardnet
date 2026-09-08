@@ -120,11 +120,11 @@ Exact-current CI `34141693656`, Fuzz `34141693771`, Security `34141693787`, and 
 
 Three bounded non-overlapping candidates were stale by exactly protected #171's ADR-only advance and were repaired non-destructively on 2026-09-08 rather than force-rebased or closed:
 
-- #134 support-bundle regression now exact `ce58b6ec2968f314ea223ddb9ff7228fc4222e44`, merge base protected `a52ccd0...`, `behind_by=0`, with the same sole `src/lib.rs` +38-line test delta. Fresh CI/Fuzz/Security/SAST/CodeQL runs are queued and predecessor evidence does not transfer.
-- #162 commercial-authority separation now exact `81a1705c04dd3cae4ea4e6466ae09b9c956517d6`, merge base protected `a52ccd0...`, `behind_by=0`, with the same six-file 2B-KRW-customer versus USD-20B-quality authority delta. Fresh exact-head CI/Security/SAST/CodeQL runs are queued.
-- #144 Kubernetes source-path migration now exact `f5383585d3588d7b63b00a11bba61fa0d875743e`, merge base protected `a52ccd0...`, `behind_by=0`; protected #171's two ADR blobs were adopted while the 13-path path/deployment/docs/test delta remained unchanged. Fresh CI/Fuzz/Security/SAST/CodeQL runs are queued.
+- #134 support-bundle regression remains exact `ce58b6ec2968f314ea223ddb9ff7228fc4222e44`, merge base protected `a52ccd0...`, `behind_by=0`, with the same sole `src/lib.rs` +38-line test delta. Exact CI `34169323244`, Fuzz `34169323221`, Security `34169323227`, and SAST `34169323232` are terminal success; CodeQL `34169323205` is terminal failure at the central delegated-verdict boundary. Predecessor evidence is not transferred.
+- #162 commercial-authority separation remains exact `81a1705c04dd3cae4ea4e6466ae09b9c956517d6`, merge base protected `a52ccd0...`, `behind_by=0`, with the same six-file 2B-KRW-customer versus USD-20B-quality authority delta. Exact CI `34169428002`, Security `34169428030`, and SAST `34169428023` are terminal success; CodeQL `34169428031` is terminal failure at the same central delegated-verdict boundary.
+- #144 Kubernetes source-path migration remains exact `f5383585d3588d7b63b00a11bba61fa0d875743e`, merge base protected `a52ccd0...`, `behind_by=0`; protected #171's two ADR blobs were adopted while the 13-path path/deployment/docs/test delta remained unchanged. Exact CI `34169523123`, Fuzz `34169523073`, Security `34169523087`, and SAST `34169523105` are terminal success; CodeQL `34169523094` is terminal failure at the central delegated-verdict boundary.
 
-Queued states are lane-local non-passing evidence, not reasons for no-op commits or rerun storms. Their owning PR/issue bodies now bind the exact new heads and current runs.
+The settled failures are exact-head non-passing owner evidence, not reasons for no-op commits or rerun storms. Their owning PR/issue bodies remain bound to the same exact heads; `.github#1929` owns the delegated CodeQL receipt repair.
 
 ## Agent Artifact Admission and other security lanes
 
