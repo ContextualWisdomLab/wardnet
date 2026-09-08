@@ -207,7 +207,7 @@ fn deployment_installs_idempotent_least_privilege_reputation_state_roles() {
     );
     assert_eq!(
         role_contract.trim(),
-        "false:false:false:false:false:false:false:false:false:false:false:false:false:false:false:false:true:true:true",
+        "f:f:f:f:f:f:f:f:f:f:f:f:f:f:f:f:t:t:t",
         "deployment must leave a NOLOGIN/NOSUPERUSER/NOBYPASSRLS state owner without schema CREATE and a NOLOGIN runtime capability without direct mutation or inner-admission authority"
     );
 
