@@ -337,6 +337,18 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         "recovery must restore only the bounded outer publication capability"
     );
 
+    let missing_publication_history =
+        publish_as_runtime(&container, Some("generation-1"), "generation-2", 2);
+    assert!(
+        !missing_publication_history.status.success()
+            && String::from_utf8_lossy(&missing_publication_history.stderr)
+                .contains("reputation_source_publication_conflict"),
+        "role recovery must not invent last-known-good publication evidence that the 0003 rollback intentionally removed"
+    );
+    assert_success(
+        publish_as_runtime(&container, None, "generation-1", 1),
+        "restore generation one publication evidence through the recovered outer capability",
+    );
     assert_success(
         publish_as_runtime(&container, Some("generation-1"), "generation-2", 2),
         "publish generation two through restored runtime capability",
@@ -351,13 +363,13 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
     let final_state = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', (SELECT count(*) = 2 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 1 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND source_generation = 'generation-1' AND source_generation_ordinal = 1), (SELECT source_generation = 'generation-2' AND source_generation_ordinal = 2 FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'));",
+            "SELECT concat_ws(':', (SELECT count(*) = 2 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 2 FROM public.reputation_source_publication WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 1 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND source_generation = 'generation-1' AND source_generation_ordinal = 1), (SELECT source_generation = 'generation-2' AND source_generation_ordinal = 2 FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'));",
         ),
         "inspect preserved history after idempotent recovery replay",
     );
     assert_eq!(
         final_state.trim(),
-        "t:t:t",
-        "recovery must preserve original generation identity and advance last-known-good only through the outer capability"
+        "t:t:t:t",
+        "recovery must preserve original generation identity and advance last-known-good only after publication evidence is explicitly restored through the outer capability"
     );
 }
