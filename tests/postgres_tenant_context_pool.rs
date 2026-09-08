@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use waf_ids_ai_soc::postgres_state::{PostgresTenantPool, TenantId};
+use waf_ids_ai_soc::postgres_state::{PostgresStateResult, PostgresTenantPool, TenantId};
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
@@ -250,7 +250,7 @@ fn prepare_database() -> Option<PostgresContainer> {
 fn tenant_identity_is_bounded_before_database_work() {
     assert!(TenantId::parse("").is_err());
     assert!(TenantId::parse(" \t\n").is_err());
-    assert!(TenantId::parse(&"x".repeat(257)).is_err());
+    assert!(TenantId::parse("x".repeat(257)).is_err());
 
     let hostile = "tenant-a'; RESET ALL; SELECT pg_sleep(30); --";
     assert_eq!(
@@ -401,6 +401,53 @@ async fn pooled_tenant_context_is_transaction_local_and_cross_tenant_fail_closed
         .expect("parameter-bound hostile identity must not become SQL");
     assert_eq!(hostile_result.0, hostile.as_str());
     assert_eq!(hostile_result.1, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_transaction_rolls_back_before_connection_reuse() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 1)
+        .await
+        .expect("loopback trust fixture must connect");
+    let tenant_a = TenantId::parse("tenant-a").expect("tenant-a must validate");
+    let task_pool = pool.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+    let task = tokio::spawn(async move {
+        task_pool
+            .with_tenant_transaction(&tenant_a, |tx| {
+                Box::pin(async move {
+                    let pid = tx
+                        .query_scalar_i64("SELECT pg_backend_pid()::bigint")
+                        .await?;
+                    let _ = started_tx.send(pid);
+                    std::future::pending::<PostgresStateResult<()>>().await
+                })
+            })
+            .await
+    });
+
+    let active_pid = started_rx
+        .await
+        .expect("transaction must bind before cancellation");
+    task.abort();
+    let cancelled = task
+        .await
+        .expect_err("aborted transaction task must not complete");
+    assert!(cancelled.is_cancelled());
+
+    let after_cancel = pool
+        .probe_unbound_context()
+        .await
+        .expect("cancelled transaction must roll back before the checkout is reused");
+    assert_eq!(after_cancel.backend_pid(), active_pid);
+    assert_eq!(after_cancel.tenant_id(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

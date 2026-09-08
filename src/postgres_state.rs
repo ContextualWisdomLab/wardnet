@@ -15,11 +15,11 @@ use std::sync::{
 };
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
-use tokio_postgres::{Client, Config, Host, NoTls, Socket, SslMode};
+use tokio_postgres::{Client, Config, NoTls, Socket};
 
 const MAX_TENANT_ID_BYTES: usize = 256;
-const TENANT_SETTING: &str = "wardnet.tenant_id";
 
 /// Error returned by Wardnet's PostgreSQL session boundary.
 #[derive(Debug)]
@@ -38,7 +38,9 @@ impl fmt::Display for PostgresStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidTenantId(reason) => write!(formatter, "invalid tenant identity: {reason}"),
-            Self::InvalidPoolSize => formatter.write_str("PostgreSQL pool size must be greater than zero"),
+            Self::InvalidPoolSize => {
+                formatter.write_str("PostgreSQL pool size must be greater than zero")
+            }
             Self::InvalidLoopbackFixture(reason) => {
                 write!(formatter, "invalid loopback PostgreSQL fixture: {reason}")
             }
@@ -151,7 +153,7 @@ impl PostgresTenantPool {
     /// obtain secret material through Wardnet's credential boundary. Passing [`NoTls`] here is
     /// not a production policy decision; the only Wardnet convenience that does so is the
     /// loopback-only integration fixture constructor.
-    pub async fn connect_with_tls<T>(
+    pub(crate) async fn connect_with_tls<T>(
         dsn: &str,
         pool_size: usize,
         tls: T,
@@ -269,10 +271,7 @@ impl PostgresTenantPool {
     }
 
     fn next_connection(&self) -> Arc<Mutex<Client>> {
-        let index = self
-            .inner
-            .next_connection
-            .fetch_add(1, Ordering::Relaxed)
+        let index = self.inner.next_connection.fetch_add(1, Ordering::Relaxed)
             % self.inner.connections.len();
         Arc::clone(&self.inner.connections[index])
     }

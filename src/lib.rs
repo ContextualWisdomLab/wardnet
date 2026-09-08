@@ -41,6 +41,7 @@ mod credentials;
 mod kev_import;
 mod misp_import;
 mod opencti_import;
+pub mod postgres_state;
 mod runtime_config;
 mod stix_import;
 mod suricata_eve;
