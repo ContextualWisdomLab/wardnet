@@ -316,11 +316,10 @@ async fn committed_publication_is_attributable_and_exact_replay_does_not_duplica
         .await
         .expect("loopback integration pool must connect");
     let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
-    let publication = publication(None, "generation-8", 8)
-        .with_audit_context(
-            PublicationAuditContext::new("subject:feed-sync", "decision:publish-generation-8")
-                .expect("audit context must validate"),
-        );
+    let publication = publication(None, "generation-8", 8).with_audit_context(
+        PublicationAuditContext::new("subject:feed-sync", "decision:publish-generation-8")
+            .expect("audit context must validate"),
+    );
 
     assert_eq!(
         pool.publish_reputation_source(&tenant, &publication)
