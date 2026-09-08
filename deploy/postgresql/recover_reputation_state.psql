@@ -1,0 +1,43 @@
+-- Restartable publication-state recovery sequencing for Wardnet.
+--
+-- Run as the database migration/cluster administrator from psql. The forward
+-- migration and role installer keep their own transaction boundaries: if the
+-- process stops after schema reapply but before role reconvergence, the outer
+-- publication capability remains fail closed and replay resumes from the
+-- complete 0003 schema boundary.
+--
+-- This script accepts only two known starting states:
+--   * complete 0002 with the entire publication boundary absent; or
+--   * complete 0003 with all publication objects present.
+-- Any partial 0003 shape requires operator diagnosis rather than speculative
+-- repair because object existence alone cannot prove schema or privilege truth.
+
+\set ON_ERROR_STOP on
+
+SELECT
+    to_regclass('public.reputation_source_publication') IS NULL
+        AND to_regclass('public.reputation_source_publication_head') IS NULL
+        AND to_regprocedure(
+            'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
+        ) IS NULL
+        AS publication_boundary_absent,
+    to_regclass('public.reputation_source_publication') IS NOT NULL
+        AND to_regclass('public.reputation_source_publication_head') IS NOT NULL
+        AND to_regprocedure(
+            'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
+        ) IS NOT NULL
+        AS publication_boundary_complete
+\gset
+
+\if :publication_boundary_absent
+    \ir ../../migrations/0003_reputation_source_publication.sql
+\elif :publication_boundary_complete
+    \echo 'Wardnet publication schema already complete; reconverging capability roles.'
+\else
+    \echo 'Wardnet recovery refused: partial publication schema requires diagnosis.'
+    \quit 3
+\endif
+
+\ir reputation_state_roles.sql
+
+\echo 'Wardnet reputation-state publication capability recovered.'
