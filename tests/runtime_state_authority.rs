@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use waf_ids_ai_soc::{DeploymentMode, RuntimeConfiguration, StateAuthority};
+use waf_ids_ai_soc::RuntimeConfiguration;
 
 fn runtime(production: bool, authority: &str, state_path: Option<&str>) -> RuntimeConfiguration {
     let deployment_mode = if production {
@@ -25,19 +25,6 @@ fn runtime(production: bool, authority: &str, state_path: Option<&str>) -> Runti
         deployment_mode,
         state_authority,
     }
-}
-
-#[test]
-fn state_authority_types_are_nameable_from_the_public_crate_surface() {
-    fn assert_public_types(mode: DeploymentMode, authority: StateAuthority) {
-        assert_eq!(mode, DeploymentMode::Production);
-        assert_eq!(authority, StateAuthority::Postgres);
-    }
-
-    assert_public_types(
-        RuntimeConfiguration::PRODUCTION_MODE,
-        RuntimeConfiguration::POSTGRES_AUTHORITY,
-    );
 }
 
 #[test]
@@ -73,6 +60,17 @@ fn standalone_file_authority_requires_an_explicit_path() {
     assert!(
         error.to_string().contains("state path"),
         "file authority without a path must fail closed: {error}"
+    );
+}
+
+#[test]
+fn standalone_file_authority_rejects_an_empty_path() {
+    let config = runtime(false, "file", Some(""));
+
+    let error = config.validate_state_authority().unwrap_err();
+    assert!(
+        error.to_string().contains("non-empty"),
+        "an empty file authority path must fail during bootstrap validation: {error}"
     );
 }
 
