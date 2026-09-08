@@ -8,12 +8,10 @@ use waf_ids_ai_soc::postgres_state::{PostgresTenantPool, TenantId};
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
-const ADMISSION_MIGRATION_PATH: &str =
-    "migrations/0002_reputation_source_generation_admission.sql";
+const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
-const PRINCIPAL_MAPPER_PATH: &str =
-    "deploy/postgresql/reputation_state_runtime_principal.sql";
+const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_principal.sql";
 const RUNTIME_PRINCIPAL: &str = "wardnet_app";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -172,7 +170,15 @@ fn start_postgres() -> PostgresContainer {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let status = Command::new("docker")
-            .args(["exec", &name, "pg_isready", "-U", "postgres", "-d", "postgres"])
+            .args([
+                "exec",
+                &name,
+                "pg_isready",
+                "-U",
+                "postgres",
+                "-d",
+                "postgres",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -210,7 +216,10 @@ fn prepare_database() -> Option<PostgresContainer> {
     let container = start_postgres();
     assert_success(psql(&container, &generation), "apply generation migration");
     assert_success(psql(&container, &admission), "apply admission migration");
-    assert_success(psql(&container, &publication), "apply publication migration");
+    assert_success(
+        psql(&container, &publication),
+        "apply publication migration",
+    );
     assert_success(psql(&container, &roles), "install capability roles");
     assert_success(
         psql(
@@ -339,7 +348,10 @@ async fn pooled_tenant_context_is_transaction_local_and_cross_tenant_fail_closed
             })
         })
         .await;
-    assert!(injected_error.is_err(), "operation error must abort the transaction");
+    assert!(
+        injected_error.is_err(),
+        "operation error must abort the transaction"
+    );
 
     let after_error = pool
         .probe_unbound_context()
@@ -353,7 +365,8 @@ async fn pooled_tenant_context_is_transaction_local_and_cross_tenant_fail_closed
         .with_tenant_transaction(&tenant_b, |tx| {
             Box::pin(async move {
                 Ok((
-                    tx.query_scalar_i64("SELECT pg_backend_pid()::bigint").await?,
+                    tx.query_scalar_i64("SELECT pg_backend_pid()::bigint")
+                        .await?,
                     tx.query_scalar_text("SELECT current_setting('wardnet.tenant_id', true)")
                         .await?,
                     tx.query_scalar_i64(
