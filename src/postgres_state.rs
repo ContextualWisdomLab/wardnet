@@ -54,9 +54,8 @@ impl fmt::Display for PostgresStateError {
             Self::PublicationConflict => {
                 formatter.write_str("reputation source publication conflicts with durable state")
             }
-            Self::InvalidPublicationOutcome => formatter.write_str(
-                "PostgreSQL publication function returned an unsupported outcome",
-            ),
+            Self::InvalidPublicationOutcome => formatter
+                .write_str("PostgreSQL publication function returned an unsupported outcome"),
             Self::InvalidPoolSize => {
                 formatter.write_str("PostgreSQL pool size must be greater than zero")
             }
