@@ -188,8 +188,8 @@ impl PostgresTenantPool {
     /// Connect a plaintext trust fixture only when the parsed DSN is explicitly loopback-only.
     ///
     /// This constructor exists for real PostgreSQL integration tests. It rejects Unix sockets,
-    /// remote hosts, implicit hosts, and any SSL mode other than `disable` so it cannot silently
-    /// become a production plaintext path.
+    /// remote host names, remote `hostaddr` network targets, implicit hosts, and any SSL mode
+    /// other than `disable` so it cannot silently become a production plaintext path.
     pub async fn connect_loopback_test(dsn: &str, pool_size: usize) -> PostgresStateResult<Self> {
         let config = dsn.parse::<Config>()?;
         if config.get_ssl_mode() != SslMode::Disable {
@@ -201,6 +201,15 @@ impl PostgresTenantPool {
         if hosts.is_empty() || !hosts.iter().all(loopback_host) {
             return Err(PostgresStateError::InvalidLoopbackFixture(
                 "every host must resolve syntactically to localhost or a loopback IP",
+            ));
+        }
+        if !config
+            .get_hostaddrs()
+            .iter()
+            .all(|address| address.is_loopback())
+        {
+            return Err(PostgresStateError::InvalidLoopbackFixture(
+                "every hostaddr network target must be a loopback IP",
             ));
         }
         Self::connect_with_tls(dsn, pool_size, NoTls).await
