@@ -189,16 +189,22 @@ fn stage_recovery_tree(container: &PostgresContainer) {
 fn recovery_accepts_only_complete_supported_schema_shapes_and_is_restartable() {
     let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
         .expect("generation migration must exist");
-    let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
-        .expect("admission migration must exist");
+    let admission_migration =
+        std::fs::read_to_string(ADMISSION_MIGRATION_PATH).expect("admission migration must exist");
     let publication_rollback = std::fs::read_to_string(PUBLICATION_ROLLBACK_PATH)
         .expect("publication rollback must exist");
     let Some(container) = start_postgres() else {
         return;
     };
 
-    assert_success(psql(&container, &generation_migration), "apply migration 0001");
-    assert_success(psql(&container, &admission_migration), "apply migration 0002");
+    assert_success(
+        psql(&container, &generation_migration),
+        "apply migration 0001",
+    );
+    assert_success(
+        psql(&container, &admission_migration),
+        "apply migration 0002",
+    );
     stage_recovery_tree(&container);
 
     assert_success(
