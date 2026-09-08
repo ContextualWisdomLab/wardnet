@@ -16,22 +16,30 @@ use std::{
 /// Well-known credentials loaded into the registry at bootstrap.
 pub const CRED_ADMIN_TOKEN: &str = "admin_token";
 pub const CRED_ADMIN_TOKENS: &str = "admin_tokens";
+/// PostgreSQL connection material. This value is secret-bearing and must stay
+/// inside the credential boundary rather than Runtime Configuration or support
+/// evidence.
+pub const CRED_POSTGRES_DSN: &str = "postgres_dsn";
 
-/// Where secret-bearing credentials were loaded from (never includes values).
+/// Where administrator credentials were loaded from (never includes values).
+///
+/// This remains deliberately admin-auth provenance. Loading an unrelated secret
+/// such as [`CRED_POSTGRES_DSN`] must not broaden health/support metadata into a
+/// generic secret-inventory side channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialSource {
-    /// At least one secret came from `WAF_IDS_CREDENTIALS_PATH`.
+    /// At least one administrator secret came from `WAF_IDS_CREDENTIALS_PATH`.
     File,
-    /// Secrets came only from env bootstrap (`ADMIN_TOKEN` / `ADMIN_TOKENS`).
+    /// Administrator secrets came only from env bootstrap (`ADMIN_TOKEN` / `ADMIN_TOKENS`).
     Env,
-    /// No admin secrets configured.
+    /// No administrator secrets configured.
     #[default]
     None,
 }
 
 impl CredentialSource {
-    /// Return the redacted provenance label exposed in health and evidence APIs.
+    /// Return the redacted administrator-provenance label exposed in health and evidence APIs.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -42,7 +50,7 @@ impl CredentialSource {
 }
 
 /// In-process map of secret credentials. Values are never logged or serialized
-/// into health/support surfaces — only the source label is exposed.
+/// into health/support surfaces — only administrator-secret provenance is exposed.
 #[derive(Debug, Clone, Default)]
 pub struct CredentialRegistry {
     values: HashMap<String, String>,
@@ -60,7 +68,7 @@ impl CredentialRegistry {
         self.values.get(name).map(String::as_str)
     }
 
-    /// Report where the registry's admin credentials came from.
+    /// Report where the registry's administrator credentials came from.
     pub fn source(&self) -> CredentialSource {
         self.source
     }
@@ -79,29 +87,52 @@ impl CredentialRegistry {
         let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
             .ok()
             .map(PathBuf::from);
-        let registry = Self::bootstrap_secrets(
+        let registry = Self::bootstrap_secrets_with_postgres(
             credentials_path.as_deref(),
             std::env::var("ADMIN_TOKEN").ok(),
             std::env::var("ADMIN_TOKENS").ok(),
+            std::env::var("POSTGRES_DSN").ok(),
         )?;
         Ok((registry, credentials_path))
     }
 
-    /// Bootstrap secret-bearing credentials plus the optional KEV fetch override.
+    /// Bootstrap the currently supported administrator secrets.
     ///
-    /// Precedence: JSON credentials file (when present) wins per-key; missing
-    /// keys are filled from the env bootstrap values. Operational non-secret
-    /// config (bind address, limits, DNSBL origin) stays on env. The KEV URL
-    /// defaults to the built-in CISA endpoint and is accepted here only as a
-    /// server-side override that must still satisfy the runtime allowlist.
+    /// This compatibility entry point intentionally delegates to
+    /// [`Self::bootstrap_secrets_with_postgres`] with no PostgreSQL credential so
+    /// existing callers retain their exact behavior while new state-authority
+    /// wiring can opt into the secret-bearing DSN boundary explicitly.
     pub fn bootstrap_secrets(
         credentials_path: Option<&Path>,
         env_admin_token: Option<String>,
         env_admin_tokens: Option<String>,
     ) -> Result<Self, String> {
+        Self::bootstrap_secrets_with_postgres(
+            credentials_path,
+            env_admin_token,
+            env_admin_tokens,
+            None,
+        )
+    }
+
+    /// Bootstrap administrator credentials plus an optional PostgreSQL DSN.
+    ///
+    /// Precedence is per key: a non-empty JSON credentials-file value wins,
+    /// otherwise the corresponding environment bootstrap value is used. Empty
+    /// values are omitted. PostgreSQL connection material remains in this
+    /// process-local secret registry and does not affect [`CredentialSource`],
+    /// which is intentionally limited to administrator-auth provenance exposed
+    /// by health/support surfaces.
+    pub fn bootstrap_secrets_with_postgres(
+        credentials_path: Option<&Path>,
+        env_admin_token: Option<String>,
+        env_admin_tokens: Option<String>,
+        env_postgres_dsn: Option<String>,
+    ) -> Result<Self, String> {
         let mut values = HashMap::new();
         // CredentialSource is documented (and reported via HealthStatus/support
-        // bundle) as admin-secret provenance specifically.
+        // bundle) as admin-secret provenance specifically. PostgreSQL secret
+        // presence must not alter that public metadata.
         let mut admin_from_file = false;
         let mut admin_from_env = false;
 
@@ -116,13 +147,17 @@ impl CredentialRegistry {
                             )
                         })?;
                     for key in [CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS] {
-                        if let Some(raw) = file_map.get(key) {
-                            let text = json_value_as_nonempty_string(raw);
-                            if let Some(text) = text {
-                                values.insert(key.to_string(), text);
-                                admin_from_file = true;
-                            }
+                        if let Some(raw) = file_map.get(key)
+                            && let Some(text) = json_value_as_nonempty_string(raw)
+                        {
+                            values.insert(key.to_string(), text);
+                            admin_from_file = true;
                         }
+                    }
+                    if let Some(raw) = file_map.get(CRED_POSTGRES_DSN)
+                        && let Some(text) = json_value_as_nonempty_string(raw)
+                    {
+                        values.insert(CRED_POSTGRES_DSN.to_string(), text);
                     }
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -147,6 +182,12 @@ impl CredentialRegistry {
             values.insert(CRED_ADMIN_TOKENS.to_string(), tokens);
             admin_from_env = true;
         }
+        if !values.contains_key(CRED_POSTGRES_DSN)
+            && let Some(dsn) = env_postgres_dsn.filter(|value| !value.is_empty())
+        {
+            values.insert(CRED_POSTGRES_DSN.to_string(), dsn);
+        }
+
         let source = if admin_from_file {
             CredentialSource::File
         } else if admin_from_env {
@@ -310,5 +351,23 @@ mod tests {
         let err = CredentialRegistry::bootstrap_secrets(Some(&path), None, None).unwrap_err();
         assert!(err.contains("not valid JSON"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn postgres_only_secret_does_not_change_admin_provenance() {
+        let registry = CredentialRegistry::bootstrap_secrets_with_postgres(
+            None,
+            None,
+            None,
+            Some("postgres-dsn-unit-test-value".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(registry.source(), CredentialSource::None);
+        assert!(!registry.has_admin_auth());
+        assert_eq!(
+            registry.get_credential(CRED_POSTGRES_DSN),
+            Some("postgres-dsn-unit-test-value")
+        );
     }
 }
