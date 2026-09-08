@@ -10,9 +10,9 @@ async fn loopback_fixture_rejects_non_loopback_hostaddr_override() {
 
     match result {
         Err(PostgresStateError::InvalidLoopbackFixture(_)) => {}
-        Err(other) => panic!(
-            "non-loopback hostaddr must be rejected before connector I/O; got {other}"
-        ),
+        Err(other) => {
+            panic!("non-loopback hostaddr must be rejected before connector I/O; got {other}")
+        }
         Ok(_) => panic!("non-loopback hostaddr must never produce a plaintext fixture pool"),
     }
 }
