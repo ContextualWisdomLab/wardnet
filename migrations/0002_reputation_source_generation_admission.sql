@@ -4,6 +4,8 @@
 -- the generation-history relation created by 0001. It does not enable the
 -- production PostgreSQL repository adapter or publish evidence snapshots.
 
+BEGIN;
+
 CREATE FUNCTION public.wardnet_admit_reputation_source_generation(
     p_tenant_id text,
     p_source_id text,
@@ -103,3 +105,5 @@ COMMENT ON FUNCTION public.wardnet_admit_reputation_source_generation(
     text
 ) IS
     'Admits one immutable tenant/source generation binding; exact duplicates replay idempotently and divergent token/ordinal reuse fails closed.';
+
+COMMIT;
