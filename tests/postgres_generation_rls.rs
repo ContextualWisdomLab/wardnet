@@ -273,6 +273,42 @@ fn source_generation_history_is_tenant_scoped_and_replay_safe() {
         "same source generation identity may exist in a different tenant",
     );
 
+    let update_count = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "WITH attempted AS (UPDATE reputation_source_generation SET provenance_ref = 'tampered' WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-8' RETURNING 1) SELECT count(*) FROM attempted",
+            ),
+        ),
+        "immutable generation history must expose no runtime UPDATE rows",
+    );
+    assert_eq!(update_count.trim(), "0");
+
+    let delete_count = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "WITH attempted AS (DELETE FROM reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-8' RETURNING 1) SELECT count(*) FROM attempted",
+            ),
+        ),
+        "immutable generation history must expose no runtime DELETE rows",
+    );
+    assert_eq!(delete_count.trim(), "0");
+
+    let immutable_receipt = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT provenance_ref FROM reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-8'",
+            ),
+        ),
+        "failed mutation attempts must preserve immutable provenance",
+    );
+    assert_eq!(immutable_receipt.trim(), "receipt-8");
+
     let tenant_a_count = assert_success(
         psql(
             &container,
