@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use waf_ids_ai_soc::{CRED_POSTGRES_DSN, CredentialRegistry};
+use waf_ids_ai_soc::{CredentialRegistry, CredentialSource};
+
+const POSTGRES_DSN_KEY: &str = "postgres_dsn";
 
 fn temp_credentials_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -23,9 +25,10 @@ fn postgres_dsn_is_kept_in_the_secret_registry() {
     .unwrap();
 
     assert_eq!(
-        registry.get_credential(CRED_POSTGRES_DSN),
+        registry.get_credential(POSTGRES_DSN_KEY),
         Some("postgres-dsn-unit-test-value")
     );
+    assert_eq!(registry.source(), CredentialSource::None);
 }
 
 #[test]
@@ -42,9 +45,10 @@ fn credentials_file_overrides_environment_postgres_dsn() {
     .unwrap();
 
     assert_eq!(
-        registry.get_credential(CRED_POSTGRES_DSN),
+        registry.get_credential(POSTGRES_DSN_KEY),
         Some("postgres-dsn-file-value")
     );
+    assert_eq!(registry.source(), CredentialSource::None);
 
     let _ = std::fs::remove_file(path);
 }
@@ -55,5 +59,5 @@ fn empty_postgres_dsn_is_not_registered() {
         CredentialRegistry::bootstrap_secrets_with_postgres(None, None, None, Some(String::new()))
             .unwrap();
 
-    assert_eq!(registry.get_credential(CRED_POSTGRES_DSN), None);
+    assert_eq!(registry.get_credential(POSTGRES_DSN_KEY), None);
 }
