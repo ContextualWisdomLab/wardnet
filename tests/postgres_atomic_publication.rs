@@ -24,6 +24,18 @@ impl Drop for PostgresContainer {
     }
 }
 
+struct Publication<'a> {
+    tenant_id: &'a str,
+    expected_prior: Option<&'a str>,
+    generation: &'a str,
+    ordinal: i64,
+    completed_at: i64,
+    provenance_ref: &'a str,
+    evidence_snapshot_ref: &'a str,
+    completeness_ref: &'a str,
+    producer_lifecycle_ref: &'a str,
+}
+
 fn docker_available() -> bool {
     Command::new("docker")
         .arg("version")
@@ -167,21 +179,21 @@ fn tenant_sql(tenant_id: &str, statement: &str) -> String {
     )
 }
 
-fn publish_sql(
-    expected_prior: Option<&str>,
-    generation: &str,
-    ordinal: i64,
-    completed_at: i64,
-    provenance_ref: &str,
-    evidence_snapshot_ref: &str,
-    completeness_ref: &str,
-    producer_lifecycle_ref: &str,
-) -> String {
-    let expected_prior = expected_prior
+fn publish_sql(publication: Publication<'_>) -> String {
+    let expected_prior = publication
+        .expected_prior
         .map(|value| format!("'{value}'"))
         .unwrap_or_else(|| "NULL".to_owned());
     format!(
-        "SELECT wardnet_publish_reputation_source_generation('tenant-a', 'urlhaus', {expected_prior}, '{generation}', {ordinal}, {completed_at}, '{provenance_ref}', '{evidence_snapshot_ref}', '{completeness_ref}', '{producer_lifecycle_ref}')"
+        "SELECT wardnet_publish_reputation_source_generation('{}', 'urlhaus', {expected_prior}, '{}', {}, {}, '{}', '{}', '{}', '{}')",
+        publication.tenant_id,
+        publication.generation,
+        publication.ordinal,
+        publication.completed_at,
+        publication.provenance_ref,
+        publication.evidence_snapshot_ref,
+        publication.completeness_ref,
+        publication.producer_lifecycle_ref,
     )
 }
 
@@ -238,16 +250,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    None,
-                    "generation-8",
-                    8,
-                    100,
-                    "receipt-8",
-                    "snapshot-8",
-                    "complete-8",
-                    "lifecycle-8",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: None,
+                    generation: "generation-8",
+                    ordinal: 8,
+                    completed_at: 100,
+                    provenance_ref: "receipt-8",
+                    evidence_snapshot_ref: "snapshot-8",
+                    completeness_ref: "complete-8",
+                    producer_lifecycle_ref: "lifecycle-8",
+                }),
             ),
         ),
         "first complete source publication must commit",
@@ -259,16 +272,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    None,
-                    "generation-8",
-                    8,
-                    100,
-                    "receipt-8",
-                    "snapshot-8",
-                    "complete-8",
-                    "lifecycle-8",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: None,
+                    generation: "generation-8",
+                    ordinal: 8,
+                    completed_at: 100,
+                    provenance_ref: "receipt-8",
+                    evidence_snapshot_ref: "snapshot-8",
+                    completeness_ref: "complete-8",
+                    producer_lifecycle_ref: "lifecycle-8",
+                }),
             ),
         ),
         "exact committed publication must replay idempotently",
@@ -280,16 +294,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    Some("generation-8"),
-                    "generation-9",
-                    9,
-                    200,
-                    "receipt-9",
-                    "snapshot-9",
-                    "complete-9",
-                    "lifecycle-9",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: Some("generation-8"),
+                    generation: "generation-9",
+                    ordinal: 9,
+                    completed_at: 200,
+                    provenance_ref: "receipt-9",
+                    evidence_snapshot_ref: "snapshot-9",
+                    completeness_ref: "complete-9",
+                    producer_lifecycle_ref: "lifecycle-9",
+                }),
             ),
         ),
         "CAS-bound successor publication must commit",
@@ -313,16 +328,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    Some("generation-9"),
-                    "generation-10",
-                    10,
-                    300,
-                    "receipt-10",
-                    "snapshot-10",
-                    "",
-                    "lifecycle-10",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: Some("generation-9"),
+                    generation: "generation-10",
+                    ordinal: 10,
+                    completed_at: 300,
+                    provenance_ref: "receipt-10",
+                    evidence_snapshot_ref: "snapshot-10",
+                    completeness_ref: "",
+                    producer_lifecycle_ref: "lifecycle-10",
+                }),
             ),
         ),
         "invalid completeness proof must roll back binding and publication together",
@@ -361,16 +377,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    Some("generation-8"),
-                    "generation-10",
-                    10,
-                    300,
-                    "receipt-10",
-                    "snapshot-10",
-                    "complete-10",
-                    "lifecycle-10",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: Some("generation-8"),
+                    generation: "generation-10",
+                    ordinal: 10,
+                    completed_at: 300,
+                    provenance_ref: "receipt-10",
+                    evidence_snapshot_ref: "snapshot-10",
+                    completeness_ref: "complete-10",
+                    producer_lifecycle_ref: "lifecycle-10",
+                }),
             ),
         ),
         "stale prior generation must fail before changing authoritative state",
@@ -386,16 +403,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
                 &container,
                 &tenant_sql(
                     "tenant-a",
-                    &publish_sql(
-                        Some("generation-9"),
-                        "generation-10-a",
-                        10,
-                        400,
-                        "receipt-10-a",
-                        "snapshot-10-a",
-                        "complete-10-a",
-                        "lifecycle-10-a",
-                    ),
+                    &publish_sql(Publication {
+                        tenant_id: "tenant-a",
+                        expected_prior: Some("generation-9"),
+                        generation: "generation-10-a",
+                        ordinal: 10,
+                        completed_at: 400,
+                        provenance_ref: "receipt-10-a",
+                        evidence_snapshot_ref: "snapshot-10-a",
+                        completeness_ref: "complete-10-a",
+                        producer_lifecycle_ref: "lifecycle-10-a",
+                    }),
                 ),
             )
         });
@@ -404,16 +422,17 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
                 &container,
                 &tenant_sql(
                     "tenant-a",
-                    &publish_sql(
-                        Some("generation-9"),
-                        "generation-10-b",
-                        11,
-                        401,
-                        "receipt-10-b",
-                        "snapshot-10-b",
-                        "complete-10-b",
-                        "lifecycle-10-b",
-                    ),
+                    &publish_sql(Publication {
+                        tenant_id: "tenant-a",
+                        expected_prior: Some("generation-9"),
+                        generation: "generation-10-b",
+                        ordinal: 11,
+                        completed_at: 401,
+                        provenance_ref: "receipt-10-b",
+                        evidence_snapshot_ref: "snapshot-10-b",
+                        completeness_ref: "complete-10-b",
+                        producer_lifecycle_ref: "lifecycle-10-b",
+                    }),
                 ),
             )
         });
@@ -481,16 +500,17 @@ fn source_publication_rejects_unused_but_regressive_ordinal() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    None,
-                    "generation-9",
-                    9,
-                    200,
-                    "receipt-9",
-                    "snapshot-9",
-                    "complete-9",
-                    "lifecycle-9",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: None,
+                    generation: "generation-9",
+                    ordinal: 9,
+                    completed_at: 200,
+                    provenance_ref: "receipt-9",
+                    evidence_snapshot_ref: "snapshot-9",
+                    completeness_ref: "complete-9",
+                    producer_lifecycle_ref: "lifecycle-9",
+                }),
             ),
         ),
         "initial publication must commit",
@@ -502,16 +522,17 @@ fn source_publication_rejects_unused_but_regressive_ordinal() {
             &container,
             &tenant_sql(
                 "tenant-a",
-                &publish_sql(
-                    Some("generation-9"),
-                    "generation-10",
-                    8,
-                    300,
-                    "receipt-10",
-                    "snapshot-10",
-                    "complete-10",
-                    "lifecycle-10",
-                ),
+                &publish_sql(Publication {
+                    tenant_id: "tenant-a",
+                    expected_prior: Some("generation-9"),
+                    generation: "generation-10",
+                    ordinal: 8,
+                    completed_at: 300,
+                    provenance_ref: "receipt-10",
+                    evidence_snapshot_ref: "snapshot-10",
+                    completeness_ref: "complete-10",
+                    producer_lifecycle_ref: "lifecycle-10",
+                }),
             ),
         ),
         "unused but regressive ordinal must not advance publication authority",
@@ -544,4 +565,103 @@ fn source_publication_rejects_unused_but_regressive_ordinal() {
         "regressive publication must not leave a generation binding",
     );
     assert_eq!(rejected_binding.trim(), "0");
+}
+
+#[test]
+fn publication_history_and_head_are_default_deny_across_tenants() {
+    let Some(container) = prepare_publication_database() else {
+        return;
+    };
+
+    let committed = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-b",
+                &publish_sql(Publication {
+                    tenant_id: "tenant-b",
+                    expected_prior: None,
+                    generation: "generation-b-1",
+                    ordinal: 1,
+                    completed_at: 100,
+                    provenance_ref: "receipt-b-1",
+                    evidence_snapshot_ref: "snapshot-b-1",
+                    completeness_ref: "complete-b-1",
+                    producer_lifecycle_ref: "lifecycle-b-1",
+                }),
+            ),
+        ),
+        "tenant B publication must commit",
+    );
+    assert_eq!(committed.trim(), "committed");
+
+    let own_rows = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-b",
+                "SELECT (SELECT count(*) FROM reputation_source_publication) || ':' || (SELECT count(*) FROM reputation_source_publication_head)",
+            ),
+        ),
+        "tenant B must see its publication history and head",
+    );
+    assert_eq!(own_rows.trim(), "1:1");
+
+    let cross_tenant_rows = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT (SELECT count(*) FROM reputation_source_publication) || ':' || (SELECT count(*) FROM reputation_source_publication_head)",
+            ),
+        ),
+        "tenant A must not see tenant B publication authority",
+    );
+    assert_eq!(cross_tenant_rows.trim(), "0:0");
+
+    let missing_context_rows = assert_success(
+        psql(
+            &container,
+            "SET ROLE wardnet_runtime_test; SELECT (SELECT count(*) FROM reputation_source_publication) || ':' || (SELECT count(*) FROM reputation_source_publication_head); RESET ROLE;",
+        ),
+        "missing tenant context must be default deny",
+    );
+    assert_eq!(missing_context_rows.trim(), "0:0");
+
+    let tenant_spoof = assert_failure(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                &publish_sql(Publication {
+                    tenant_id: "tenant-b",
+                    expected_prior: Some("generation-b-1"),
+                    generation: "generation-b-2",
+                    ordinal: 2,
+                    completed_at: 200,
+                    provenance_ref: "receipt-b-2",
+                    evidence_snapshot_ref: "snapshot-b-2",
+                    completeness_ref: "complete-b-2",
+                    producer_lifecycle_ref: "lifecycle-b-2",
+                }),
+            ),
+        ),
+        "runtime tenant context must not spoof another tenant publication",
+    );
+    assert!(
+        tenant_spoof.contains("reputation_source_publication_tenant_context_mismatch"),
+        "tenant spoof must use the stable context-mismatch class, got: {tenant_spoof}"
+    );
+
+    let preserved_head = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-b",
+                "SELECT source_generation FROM reputation_source_publication_head WHERE source_id = 'urlhaus'",
+            ),
+        ),
+        "spoofed publication must leave tenant B authority unchanged",
+    );
+    assert_eq!(preserved_head.trim(), "generation-b-1");
 }
