@@ -182,21 +182,24 @@ pub fn parse_u64_env(
 #[cfg(test)]
 /// Detect syntax that imports or directly calls the process-environment API.
 ///
-/// Importing `std::env` outside the two bootstrap adapters is itself forbidden:
-/// otherwise aliases can hide later `var`/`var_os` calls from a literal-call
-/// scan. Whitespace is ignored so normal rustfmt layouts and grouped imports
-/// cannot change the architecture result.
+/// Importing `std::env` or aliasing the `std` root outside the two bootstrap
+/// adapters is itself forbidden: otherwise aliases can hide later `var`/`var_os`
+/// calls from a literal-call scan. Whitespace and an optional leading `::` on
+/// `use` paths are normalized so equivalent Rust import syntax cannot change
+/// the architecture result.
 fn source_uses_runtime_env(source: &str) -> bool {
     let compact = source
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
+    let compact = compact.replace("use::std", "usestd");
 
     if compact.contains("std::env::var(")
         || compact.contains("std::env::var_os(")
         || compact.contains("usestd::env;")
         || compact.contains("usestd::envas")
         || compact.contains("usestd::env::")
+        || compact.contains("usestdas")
     {
         return true;
     }
