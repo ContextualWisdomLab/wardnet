@@ -8,7 +8,7 @@
 use crate::{AppConfig, CRED_ADMIN_TOKEN, CredentialRegistry};
 #[cfg(test)]
 use std::path::Path;
-use std::path::{PathBuf, Path as StdPath};
+use std::path::{Path as StdPath, PathBuf};
 
 /// Deployment intent used to select fail-closed state-authority invariants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +70,16 @@ impl RuntimeConfiguration {
     pub const DEFAULT_RATE_LIMIT_WINDOW: u64 = 60;
     /// Default maximum accepted request body size in bytes.
     pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
+    /// Standalone deployment marker for callers that construct a snapshot.
+    pub const STANDALONE_MODE: DeploymentMode = DeploymentMode::Standalone;
+    /// Production deployment marker for callers that construct a snapshot.
+    pub const PRODUCTION_MODE: DeploymentMode = DeploymentMode::Production;
+    /// In-memory state authority marker for standalone callers.
+    pub const MEMORY_AUTHORITY: StateAuthority = StateAuthority::Memory;
+    /// File state authority marker for standalone callers.
+    pub const FILE_AUTHORITY: StateAuthority = StateAuthority::File;
+    /// PostgreSQL state authority marker for production callers.
+    pub const POSTGRES_AUTHORITY: StateAuthority = StateAuthority::Postgres;
 
     /// Load the process-edge runtime snapshot from environment bootstrap input.
     ///
@@ -130,6 +140,7 @@ impl RuntimeConfiguration {
             state_authority,
         };
         config.validate_state_authority()?;
+        config.ensure_state_backend_available()?;
         Ok(config)
     }
 
@@ -174,25 +185,15 @@ impl RuntimeConfiguration {
 
     /// Derive the application configuration from this non-secret snapshot and
     /// the independently bootstrapped secret registry.
-    pub fn app_config(
-        &self,
-        credentials: &CredentialRegistry,
-    ) -> Result<AppConfig, Box<dyn std::error::Error>> {
-        self.validate_state_authority()?;
-        self.ensure_state_backend_available()?;
-        let state_path = match self.state_authority {
-            StateAuthority::Memory => None,
-            StateAuthority::File => self.state_path.clone(),
-            StateAuthority::Postgres => unreachable!("backend availability rejects PostgreSQL"),
-        };
-        Ok(AppConfig {
+    pub fn app_config(&self, credentials: &CredentialRegistry) -> AppConfig {
+        AppConfig {
             admin_token: credentials
                 .get_credential(CRED_ADMIN_TOKEN)
                 .map(str::to_owned),
-            state_path,
+            state_path: self.state_path.clone(),
             dnsbl_origin: self.dnsbl_origin.clone(),
             event_limit: self.event_limit,
-        })
+        }
     }
 }
 
@@ -437,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    /// Production state authority must be explicit and PostgreSQL-backed.
+    /// Production state authority must be explicit, PostgreSQL-backed, and unavailable until wired.
     fn runtime_configuration_requires_explicit_postgres_in_production() {
         assert!(runtime_from_pairs(&[("WARDNET_DEPLOYMENT_MODE", "production")]).is_err());
         assert!(
@@ -448,13 +449,27 @@ mod tests {
             ])
             .is_err()
         );
-        let config = runtime_from_pairs(&[
-            ("WARDNET_DEPLOYMENT_MODE", "production"),
-            ("WARDNET_STATE_AUTHORITY", "postgres"),
-        ])
-        .unwrap();
-        assert_eq!(config.deployment_mode, DeploymentMode::Production);
-        assert_eq!(config.state_authority, StateAuthority::Postgres);
+        assert!(
+            runtime_from_pairs(&[
+                ("WARDNET_DEPLOYMENT_MODE", "production"),
+                ("WARDNET_STATE_AUTHORITY", "postgres"),
+            ])
+            .is_err(),
+            "production must fail closed until the PostgreSQL adapter is wired"
+        );
+
+        let config = RuntimeConfiguration {
+            bind_addr: RuntimeConfiguration::DEFAULT_BIND_ADDR.to_string(),
+            state_path: None,
+            dnsbl_origin: AppConfig::DEFAULT_DNSBL_ORIGIN.to_string(),
+            event_limit: AppConfig::DEFAULT_EVENT_LIMIT,
+            rate_limit: RuntimeConfiguration::DEFAULT_RATE_LIMIT,
+            rate_limit_window: RuntimeConfiguration::DEFAULT_RATE_LIMIT_WINDOW,
+            max_body_bytes: RuntimeConfiguration::DEFAULT_MAX_BODY_BYTES,
+            deployment_mode: DeploymentMode::Production,
+            state_authority: StateAuthority::Postgres,
+        };
+        config.validate_state_authority().unwrap();
         assert!(config.ensure_state_backend_available().is_err());
     }
 
@@ -523,7 +538,7 @@ mod tests {
         )
         .unwrap();
 
-        let app = runtime.app_config(&credentials).unwrap();
+        let app = runtime.app_config(&credentials);
         assert_eq!(app.admin_token.as_deref(), Some("secret"));
         assert_eq!(app.state_path, Some(PathBuf::from("state.json")));
         assert_eq!(app.dnsbl_origin, "dnsbl.example");
