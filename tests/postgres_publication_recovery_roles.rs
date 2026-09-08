@@ -156,7 +156,6 @@ fn start_postgres() -> Option<PostgresContainer> {
         "start PostgreSQL 18.4 container",
     );
     let container = PostgresContainer { name };
-
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let status = Command::new("docker")
@@ -184,23 +183,46 @@ fn start_postgres() -> Option<PostgresContainer> {
     }
 }
 
+fn publication_sql(
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+) -> String {
+    let prior = expected_prior
+        .map(|value| format!("'{value}'"))
+        .unwrap_or_else(|| "NULL".to_string());
+    format!(
+        "BEGIN; SELECT set_config('wardnet.tenant_id', 'tenant-a', true); SELECT public.wardnet_publish_reputation_source_generation('tenant-a', 'feed-a', {prior}, '{generation}', {ordinal}, {ordinal}, 'provenance-{ordinal}', 'evidence-{ordinal}', 'complete-{ordinal}', 'lifecycle-{ordinal}'); COMMIT;"
+    )
+}
+
 fn publish_as_runtime(
     container: &PostgresContainer,
     expected_prior: Option<&str>,
     generation: &str,
     ordinal: i64,
 ) -> Output {
-    let prior = expected_prior
-        .map(|value| format!("'{value}'"))
-        .unwrap_or_else(|| "NULL".to_string());
     let sql = format!(
-        "SET ROLE wardnet_runtime; BEGIN; SELECT set_config('wardnet.tenant_id', 'tenant-a', true); SELECT public.wardnet_publish_reputation_source_generation('tenant-a', 'feed-a', {prior}, '{generation}', {ordinal}, {ordinal}, 'provenance-{ordinal}', 'evidence-{ordinal}', 'complete-{ordinal}', 'lifecycle-{ordinal}'); COMMIT; RESET ROLE;"
+        "SET ROLE wardnet_runtime; {} RESET ROLE;",
+        publication_sql(expected_prior, generation, ordinal)
     );
     psql(container, &sql)
 }
 
+fn publish_as_recovery_admin(
+    container: &PostgresContainer,
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+) -> Output {
+    psql(
+        container,
+        &publication_sql(expected_prior, generation, ordinal),
+    )
+}
+
 #[test]
-fn publication_recovery_reconverges_the_existing_least_privilege_role_installer() {
+fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_gap() {
     let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
         .expect("source-generation schema migration must exist");
     let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
@@ -236,7 +258,6 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         psql(&container, &publication_migration),
         "reapply publication migration before role recovery",
     );
-
     let unrecovered = assert_success(
         psql(
             &container,
@@ -244,34 +265,20 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         ),
         "inspect publication authority immediately after schema reapply",
     );
-    assert_eq!(
-        unrecovered.trim(),
-        "f:f:t",
-        "schema reapply must preserve generation history but must not masquerade as restored least-privilege runtime authority"
-    );
-    assert!(
-        !publish_as_runtime(&container, Some("generation-1"), "generation-2", 2)
-            .status
-            .success(),
-        "runtime publication must remain unavailable before role reconvergence"
-    );
+    assert_eq!(unrecovered.trim(), "f:f:t");
 
     let owner_transfer_marker =
         "ALTER FUNCTION public.wardnet_publish_reputation_source_generation(";
-    assert!(
-        role_installer.contains(owner_transfer_marker),
-        "failure injection marker must track the publication owner transfer"
-    );
     let failing_role_recovery = role_installer.replacen(
         owner_transfer_marker,
         "SELECT 1 / 0;\n\nALTER FUNCTION public.wardnet_publish_reputation_source_generation(",
         1,
     );
+    assert!(role_installer.contains(owner_transfer_marker));
     let failed_recovery = psql(&container, &failing_role_recovery);
     assert!(
         !failed_recovery.status.success()
-            && String::from_utf8_lossy(&failed_recovery.stderr).contains("division by zero"),
-        "mid-recovery failure must be the injected semantic failure"
+            && String::from_utf8_lossy(&failed_recovery.stderr).contains("division by zero")
     );
     let still_unrecovered = assert_success(
         psql(
@@ -280,11 +287,7 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         ),
         "inspect authority after failed role recovery",
     );
-    assert_eq!(
-        still_unrecovered.trim(),
-        "t:t",
-        "failed role reconvergence must not be reportable as recovered authority"
-    );
+    assert_eq!(still_unrecovered.trim(), "t:t");
 
     assert_success(
         run_docker(
@@ -299,59 +302,61 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         ),
         "create recovery staging directory",
     );
-    let installer_target = format!(
-        "{}:/tmp/wardnet-recovery/reputation_state_roles.sql",
-        container.name
-    );
-    assert_success(
-        run_docker(&["cp", ROLE_INSTALLER_PATH, &installer_target], None),
-        "stage canonical reputation role installer",
-    );
-    let recovery_target = format!(
-        "{}:/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        container.name
-    );
-    assert_success(
-        run_docker(&["cp", RECOVERY_PATH, &recovery_target], None),
-        "stage executable publication recovery boundary",
-    );
-
+    for path in [ROLE_INSTALLER_PATH, RECOVERY_PATH] {
+        let destination = format!("{}:/tmp/wardnet-recovery/", container.name);
+        assert_success(
+            run_docker(&["cp", path, &destination], None),
+            "stage recovery asset",
+        );
+    }
     assert_success(
         psql_file(
             &container,
             "/tmp/wardnet-recovery/reputation_state_recovery.sql",
         ),
-        "reconverge publication authority after migration recovery",
+        "reconverge publication owner while withholding unsafe runtime publication",
     );
 
-    let recovered = assert_success(
+    let recovered_but_gated = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', (SELECT r.rolname = 'wardnet_state_owner' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation'), (SELECT p.prosecdef FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation'), (SELECT p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[] FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation'), NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation' AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'), has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'), NOT has_function_privilege('wardnet_runtime', 'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)', 'EXECUTE'), has_table_privilege('wardnet_runtime', 'public.reputation_source_generation', 'SELECT'), has_table_privilege('wardnet_runtime', 'public.reputation_source_publication', 'SELECT'), has_table_privilege('wardnet_runtime', 'public.reputation_source_publication_head', 'SELECT'), NOT has_table_privilege('wardnet_runtime', 'public.reputation_source_generation', 'INSERT'), NOT has_table_privilege('wardnet_runtime', 'public.reputation_source_publication', 'INSERT'), NOT has_table_privilege('wardnet_runtime', 'public.reputation_source_publication_head', 'UPDATE'), NOT has_schema_privilege('wardnet_state_owner', 'public', 'CREATE'), (SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit AND NOT rolreplication FROM pg_catalog.pg_roles WHERE rolname = 'wardnet_state_owner'));",
+            "SELECT concat_ws(':', (SELECT r.rolname = 'wardnet_state_owner' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_roles r ON r.oid = p.proowner WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation'), (SELECT p.prosecdef FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation'), (SELECT p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[] FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation'), NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl WHERE n.nspname = 'public' AND p.proname = 'wardnet_publish_reputation_source_generation' AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'), NOT has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'), NOT has_function_privilege('wardnet_runtime', 'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)', 'EXECUTE'), has_table_privilege('wardnet_runtime', 'public.reputation_source_generation', 'SELECT'), has_table_privilege('wardnet_runtime', 'public.reputation_source_publication', 'SELECT'), has_table_privilege('wardnet_runtime', 'public.reputation_source_publication_head', 'SELECT'), NOT has_table_privilege('wardnet_runtime', 'public.reputation_source_generation', 'INSERT'), NOT has_table_privilege('wardnet_runtime', 'public.reputation_source_publication', 'INSERT'), NOT has_table_privilege('wardnet_runtime', 'public.reputation_source_publication_head', 'UPDATE'), NOT has_schema_privilege('wardnet_state_owner', 'public', 'CREATE'), (SELECT NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolinherit AND NOT rolreplication FROM pg_catalog.pg_roles WHERE rolname = 'wardnet_state_owner'));",
         ),
-        "inspect restored least-privilege publication capability",
+        "inspect recovered owner with runtime publication held closed",
     );
     assert_eq!(
-        recovered.trim(),
-        "t:t:t:t:t:t:t:t:t:t:t:t:t:t",
-        "recovery must restore only the bounded outer publication capability"
+        recovered_but_gated.trim(),
+        "t:t:t:t:t:t:t:t:t:t:t:t:t:t"
+    );
+    assert!(
+        !publish_as_runtime(&container, None, "generation-2", 2)
+            .status
+            .success(),
+        "runtime must not create a new first head while historical publication evidence is absent"
     );
 
-    let missing_publication_history =
-        publish_as_runtime(&container, Some("generation-1"), "generation-2", 2);
-    assert!(
-        !missing_publication_history.status.success()
-            && String::from_utf8_lossy(&missing_publication_history.stderr)
-                .contains("reputation_source_publication_conflict"),
-        "role recovery must not invent last-known-good publication evidence that the 0003 rollback intentionally removed"
+    assert_success(
+        publish_as_recovery_admin(&container, None, "generation-1", 1),
+        "restore authoritative generation-one publication evidence under recovery authority",
     );
     assert_success(
-        publish_as_runtime(&container, None, "generation-1", 1),
-        "restore generation one publication evidence through the recovered outer capability",
+        psql_file(
+            &container,
+            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
+        ),
+        "reactivate bounded runtime publication after the evidence gap closes",
     );
+    let runtime_reactivated = assert_success(
+        psql(
+            &container,
+            "SELECT has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE');",
+        ),
+        "inspect runtime publication after authoritative evidence restore",
+    );
+    assert_eq!(runtime_reactivated.trim(), "t");
     assert_success(
         publish_as_runtime(&container, Some("generation-1"), "generation-2", 2),
-        "publish generation two through restored runtime capability",
+        "publish generation two through restored exact-prior runtime capability",
     );
     assert_success(
         psql_file(
@@ -360,16 +365,13 @@ fn publication_recovery_reconverges_the_existing_least_privilege_role_installer(
         ),
         "replay role recovery idempotently",
     );
+
     let final_state = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', (SELECT count(*) = 2 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 2 FROM public.reputation_source_publication WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 1 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND source_generation = 'generation-1' AND source_generation_ordinal = 1), (SELECT source_generation = 'generation-2' AND source_generation_ordinal = 2 FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'));",
+            "SELECT concat_ws(':', (SELECT count(*) = 2 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 2 FROM public.reputation_source_publication WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 1 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND source_generation = 'generation-1' AND source_generation_ordinal = 1), (SELECT source_generation = 'generation-2' AND source_generation_ordinal = 2 FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'));",
         ),
         "inspect preserved history after idempotent recovery replay",
     );
-    assert_eq!(
-        final_state.trim(),
-        "t:t:t:t",
-        "recovery must preserve original generation identity and advance last-known-good only after publication evidence is explicitly restored through the outer capability"
-    );
+    assert_eq!(final_state.trim(), "t:t:t:t:t");
 }
