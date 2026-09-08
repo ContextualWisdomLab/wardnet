@@ -117,9 +117,10 @@ impl CredentialRegistry {
 
     /// Bootstrap administrator credentials plus an optional PostgreSQL DSN.
     ///
-    /// Precedence is per key: a non-blank JSON credentials-file value wins,
-    /// otherwise the corresponding environment bootstrap value is used. Blank
-    /// PostgreSQL values are omitted. PostgreSQL connection material remains in
+    /// Precedence is per key: a non-blank JSON string from the credentials file
+    /// wins, otherwise the corresponding environment bootstrap value is used.
+    /// Blank strings and null are omitted; every other PostgreSQL value type is
+    /// rejected without reflecting the supplied secret material. PostgreSQL connection material remains in
     /// this process-local secret registry and does not affect [`CredentialSource`],
     /// which is intentionally limited to administrator-auth provenance exposed
     /// by health/support surfaces.
@@ -154,11 +155,22 @@ impl CredentialRegistry {
                             admin_from_file = true;
                         }
                     }
-                    if let Some(raw) = file_map.get(CRED_POSTGRES_DSN)
-                        && let Some(text) = json_value_as_nonempty_string(raw)
-                            .filter(|text| !text.trim().is_empty())
-                    {
-                        values.insert(CRED_POSTGRES_DSN.to_string(), text);
+                    if let Some(raw) = file_map.get(CRED_POSTGRES_DSN) {
+                        let postgres_dsn = match raw {
+                            serde_json::Value::String(text) if !text.trim().is_empty() => {
+                                Some(text.clone())
+                            }
+                            serde_json::Value::Null | serde_json::Value::String(_) => None,
+                            _ => {
+                                return Err(format!(
+                                    "credentials file {} key {CRED_POSTGRES_DSN} must be a JSON string or null",
+                                    path.display()
+                                ));
+                            }
+                        };
+                        if let Some(text) = postgres_dsn {
+                            values.insert(CRED_POSTGRES_DSN.to_string(), text);
+                        }
                     }
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}

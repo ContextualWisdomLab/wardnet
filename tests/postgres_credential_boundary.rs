@@ -107,3 +107,47 @@ fn nonblank_postgres_dsn_is_preserved_byte_for_byte() {
     assert_eq!(registry.source(), CredentialSource::None);
     assert!(!registry.has_admin_auth());
 }
+
+#[test]
+fn non_string_credentials_file_postgres_dsn_fails_closed() {
+    let malformed_values = [
+        ("number", "42"),
+        ("boolean", "true"),
+        ("array", r#"["host=db.internal"]"#),
+        ("object", r#"{"host":"db.internal"}"#),
+    ];
+
+    for (label, malformed_value) in malformed_values {
+        let path = temp_credentials_path(label);
+        std::fs::write(&path, format!(r#"{{"postgres_dsn":{malformed_value}}}"#)).unwrap();
+
+        let error = CredentialRegistry::bootstrap_secrets_with_postgres(
+            Some(&path),
+            None,
+            None,
+            Some("host=env.internal dbname=wardnet".to_string()),
+        )
+        .expect_err("explicit malformed file DSN must not fall back to environment bootstrap");
+
+        assert!(
+            error.contains(POSTGRES_DSN_KEY),
+            "{label} error must identify the malformed credential key without secret material: {error}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+fn null_credentials_file_postgres_dsn_remains_absent() {
+    let path = temp_credentials_path("null-postgres-dsn");
+    std::fs::write(&path, r#"{"postgres_dsn":null}"#).unwrap();
+
+    let registry =
+        CredentialRegistry::bootstrap_secrets_with_postgres(Some(&path), None, None, None).unwrap();
+
+    assert_eq!(registry.get_credential(POSTGRES_DSN_KEY), None);
+    assert_eq!(registry.source(), CredentialSource::None);
+    assert!(!registry.has_admin_auth());
+
+    let _ = std::fs::remove_file(path);
+}
