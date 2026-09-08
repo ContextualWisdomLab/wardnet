@@ -30,6 +30,15 @@ SELECT
         ) IS NULL
         AND to_regclass('public.wardnet_schema_version') IS NULL AS empty_schema,
     to_regclass('public.reputation_source_generation') IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'reputation_source_generation'
+              AND column_name = 'provenance_ref'
+              AND data_type = 'text'
+              AND is_nullable = 'NO'
+        )
         AND to_regprocedure(
             'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)'
         ) IS NOT NULL
@@ -40,6 +49,15 @@ SELECT
         ) IS NOT NULL
         AND to_regclass('public.wardnet_schema_version') IS NULL AS supported_v3_schema,
     to_regclass('public.reputation_source_generation') IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'reputation_source_generation'
+              AND column_name = 'provenance_ref'
+              AND data_type = 'text'
+              AND is_nullable = 'NO'
+        )
         AND to_regprocedure(
             'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)'
         ) IS NOT NULL
@@ -98,6 +116,15 @@ SELECT
 -- Verify the exact supported postcondition before releasing serialization.
 SELECT
     to_regclass('public.reputation_source_generation') IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'reputation_source_generation'
+              AND column_name = 'provenance_ref'
+              AND data_type = 'text'
+              AND is_nullable = 'NO'
+        )
         AND to_regprocedure(
             'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)'
         ) IS NOT NULL
