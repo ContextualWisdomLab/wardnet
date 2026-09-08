@@ -355,7 +355,10 @@ fn generation_admission_defines_exact_idempotent_replay_and_divergent_conflict()
         ),
         "create non-owner admission role",
     );
-    assert_success(psql(&container, &schema_migration), "apply generation schema");
+    assert_success(
+        psql(&container, &schema_migration),
+        "apply generation schema",
+    );
     assert_success(
         psql(&container, &admission_migration),
         "apply generation admission migration",
