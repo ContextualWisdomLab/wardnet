@@ -117,10 +117,10 @@ impl CredentialRegistry {
 
     /// Bootstrap administrator credentials plus an optional PostgreSQL DSN.
     ///
-    /// Precedence is per key: a non-empty JSON credentials-file value wins,
-    /// otherwise the corresponding environment bootstrap value is used. Empty
-    /// values are omitted. PostgreSQL connection material remains in this
-    /// process-local secret registry and does not affect [`CredentialSource`],
+    /// Precedence is per key: a non-blank JSON credentials-file value wins,
+    /// otherwise the corresponding environment bootstrap value is used. Blank
+    /// PostgreSQL values are omitted. PostgreSQL connection material remains in
+    /// this process-local secret registry and does not affect [`CredentialSource`],
     /// which is intentionally limited to administrator-auth provenance exposed
     /// by health/support surfaces.
     pub fn bootstrap_secrets_with_postgres(
@@ -156,6 +156,7 @@ impl CredentialRegistry {
                     }
                     if let Some(raw) = file_map.get(CRED_POSTGRES_DSN)
                         && let Some(text) = json_value_as_nonempty_string(raw)
+                            .filter(|text| !text.trim().is_empty())
                     {
                         values.insert(CRED_POSTGRES_DSN.to_string(), text);
                     }
@@ -183,7 +184,7 @@ impl CredentialRegistry {
             admin_from_env = true;
         }
         if !values.contains_key(CRED_POSTGRES_DSN)
-            && let Some(dsn) = env_postgres_dsn.filter(|value| !value.is_empty())
+            && let Some(dsn) = env_postgres_dsn.filter(|value| !value.trim().is_empty())
         {
             values.insert(CRED_POSTGRES_DSN.to_string(), dsn);
         }
