@@ -32,7 +32,7 @@ Wardnet #140 remains the Runtime Configuration consumer specimen at `93a51f9706c
 
 ## PostgreSQL production-state prerequisite stack
 
-Current canonical dependency order is `#140 -> #193 -> #194 -> #196 -> #198 -> #199 -> #200 -> #207 -> #208 -> #209 -> #212 -> #216 -> #217 -> #219`. Every parent movement requires ordinary non-force adoption and fresh exact-head gates; predecessor GREEN does not transfer.
+Current canonical dependency order is `#140 -> #193 -> #194 -> #196 -> #198 -> #199 -> #200 -> #207 -> #208 -> #209 -> #212 -> #216 -> #217 -> #219 -> #221`. Every parent movement requires ordinary non-force adoption and fresh exact-head gates; predecessor GREEN does not transfer.
 
 Parallel overlap is now reduced through verified successor transfer rather than discard. #214 is closed because exact #216 reconstructs every valid migration-atomicity source/test/ADR/evidence delta on the canonical #212 lineage. #215 is closed because #217 reconstructs every valid complete-0002/complete-0003 recovery preflight, partial-state refusal and restartability delta; #215's post-recovery `expected_prior = NULL` generation-2 behavior was positively disproved and intentionally not transferred.
 
@@ -58,7 +58,9 @@ Exact-current #217 hosted CI `34265888259`, rust `102195122469`, is terminal **S
 
 #219 is the current startup-migration compatibility child at exact `55c8e7c4e4ac022e4d6ca5090c111c79068d137b`, Draft on exact #217. Its canonical session advisory-lock sequencer serializes the multi-transaction 0001→0004 startup path, admits only empty, complete 0003, or exact supported-version shapes, records durable `reputation_state` schema version 4, refuses future/partial schema without normalization, and supports receipt-only rollback to complete 0003. Real PostgreSQL 18.4 hostile RED `0e9f7771b82565681a7afb945bd9645bb4494dc3`, CI `34270364345` / rust `102210127249`, proved that the preceding shape check wrongly accepted a version-4 tenant table after `FORCE ROW LEVEL SECURITY` was removed. The minimum repair now requires both ENABLE and FORCE RLS on all three tenant-owned generation/publication/head tables at startup admission and final postcondition. Exact-head CI `34270783027` / rust `102211539102` is terminal SUCCESS through formatting, every locked workspace/Pg18.4 test and strict Clippy; fresh review submissions and inline threads are both zero. #219 does not create principals, activate PostgreSQL application authority or copy #217 recovery ownership.
 
-Production PostgreSQL authority remains disabled. #80/#192 still own actual deployment-principal/login membership, application repository/transaction wiring, pooled transaction-local tenant-context checkout/reset, crash/retry/idempotency, authoritative backup/restore of generation plus publication history/head with retention/encryption and declared RPO/RTO, readiness/degraded evidence, protected integration and immutable release evidence. #219 now supplies the Draft startup migration serialization/version/RLS-compatibility prerequisite but is not protected or released authority.
+#221 is the current external runtime-principal mapping child at exact `6c3158d6644f13efd21bd57e8218880127dedf96`, Draft on exact #219. It consumes an externally managed PostgreSQL LOGIN identity and grants only the existing `wardnet_runtime` capability; credentials and principal lifecycle remain external deployment/IAM authority. Fresh hostile RED `32485204874cf80dc06de897066b961c9d31ee7c`, CI `34273845235` / rust `102221868896`, proved that the preceding mapper could add a bounded direct edge while an unowned indirect role chain already exposed `wardnet_runtime`. The minimum repair accepts only absent or exactly bounded direct replay membership and recursively rejects every alternate path to `wardnet_runtime`, while retaining fail-closed privileged-role checks and identifier-safe hostile-name mapping. Exact-head CI `34274204904` / rust `102223067782` is terminal SUCCESS through exact checkout, formatting, all locked workspace/PostgreSQL 18.4 hostile tests and strict Clippy; fresh review submissions and inline threads are both zero. #221 does not enable `StateAuthority::Postgres`, create credentials/principals, grant `wardnet_state_owner`, or add application repository/pool wiring.
+
+Production PostgreSQL authority remains disabled. #80/#192 still own application repository/transaction wiring, pooled transaction-local tenant-context checkout/reset, crash/retry/idempotency, authoritative backup/restore of generation plus publication history/head with retention/encryption and declared RPO/RTO, readiness/degraded evidence, protected integration and immutable release evidence. #221 now supplies the Draft external-principal-to-runtime-capability prerequisite but is not protected or released authority.
 
 ## Gateway and Agent Artifact Admission security lanes
 
@@ -72,7 +74,7 @@ Production PostgreSQL authority remains disabled. #80/#192 still own actual depl
 
 ## Other preservation and integration lanes
 
-#165 is the canonical trusted forwarded-client attribution slice for #83 and remains Draft behind #140 plus preservation transfer from #157. It owns direct-peer trust, right-to-left forwarded-chain attribution, mapped-address normalization and fail-closed trusted-CIDR grammar; broader local limiter cardinality and distributed admission remain separate #83 work.
+#165 is the canonical trusted forwarded-client attribution slice for #83 and remains Draft behind #140 plus preservation transfer from #157. It owns direct-peer trust, right-to-left trusted forwarded-chain attribution, mapped-address normalization and fail-closed trusted-CIDR grammar; broader local limiter cardinality and distributed admission remain separate #83 work.
 
 #135 preserves bounded local-limiter cardinality/expiry/stable-429 behavior but carries overlapping Runtime Configuration/trusted-proxy prerequisite authority. Its unique limiter delta must be reconstructed after #140 and #165 reach protected truth rather than integrating a second configuration/trusted-attribution foundation.
 
@@ -86,7 +88,7 @@ Authority and safety remain ahead of feature breadth. Current release-blocking o
 
 1. satisfiable protected governance and authenticated exact-head central evidence;
 2. protected management authentication and Runtime Configuration truth;
-3. #80/#192 PostgreSQL production authority with the dependency stack through #219, followed by production principal mapping, repository/pool transaction wiring, crash/retry, authoritative backup/restore and readiness evidence;
+3. #80/#192 PostgreSQL production authority with the dependency stack through #221, followed by application repository/pool transaction wiring with transaction-local tenant context, crash/retry, authoritative backup/restore and readiness evidence;
 4. trusted client attribution and bounded/distributed admission reconstructed without duplicate #140/#165 authority;
 5. immutable EgressWeave authorization/evidence integration for outbound transport;
 6. deployed attack-path evidence and proven Coraza/CRS + Suricata enforcement without inventing substitute detection authority;
