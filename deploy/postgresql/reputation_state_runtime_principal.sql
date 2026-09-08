@@ -59,7 +59,10 @@ $wardnet_unsafe_capability_roles$;
 -- application identity. Special PostgreSQL role attributes are not inherited,
 -- but SET-capable membership in an elevated role could still acquire them, so
 -- reject any direct or indirect privileged-role membership as well as any
--- access to Wardnet's state-owner role.
+-- access to Wardnet's state-owner role. Runtime membership is valid only when
+-- absent (first mapping) or already present as the mapper's exact bounded direct
+-- edge (idempotent replay); any alternate role path to wardnet_runtime is
+-- outside this artifact's authority and therefore fails closed.
 SELECT
     count(*) = 1
         AND bool_and(rolcanlogin)
@@ -89,6 +92,45 @@ SELECT
                   elevated_role.oid,
                   'MEMBER'
               )
+        )
+        AND (
+            SELECT
+                count(*) = 0
+                    OR (
+                        count(*) = 1
+                        AND bool_and(NOT membership.admin_option)
+                        AND bool_and(membership.inherit_option)
+                        AND bool_and(NOT membership.set_option)
+                    )
+            FROM pg_catalog.pg_auth_members membership
+            JOIN pg_catalog.pg_roles granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_catalog.pg_roles member_role
+              ON member_role.oid = membership.member
+            WHERE granted_role.rolname = 'wardnet_runtime'
+              AND member_role.rolname = :'wardnet_runtime_principal'
+        )
+        AND NOT EXISTS (
+            WITH RECURSIVE alternate_memberships(roleid) AS (
+                SELECT membership.roleid
+                FROM pg_catalog.pg_auth_members membership
+                JOIN pg_catalog.pg_roles member_role
+                  ON member_role.oid = membership.member
+                JOIN pg_catalog.pg_roles granted_role
+                  ON granted_role.oid = membership.roleid
+                WHERE member_role.rolname = :'wardnet_runtime_principal'
+                  AND granted_role.rolname <> 'wardnet_runtime'
+                UNION
+                SELECT membership.roleid
+                FROM pg_catalog.pg_auth_members membership
+                JOIN alternate_memberships inherited
+                  ON inherited.roleid = membership.member
+            )
+            SELECT 1
+            FROM alternate_memberships inherited
+            JOIN pg_catalog.pg_roles inherited_role
+              ON inherited_role.oid = inherited.roleid
+            WHERE inherited_role.rolname = 'wardnet_runtime'
         ) AS runtime_principal_safe
 FROM pg_catalog.pg_roles
 WHERE rolname = :'wardnet_runtime_principal'
@@ -98,7 +140,7 @@ WHERE rolname = :'wardnet_runtime_principal'
 \else
 DO $wardnet_unsafe_runtime_principal$
 BEGIN
-    RAISE EXCEPTION 'Wardnet runtime principal mapping refused: principal is absent, non-login, non-inheriting, privileged, or state-owner capable.';
+    RAISE EXCEPTION 'Wardnet runtime principal mapping refused: principal is absent, non-login, non-inheriting, privileged, state-owner capable, or already has an unbounded runtime membership path.';
 END
 $wardnet_unsafe_runtime_principal$;
 \endif
