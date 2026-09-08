@@ -317,3 +317,128 @@ fn failed_publication_forward_migration_rolls_back_all_publication_owned_ddl() {
         "a failure-atomic 0003 migration must remain cleanly replayable after the aborted attempt"
     );
 }
+
+#[test]
+fn failed_generation_schema_migration_rolls_back_all_generation_owned_ddl() {
+    let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
+        .expect("source-generation schema migration must exist");
+    let failure_marker = "REVOKE ALL ON TABLE reputation_source_generation FROM PUBLIC;";
+    assert!(
+        generation_migration.contains(failure_marker),
+        "failure injection marker must follow generation-table creation"
+    );
+    let failing_generation_migration = generation_migration.replacen(
+        failure_marker,
+        "SELECT 1 / 0;\n\nREVOKE ALL ON TABLE reputation_source_generation FROM PUBLIC;",
+        1,
+    );
+    let Some(container) = start_postgres() else {
+        return;
+    };
+
+    let failed_attempt = psql(&container, &failing_generation_migration);
+    assert!(
+        !failed_attempt.status.success(),
+        "injected generation migration failure must abort the forward attempt"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_attempt.stderr).contains("division by zero"),
+        "generation-migration RED must be the injected semantic failure, not runner/bootstrap noise"
+    );
+
+    let post_failure_state = assert_success(
+        psql(
+            &container,
+            "SELECT to_regclass('public.reputation_source_generation') IS NULL;",
+        ),
+        "inspect state after failed migration 0001",
+    );
+    assert_eq!(
+        post_failure_state.trim(),
+        "t",
+        "failed migration 0001 must not strand a partially secured generation table"
+    );
+
+    assert_success(
+        psql(&container, &generation_migration),
+        "replay migration 0001 cleanly after injected failure",
+    );
+    let replay_state = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_generation') IS NOT NULL, (SELECT relrowsecurity AND relforcerowsecurity FROM pg_catalog.pg_class WHERE oid = 'public.reputation_source_generation'::regclass));",
+        ),
+        "inspect successful generation schema after replay",
+    );
+    assert_eq!(
+        replay_state.trim(),
+        "t:t",
+        "a failure-atomic 0001 migration must replay to the forced-RLS generation boundary"
+    );
+}
+
+#[test]
+fn failed_admission_migration_rolls_back_all_admission_owned_ddl() {
+    let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
+        .expect("source-generation schema migration must exist");
+    let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
+        .expect("source-generation admission migration must exist");
+    let failure_marker = "REVOKE ALL ON FUNCTION public.wardnet_admit_reputation_source_generation(";
+    assert!(
+        admission_migration.contains(failure_marker),
+        "failure injection marker must follow admission-function creation"
+    );
+    let failing_admission_migration = admission_migration.replacen(
+        failure_marker,
+        "SELECT 1 / 0;\n\nREVOKE ALL ON FUNCTION public.wardnet_admit_reputation_source_generation(",
+        1,
+    );
+    let Some(container) = start_postgres() else {
+        return;
+    };
+
+    assert_success(
+        psql(&container, &generation_migration),
+        "apply migration 0001 before admission failure-atomicity test",
+    );
+
+    let failed_attempt = psql(&container, &failing_admission_migration);
+    assert!(
+        !failed_attempt.status.success(),
+        "injected admission migration failure must abort the forward attempt"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_attempt.stderr).contains("division by zero"),
+        "admission-migration RED must be the injected semantic failure, not runner/bootstrap noise"
+    );
+
+    let post_failure_state = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_generation') IS NOT NULL, to_regprocedure('public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)') IS NULL);",
+        ),
+        "inspect state after failed migration 0002",
+    );
+    assert_eq!(
+        post_failure_state.trim(),
+        "t:t",
+        "failed migration 0002 must preserve 0001 while removing the partial admission capability"
+    );
+
+    assert_success(
+        psql(&container, &admission_migration),
+        "replay migration 0002 cleanly after injected failure",
+    );
+    let replay_state = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_generation') IS NOT NULL, to_regprocedure('public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)') IS NOT NULL, NOT has_function_privilege('public', 'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)', 'EXECUTE'));",
+        ),
+        "inspect successful admission boundary after replay",
+    );
+    assert_eq!(
+        replay_state.trim(),
+        "t:t:t",
+        "a failure-atomic 0002 migration must replay with PUBLIC execution revoked"
+    );
+}
