@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    /// The detector rejects direct calls and both direct and grouped env imports.
+    /// The detector rejects direct calls and direct, grouped, or root aliases.
     fn runtime_env_syntax_detector_covers_alias_forms() {
         assert!(source_uses_runtime_env(
             "fn bypass() { let _ = std::env::var_os(\"BIND_ADDR\"); }"
@@ -395,6 +395,12 @@ mod tests {
         ));
         assert!(source_uses_runtime_env(
             "use ::std::env as process_env; fn bypass() { let _ = process_env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "use std::{self as standard}; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "extern crate std as standard; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
         ));
         assert!(!source_uses_runtime_env("use std::fmt; fn harmless() {}"));
     }
