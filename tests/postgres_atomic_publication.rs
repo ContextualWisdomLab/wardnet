@@ -185,8 +185,7 @@ fn publish_sql(
     )
 }
 
-#[test]
-fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
+fn prepare_publication_database() -> Option<PostgresContainer> {
     let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
         .expect("source-generation schema migration must exist");
     let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
@@ -195,7 +194,7 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
         "atomic source-publication migration must exist before PostgreSQL authority is enabled",
     );
     if !require_docker_or_skip() {
-        return;
+        return None;
     }
 
     let container = start_postgres();
@@ -225,6 +224,14 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
         ),
         "grant bounded publication privileges",
     );
+    Some(container)
+}
+
+#[test]
+fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
+    let Some(container) = prepare_publication_database() else {
+        return;
+    };
 
     let first = assert_success(
         psql(
@@ -461,4 +468,80 @@ fn source_generation_publication_is_atomic_idempotent_and_cas_bound() {
         "losing writer must not leave a publication record",
     );
     assert_eq!(publication_count.trim(), "3");
+}
+
+#[test]
+fn source_publication_rejects_unused_but_regressive_ordinal() {
+    let Some(container) = prepare_publication_database() else {
+        return;
+    };
+
+    let first = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                &publish_sql(
+                    None,
+                    "generation-9",
+                    9,
+                    200,
+                    "receipt-9",
+                    "snapshot-9",
+                    "complete-9",
+                    "lifecycle-9",
+                ),
+            ),
+        ),
+        "initial publication must commit",
+    );
+    assert_eq!(first.trim(), "committed");
+
+    let regression = assert_failure(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                &publish_sql(
+                    Some("generation-9"),
+                    "generation-10",
+                    8,
+                    300,
+                    "receipt-10",
+                    "snapshot-10",
+                    "complete-10",
+                    "lifecycle-10",
+                ),
+            ),
+        ),
+        "unused but regressive ordinal must not advance publication authority",
+    );
+    assert!(
+        regression.contains("reputation_source_publication_conflict"),
+        "ordinal regression must use the stable publication conflict class, got: {regression}"
+    );
+
+    let head = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT source_generation || ':' || source_generation_ordinal FROM reputation_source_publication_head WHERE source_id = 'urlhaus'",
+            ),
+        ),
+        "regressive publication must preserve last-known-good head",
+    );
+    assert_eq!(head.trim(), "generation-9:9");
+
+    let rejected_binding = assert_success(
+        psql(
+            &container,
+            &tenant_sql(
+                "tenant-a",
+                "SELECT count(*) FROM reputation_source_generation WHERE source_id = 'urlhaus' AND source_generation = 'generation-10'",
+            ),
+        ),
+        "regressive publication must not leave a generation binding",
+    );
+    assert_eq!(rejected_binding.trim(), "0");
 }
