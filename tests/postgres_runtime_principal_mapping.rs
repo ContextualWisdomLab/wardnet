@@ -270,38 +270,38 @@ fn runtime_principal_mapping_is_external_identity_least_privilege_and_injection_
         "inspect shadowed runtime principal before mapping",
     );
     assert_eq!(shadowed_before.trim(), "t:0");
-+    let shadowed = map_runtime_principal(&container, "wardnet_shadowed");
-+    assert!(
-+        !shadowed.status.success(),
-+        "principal with an inherited runtime path must fail closed instead of gaining a second direct mapping"
-+    );
-+    let shadowed_after = assert_success(
-+        psql(
-+            &container,
-+            "SELECT count(*) FROM pg_catalog.pg_auth_members membership JOIN pg_catalog.pg_roles granted_role ON granted_role.oid = membership.roleid JOIN pg_catalog.pg_roles member_role ON member_role.oid = membership.member WHERE granted_role.rolname = 'wardnet_runtime' AND member_role.rolname = 'wardnet_shadowed';",
-+        ),
-+        "inspect rejected shadow runtime principal",
-+    );
-+    assert_eq!(shadowed_after.trim(), "0");
-+
-+    let hostile = "wardnet_hostile; CREATE ROLE wardnet_injected";
-+    assert_success(
-+        psql(
-+            &container,
-+            "CREATE ROLE \"wardnet_hostile; CREATE ROLE wardnet_injected\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION;",
-+        ),
-+        "create synthetic hostile-name login",
-+    );
-+    assert_success(
-+        map_runtime_principal(&container, hostile),
-+        "map hostile-name principal without SQL injection",
-+    );
-+    let hostile_result = assert_success(
-+        psql(
-+            &container,
-+            "SELECT concat_ws(':', pg_has_role('wardnet_hostile; CREATE ROLE wardnet_injected', 'wardnet_runtime', 'member'), to_regrole('wardnet_injected') IS NULL);",
-+        ),
-+        "inspect hostile-name mapping",
-+    );
-+    assert_eq!(hostile_result.trim(), "t:t");
-+}
+    let shadowed = map_runtime_principal(&container, "wardnet_shadowed");
+    assert!(
+        !shadowed.status.success(),
+        "principal with an inherited runtime path must fail closed instead of gaining a second direct mapping"
+    );
+    let shadowed_after = assert_success(
+        psql(
+            &container,
+            "SELECT count(*) FROM pg_catalog.pg_auth_members membership JOIN pg_catalog.pg_roles granted_role ON granted_role.oid = membership.roleid JOIN pg_catalog.pg_roles member_role ON member_role.oid = membership.member WHERE granted_role.rolname = 'wardnet_runtime' AND member_role.rolname = 'wardnet_shadowed';",
+        ),
+        "inspect rejected shadow runtime principal",
+    );
+    assert_eq!(shadowed_after.trim(), "0");
+
+    let hostile = "wardnet_hostile; CREATE ROLE wardnet_injected";
+    assert_success(
+        psql(
+            &container,
+            "CREATE ROLE \"wardnet_hostile; CREATE ROLE wardnet_injected\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION;",
+        ),
+        "create synthetic hostile-name login",
+    );
+    assert_success(
+        map_runtime_principal(&container, hostile),
+        "map hostile-name principal without SQL injection",
+    );
+    let hostile_result = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', pg_has_role('wardnet_hostile; CREATE ROLE wardnet_injected', 'wardnet_runtime', 'member'), to_regrole('wardnet_injected') IS NULL);",
+        ),
+        "inspect hostile-name mapping",
+    );
+    assert_eq!(hostile_result.trim(), "t:t");
+}
