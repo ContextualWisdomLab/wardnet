@@ -50,7 +50,11 @@ jobs:
           crate_tls = "    pub(crate) async fn connect_with_tls<T>("
           if text.count(public_tls) != 1:
               raise SystemExit("TLS constructor visibility insertion point is not unique")
-          state.write_text(text.replace(public_tls, crate_tls, 1))
+          text = text.replace(public_tls, crate_tls, 1)
+          unused_setting = 'const TENANT_SETTING: &str = "wardnet.tenant_id";\n'
+          if text.count(unused_setting) != 1:
+              raise SystemExit("unused tenant-setting constant insertion point is not unique")
+          state.write_text(text.replace(unused_setting, "", 1))
 
           test = Path("tests/postgres_tenant_context_pool.rs")
           text = test.read_text()
