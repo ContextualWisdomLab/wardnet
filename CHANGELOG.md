@@ -7,6 +7,7 @@
 - Removed the distributable Kubernetes administrator `Secret` and historical placeholder credential. Production deployments must provision `waf-ids-ai-soc-admin` / `ADMIN_TOKEN` through the external secret-management control plane; the workload's `secretKeyRef` is explicitly non-optional.
 - Added a structural regression contract that rejects shipped administrator Secret objects, placeholder credentials, decoy workloads, init-container false positives, and optional administrator Secret references.
 - Added an explicit runtime deployment/state-authority contract: standalone operation may select memory or JSON-file state, while production requires `WARDNET_STATE_AUTHORITY=postgres` and never infers production from the listener address. Until #80 wires the durable PostgreSQL repository/RLS/migration adapter, selecting PostgreSQL fails before listener startup instead of silently downgrading to a weaker state backend.
+- Added the first durable PostgreSQL source-generation schema: immutable tenant/source generation and ordinal identities, default-deny forced RLS, transaction-local tenant admission, and credential-free provenance references. The production repository adapter remains disabled until its separate port and transaction contracts are complete.
 
 ### Operations
 
