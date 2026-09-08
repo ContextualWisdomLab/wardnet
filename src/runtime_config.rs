@@ -160,7 +160,7 @@ impl RuntimeConfiguration {
                 if self
                     .state_path
                     .as_deref()
-                    .map_or(true, |path| path.as_os_str().is_empty()) =>
+                    .is_none_or(|path| path.as_os_str().is_empty()) =>
             {
                 Err(invalid_configuration(
                     "file state authority requires an explicit non-empty state path",
