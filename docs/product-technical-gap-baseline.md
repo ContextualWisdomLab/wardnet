@@ -20,7 +20,7 @@ Organization ruleset `18156473` still has the solo-maintainer-incompatible gener
 
 Runner/materialization remains `.github#712` authority. Queued/pre-checkout `runner_id=0` is incomplete evidence, not a leaf-source defect. Wardnet has repeatedly shown the same `ubuntu-24.04` lanes later acquiring GitHub-hosted compute, so source or runner-label churn is not a default repair.
 
-Delegated CodeQL remains a central producer/receipt path until its repaired exact head reaches protected central truth. `.github#2028` was squash-merged into central protected `main@7fd571dbcdbae6acf29d8f4ee704d7ba6297e4db`, but its statusless fallback was rejected because it did not bind enough provenance. Canonical successor `.github#1902` is now open/Ready at exact `df35cfe57b90bfcf6caac1440390c057ddc48347`: it preserves the authenticated receipt/SARIF design, repairs mixed terminal/pending settlement-map loss, and paginates all producer job/artifact collections before provenance filtering. The previously identified later-page completeness finding is therefore repaired in source and executable RED→GREEN contracts. Five exact-head hosted workflows and qualifying independent review are still pending merge authority; predecessor local verification does not transfer. Until this exact central repair reaches protected truth and unchanged Wardnet consumers prove the then-live receipt path, code-bearing Wardnet CodeQL failures remain valid non-passing consumer evidence. Docs-only CodeQL success is not proof of producer integration.
+Delegated CodeQL remains a central producer/receipt path until its repaired exact head reaches protected central truth. `.github#2028` was squash-merged into central protected `main@7fd571dbcdbae6acf29d8f4ee704d7ba6297e4db`, but its statusless fallback was rejected because it did not bind enough provenance. Canonical successor `.github#1902` is now Draft at exact `0764ac256363b34ff10a23c19c1884d2eb975a1b`. Its production path retains the authenticated receipt/SARIF design, repairs mixed terminal/pending settlement-map loss, and paginates all producer job/artifact collections before provenance filtering; follow-up commits repair two malformed test-shim token boundaries that prevented hosted test modules from parsing/executing. Current exact Agent Review Runtime Quality, SAST, Python Security, CodeQL and Security Scan runs are queued/non-passing, and qualifying independent review remains a merge gate. Until this exact central repair reaches protected truth and unchanged Wardnet consumers prove the then-live receipt path, code-bearing Wardnet CodeQL failures remain valid non-passing consumer evidence. Docs-only CodeQL success is not proof of producer integration.
 
 ## Outbound destination reputation stack
 
@@ -46,7 +46,7 @@ P0 #192 requires tenant-scoped durable uniqueness for both `(source_id, source_g
 
 #193 is a Draft child of #140 that makes deployment intent and mutable-state authority explicit. Production requires an explicit PostgreSQL authority declaration and cannot silently fall back to file/memory state; PostgreSQL selection remains fail-closed until #80's durable adapter exists. Exact current #193 head is `88e54cd18fb686a6b61525c400531820f7a014b4`, with repository-owned CI/Fuzz GREEN recorded in the PR body.
 
-#194 is the next Draft child and now owns PostgreSQL DSN bootstrap secrecy. Semantic RED `#194@9436ad4c7729f1a6a9f6542aa2919b9ae0e45012`, CI `34185447086` / rust `101932754357`, acquired a real GitHub-hosted `ubuntu-24.04` runner, passed formatting, then failed in locked workspace tests while production source was unchanged. Current causal repair head `eeddc49170b30169bb3fd6a918ee91a74e1ce9f3` keeps `postgres_dsn` inside `CredentialRegistry`, applies file-over-environment precedence, drops empty DSNs, and deliberately leaves `CredentialSource` as administrator-auth provenance so PostgreSQL secret presence is not exposed through health/support metadata. This slice opens no database connection and does not claim durability. Exact-current CI `34189654335` and Fuzz `34189654329` are currently queued/non-passing; the CI job is pre-checkout `runner_id=0` and has been handed to `.github#712` without no-op retrigger or source churn.
+#194 is the next Draft child and owns PostgreSQL DSN bootstrap secrecy. Semantic RED `#194@9436ad4c7729f1a6a9f6542aa2919b9ae0e45012`, CI `34185447086` / rust `101932754357`, acquired a real GitHub-hosted `ubuntu-24.04` runner, passed formatting, then failed in locked workspace tests while production source was unchanged. Current causal repair head `eeddc49170b30169bb3fd6a918ee91a74e1ce9f3` keeps `postgres_dsn` inside `CredentialRegistry`, applies file-over-environment precedence, drops empty DSNs, and deliberately leaves `CredentialSource` as administrator-auth provenance so PostgreSQL secret presence is not exposed through health/support metadata. This slice opens no database connection and does not claim durability. Exact-current CI `34189654335` and Fuzz `34189654329` remain queued/non-passing; CI job `101944919704` is still pre-checkout with `steps=[]` and `runner_id=0`, already handed to `.github#712` without no-op retrigger or source churn.
 
 ## Gateway and Agent Artifact Admission security lanes
 
@@ -60,6 +60,10 @@ P0 #192 requires tenant-scoped durable uniqueness for both `(source_id, source_g
 
 ## Other preservation and integration lanes
 
+#165 is the canonical trusted forwarded-client attribution slice for #83 and remains Draft behind #140 plus preservation transfer from #157. It owns direct-peer trust, right-to-left forwarded-chain attribution, observed mapped-address normalization and fail-closed trusted-CIDR grammar; broader local limiter cardinality and distributed admission remain separate #83 work.
+
+#135 preserves the bounded local-limiter cardinality/expiry/stable-429 slice but was incorrectly Ready while carrying overlapping Runtime Configuration and trusted-proxy prerequisite authority. It has been converted back to Draft at exact `b45e99d4ddd5448238aa58d272409968127df08b`. Its unique limiter delta must be reconstructed after #140 and #165 reach protected truth instead of integrating a second configuration/trusted-attribution foundation. Exact current CI/Fuzz/Security/SAST are GREEN and CodeQL remains the central delegated-receipt failure class; these results do not override the stack repair.
+
 #167/#170 retain MISP/DNSBL source-ownership and source-severity semantics. #115/#136 preserve threat-feed and outbound-policy hostile consumer evidence but cannot merge a second EgressWeave transport-policy authority. #88 preserves credential-guard evidence pending an immutable compatible contextual-orchestrator boundary rather than retaining LiteLLM/provider-routing authority in Wardnet. #90/#95/#112 are preservation lanes whose valid unique Wardnet deltas must be reconstructed from current protected truth instead of mechanically merging stale aggregate source.
 
 #134 support-bundle contract, #162 customer-contract-vs-USD-20B-quality authority separation, and #144 Kubernetes source-path migration have already non-force adopted protected #171 and retain unchanged bounded deltas. Their repository/security lanes are GREEN where Wardnet owns them; code-bearing CodeQL failures remain central delegated-receipt specimens rather than reasons for leaf churn.
@@ -71,12 +75,13 @@ Authority and safety remain ahead of feature breadth. Current release-blocking o
 1. satisfiable protected governance and authenticated exact-head central evidence;
 2. protected management authentication and Runtime Configuration truth;
 3. #80/#192 PostgreSQL production authority, tenant/RLS isolation and crash-safe reputation-history publication, with #193/#194 prerequisites integrated first;
-4. immutable EgressWeave authorization/evidence integration for outbound transport;
-5. deployed attack-path evidence and proven Coraza/CRS + Suricata enforcement without inventing substitute detection authority;
-6. Agent Artifact Admission integrated with its released foreign-owner ports;
-7. transactional outbox/idempotent workers, Keyverse-backed identity/approval and distributed admission/trusted attribution;
-8. immutable package/image/SBOM/provenance/reproducibility/promotion/rollback plus production telemetry/SLO/incident/restore evidence;
-9. one immutable protected Wardnet release identity.
+4. trusted client attribution and bounded/distributed admission reconstructed without duplicate #140/#165 authority;
+5. immutable EgressWeave authorization/evidence integration for outbound transport;
+6. deployed attack-path evidence and proven Coraza/CRS + Suricata enforcement without inventing substitute detection authority;
+7. Agent Artifact Admission integrated with its released foreign-owner ports;
+8. transactional outbox/idempotent workers, Keyverse-backed identity/approval and distributed admission/trusted attribution;
+9. immutable package/image/SBOM/provenance/reproducibility/promotion/rollback plus production telemetry/SLO/incident/restore evidence;
+10. one immutable protected Wardnet release identity.
 
 The USD 20 billion ambition is a product-quality bar, not pricing, ARR or billing truth. Prefer a modular monolith until transaction/isolation/scale/deployment/reuse evidence justifies a split.
 
