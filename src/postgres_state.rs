@@ -1,9 +1,11 @@
-//! PostgreSQL session boundary for tenant-scoped reputation state work.
+//! PostgreSQL session and repository boundary for tenant-scoped reputation state work.
 //!
-//! This module deliberately owns only connection/session mechanics. Runtime
-//! selection remains in `runtime_config`, credential sourcing remains in
+//! Runtime selection remains in `runtime_config`, credential sourcing remains in
 //! `CredentialRegistry`, and enabling PostgreSQL as an application authority is
-//! deferred until the repository/readiness slice is complete.
+//! deferred until the wider repository/readiness slice is complete. This module
+//! owns transaction-local tenant binding and bounded typed calls into Wardnet's
+//! canonical PostgreSQL reputation-state functions; it does not expose raw SQL as
+//! an application repository API.
 
 use std::fmt;
 use std::future::Future;
@@ -20,12 +22,20 @@ use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::{Client, Config, NoTls, Socket};
 
 const MAX_TENANT_ID_BYTES: usize = 256;
+const PUBLICATION_CONFLICT_SQLSTATE: &str = "40001";
+const PUBLICATION_CONFLICT_MESSAGE: &str = "reputation_source_publication_conflict";
 
-/// Error returned by Wardnet's PostgreSQL session boundary.
+/// Error returned by Wardnet's PostgreSQL session and repository boundary.
 #[derive(Debug)]
 pub enum PostgresStateError {
     /// Tenant identity is empty or exceeds the bounded application contract.
     InvalidTenantId(&'static str),
+    /// A typed publication command violates Wardnet's application contract.
+    InvalidPublication(&'static str),
+    /// The publication conflicts with immutable history or current-head ordering.
+    PublicationConflict,
+    /// The canonical publication function returned an undocumented outcome.
+    InvalidPublicationOutcome,
     /// A connection pool with no connections cannot fail closed.
     InvalidPoolSize,
     /// The plaintext integration constructor was requested outside loopback.
@@ -38,6 +48,14 @@ impl fmt::Display for PostgresStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidTenantId(reason) => write!(formatter, "invalid tenant identity: {reason}"),
+            Self::InvalidPublication(reason) => {
+                write!(formatter, "invalid reputation source publication: {reason}")
+            }
+            Self::PublicationConflict => {
+                formatter.write_str("reputation source publication conflicts with durable state")
+            }
+            Self::InvalidPublicationOutcome => formatter
+                .write_str("PostgreSQL publication function returned an unsupported outcome"),
             Self::InvalidPoolSize => {
                 formatter.write_str("PostgreSQL pool size must be greater than zero")
             }
@@ -64,7 +82,7 @@ impl From<tokio_postgres::Error> for PostgresStateError {
     }
 }
 
-/// Result type for PostgreSQL tenant-session operations.
+/// Result type for PostgreSQL tenant-session and repository operations.
 pub type PostgresStateResult<T> = Result<T, PostgresStateError>;
 
 /// Validated tenant identity passed to PostgreSQL only as parameter data.
@@ -90,6 +108,70 @@ impl TenantId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Immutable command for one tenant-scoped reputation-source publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReputationSourcePublication {
+    source_id: String,
+    expected_prior_generation: Option<String>,
+    source_generation: String,
+    source_generation_ordinal: i64,
+    completed_at_unix: i64,
+    provenance_ref: String,
+    evidence_snapshot_ref: String,
+    completeness_ref: String,
+    producer_lifecycle_ref: String,
+}
+
+impl ReputationSourcePublication {
+    /// Build a publication command that matches the canonical PostgreSQL function contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source_id: impl AsRef<str>,
+        expected_prior_generation: Option<&str>,
+        source_generation: impl AsRef<str>,
+        source_generation_ordinal: i64,
+        completed_at_unix: i64,
+        provenance_ref: impl AsRef<str>,
+        evidence_snapshot_ref: impl AsRef<str>,
+        completeness_ref: impl AsRef<str>,
+        producer_lifecycle_ref: impl AsRef<str>,
+    ) -> PostgresStateResult<Self> {
+        if source_generation_ordinal < 0 {
+            return Err(PostgresStateError::InvalidPublication(
+                "source generation ordinal must be nonnegative",
+            ));
+        }
+        if completed_at_unix < 0 {
+            return Err(PostgresStateError::InvalidPublication(
+                "completion time must be nonnegative",
+            ));
+        }
+
+        Ok(Self {
+            source_id: validate_publication_text(source_id.as_ref())?,
+            expected_prior_generation: expected_prior_generation
+                .map(validate_publication_text)
+                .transpose()?,
+            source_generation: validate_publication_text(source_generation.as_ref())?,
+            source_generation_ordinal,
+            completed_at_unix,
+            provenance_ref: validate_publication_text(provenance_ref.as_ref())?,
+            evidence_snapshot_ref: validate_publication_text(evidence_snapshot_ref.as_ref())?,
+            completeness_ref: validate_publication_text(completeness_ref.as_ref())?,
+            producer_lifecycle_ref: validate_publication_text(producer_lifecycle_ref.as_ref())?,
+        })
+    }
+}
+
+/// Stable application outcome returned by the typed publication repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationOutcome {
+    /// A new immutable publication and last-known-good head were committed.
+    Committed,
+    /// The exact immutable publication was already committed and was replayed idempotently.
+    Replay,
 }
 
 /// Safe diagnostic proving that a checked-out pooled connection has no tenant authority.
@@ -143,6 +225,34 @@ impl<'client> TenantTransaction<'client> {
     pub async fn query_scalar_text(&self, sql: &str) -> PostgresStateResult<String> {
         let row = self.client.query_one(sql, &[]).await?;
         Ok(row.try_get(0)?)
+    }
+
+    async fn publish_reputation_source(
+        &self,
+        tenant_id: String,
+        publication: ReputationSourcePublication,
+    ) -> PostgresStateResult<PublicationOutcome> {
+        let row = self
+            .client
+            .query_one(
+                "SELECT public.wardnet_publish_reputation_source_generation($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                &[
+                    &tenant_id,
+                    &publication.source_id,
+                    &publication.expected_prior_generation,
+                    &publication.source_generation,
+                    &publication.source_generation_ordinal,
+                    &publication.completed_at_unix,
+                    &publication.provenance_ref,
+                    &publication.evidence_snapshot_ref,
+                    &publication.completeness_ref,
+                    &publication.producer_lifecycle_ref,
+                ],
+            )
+            .await
+            .map_err(map_publication_error)?;
+        let outcome: String = row.try_get(0)?;
+        parse_publication_outcome(&outcome)
     }
 }
 
@@ -260,6 +370,27 @@ impl PostgresTenantPool {
         }
     }
 
+    /// Atomically publish one reputation-source generation through Wardnet's canonical function.
+    ///
+    /// The operation is always executed inside a transaction-local tenant context. Callers receive
+    /// stable application outcomes rather than PostgreSQL function strings or SQLSTATE details.
+    pub async fn publish_reputation_source(
+        &self,
+        tenant_id: &TenantId,
+        publication: &ReputationSourcePublication,
+    ) -> PostgresStateResult<PublicationOutcome> {
+        let tenant_value = tenant_id.as_str().to_owned();
+        let publication = publication.clone();
+        self.with_tenant_transaction(tenant_id, move |transaction| {
+            Box::pin(async move {
+                transaction
+                    .publish_reputation_source(tenant_value, publication)
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Inspect only backend identity and tenant context outside a transaction.
     ///
     /// This is deliberately not a general raw-query escape hatch. It exists to prove pooled
@@ -283,6 +414,39 @@ impl PostgresTenantPool {
         let index = self.inner.next_connection.fetch_add(1, Ordering::Relaxed)
             % self.inner.connections.len();
         Arc::clone(&self.inner.connections[index])
+    }
+}
+
+fn validate_publication_text(raw: &str) -> PostgresStateResult<String> {
+    if raw.is_empty() {
+        return Err(PostgresStateError::InvalidPublication(
+            "text values must be nonempty",
+        ));
+    }
+    if raw != raw.trim() {
+        return Err(PostgresStateError::InvalidPublication(
+            "text values must not contain leading or trailing whitespace",
+        ));
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_publication_outcome(raw: &str) -> PostgresStateResult<PublicationOutcome> {
+    match raw {
+        "committed" => Ok(PublicationOutcome::Committed),
+        "replay" => Ok(PublicationOutcome::Replay),
+        _ => Err(PostgresStateError::InvalidPublicationOutcome),
+    }
+}
+
+fn map_publication_error(error: tokio_postgres::Error) -> PostgresStateError {
+    if error.as_db_error().is_some_and(|database_error| {
+        database_error.code().code() == PUBLICATION_CONFLICT_SQLSTATE
+            && database_error.message() == PUBLICATION_CONFLICT_MESSAGE
+    }) {
+        PostgresStateError::PublicationConflict
+    } else {
+        PostgresStateError::Postgres(error)
     }
 }
 
@@ -343,5 +507,109 @@ impl Drop for ActiveTransaction {
         tokio::spawn(async move {
             let _ = client.batch_execute("ROLLBACK").await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_publication() -> PostgresStateResult<ReputationSourcePublication> {
+        ReputationSourcePublication::new(
+            "urlhaus",
+            Some("generation-8"),
+            "generation-9",
+            9,
+            1_700_000_009,
+            "provenance-generation-9",
+            "snapshot-generation-9",
+            "complete-generation-9",
+            "lifecycle-generation-9",
+        )
+    }
+
+    #[test]
+    fn publication_command_accepts_canonical_values() {
+        assert!(valid_publication().is_ok());
+    }
+
+    #[test]
+    fn publication_command_rejects_untrimmed_or_empty_text() {
+        assert!(matches!(
+            ReputationSourcePublication::new(
+                " urlhaus",
+                None,
+                "generation-9",
+                9,
+                1,
+                "provenance",
+                "snapshot",
+                "complete",
+                "lifecycle",
+            ),
+            Err(PostgresStateError::InvalidPublication(_))
+        ));
+        assert!(matches!(
+            ReputationSourcePublication::new(
+                "urlhaus",
+                Some(""),
+                "generation-9",
+                9,
+                1,
+                "provenance",
+                "snapshot",
+                "complete",
+                "lifecycle",
+            ),
+            Err(PostgresStateError::InvalidPublication(_))
+        ));
+    }
+
+    #[test]
+    fn publication_command_rejects_negative_ordinals_and_times() {
+        assert!(matches!(
+            ReputationSourcePublication::new(
+                "urlhaus",
+                None,
+                "generation-9",
+                -1,
+                1,
+                "provenance",
+                "snapshot",
+                "complete",
+                "lifecycle",
+            ),
+            Err(PostgresStateError::InvalidPublication(_))
+        ));
+        assert!(matches!(
+            ReputationSourcePublication::new(
+                "urlhaus",
+                None,
+                "generation-9",
+                9,
+                -1,
+                "provenance",
+                "snapshot",
+                "complete",
+                "lifecycle",
+            ),
+            Err(PostgresStateError::InvalidPublication(_))
+        ));
+    }
+
+    #[test]
+    fn publication_outcomes_fail_closed() {
+        assert_eq!(
+            parse_publication_outcome("committed").expect("committed outcome must parse"),
+            PublicationOutcome::Committed
+        );
+        assert_eq!(
+            parse_publication_outcome("replay").expect("replay outcome must parse"),
+            PublicationOutcome::Replay
+        );
+        assert!(matches!(
+            parse_publication_outcome("unexpected"),
+            Err(PostgresStateError::InvalidPublicationOutcome)
+        ));
     }
 }
