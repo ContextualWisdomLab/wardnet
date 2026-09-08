@@ -8,6 +8,7 @@ const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
 const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
+const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct PostgresContainer {
@@ -123,6 +124,15 @@ fn psql(container: &PostgresContainer, sql: &str) -> Output {
     )
 }
 
+fn final_startup_announced(container: &PostgresContainer) -> bool {
+    let logs = run_docker(&["logs", &container.name], None);
+    if !logs.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&logs.stdout).contains(FINAL_STARTUP_MARKER)
+        || String::from_utf8_lossy(&logs.stderr).contains(FINAL_STARTUP_MARKER)
+}
+
 fn start_postgres() -> PostgresContainer {
     let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = format!(
@@ -147,6 +157,7 @@ fn start_postgres() -> PostgresContainer {
 
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
+        let final_startup = final_startup_announced(&container);
         let status = Command::new("docker")
             .args([
                 "exec",
@@ -161,12 +172,12 @@ fn start_postgres() -> PostgresContainer {
             .stderr(Stdio::null())
             .status()
             .expect("pg_isready command must start");
-        if status.success() {
+        if final_startup && status.success() {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "PostgreSQL 18.4 container did not become ready within 60 seconds"
+            "PostgreSQL 18.4 final server did not become ready within 60 seconds"
         );
         thread::sleep(Duration::from_millis(500));
     }
