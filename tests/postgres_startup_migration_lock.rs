@@ -249,9 +249,7 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
     wait_for_advisory_lock(&container);
     let contended = psql(
         &container,
-        &format!(
-            "SET lock_timeout = '250ms';\n\\ir {MIGRATION_ENTRYPOINT_IN_CONTAINER}\n"
-        ),
+        &format!("SET lock_timeout = '250ms';\n\\ir {MIGRATION_ENTRYPOINT_IN_CONTAINER}\n"),
     );
     assert!(
         !contended.status.success(),
