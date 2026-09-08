@@ -6,7 +6,7 @@
 -- until its separate repository, pooling, migration, recovery, and database
 -- role-provisioning contracts are complete.
 --
--- The publication function is SECURITY DEFININER so the runtime role can receive
+-- The publication function is SECURITY DEFINER so the runtime role can receive
 -- EXECUTE without receiving direct INSERT/UPDATE authority over publication
 -- state. Before production PostgreSQL authority is enabled, deployment must
 -- transfer this function to a dedicated NOSUPERUSER/NOBYPASSRLS state-owner
