@@ -156,9 +156,16 @@ impl RuntimeConfiguration {
         }
 
         match self.state_authority {
-            StateAuthority::File if self.state_path.is_none() => Err(invalid_configuration(
-                "file state authority requires an explicit state path",
-            )),
+            StateAuthority::File
+                if self
+                    .state_path
+                    .as_deref()
+                    .map_or(true, |path| path.as_os_str().is_empty()) =>
+            {
+                Err(invalid_configuration(
+                    "file state authority requires an explicit non-empty state path",
+                ))
+            }
             StateAuthority::Memory | StateAuthority::Postgres if self.state_path.is_some() => {
                 Err(invalid_configuration(
                     "WAF_IDS_STATE_PATH is only valid when file state authority is selected",
