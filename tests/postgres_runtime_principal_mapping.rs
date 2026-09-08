@@ -258,6 +258,35 @@ fn runtime_principal_mapping_is_external_identity_least_privilege_and_injection_
     assert_success(
         psql(
             &container,
+            "CREATE ROLE wardnet_state_delegate NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION; GRANT INSERT ON TABLE public.reputation_source_generation TO wardnet_state_delegate; GRANT EXECUTE ON FUNCTION public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text) TO wardnet_state_delegate; CREATE ROLE wardnet_overprivileged LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION; GRANT wardnet_state_delegate TO wardnet_overprivileged WITH ADMIN FALSE, INHERIT TRUE, SET TRUE;",
+        ),
+        "create an inherited Wardnet state-capability path outside the bounded mapper",
+    );
+    let overprivileged_before = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', has_table_privilege('wardnet_overprivileged', 'public.reputation_source_generation', 'INSERT'), has_function_privilege('wardnet_overprivileged', 'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)', 'EXECUTE'), pg_has_role('wardnet_overprivileged', 'wardnet_runtime', 'member'));",
+        ),
+        "inspect out-of-band Wardnet state authority before mapping",
+    );
+    assert_eq!(overprivileged_before.trim(), "t:t:f");
+    let overprivileged = map_runtime_principal(&container, "wardnet_overprivileged");
+    assert!(
+        !overprivileged.status.success(),
+        "principal with out-of-band Wardnet mutation or inner-admission authority must fail closed"
+    );
+    let overprivileged_after = assert_success(
+        psql(
+            &container,
+            "SELECT pg_has_role('wardnet_overprivileged', 'wardnet_runtime', 'member');",
+        ),
+        "inspect rejected overprivileged principal",
+    );
+    assert_eq!(overprivileged_after.trim(), "f");
+
+    assert_success(
+        psql(
+            &container,
             "CREATE ROLE wardnet_runtime_delegate NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION; GRANT wardnet_runtime TO wardnet_runtime_delegate WITH ADMIN TRUE, INHERIT TRUE, SET TRUE; CREATE ROLE wardnet_shadowed LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS NOREPLICATION; GRANT wardnet_runtime_delegate TO wardnet_shadowed WITH ADMIN FALSE, INHERIT TRUE, SET TRUE;",
         ),
         "create a shadow runtime-membership path outside the bounded mapper",
