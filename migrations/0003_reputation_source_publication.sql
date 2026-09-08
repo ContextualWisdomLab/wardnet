@@ -11,6 +11,12 @@
 -- state. Before production PostgreSQL authority is enabled, deployment must
 -- transfer this function to a dedicated NOSUPERUSER/NOBYPASSRLS state-owner
 -- role. This migration intentionally does not create cluster roles.
+--
+-- Keep the complete forward migration in one explicit transaction. psql
+-- autocommit would otherwise make earlier DDL durable when a later statement
+-- fails, leaving a schema that is neither the 0002 nor the 0003 boundary.
+
+BEGIN;
 
 CREATE TABLE reputation_source_publication (
     tenant_id text NOT NULL
@@ -288,3 +294,5 @@ COMMENT ON FUNCTION public.wardnet_publish_reputation_source_generation(
     text
 ) IS
     'Atomically admits and publishes one evidence-complete source generation using exact-prior compare-and-swap semantics. Production ownership must be a dedicated NOSUPERUSER/NOBYPASSRLS state role; runtime receives EXECUTE, not direct mutation privileges.';
+
+COMMIT;

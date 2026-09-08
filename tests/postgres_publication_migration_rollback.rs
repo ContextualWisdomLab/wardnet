@@ -245,3 +245,75 @@ fn publication_migration_can_roll_back_to_admission_and_reapply_without_losing_g
         "reapply must restore publication authority without duplicating preserved generation history"
     );
 }
+
+#[test]
+fn failed_publication_forward_migration_rolls_back_all_publication_owned_ddl() {
+    let generation_migration = std::fs::read_to_string(GENERATION_MIGRATION_PATH)
+        .expect("source-generation schema migration must exist");
+    let admission_migration = std::fs::read_to_string(ADMISSION_MIGRATION_PATH)
+        .expect("source-generation admission migration must exist");
+    let publication_migration = std::fs::read_to_string(PUBLICATION_MIGRATION_PATH)
+        .expect("source-publication migration must exist");
+    let failure_marker = "CREATE TABLE reputation_source_publication_head (";
+    assert!(
+        publication_migration.contains(failure_marker),
+        "failure injection marker must track the publication/head schema boundary"
+    );
+    let failing_publication_migration = publication_migration.replacen(
+        failure_marker,
+        "SELECT 1 / 0;\n\nCREATE TABLE reputation_source_publication_head (",
+        1,
+    );
+    let Some(container) = start_postgres() else {
+        return;
+    };
+
+    assert_success(
+        psql(&container, &generation_migration),
+        "apply migration 0001 before failure-atomicity test",
+    );
+    assert_success(
+        psql(&container, &admission_migration),
+        "apply migration 0002 before failure-atomicity test",
+    );
+
+    let failed_attempt = psql(&container, &failing_publication_migration);
+    assert!(
+        !failed_attempt.status.success(),
+        "injected publication migration failure must abort the forward attempt"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_attempt.stderr).contains("division by zero"),
+        "forward-migration RED must be the injected semantic failure, not runner/bootstrap noise"
+    );
+
+    let post_failure_state = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_generation') IS NOT NULL, to_regprocedure('public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)') IS NOT NULL, to_regclass('public.reputation_source_publication') IS NULL, to_regclass('public.reputation_source_publication_head') IS NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NULL);",
+        ),
+        "inspect state after failed migration 0003",
+    );
+    assert_eq!(
+        post_failure_state.trim(),
+        "t:t:t:t:t",
+        "failed migration 0003 must preserve 0001/0002 while rolling back every publication-owned DDL effect"
+    );
+
+    assert_success(
+        psql(&container, &publication_migration),
+        "replay migration 0003 cleanly after injected failure",
+    );
+    let replay_state = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_publication') IS NOT NULL, to_regclass('public.reputation_source_publication_head') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL);",
+        ),
+        "inspect successful publication schema after replay",
+    );
+    assert_eq!(
+        replay_state.trim(),
+        "t:t:t",
+        "a failure-atomic 0003 migration must remain cleanly replayable after the aborted attempt"
+    );
+}
