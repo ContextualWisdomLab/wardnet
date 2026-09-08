@@ -176,9 +176,9 @@ fn runtime_role_cannot_mutate_publication_authority_outside_the_admission_bounda
     assert_success(
         psql(
             &container,
-            "CREATE ROLE wardnet_runtime_test NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;",
+            "CREATE ROLE wardnet_state_owner_test NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION; CREATE ROLE wardnet_runtime_test NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;",
         ),
-        "create non-owner runtime role",
+        "create state-owner and runtime roles",
     );
     assert_success(
         psql(&container, &generation_migration),
@@ -192,12 +192,26 @@ fn runtime_role_cannot_mutate_publication_authority_outside_the_admission_bounda
         psql(&container, &publication_migration),
         "apply publication migration",
     );
+
     assert_success(
         psql(
             &container,
-            "GRANT SELECT, INSERT ON reputation_source_generation TO wardnet_runtime_test; GRANT EXECUTE ON FUNCTION wardnet_admit_reputation_source_generation(text, text, text, bigint, bigint, text) TO wardnet_runtime_test; GRANT SELECT, INSERT ON reputation_source_publication TO wardnet_runtime_test; GRANT SELECT, INSERT, UPDATE ON reputation_source_publication_head TO wardnet_runtime_test; GRANT EXECUTE ON FUNCTION wardnet_publish_reputation_source_generation(text, text, text, text, bigint, bigint, text, text, text, text) TO wardnet_runtime_test;",
+            "GRANT USAGE, CREATE ON SCHEMA public TO wardnet_state_owner_test; GRANT SELECT, INSERT ON reputation_source_generation TO wardnet_state_owner_test; GRANT EXECUTE ON FUNCTION wardnet_admit_reputation_source_generation(text, text, text, bigint, bigint, text) TO wardnet_state_owner_test; GRANT SELECT, INSERT ON reputation_source_publication TO wardnet_state_owner_test; GRANT SELECT, INSERT, UPDATE ON reputation_source_publication_head TO wardnet_state_owner_test; ALTER FUNCTION wardnet_publish_reputation_source_generation(text, text, text, text, bigint, bigint, text, text, text, text) OWNER TO wardnet_state_owner_test; GRANT SELECT ON reputation_source_generation, reputation_source_publication, reputation_source_publication_head TO wardnet_runtime_test; GRANT EXECUTE ON FUNCTION wardnet_publish_reputation_source_generation(text, text, text, text, bigint, bigint, text, text, text, text) TO wardnet_runtime_test;",
         ),
-        "grant current SECURITY INVOKER publication privileges",
+        "install least-privilege publication capability",
+    );
+
+    let role_contract = assert_success(
+        psql(
+            &container,
+            "SELECT r.rolsuper || ':' || r.rolbypassrls || ':' || p.prosecdef || ':' || has_table_privilege('wardnet_runtime_test', 'reputation_source_publication', 'INSERT') || ':' || has_table_privilege('wardnet_runtime_test', 'reputation_source_publication_head', 'UPDATE') FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = 'wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'::regprocedure;",
+        ),
+        "verify publication capability owner and runtime privilege contract",
+    );
+    assert_eq!(
+        role_contract.trim(),
+        "false:false:true:false:false",
+        "publication must be SECURITY DEFINER under a non-superuser/non-BYPASSRLS owner while runtime has no direct mutation authority"
     );
 
     let publish = |expected_prior: &str, generation: &str, ordinal: i64| {
@@ -226,13 +240,36 @@ fn runtime_role_cannot_mutate_publication_authority_outside_the_admission_bounda
         !direct_regression.status.success(),
         "runtime role must not bypass publication CAS/monotonicity with direct head DML"
     );
+    assert!(
+        String::from_utf8_lossy(&direct_regression.stderr).contains("permission denied"),
+        "direct mutation must fail at the privilege boundary, got: {}",
+        String::from_utf8_lossy(&direct_regression.stderr)
+    );
+
+    let direct_history_insert = psql(
+        &container,
+        "SET ROLE wardnet_runtime_test; BEGIN; SET LOCAL wardnet.tenant_id = 'tenant-a'; INSERT INTO reputation_source_publication (tenant_id, source_id, prior_source_generation, source_generation, source_generation_ordinal, completed_at_unix, provenance_ref, evidence_snapshot_ref, completeness_ref, producer_lifecycle_ref) VALUES ('tenant-a', 'urlhaus', 'generation-10', 'forged-generation', 11, 1100, 'forged-receipt', 'forged-snapshot', 'forged-completeness', 'forged-lifecycle'); COMMIT;",
+    );
+    assert!(
+        !direct_history_insert.status.success(),
+        "runtime role must not forge immutable publication history directly"
+    );
 
     let head = assert_success(
         psql(
             &container,
             "SET ROLE wardnet_runtime_test; BEGIN; SET LOCAL wardnet.tenant_id = 'tenant-a'; SELECT source_generation || ':' || source_generation_ordinal FROM reputation_source_publication_head WHERE source_id = 'urlhaus'; COMMIT;",
         ),
-        "read publication head after rejected direct mutation",
+        "read publication head after rejected direct mutations",
     );
     assert_eq!(head.trim(), "generation-10:10");
+
+    let publication_count = assert_success(
+        psql(
+            &container,
+            "SET ROLE wardnet_runtime_test; BEGIN; SET LOCAL wardnet.tenant_id = 'tenant-a'; SELECT count(*) FROM reputation_source_publication WHERE source_id = 'urlhaus'; COMMIT;",
+        ),
+        "read immutable publication history after rejected direct insert",
+    );
+    assert_eq!(publication_count.trim(), "2");
 }
