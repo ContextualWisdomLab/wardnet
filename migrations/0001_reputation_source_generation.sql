@@ -4,6 +4,8 @@
 -- generation identity. The runtime repository adapter remains disabled until
 -- its separate port and transaction contracts are complete.
 
+BEGIN;
+
 CREATE TABLE reputation_source_generation (
     tenant_id text NOT NULL
         CHECK (tenant_id <> '' AND tenant_id = btrim(tenant_id)),
@@ -51,3 +53,5 @@ COMMENT ON COLUMN reputation_source_generation.source_generation_ordinal IS
     'Monotonic source ordinal identity; ordering enforcement remains repository-owned.';
 COMMENT ON COLUMN reputation_source_generation.provenance_ref IS
     'Credential-free immutable reference to completion provenance evidence.';
+
+COMMIT;
