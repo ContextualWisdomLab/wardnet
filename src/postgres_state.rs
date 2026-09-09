@@ -693,79 +693,76 @@ impl PostgresTenantPool {
         })
     }
 
-    /// Checkout the next usable pool member before starting any database operation.
+    /// Checkout the next live pool member before starting any database operation.
     ///
-    /// A failed query or transaction is never replayed on another member: its commit outcome may
-    /// be ambiguous. Checkout first scans the complete round-robin window without waiting, holding
-    /// the first immediately usable member while noticing one closed peer. When healthy capacity
-    /// exists, a closed peer is repaired in the background only after this scan and only while that
-    /// repair task owns the peer's slot mutex. Both background slot ownership and the all-dead
-    /// fallback are bounded by Wardnet's reconnect-readiness window, so a stalled reconnect cannot
-    /// hide established capacity or hold later checkout beyond the buyer-visible fail-closed bound.
-    /// Socket, TLS, authentication, and PostgreSQL startup progress must finish within the window;
-    /// exhaustion fails closed with [`PostgresStateError::PoolUnavailable`] before database work.
+    /// A failed query or transaction is never replayed on another member because its durable
+    /// outcome can be ambiguous. Every selected driver-known-open session must first answer
+    /// PostgreSQL's protocol-level liveness check. The fixed reconnect-readiness window is divided
+    /// across the remaining round-robin candidates, so one half-open socket cannot consume the
+    /// complete checkout budget and hide unrelated healthy capacity. At most one failed member per
+    /// checkout is replaced in the background under a fresh bounded reconnect window; exhaustion
+    /// fails closed with [`PostgresStateError::PoolUnavailable`] before Wardnet state work begins.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
-        let mut healthy = None;
-        let mut repair_candidate = None;
+        let checkout_deadline =
+            tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
+        let mut repair_started = false;
 
         for offset in 0..self.inner.connections.len() {
-            let index = start.wrapping_add(offset) % self.inner.connections.len();
-            if let Ok(client) = Arc::clone(&self.inner.connections[index]).try_lock_owned() {
-                if client.is_closed() {
-                    repair_candidate.get_or_insert(index);
-                } else if healthy.is_none() {
-                    healthy = Some(client);
-                }
+            let now = tokio::time::Instant::now();
+            if now >= checkout_deadline {
+                break;
             }
-        }
 
-        if let Some(client) = healthy {
-            let repair_deadline =
-                tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
-            if let Some(index) = repair_candidate
-                && let Ok(mut closed) = Arc::clone(&self.inner.connections[index]).try_lock_owned()
-                && closed.is_closed()
-            {
-                let pool = self.clone();
-                tokio::spawn(async move {
-                    if let Ok(Ok(replacement)) =
-                        tokio::time::timeout_at(repair_deadline, pool.reconnect_client()).await
-                    {
-                        *closed = replacement;
-                    }
-                });
-            }
-            return Ok(client);
-        }
-
-        let reconnect_deadline = tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
-        for offset in 0..self.inner.connections.len() {
+            let remaining_candidates = self.inner.connections.len() - offset;
+            let remaining_budget = checkout_deadline.saturating_duration_since(now);
+            let candidate_budget = remaining_budget / (remaining_candidates as u32);
+            let candidate_deadline = now + candidate_budget;
             let index = start.wrapping_add(offset) % self.inner.connections.len();
             let connection = Arc::clone(&self.inner.connections[index]);
-            let mut client =
-                match tokio::time::timeout_at(reconnect_deadline, connection.lock_owned()).await {
-                    Ok(client) => client,
-                    Err(_) => break,
-                };
-            if !client.is_closed() {
-                return Ok(client);
+            let mut client = match tokio::time::timeout_at(
+                candidate_deadline,
+                connection.lock_owned(),
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(_) => continue,
+            };
+
+            if client.is_closed() {
+                if !repair_started {
+                    self.spawn_bounded_repair(client);
+                    repair_started = true;
+                }
+                continue;
             }
 
-            match tokio::time::timeout_at(reconnect_deadline, self.reconnect_client()).await {
-                Ok(Ok(replacement)) => {
-                    *client = replacement;
-                    return Ok(client);
+            match tokio::time::timeout_at(candidate_deadline, client.check_connection()).await {
+                Ok(Ok(())) => return Ok(client),
+                Ok(Err(_)) | Err(_) => {
+                    if !repair_started {
+                        self.spawn_bounded_repair(client);
+                        repair_started = true;
+                    }
                 }
-                Ok(Err(_)) => {
-                    // The caller-facing contract is pool availability, not connection diagnostics.
-                    // Do not log or surface reconnect errors because they can contain endpoint or
-                    // credential-adjacent material; continue to any unrelated healthy pool member.
-                }
-                Err(_) => break,
             }
         }
+
         Err(PostgresStateError::PoolUnavailable)
+    }
+
+    fn spawn_bounded_repair(&self, mut client: OwnedMutexGuard<Client>) {
+        let pool = self.clone();
+        tokio::spawn(async move {
+            let repair_deadline =
+                tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
+            if let Ok(Ok(replacement)) =
+                tokio::time::timeout_at(repair_deadline, pool.reconnect_client()).await
+            {
+                *client = replacement;
+            }
+        });
     }
 
     async fn reconnect_client(&self) -> PostgresStateResult<Client> {
