@@ -731,8 +731,7 @@ impl PostgresTenantPool {
             return Ok(client);
         }
 
-        let reconnect_deadline =
-            tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
+        let reconnect_deadline = tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
             let mut client = Arc::clone(&self.inner.connections[index])
