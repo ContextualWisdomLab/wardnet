@@ -202,7 +202,8 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
     );
 
     // Empty admin credentials intentionally exercise the permission-denied
-    // presentation path on the real audit endpoint.
+    // presentation path on the real audit endpoint while the gateway itself is
+    // configured with an admin credential below.
     wait_until_bool(
         &client,
         &driver_url,
@@ -259,7 +260,7 @@ fn reserve_loopback_port() -> u16 {
 fn spawn_ready_gateway() -> (Child, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
         .env("BIND_ADDR", "127.0.0.1:0")
-        .env_remove("ADMIN_TOKEN")
+        .env("ADMIN_TOKEN", "browser-test-admin")
         .env_remove("ADMIN_TOKENS")
         .env_remove("WAF_IDS_CREDENTIALS_PATH")
         .env_remove("WAF_IDS_STATE_PATH")
