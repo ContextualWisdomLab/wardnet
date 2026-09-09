@@ -250,12 +250,14 @@ pub(crate) type TenantTransactionFuture<'client, T> =
 
 impl<'client> TenantTransaction<'client> {
     /// Execute fixed white-box test SQL returning one `BIGINT` scalar.
+    #[cfg(test)]
     pub(crate) async fn query_scalar_i64(&self, sql: &str) -> PostgresStateResult<i64> {
         let row = self.client.query_one(sql, &[]).await?;
         Ok(row.try_get(0)?)
     }
 
     /// Execute fixed white-box test SQL returning one non-null text scalar.
+    #[cfg(test)]
     pub(crate) async fn query_scalar_text(&self, sql: &str) -> PostgresStateResult<String> {
         let row = self.client.query_one(sql, &[]).await?;
         Ok(row.try_get(0)?)
