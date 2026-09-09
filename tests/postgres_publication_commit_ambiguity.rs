@@ -307,7 +307,9 @@ fn read_startup_packet(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(frame))
 }
 
-fn read_typed_message(stream: &mut TcpStream) -> io::Result<Option<(u8, Vec<u8>, Vec<u8>)>> {
+type TypedMessage = (u8, Vec<u8>, Vec<u8>);
+
+fn read_typed_message(stream: &mut TcpStream) -> io::Result<Option<TypedMessage>> {
     let mut message_type = [0_u8; 1];
     if !read_exact_or_eof(stream, &mut message_type)? {
         return Ok(None);
@@ -587,7 +589,7 @@ fn publication_with(
 }
 
 async fn connect_pool(
-    container: &PostgresContainer,
+    _container: &PostgresContainer,
     proxy: &CommitFaultProxy,
 ) -> PostgresTenantPool {
     let dsn = format!(
