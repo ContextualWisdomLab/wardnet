@@ -714,8 +714,7 @@ impl PostgresTenantPool {
 
         if let Some(client) = healthy {
             if let Some(index) = repair_candidate
-                && let Ok(mut closed) =
-                    Arc::clone(&self.inner.connections[index]).try_lock_owned()
+                && let Ok(mut closed) = Arc::clone(&self.inner.connections[index]).try_lock_owned()
                 && closed.is_closed()
             {
                 let pool = self.clone();
