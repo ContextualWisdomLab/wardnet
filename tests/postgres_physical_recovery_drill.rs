@@ -1,75 +1,49 @@
 use serde_json::Value;
-use std::{path::PathBuf, process::Command};
+use std::path::PathBuf;
+use std::process::Command;
 
-fn required_non_empty_string<'a>(receipt: &'a Value, key: &str) -> &'a str {
+fn required_string<'a>(receipt: &'a Value, key: &str) -> &'a str {
     receipt
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| panic!("recovery receipt must contain non-empty {key}"))
+        .unwrap_or_else(|| panic!("recovery receipt must contain {key}"))
+}
+
+fn required_true(receipt: &Value, key: &str) {
+    let value = receipt.get(key).and_then(Value::as_bool);
+    assert_eq!(value, Some(true), "recovery receipt must prove {key}");
+}
+
+fn required_u64(receipt: &Value, key: &str) -> u64 {
+    receipt
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("recovery receipt must contain integer {key}"))
 }
 
 #[test]
 fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo() {
-    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let drill = repository_root.join("scripts/postgres_recovery_drill.sh");
-
-    assert!(
-        drill.is_file(),
-        "Wardnet must ship an executable physical PostgreSQL backup/WAL/PITR recovery drill at {}",
-        drill.display()
-    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let drill = root.join("scripts/postgres_recovery_drill.sh");
+    assert!(drill.is_file(), "physical recovery drill must exist");
 
     let output = Command::new("bash")
         .arg(&drill)
         .env("WARDNET_POSTGRES_IMAGE", "postgres:18.4-bookworm")
         .output()
-        .unwrap_or_else(|error| panic!("failed to execute {}: {error}", drill.display()));
-
+        .expect("physical recovery drill must execute");
     assert!(
         output.status.success(),
-        "physical recovery drill failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        "recovery drill failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "recovery drill stdout must be one machine-readable JSON receipt: {error}\nstdout:\n{}",
-            String::from_utf8_lossy(&output.stdout)
-        )
-    });
-
+    let receipt: Value = serde_json::from_slice(&output.stdout)
+        .expect("recovery drill stdout must be one JSON receipt");
     assert_eq!(
         receipt.get("postgres_image").and_then(Value::as_str),
-        Some("postgres:18.4-bookworm"),
-        "the destructive acceptance must run against the pinned PostgreSQL 18.4 image"
-    );
-    assert_eq!(
-        receipt.get("backup_manifest_verified").and_then(Value::as_bool),
-        Some(true),
-        "a base backup is not recovery evidence until its manifest verifies"
-    );
-    assert_eq!(
-        receipt
-            .get("used_archived_wal_beyond_base_backup")
-            .and_then(Value::as_bool),
-        Some(true),
-        "the recovery target must require archived WAL committed after the base backup"
-    );
-    assert_eq!(
-        receipt
-            .get("source_destroyed_before_restore")
-            .and_then(Value::as_bool),
-        Some(true),
-        "restore must not be able to read the live source data directory"
-    );
-    assert_eq!(
-        receipt
-            .get("recovery_reached_declared_target")
-            .and_then(Value::as_bool),
-        Some(true),
-        "restored PostgreSQL must reach the explicitly recorded recovery target"
+        Some("postgres:18.4-bookworm")
     );
 
     for key in [
@@ -81,30 +55,14 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
         "recovery_target_lsn",
         "latest_recovered_lsn",
     ] {
-        required_non_empty_string(&receipt, key);
+        required_string(&receipt, key);
     }
 
-    assert_eq!(
-        receipt
-            .get("rpo_lost_publication_transactions")
-            .and_then(Value::as_u64),
-        Some(0),
-        "the controlled recovery fixture must lose zero committed Wardnet publication transactions"
-    );
-    assert!(
-        receipt
-            .get("rto_ms")
-            .and_then(Value::as_u64)
-            .is_some_and(|value| value > 0),
-        "RTO must be measured from declared restore start through the first successful bounded runtime verification"
-    );
-
-    assert_eq!(
-        receipt.get("runtime_login_is_superuser").and_then(Value::as_bool),
-        Some(false),
-        "post-restore verification must use the ordinary bounded runtime LOGIN"
-    );
     for key in [
+        "backup_manifest_verified",
+        "used_archived_wal_beyond_base_backup",
+        "source_destroyed_before_restore",
+        "recovery_reached_declared_target",
         "runtime_rls_enforced",
         "tenant_isolation_verified",
         "publication_history_verified",
@@ -116,27 +74,25 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
         "unbound_runtime_has_no_tenant_authority",
         "post_restore_publication_committed",
     ] {
-        assert_eq!(
-            receipt.get(key).and_then(Value::as_bool),
-            Some(true),
-            "recovery receipt must prove {key}"
-        );
+        required_true(&receipt, key);
     }
 
-    let hostile_cases = receipt
+    assert_eq!(required_u64(&receipt, "rpo_lost_publication_transactions"), 0);
+    assert!(required_u64(&receipt, "rto_ms") > 0);
+    assert_eq!(
+        receipt.get("runtime_login_is_superuser").and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let hostile = receipt
         .get("hostile_cases")
-        .and_then(Value::as_object)
-        .expect("recovery receipt must include hostile_cases");
+        .expect("recovery receipt must contain hostile_cases");
     for key in [
         "corrupt_manifest_failed_closed",
         "missing_wal_failed_closed",
         "unreachable_target_failed_closed",
         "partial_role_or_rls_state_failed_closed",
     ] {
-        assert_eq!(
-            hostile_cases.get(key).and_then(Value::as_bool),
-            Some(true),
-            "recovery drill must prove hostile case {key}"
-        );
+        required_true(hostile, key);
     }
 }
