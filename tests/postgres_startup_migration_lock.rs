@@ -7,6 +7,8 @@ const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const MIGRATION_ENTRYPOINT_PATH: &str = "deploy/postgresql/reputation_state_migrate.sql";
 const MIGRATION_ENTRYPOINT_IN_CONTAINER: &str =
     "/wardnet/deploy/postgresql/reputation_state_migrate.sql";
+const AUDIT_ROLLBACK_IN_CONTAINER: &str =
+    "/wardnet/migrations/0005_reputation_source_publication_audit.down.sql";
 const VERSION_ROLLBACK_IN_CONTAINER: &str =
     "/wardnet/migrations/0004_reputation_state_schema_version.down.sql";
 const MIGRATION_LOCK_KEY: &str = "wardnet.reputation_state.schema_migration";
@@ -284,11 +286,11 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
     let current = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', to_regclass('public.reputation_source_generation') IS NOT NULL, to_regprocedure('public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)') IS NOT NULL, to_regclass('public.reputation_source_publication') IS NOT NULL, to_regclass('public.reputation_source_publication_head') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL, (SELECT schema_version = 4 FROM public.wardnet_schema_version WHERE component = 'reputation_state'));",
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_generation') IS NOT NULL, to_regprocedure('public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)') IS NOT NULL, to_regclass('public.reputation_source_publication') IS NOT NULL, to_regclass('public.reputation_source_publication_head') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL, to_regclass('public.reputation_source_publication_audit') IS NOT NULL, to_regprocedure('public.wardnet_record_reputation_source_publication_audit()') IS NOT NULL, (SELECT schema_version = 5 FROM public.wardnet_schema_version WHERE component = 'reputation_state'));",
         ),
         "inspect current migrated schema",
     );
-    assert_eq!(current.trim(), "t:t:t:t:t:t");
+    assert_eq!(current.trim(), "t:t:t:t:t:t:t:t");
 
     assert_success(
         psql_file(&container, MIGRATION_ENTRYPOINT_IN_CONTAINER),
@@ -296,17 +298,38 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
     );
 
     assert_success(
+        psql_file(&container, AUDIT_ROLLBACK_IN_CONTAINER),
+        "roll attributable audit layer back to supported version 4",
+    );
+    let version_four = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT schema_version = 4 FROM public.wardnet_schema_version WHERE component = 'reputation_state'), to_regclass('public.reputation_source_publication_audit') IS NULL, to_regclass('public.reputation_source_publication') IS NOT NULL);",
+        ),
+        "inspect supported version 4 boundary",
+    );
+    assert_eq!(version_four.trim(), "t:t:t");
+    assert_success(
+        psql_file(&container, MIGRATION_ENTRYPOINT_IN_CONTAINER),
+        "upgrade supported version 4 boundary to current version",
+    );
+
+    assert_success(
+        psql_file(&container, AUDIT_ROLLBACK_IN_CONTAINER),
+        "roll attributable audit layer back before version receipt rollback",
+    );
+    assert_success(
         psql_file(&container, VERSION_ROLLBACK_IN_CONTAINER),
         "roll schema-version layer back to supported 0003 boundary",
     );
     let previous = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', to_regclass('public.wardnet_schema_version') IS NULL, to_regclass('public.reputation_source_publication') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL);",
+            "SELECT concat_ws(':', to_regclass('public.wardnet_schema_version') IS NULL, to_regclass('public.reputation_source_publication') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL, to_regclass('public.reputation_source_publication_audit') IS NULL);",
         ),
         "inspect supported previous schema boundary",
     );
-    assert_eq!(previous.trim(), "t:t:t");
+    assert_eq!(previous.trim(), "t:t:t:t");
     assert_success(
         psql_file(&container, MIGRATION_ENTRYPOINT_IN_CONTAINER),
         "upgrade supported 0003 boundary to current version",
@@ -315,7 +338,7 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
     assert_success(
         psql(
             &container,
-            "UPDATE public.wardnet_schema_version SET schema_version = 5 WHERE component = 'reputation_state';",
+            "UPDATE public.wardnet_schema_version SET schema_version = 6 WHERE component = 'reputation_state';",
         ),
         "inject incompatible future schema version",
     );
@@ -340,12 +363,12 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
         ),
         "inspect refused future schema version",
     );
-    assert_eq!(future_preserved.trim(), "5");
+    assert_eq!(future_preserved.trim(), "6");
 
     assert_success(
         psql(
             &container,
-            "UPDATE public.wardnet_schema_version SET schema_version = 4 WHERE component = 'reputation_state'; ALTER TABLE public.reputation_source_generation DROP COLUMN provenance_ref;",
+            "UPDATE public.wardnet_schema_version SET schema_version = 5 WHERE component = 'reputation_state'; ALTER TABLE public.reputation_source_generation DROP COLUMN provenance_ref;",
         ),
         "inject structurally partial current-version schema",
     );
@@ -366,7 +389,7 @@ fn startup_migration_serializes_and_fails_closed_on_future_schema() {
     let partial_preserved = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', (SELECT count(*) = 0 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reputation_source_generation' AND column_name = 'provenance_ref'), (SELECT schema_version = 4 FROM public.wardnet_schema_version WHERE component = 'reputation_state'));",
+            "SELECT concat_ws(':', (SELECT count(*) = 0 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reputation_source_generation' AND column_name = 'provenance_ref'), (SELECT schema_version = 5 FROM public.wardnet_schema_version WHERE component = 'reputation_state'));",
         ),
         "inspect refused structural partial schema",
     );
