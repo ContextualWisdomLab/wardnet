@@ -27,7 +27,6 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
     let driver_port = reserve_loopback_port();
     let mut driver = Command::new(chromedriver)
         .arg(format!("--port={driver_port}"))
-        .arg("--allowed-ips=")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -231,7 +230,12 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
         );
     }
 
+    // ChromeDriver's W3C transport is HTTP. The driver keeps its documented
+    // local-only default because this test does not pass --allowed-ips, and
+    // driver_url is fixed to 127.0.0.1. This disposable session capability is
+    // test-process state, not a Wardnet credential, and never leaves the host.
     let _ = client
+        // codeql[rust/cleartext-transmission]
         .delete(format!("{driver_url}/session/{session_id}"))
         .send()
         .await;
@@ -386,7 +390,11 @@ async fn wd_post(
     suffix: &str,
     body: Value,
 ) -> Value {
+    // WebDriver session commands use the same local-only ChromeDriver HTTP
+    // transport described at session teardown. The session identifier is an
+    // ephemeral test capability, not application sensitive data.
     client
+        // codeql[rust/cleartext-transmission]
         .post(format!("{driver_url}/session/{session_id}/{suffix}"))
         .json(&body)
         .send()
