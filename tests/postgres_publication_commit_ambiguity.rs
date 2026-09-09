@@ -453,7 +453,10 @@ async fn committed_but_unacknowledged_publication_is_reconciled_without_automati
 
     proxy.arm_one_commit_ack_drop();
     let first = pool.publish_reputation_source(&tenant, &exact).await;
-    assert!(first.is_err(), "lost COMMIT acknowledgement must never claim success");
+    assert!(
+        first.is_err(),
+        "lost COMMIT acknowledgement must never claim success"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(2);
     while !proxy.acknowledgement_dropped() && Instant::now() < deadline {
