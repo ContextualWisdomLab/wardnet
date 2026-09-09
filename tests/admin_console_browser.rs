@@ -178,9 +178,9 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
         .pointer("/value/nodes")
         .and_then(Value::as_array)
         .expect("Chrome accessibility tree nodes");
-    let admin_token = nodes.iter().find(|node| {
-        node.pointer("/name/value").and_then(Value::as_str) == Some("Admin token")
-    });
+    let admin_token = nodes
+        .iter()
+        .find(|node| node.pointer("/name/value").and_then(Value::as_str) == Some("Admin token"));
     let admin_token = admin_token.expect("admin token must have a computed accessible name");
     assert_eq!(
         admin_token
@@ -273,7 +273,10 @@ fn spawn_ready_gateway() -> (Child, String) {
     reader
         .read_line(&mut line)
         .expect("read Wardnet readiness line");
-    assert!(line.contains("listening on"), "unexpected startup: {line:?}");
+    assert!(
+        line.contains("listening on"),
+        "unexpected startup: {line:?}"
+    );
     let address = line
         .split_whitespace()
         .last()
