@@ -308,6 +308,42 @@ async fn typed_repository_rejects_historical_aba_and_keeps_last_known_good_publi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_repository_refuses_unaudited_publication_without_residue() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("loopback integration pool must connect");
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+
+    let unaudited = pool
+        .publish_reputation_source(&tenant, &publication(None, "generation-8", 8))
+        .await;
+    assert!(
+        matches!(unaudited, Err(PostgresStateError::InvalidAuditContext(_))),
+        "typed application publication must fail closed before durable mutation when actor/decision attribution is absent: {unaudited:?}"
+    );
+
+    let residue = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_generation), (SELECT count(*) FROM public.reputation_source_publication), (SELECT count(*) FROM public.reputation_source_publication_head), (SELECT count(*) FROM public.reputation_source_publication_audit));",
+        ),
+        "inspect unaudited publication residue",
+    );
+    assert_eq!(
+        residue.trim(),
+        "0:0:0:0",
+        "rejected unaudited typed publication must leave no admitted generation, publication, head, or audit residue"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_publication_is_attributable_and_exact_replay_does_not_duplicate_audit() {
     let Some(container) = prepare_database() else {
         return;
