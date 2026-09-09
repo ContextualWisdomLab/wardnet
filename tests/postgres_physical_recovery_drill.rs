@@ -118,8 +118,5 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
     );
     let role_guard_receipt: Value = serde_json::from_slice(&role_guard_output.stdout)
         .expect("recovery role-mapping guard stdout must be one JSON receipt");
-    required_true(
-        &role_guard_receipt,
-        "unsafe_role_mapping_failed_closed",
-    );
+    required_true(&role_guard_receipt, "unsafe_role_mapping_failed_closed");
 }
