@@ -9,7 +9,7 @@ const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_genera
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
 const PUBLICATION_ROLLBACK_PATH: &str = "migrations/0003_reputation_source_publication.down.sql";
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
-const RECOVERY_PATH: &str = "deploy/postgresql/reputation_state_recovery.sql";
+const RECOVERY_PATH_IN_CONTAINER: &str = "/wardnet/deploy/postgresql/reputation_state_recovery.sql";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 
 struct PostgresContainer {
@@ -171,6 +171,22 @@ fn start_postgres() -> Option<PostgresContainer> {
     }
 }
 
+fn stage_recovery_tree(container: &PostgresContainer) {
+    assert_success(
+        run_docker(&["exec", &container.name, "mkdir", "-p", "/wardnet"], None),
+        "create recovery fixture root",
+    );
+    let destination = format!("{}:/wardnet/", container.name);
+    assert_success(
+        run_docker(&["cp", "migrations", &destination], None),
+        "stage canonical migrations",
+    );
+    assert_success(
+        run_docker(&["cp", "deploy", &destination], None),
+        "stage deployment recovery assets",
+    );
+}
+
 #[test]
 fn recovery_does_not_expose_runtime_publication_while_old_evidence_is_missing() {
     let Some(container) = start_postgres() else {
@@ -203,31 +219,9 @@ fn recovery_does_not_expose_runtime_publication_while_old_evidence_is_missing() 
     );
     assert_success(psql(&container, &migration), "reapply publication boundary");
 
+    stage_recovery_tree(&container);
     assert_success(
-        run_docker(
-            &[
-                "exec",
-                &container.name,
-                "mkdir",
-                "-p",
-                "/tmp/wardnet-recovery-gap",
-            ],
-            None,
-        ),
-        "create recovery staging directory",
-    );
-    for path in [ROLE_INSTALLER_PATH, RECOVERY_PATH] {
-        let destination = format!("{}:/tmp/wardnet-recovery-gap/", container.name);
-        assert_success(
-            run_docker(&["cp", path, &destination], None),
-            "stage recovery asset",
-        );
-    }
-    assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery-gap/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "run publication authority recovery",
     );
 
