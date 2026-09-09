@@ -4,7 +4,7 @@
 -- mutation. Cluster roles and runtime grants remain owned by the separate role
 -- installer; application repository authority remains disabled.
 --
--- PostgreSQL session advisory locks are intentional here: migrations 0001..0004
+-- PostgreSQL session advisory locks are intentional here: migrations 0001..0005
 -- each own their transaction, while this lock must survive those commits until
 -- the whole startup sequence has reached one verified durable boundary.
 \set ON_ERROR_STOP on
@@ -17,7 +17,9 @@ SELECT pg_catalog.pg_advisory_lock(
 --   * empty: no migration-owned reputation-state objects exist;
 --   * complete 0003: all durable publication objects exist, version receipt absent;
 --   * versioned: complete publication boundary plus the version receipt.
--- Any mixture is diagnostic evidence, not permission to normalize a schema.
+-- Version 4 has no audit objects; version 5 has the complete attributable audit
+-- relation/function/trigger boundary. Any mixture is diagnostic evidence, not
+-- permission to normalize a schema.
 SELECT
     to_regclass('public.reputation_source_generation') IS NULL
         AND to_regprocedure(
@@ -27,6 +29,10 @@ SELECT
         AND to_regclass('public.reputation_source_publication_head') IS NULL
         AND to_regprocedure(
             'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
+        ) IS NULL
+        AND to_regclass('public.reputation_source_publication_audit') IS NULL
+        AND to_regprocedure(
+            'public.wardnet_record_reputation_source_publication_audit()'
         ) IS NULL
         AND to_regclass('public.wardnet_schema_version') IS NULL AS empty_schema,
     to_regclass('public.reputation_source_generation') IS NOT NULL
@@ -58,6 +64,10 @@ SELECT
               AND relrowsecurity
               AND relforcerowsecurity
         )
+        AND to_regclass('public.reputation_source_publication_audit') IS NULL
+        AND to_regprocedure(
+            'public.wardnet_record_reputation_source_publication_audit()'
+        ) IS NULL
         AND to_regclass('public.wardnet_schema_version') IS NULL AS supported_v3_schema,
     to_regclass('public.reputation_source_generation') IS NOT NULL
         AND EXISTS (
@@ -96,8 +106,10 @@ SELECT
     \ir ../../migrations/0002_reputation_source_generation_admission.sql
     \ir ../../migrations/0003_reputation_source_publication.sql
     \ir ../../migrations/0004_reputation_state_schema_version.sql
+    \ir ../../migrations/0005_reputation_source_publication_audit.sql
 \elif :supported_v3_schema
     \ir ../../migrations/0004_reputation_state_schema_version.sql
+    \ir ../../migrations/0005_reputation_source_publication_audit.sql
 \elif :versioned_schema
     -- Reading the migration-owned columns is itself a fail-closed shape check:
     -- a foreign relation with this name but an incompatible layout errors here
@@ -105,19 +117,66 @@ SELECT
     SELECT
         count(*) = 1
             AND min(component) = 'reputation_state'
-            AND min(schema_version) = 4 AS schema_version_current,
+            AND min(schema_version) = 4 AS schema_version_v4,
         count(*) = 1
             AND min(component) = 'reputation_state'
-            AND min(schema_version) > 4 AS schema_version_future
+            AND min(schema_version) = 5 AS schema_version_v5,
+        count(*) = 1
+            AND min(component) = 'reputation_state'
+            AND min(schema_version) > 5 AS schema_version_future
     FROM public.wardnet_schema_version
     \gset
 
-    \if :schema_version_current
-        \echo 'Wardnet reputation_state schema is already at supported version 4.'
+    \if :schema_version_v4
+        SELECT
+            to_regclass('public.reputation_source_publication_audit') IS NULL
+                AND to_regprocedure(
+                    'public.wardnet_record_reputation_source_publication_audit()'
+                ) IS NULL AS schema_v4_shape
+        \gset
+        \if :schema_v4_shape
+            \ir ../../migrations/0005_reputation_source_publication_audit.sql
+        \else
+            DO $wardnet_partial_v4_schema$
+            BEGIN
+                RAISE EXCEPTION 'Wardnet startup migration refused: version 4 contains unexpected publication-audit objects.';
+            END
+            $wardnet_partial_v4_schema$;
+        \endif
+    \elif :schema_version_v5
+        SELECT
+            to_regclass('public.reputation_source_publication_audit') IS NOT NULL
+                AND to_regprocedure(
+                    'public.wardnet_record_reputation_source_publication_audit()'
+                ) IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_trigger
+                    WHERE tgrelid = 'public.reputation_source_publication'::regclass
+                      AND tgname = 'reputation_source_publication_audit_after_insert'
+                      AND NOT tgisinternal
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_class
+                    WHERE oid = 'public.reputation_source_publication_audit'::regclass
+                      AND relrowsecurity
+                      AND relforcerowsecurity
+                ) AS schema_v5_shape
+        \gset
+        \if :schema_v5_shape
+            \echo 'Wardnet reputation_state schema is already at supported version 5.'
+        \else
+            DO $wardnet_partial_v5_schema$
+            BEGIN
+                RAISE EXCEPTION 'Wardnet startup migration refused: version 5 publication-audit shape is incomplete.';
+            END
+            $wardnet_partial_v5_schema$;
+        \endif
     \elif :schema_version_future
         DO $wardnet_future_schema$
         BEGIN
-            RAISE EXCEPTION 'Wardnet reputation_state schema is newer than supported Wardnet schema version 4.';
+            RAISE EXCEPTION 'Wardnet reputation_state schema is newer than supported Wardnet schema version 5.';
         END
         $wardnet_future_schema$;
     \else
@@ -155,13 +214,25 @@ SELECT
         AND to_regprocedure(
             'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'
         ) IS NOT NULL
+        AND to_regclass('public.reputation_source_publication_audit') IS NOT NULL
+        AND to_regprocedure(
+            'public.wardnet_record_reputation_source_publication_audit()'
+        ) IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_trigger
+            WHERE tgrelid = 'public.reputation_source_publication'::regclass
+              AND tgname = 'reputation_source_publication_audit_after_insert'
+              AND NOT tgisinternal
+        )
         AND (
-            SELECT count(*) = 3
+            SELECT count(*) = 4
             FROM pg_catalog.pg_class
             WHERE oid IN (
                 to_regclass('public.reputation_source_generation'),
                 to_regclass('public.reputation_source_publication'),
-                to_regclass('public.reputation_source_publication_head')
+                to_regclass('public.reputation_source_publication_head'),
+                to_regclass('public.reputation_source_publication_audit')
             )
               AND relrowsecurity
               AND relforcerowsecurity
@@ -170,7 +241,7 @@ SELECT
         AND (
             SELECT count(*) = 1
                 AND min(component) = 'reputation_state'
-                AND min(schema_version) = 4
+                AND min(schema_version) = 5
             FROM public.wardnet_schema_version
         ) AS migration_complete
 \gset
@@ -181,7 +252,7 @@ SELECT
     ) AS migration_lock_released
     \gset
     \if :migration_lock_released
-        \echo 'Wardnet reputation_state startup migration reached supported version 4.'
+        \echo 'Wardnet reputation_state startup migration reached supported version 5.'
     \else
         DO $wardnet_unlock_failed$
         BEGIN
