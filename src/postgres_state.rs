@@ -15,6 +15,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_postgres::config::{Host, SslMode};
@@ -23,6 +24,7 @@ use tokio_postgres::{Client, Config, NoTls, Socket};
 
 const MAX_TENANT_ID_BYTES: usize = 256;
 const MAX_AUDIT_REFERENCE_BYTES: usize = 512;
+const POSTGRES_RECONNECT_READINESS_TIMEOUT: Duration = Duration::from_millis(500);
 const PUBLICATION_CONFLICT_SQLSTATE: &str = "40001";
 const PUBLICATION_CONFLICT_MESSAGE: &str = "reputation_source_publication_conflict";
 
@@ -692,10 +694,11 @@ impl PostgresTenantPool {
     /// be ambiguous. Checkout first scans the complete round-robin window without waiting, holding
     /// the first immediately usable member while noticing one closed peer. When healthy capacity
     /// exists, a closed peer is repaired in the background only after this scan and only while that
-    /// repair task owns the peer's slot mutex, so slow reconnect cannot hide or block established
-    /// healthy capacity and concurrent checkouts cannot create competing replacements. When no
-    /// healthy member is immediately available, checkout keeps the existing blocking path: wait for
-    /// slots in round-robin order, recheck under the slot mutex, and repair before database work.
+    /// repair task owns the peer's slot mutex. Both background slot ownership and the all-dead
+    /// fallback are bounded by Wardnet's reconnect-readiness window, so a stalled reconnect cannot
+    /// hide established capacity or hold later checkout beyond the buyer-visible fail-closed bound.
+    /// Socket, TLS, authentication, and PostgreSQL startup progress must finish within the window;
+    /// exhaustion fails closed with [`PostgresStateError::PoolUnavailable`] before database work.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         let mut healthy = None;
@@ -713,13 +716,17 @@ impl PostgresTenantPool {
         }
 
         if let Some(client) = healthy {
+            let repair_deadline =
+                tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
             if let Some(index) = repair_candidate
                 && let Ok(mut closed) = Arc::clone(&self.inner.connections[index]).try_lock_owned()
                 && closed.is_closed()
             {
                 let pool = self.clone();
                 tokio::spawn(async move {
-                    if let Ok(replacement) = pool.reconnect_client().await {
+                    if let Ok(Ok(replacement)) =
+                        tokio::time::timeout_at(repair_deadline, pool.reconnect_client()).await
+                    {
                         *closed = replacement;
                     }
                 });
@@ -727,25 +734,30 @@ impl PostgresTenantPool {
             return Ok(client);
         }
 
+        let reconnect_deadline = tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
-            let mut client = Arc::clone(&self.inner.connections[index])
-                .lock_owned()
-                .await;
+            let connection = Arc::clone(&self.inner.connections[index]);
+            let mut client =
+                match tokio::time::timeout_at(reconnect_deadline, connection.lock_owned()).await {
+                    Ok(client) => client,
+                    Err(_) => break,
+                };
             if !client.is_closed() {
                 return Ok(client);
             }
 
-            match self.reconnect_client().await {
-                Ok(replacement) => {
+            match tokio::time::timeout_at(reconnect_deadline, self.reconnect_client()).await {
+                Ok(Ok(replacement)) => {
                     *client = replacement;
                     return Ok(client);
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     // The caller-facing contract is pool availability, not connection diagnostics.
                     // Do not log or surface reconnect errors because they can contain endpoint or
                     // credential-adjacent material; continue to any unrelated healthy pool member.
                 }
+                Err(_) => break,
             }
         }
         Err(PostgresStateError::PoolUnavailable)
