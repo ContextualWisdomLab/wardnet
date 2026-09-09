@@ -446,6 +446,11 @@ impl PostgresTenantPool {
         tenant_id: &TenantId,
         publication: &ReputationSourcePublication,
     ) -> PostgresStateResult<PublicationOutcome> {
+        if publication.audit_context.is_none() {
+            return Err(PostgresStateError::InvalidAuditContext(
+                "actor and decision attribution is required",
+            ));
+        }
         let tenant_value = tenant_id.as_str().to_owned();
         let publication = publication.clone();
         self.with_tenant_transaction(tenant_id, move |transaction| {
