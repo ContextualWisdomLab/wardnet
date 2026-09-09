@@ -689,21 +689,43 @@ impl PostgresTenantPool {
     /// Checkout the next usable pool member before starting any database operation.
     ///
     /// A failed query or transaction is never replayed on another member: its commit outcome may
-    /// be ambiguous. Checkout first scans the round-robin window without waiting so a closed or
-    /// contended slot cannot hide an unrelated already-open member. Only when no healthy member is
-    /// immediately available does it wait for slots in the same order, recheck their state under
-    /// the slot mutex, and repair a closed slot before database work. That keeps one replacement
-    /// authority per slot while avoiding head-of-line blocking on slow reconnects.
+    /// be ambiguous. Checkout first scans the complete round-robin window without waiting, holding
+    /// the first immediately usable member while noticing one closed peer. When healthy capacity
+    /// exists, a closed peer is repaired in the background only after this scan and only while that
+    /// repair task owns the peer's slot mutex, so slow reconnect cannot hide or block established
+    /// healthy capacity and concurrent checkouts cannot create competing replacements. When no
+    /// healthy member is immediately available, checkout keeps the existing blocking path: wait for
+    /// slots in round-robin order, recheck under the slot mutex, and repair before database work.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
+        let mut healthy = None;
+        let mut repair_candidate = None;
 
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
-            if let Ok(client) = Arc::clone(&self.inner.connections[index]).try_lock_owned()
-                && !client.is_closed()
-            {
-                return Ok(client);
+            if let Ok(client) = Arc::clone(&self.inner.connections[index]).try_lock_owned() {
+                if client.is_closed() {
+                    repair_candidate.get_or_insert(index);
+                } else if healthy.is_none() {
+                    healthy = Some(client);
+                }
             }
+        }
+
+        if let Some(client) = healthy {
+            if let Some(index) = repair_candidate
+                && let Ok(mut closed) =
+                    Arc::clone(&self.inner.connections[index]).try_lock_owned()
+                && closed.is_closed()
+            {
+                let pool = self.clone();
+                tokio::spawn(async move {
+                    if let Ok(replacement) = pool.reconnect_client().await {
+                        *closed = replacement;
+                    }
+                });
+            }
+            return Ok(client);
         }
 
         for offset in 0..self.inner.connections.len() {
