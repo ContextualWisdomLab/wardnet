@@ -405,7 +405,7 @@ async fn lost_pool_capacity_is_replenished_before_the_next_original_member_fails
     assert!(
         [post_loss_a.tenant_id(), post_loss_b.tenant_id(), post_loss_c.tenant_id()]
             .into_iter()
-            .all(Option::is_none),
+            .all(|tenant_id| tenant_id.is_none()),
         "replacement and surviving connections must have no tenant context before rebinding"
     );
 
