@@ -438,3 +438,58 @@ async fn all_closed_members_fail_closed_within_the_reconnect_readiness_bound() {
         "a bounded exhausted reconnect window must fail closed with stable PoolUnavailable",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn caller_cancellation_preempts_internal_reconnect_readiness_timeout() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let proxy = NewConnectionStallProxy::start(container.host_port);
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        proxy.port()
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 1)
+        .await
+        .expect("single-member loopback pool must connect through the fault proxy");
+
+    let original_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("original pool member must be reachable")
+        .backend_pid();
+
+    proxy.stall_new_connections();
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({original_pid});"),
+        ),
+        "terminate the original pooled backend before caller cancellation",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(100), pool.probe_unbound_context()).await;
+    assert!(
+        cancelled.is_err(),
+        "a caller deadline shorter than Wardnet's reconnect-readiness window must remain caller cancellation rather than become PoolUnavailable",
+    );
+
+    proxy.release_new_connections();
+    let recovered = tokio::time::timeout(Duration::from_secs(2), pool.probe_unbound_context())
+        .await
+        .expect("pool checkout must recover after the caller cancels and the proxy releases")
+        .expect("the cancelled reconnect must not poison the failed slot");
+    assert_ne!(
+        recovered.backend_pid(),
+        original_pid,
+        "recovery must use a newly established PostgreSQL backend",
+    );
+    assert_eq!(
+        recovered.tenant_id(),
+        None,
+        "recovery after caller cancellation must not leak tenant context",
+    );
+}
