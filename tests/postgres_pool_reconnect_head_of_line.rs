@@ -361,7 +361,8 @@ async fn slow_reconnect_does_not_block_an_unrelated_healthy_pool_member() {
     assert_eq!(terminated.trim(), "t");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let result = tokio::time::timeout(Duration::from_millis(750), pool.probe_unbound_context()).await;
+    let result =
+        tokio::time::timeout(Duration::from_millis(750), pool.probe_unbound_context()).await;
     proxy.release_new_connections();
 
     let probe = result
