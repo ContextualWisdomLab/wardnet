@@ -22,8 +22,7 @@ const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_
 const RUNTIME_PRINCIPAL: &str = "wardnet_commit_ambiguity_app";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 const MAX_PROTOCOL_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
-const COMMIT_UNKNOWN_DISPLAY: &str =
-    "PostgreSQL commit outcome is unknown after transport loss";
+const COMMIT_UNKNOWN_DISPLAY: &str = "PostgreSQL commit outcome is unknown after transport loss";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[repr(u8)]
@@ -71,8 +70,8 @@ struct CommitFaultProxy {
 
 impl CommitFaultProxy {
     fn start(upstream_port: u16) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .expect("commit fault proxy must bind loopback");
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("commit fault proxy must bind loopback");
         listener
             .set_nonblocking(true)
             .expect("commit fault proxy listener must become nonblocking");
@@ -106,14 +105,7 @@ impl CommitFaultProxy {
                         let completed = Arc::clone(&accept_completed);
                         let withheld = Arc::clone(&accept_withheld);
                         thread::spawn(move || {
-                            proxy_connection(
-                                client,
-                                upstream,
-                                mode,
-                                forwarded,
-                                completed,
-                                withheld,
-                            );
+                            proxy_connection(client, upstream, mode, forwarded, completed, withheld);
                         });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -220,7 +212,8 @@ fn relay_frontend(
     precommit_withheld: Arc<AtomicBool>,
     drop_after_commit: Arc<AtomicBool>,
 ) {
-    let Some(startup) = read_startup_packet(&mut client).expect("frontend startup packet must parse")
+    let Some(startup) =
+        read_startup_packet(&mut client).expect("frontend startup packet must parse")
     else {
         return;
     };
@@ -236,9 +229,8 @@ fn relay_frontend(
         };
 
         if message_type == b'Q' && simple_query_is_commit(&payload) {
-            let armed = CommitFault::from_raw(
-                mode.swap(CommitFault::PassThrough as u8, Ordering::AcqRel),
-            );
+            let armed =
+                CommitFault::from_raw(mode.swap(CommitFault::PassThrough as u8, Ordering::AcqRel));
             match armed {
                 CommitFault::DropBeforeCommit => {
                     precommit_withheld.store(true, Ordering::Release);
@@ -592,7 +584,10 @@ fn publication_with(
     )
 }
 
-async fn connect_pool(container: &PostgresContainer, proxy: &CommitFaultProxy) -> PostgresTenantPool {
+async fn connect_pool(
+    container: &PostgresContainer,
+    proxy: &CommitFaultProxy,
+) -> PostgresTenantPool {
     let dsn = format!(
         "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
         proxy.port()
@@ -707,13 +702,15 @@ async fn committed_but_ack_lost_reconciles_only_the_byte_identical_publication()
         "decision:publish-generation-9-9",
     );
     assert_conflict(
-        pool.publish_reputation_source(&tenant, &changed_evidence).await,
+        pool.publish_reputation_source(&tenant, &changed_evidence)
+            .await,
         "changed evidence must not reconcile an ambiguous commit",
     );
 
     let changed_prior = publication(None, "generation-9", 9);
     assert_conflict(
-        pool.publish_reputation_source(&tenant, &changed_prior).await,
+        pool.publish_reputation_source(&tenant, &changed_prior)
+            .await,
         "changed prior-generation expectation must not reconcile an ambiguous commit",
     );
 
@@ -726,7 +723,8 @@ async fn committed_but_ack_lost_reconciles_only_the_byte_identical_publication()
         "decision:publish-generation-9-9",
     );
     assert_conflict(
-        pool.publish_reputation_source(&tenant, &changed_actor).await,
+        pool.publish_reputation_source(&tenant, &changed_actor)
+            .await,
         "changed actor attribution must not reconcile an ambiguous commit",
     );
 
@@ -739,7 +737,8 @@ async fn committed_but_ack_lost_reconciles_only_the_byte_identical_publication()
         "decision:different-decision",
     );
     assert_conflict(
-        pool.publish_reputation_source(&tenant, &changed_decision).await,
+        pool.publish_reputation_source(&tenant, &changed_decision)
+            .await,
         "changed decision attribution must not reconcile an ambiguous commit",
     );
 
