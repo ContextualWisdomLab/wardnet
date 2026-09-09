@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use waf_ids_ai_soc::postgres_state::{
-    PostgresTenantPool, PublicationAuditContext, PublicationOutcome, ReputationSourcePublication,
-    TenantId,
+    PostgresStateError, PostgresTenantPool, PublicationAuditContext, PublicationOutcome,
+    ReputationSourcePublication, TenantId,
 };
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
@@ -318,5 +318,23 @@ async fn typed_repository_uses_surviving_pool_member_after_one_backend_is_lost()
         counts.trim(),
         "1:1:1:1",
         "healthy-member failover must expose exactly one complete attributable publication"
+    );
+
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({second_pid});"),
+        ),
+        "terminate the remaining pooled backend",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let unavailable = pool
+        .current_reputation_source_publication(&tenant, "urlhaus")
+        .await;
+    assert!(
+        matches!(unavailable, Err(PostgresStateError::PoolUnavailable)),
+        "a pool with no open members must fail closed with a stable typed outcome"
     );
 }
