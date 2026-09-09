@@ -252,7 +252,7 @@ fn publication() -> ReputationSourcePublication {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn typed_repository_uses_surviving_pool_member_after_one_backend_is_lost() {
+async fn typed_repository_remains_available_after_one_backend_is_lost() {
     let Some(container) = prepare_database() else {
         return;
     };
@@ -293,15 +293,13 @@ async fn typed_repository_uses_surviving_pool_member_after_one_backend_is_lost()
     let outcome = pool
         .publish_reputation_source(&tenant, &publication())
         .await
-        .expect(
-            "one lost pool member must not make the typed repository unavailable while another member is healthy",
-        );
+        .expect("one lost pool member must not make the typed repository unavailable");
     assert_eq!(outcome, PublicationOutcome::Committed);
 
     let current = pool
         .current_reputation_source_publication(&tenant, "urlhaus")
         .await
-        .expect("the surviving member must read the committed aggregate")
+        .expect("available capacity must read the committed aggregate")
         .expect("the committed aggregate must exist");
     assert_eq!(current.source_generation(), "generation-8");
     assert_eq!(current.actor_subject_id(), "subject:pool-loss");
@@ -317,7 +315,224 @@ async fn typed_repository_uses_surviving_pool_member_after_one_backend_is_lost()
     assert_eq!(
         counts.trim(),
         "1:1:1:1",
-        "healthy-member failover must expose exactly one complete attributable publication"
+        "member loss must expose exactly one complete attributable publication"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconnect_failure_preserves_healthy_capacity_and_fails_closed_without_spinning() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("two-member loopback pool must connect");
+
+    let first_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("first original pool member must be reachable")
+        .backend_pid();
+    let second_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("second original pool member must be reachable")
+        .backend_pid();
+    assert_ne!(first_pid, second_pid);
+
+    assert_success(
+        psql(
+            &container,
+            &format!("ALTER ROLE {RUNTIME_PRINCIPAL} NOLOGIN;"),
+        ),
+        "disable only future runtime logins",
+    );
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({first_pid});"),
+        ),
+        "terminate first pooled backend while reconnect is unavailable",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let survivor = tokio::time::timeout(Duration::from_secs(5), pool.probe_unbound_context())
+        .await
+        .expect("one failed reconnect attempt must not spin")
+        .expect("an unrelated healthy member must remain usable when reconnect fails");
+    assert_eq!(survivor.backend_pid(), second_pid);
+    assert_eq!(survivor.tenant_id(), None);
+
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({second_pid});"),
+        ),
+        "terminate the remaining original backend while reconnect is unavailable",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let unavailable = tokio::time::timeout(Duration::from_secs(5), pool.probe_unbound_context())
+        .await
+        .expect("bounded reconnect attempts must return rather than spin");
+    assert!(
+        matches!(unavailable, Err(PostgresStateError::PoolUnavailable)),
+        "no healthy or replenished member must fail closed with stable PoolUnavailable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_checkouts_create_one_replacement_for_one_failed_slot() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 1)
+        .await
+        .expect("single-member loopback pool must connect");
+    let original_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("original pool member must be reachable")
+        .backend_pid();
+
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({original_pid});"),
+        ),
+        "terminate the single pooled backend",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let task_pool = pool.clone();
+        tasks.push(tokio::spawn(async move {
+            task_pool.probe_unbound_context().await
+        }));
+    }
+
+    let mut replacement_pid = None;
+    for task in tasks {
+        let probe = task
+            .await
+            .expect("concurrent checkout task must join")
+            .expect("concurrent checkout must use replenished capacity");
+        assert_ne!(probe.backend_pid(), original_pid);
+        assert_eq!(probe.tenant_id(), None);
+        if let Some(expected) = replacement_pid {
+            assert_eq!(
+                probe.backend_pid(),
+                expected,
+                "one failed slot must have exactly one replacement authority"
+            );
+        } else {
+            replacement_pid = Some(probe.backend_pid());
+        }
+    }
+
+    let active_runtime_connections = assert_success(
+        psql(
+            &container,
+            &format!(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = '{RUNTIME_PRINCIPAL}';"
+            ),
+        ),
+        "count runtime connections after concurrent replenishment",
+    );
+    assert_eq!(
+        active_runtime_connections.trim(),
+        "1",
+        "concurrent checkouts must not create duplicate replacement connections for one slot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_pool_capacity_is_replenished_before_the_next_original_member_fails() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("two-member loopback pool must connect");
+
+    let first_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("first original pool member must be reachable")
+        .backend_pid();
+    let second_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("second original pool member must be reachable")
+        .backend_pid();
+    assert_ne!(
+        first_pid, second_pid,
+        "fixture requires two physical backends"
+    );
+
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &publication())
+            .await
+            .expect("initial publication must commit before failure injection"),
+        PublicationOutcome::Committed
+    );
+
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({first_pid});"),
+        ),
+        "terminate first original pooled backend",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let post_loss_a = pool
+        .probe_unbound_context()
+        .await
+        .expect("a healthy member must remain usable after the first loss");
+    let post_loss_b = pool
+        .probe_unbound_context()
+        .await
+        .expect("pool checkout must restore the lost slot without process restart");
+    let post_loss_c = pool
+        .probe_unbound_context()
+        .await
+        .expect("restored capacity must remain available");
+    let replacement_pid = [
+        post_loss_a.backend_pid(),
+        post_loss_b.backend_pid(),
+        post_loss_c.backend_pid(),
+    ]
+    .into_iter()
+    .find(|pid| *pid != first_pid && *pid != second_pid)
+    .expect("one observed backend must be a replacement for the terminated member");
+    assert!(
+        [
+            post_loss_a.tenant_id(),
+            post_loss_b.tenant_id(),
+            post_loss_c.tenant_id(),
+        ]
+        .into_iter()
+        .all(|tenant_id| tenant_id.is_none()),
+        "replacement and surviving connections must have no tenant context before rebinding"
     );
 
     let terminated = assert_success(
@@ -325,16 +540,37 @@ async fn typed_repository_uses_surviving_pool_member_after_one_backend_is_lost()
             &container,
             &format!("SELECT pg_terminate_backend({second_pid});"),
         ),
-        "terminate the remaining pooled backend",
+        "terminate second original pooled backend",
     );
     assert_eq!(terminated.trim(), "t");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let unavailable = pool
+    let current = pool
         .current_reputation_source_publication(&tenant, "urlhaus")
-        .await;
-    assert!(
-        matches!(unavailable, Err(PostgresStateError::PoolUnavailable)),
-        "a pool with no open members must fail closed with a stable typed outcome"
+        .await
+        .expect("replacement capacity must preserve service after both original members are gone")
+        .expect("the prior complete publication must remain authoritative");
+    assert_eq!(current.source_generation(), "generation-8");
+
+    let live = pool
+        .probe_unbound_context()
+        .await
+        .expect("replacement connection must remain usable after the second original loss");
+    assert_ne!(live.backend_pid(), first_pid);
+    assert_ne!(live.backend_pid(), second_pid);
+    assert_eq!(live.tenant_id(), None);
+    assert!(replacement_pid != first_pid && replacement_pid != second_pid);
+
+    let counts = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_generation), (SELECT count(*) FROM public.reputation_source_publication), (SELECT count(*) FROM public.reputation_source_publication_head), (SELECT count(*) FROM public.reputation_source_publication_audit));",
+        ),
+        "inspect publication residue after sequential member loss",
+    );
+    assert_eq!(
+        counts.trim(),
+        "1:1:1:1",
+        "capacity replenishment must not replay the committed publication"
     );
 }
