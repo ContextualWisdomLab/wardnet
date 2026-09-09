@@ -18,6 +18,7 @@ const AUDIT_MIGRATION_PATH: &str = "migrations/0005_reputation_source_publicatio
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
 const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_principal.sql";
 const RUNTIME_PRINCIPAL: &str = "wardnet_repository_app";
+const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct PostgresContainer {
@@ -194,12 +195,16 @@ fn start_postgres() -> Option<PostgresContainer> {
             .stderr(Stdio::null())
             .status()
             .expect("pg_isready command must start");
-        if status.success() {
+        let logs = run_docker(&["logs", &name], None);
+        let final_server_started = logs.status.success()
+            && (String::from_utf8_lossy(&logs.stdout).contains(FINAL_STARTUP_MARKER)
+                || String::from_utf8_lossy(&logs.stderr).contains(FINAL_STARTUP_MARKER));
+        if status.success() && final_server_started {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "PostgreSQL 18.4 container did not become ready within 60 seconds"
+            "PostgreSQL 18.4 final server did not become ready within 60 seconds"
         );
         thread::sleep(Duration::from_millis(500));
     }
