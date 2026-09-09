@@ -699,9 +699,10 @@ impl PostgresTenantPool {
     /// outcome can be ambiguous. Every selected driver-known-open session must first answer
     /// PostgreSQL's protocol-level liveness check. The fixed reconnect-readiness window is divided
     /// across the remaining round-robin candidates, so one half-open socket cannot consume the
-    /// complete checkout budget and hide unrelated healthy capacity. At most one failed member per
-    /// checkout is replaced in the background under a fresh bounded reconnect window; exhaustion
-    /// fails closed with [`PostgresStateError::PoolUnavailable`] before Wardnet state work begins.
+    /// complete checkout budget and hide unrelated healthy capacity. A driver-known-closed or
+    /// promptly failed session may be synchronously replaced inside that same candidate budget so
+    /// an explicit caller retry retains the pre-existing reconnect contract. A timed-out half-open
+    /// member is repaired only in the background and is never used to replay started work.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         let checkout_deadline = tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
@@ -726,16 +727,26 @@ impl PostgresTenantPool {
                 };
 
             if client.is_closed() {
-                if !repair_started {
-                    self.spawn_bounded_repair(client);
-                    repair_started = true;
+                if let Ok(Ok(replacement)) =
+                    tokio::time::timeout_at(candidate_deadline, self.reconnect_client()).await
+                {
+                    *client = replacement;
+                    return Ok(client);
                 }
                 continue;
             }
 
             match tokio::time::timeout_at(candidate_deadline, client.check_connection()).await {
                 Ok(Ok(())) => return Ok(client),
-                Ok(Err(_)) | Err(_) => {
+                Ok(Err(_)) => {
+                    if let Ok(Ok(replacement)) =
+                        tokio::time::timeout_at(candidate_deadline, self.reconnect_client()).await
+                    {
+                        *client = replacement;
+                        return Ok(client);
+                    }
+                }
+                Err(_) => {
                     if !repair_started {
                         self.spawn_bounded_repair(client);
                         repair_started = true;
