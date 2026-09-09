@@ -362,7 +362,10 @@ async fn lost_pool_capacity_is_replenished_before_the_next_original_member_fails
         .await
         .expect("second original pool member must be reachable")
         .backend_pid();
-    assert_ne!(first_pid, second_pid, "fixture requires two physical backends");
+    assert_ne!(
+        first_pid, second_pid,
+        "fixture requires two physical backends"
+    );
 
     let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
     assert_eq!(
@@ -403,9 +406,13 @@ async fn lost_pool_capacity_is_replenished_before_the_next_original_member_fails
     .find(|pid| *pid != first_pid && *pid != second_pid)
     .expect("one observed backend must be a replacement for the terminated member");
     assert!(
-        [post_loss_a.tenant_id(), post_loss_b.tenant_id(), post_loss_c.tenant_id()]
-            .into_iter()
-            .all(|tenant_id| tenant_id.is_none()),
+        [
+            post_loss_a.tenant_id(),
+            post_loss_b.tenant_id(),
+            post_loss_c.tenant_id(),
+        ]
+        .into_iter()
+        .all(|tenant_id| tenant_id.is_none()),
         "replacement and surviving connections must have no tenant context before rebinding"
     );
 
