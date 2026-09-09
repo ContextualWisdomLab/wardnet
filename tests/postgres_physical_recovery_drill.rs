@@ -96,9 +96,30 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
         "corrupt_manifest_failed_closed",
         "missing_wal_failed_closed",
         "unreachable_target_failed_closed",
-        "partial_schema_or_rls_state_failed_closed",
-        "unsafe_role_mapping_failed_closed",
+        "partial_role_or_rls_state_failed_closed",
     ] {
         required_true(hostile, key);
     }
+
+    let role_guard = root.join("scripts/postgres_recovery_role_mapping_guard.sh");
+    assert!(
+        role_guard.is_file(),
+        "recovery role-mapping guard must exist"
+    );
+    let role_guard_output = Command::new("bash")
+        .arg(&role_guard)
+        .env("WARDNET_POSTGRES_IMAGE", "postgres:18.4-bookworm")
+        .output()
+        .expect("recovery role-mapping guard must execute");
+    assert!(
+        role_guard_output.status.success(),
+        "recovery role-mapping guard failed: {}",
+        String::from_utf8_lossy(&role_guard_output.stderr)
+    );
+    let role_guard_receipt: Value = serde_json::from_slice(&role_guard_output.stdout)
+        .expect("recovery role-mapping guard stdout must be one JSON receipt");
+    required_true(
+        &role_guard_receipt,
+        "unsafe_role_mapping_failed_closed",
+    );
 }
