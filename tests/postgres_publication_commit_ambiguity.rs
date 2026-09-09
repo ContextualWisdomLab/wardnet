@@ -105,7 +105,9 @@ impl CommitFaultProxy {
                         let completed = Arc::clone(&accept_completed);
                         let withheld = Arc::clone(&accept_withheld);
                         thread::spawn(move || {
-                            proxy_connection(client, upstream, mode, forwarded, completed, withheld);
+                            proxy_connection(
+                                client, upstream, mode, forwarded, completed, withheld,
+                            );
                         });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
