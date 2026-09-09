@@ -1,10 +1,10 @@
 -- Attributable audit evidence for tenant-scoped reputation-source publication.
 --
 -- Audit evidence is emitted by an AFTER INSERT trigger inside the same durable
--- transaction as the immutable publication and last-known-good head. The typed
--- repository supplies actor/decision references through transaction-local GUCs;
--- unaudited legacy calls remain compatible while production authority stays
--- disabled. Exact replay performs no INSERT and therefore cannot duplicate audit.
+-- transaction as the immutable publication and last-known-good head. Every
+-- schema-version-5 publication requires both actor and decision references through
+-- transaction-local GUCs. Exact replay performs no INSERT and therefore cannot
+-- duplicate audit evidence.
 --
 -- Schema version 4 is the sole supported input. Startup migration serialization
 -- remains owned by deploy/postgresql/reputation_state_migrate.sql.
@@ -84,10 +84,6 @@ DECLARE
     actor_subject text := nullif(current_setting('wardnet.actor_subject_id', true), '');
     publication_decision text := nullif(current_setting('wardnet.decision_id', true), '');
 BEGIN
-    IF actor_subject IS NULL AND publication_decision IS NULL THEN
-        RETURN NEW;
-    END IF;
-
     IF actor_subject IS NULL OR publication_decision IS NULL THEN
         RAISE EXCEPTION USING
             ERRCODE = '42501',
@@ -146,6 +142,6 @@ COMMENT ON COLUMN public.reputation_source_publication_audit.actor_subject_id IS
 COMMENT ON COLUMN public.reputation_source_publication_audit.decision_id IS
     'Validated decision reference that caused the immutable publication.';
 COMMENT ON FUNCTION public.wardnet_record_reputation_source_publication_audit() IS
-    'Records optional transaction-local actor/decision attribution atomically with a newly inserted publication; exact replay emits no duplicate audit.';
+    'Requires transaction-local actor/decision attribution and records it atomically with each newly inserted publication; exact replay emits no duplicate audit.';
 
 COMMIT;
