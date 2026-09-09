@@ -94,6 +94,20 @@ When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling fil
 4. Check `GET /api/commercial/readiness`.
 5. Export `GET /api/support-bundle` for buyer lab evidence or support handoff.
 
+## Staged PostgreSQL Reputation-State Session Liveness
+
+The PostgreSQL reputation-state adapter is still stacked feature-branch evidence and is **not** protected production authority. `StateAuthority::Postgres` remains fail closed until the complete durable-state stack is integrated and released. The following contract describes the implemented adapter behavior that must survive that integration.
+
+Before any Wardnet PostgreSQL query or transaction begins, the selected pooled session must answer a non-mutating PostgreSQL protocol preflight inside the repository-owned checkout/readiness window. TCP establishment, kernel keepalive state, and `Client::is_closed()` are insufficient by themselves because a socket can remain open while PostgreSQL protocol responses stop progressing.
+
+A failed or timed-out preflight occurs before Wardnet database work starts. The pool removes that client from its slot before releasing the slot mutex, may continue to an unrelated established healthy member, and may later create one bounded replacement under the same per-slot mutex. A client that missed a protocol response is not returned to service. If every candidate fails to prove pre-operation protocol progress within the checkout window, the adapter returns typed `PoolUnavailable` and must not report readiness.
+
+Once a query, publication, transaction, rollback, or COMMIT has begun, the pre-operation failover rule no longer applies. Do not move or automatically replay started work on another pool member. In particular, a closed transport while Wardnet is awaiting COMMIT remains `CommitOutcomeUnknown`; reconciliation must use the existing explicit byte-identical publication semantics rather than elapsed time or an automatic retry.
+
+Operational checks for this boundary are executable in `tests/postgres_half_open_liveness.rs` against real `postgres:18.4-bookworm` through a loopback protocol fault proxy. The acceptance covers one selected established stream with withheld backend responses, all-stream fail-closed behavior, recovery after the fault is cleared, tenant-context hygiene, bounded replacement count, a 40 ms slow-valid control, and 200 unexcluded healthy database/proxy samples enforcing p95 at or below 20 ms. A failure of any of those cases is a state-adapter readiness defect, not evidence that the guard should be weakened.
+
+PostgreSQL DSN/TLS construction remains inside the credential/bootstrap boundary. Do not add DSN getters, logs, support-bundle fields, Context Graph projections, cross-service SQL, or foreign-owner state as a workaround for connection recovery.
+
 ## Production Boundaries
 
 This baseline is suitable for local and controlled lab deployments. Internet-facing use still requires:

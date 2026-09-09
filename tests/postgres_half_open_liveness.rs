@@ -21,6 +21,8 @@ const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_
 const RUNTIME_PRINCIPAL: &str = "wardnet_half_open_liveness_app";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 const BUYER_PATH_GUARD: Duration = Duration::from_millis(750);
+const BUYER_PATH_P95_BUDGET: Duration = Duration::from_millis(20);
+const BUYER_PATH_P95_SAMPLES: usize = 200;
 const SLOW_VALID_DELAY_MS: u64 = 40;
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -383,6 +385,48 @@ fn prepare_database() -> Option<PostgresContainer> {
         "map external LOGIN to bounded runtime capability",
     );
     Some(container)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn healthy_preflight_stays_within_buyer_path_p95_budget() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let proxy = BackendBlackholeProxy::start(container.host_port);
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        proxy.port()
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("loopback performance pool must connect through the real proxy");
+
+    let mut samples = Vec::with_capacity(BUYER_PATH_P95_SAMPLES);
+    for _ in 0..BUYER_PATH_P95_SAMPLES {
+        let started = Instant::now();
+        let probe = pool
+            .probe_unbound_context()
+            .await
+            .expect("healthy PostgreSQL preflight/probe must succeed");
+        samples.push(started.elapsed());
+        assert!(
+            probe.tenant_id().is_none(),
+            "performance sampling must preserve unbound tenant-context hygiene"
+        );
+    }
+
+    samples.sort_unstable();
+    let p95_index = (BUYER_PATH_P95_SAMPLES * 95).div_ceil(100) - 1;
+    let p95 = samples[p95_index];
+    assert!(
+        p95 <= BUYER_PATH_P95_BUDGET,
+        "real PostgreSQL preflight plus probe p95 {p95:?} across {BUYER_PATH_P95_SAMPLES} unexcluded samples exceeds {BUYER_PATH_P95_BUDGET:?}"
+    );
+    assert_eq!(
+        proxy.connection_count(),
+        2,
+        "healthy buyer-path sampling must not churn physical PostgreSQL sessions"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
