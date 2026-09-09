@@ -686,15 +686,26 @@ impl PostgresTenantPool {
         })
     }
 
-    /// Checkout the next driver-open pool member before starting any database operation.
+    /// Checkout the next usable pool member before starting any database operation.
     ///
     /// A failed query or transaction is never replayed on another member: its commit outcome may
-    /// be ambiguous. A closed slot is repaired under that slot's mutex before any database work,
-    /// so concurrent checkouts cannot create competing replacements for one failed member. One
-    /// checkout attempts each closed slot at most once; a failed reconnect therefore falls through
-    /// to unrelated healthy members without spinning.
+    /// be ambiguous. Checkout first scans the round-robin window without waiting so a closed or
+    /// contended slot cannot hide an unrelated already-open member. Only when no healthy member is
+    /// immediately available does it wait for slots in the same order, recheck their state under
+    /// the slot mutex, and repair a closed slot before database work. That keeps one replacement
+    /// authority per slot while avoiding head-of-line blocking on slow reconnects.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
+
+        for offset in 0..self.inner.connections.len() {
+            let index = start.wrapping_add(offset) % self.inner.connections.len();
+            if let Ok(client) = Arc::clone(&self.inner.connections[index]).try_lock_owned()
+                && !client.is_closed()
+            {
+                return Ok(client);
+            }
+        }
+
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
             let mut client = Arc::clone(&self.inner.connections[index])
