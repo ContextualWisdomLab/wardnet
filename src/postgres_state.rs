@@ -704,8 +704,7 @@ impl PostgresTenantPool {
     /// fails closed with [`PostgresStateError::PoolUnavailable`] before Wardnet state work begins.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
-        let checkout_deadline =
-            tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
+        let checkout_deadline = tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
         let mut repair_started = false;
 
         for offset in 0..self.inner.connections.len() {
@@ -720,15 +719,11 @@ impl PostgresTenantPool {
             let candidate_deadline = now + candidate_budget;
             let index = start.wrapping_add(offset) % self.inner.connections.len();
             let connection = Arc::clone(&self.inner.connections[index]);
-            let mut client = match tokio::time::timeout_at(
-                candidate_deadline,
-                connection.lock_owned(),
-            )
-            .await
-            {
-                Ok(client) => client,
-                Err(_) => continue,
-            };
+            let mut client =
+                match tokio::time::timeout_at(candidate_deadline, connection.lock_owned()).await {
+                    Ok(client) => client,
+                    Err(_) => continue,
+                };
 
             if client.is_closed() {
                 if !repair_started {
