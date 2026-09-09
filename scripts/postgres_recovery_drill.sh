@@ -269,8 +269,8 @@ docker exec -u postgres "$source_container" \
 docker exec -u postgres "$source_container" pg_verifybackup /backup/base >/dev/null
 
 manifest="$(docker exec "$source_container" cat /backup/base/backup_manifest)"
-backup_start_lsn="$(printf '%s\n' "$manifest" | awk -F'"' '/"Start-LSN"/ {print $4; exit}')"
-backup_end_lsn="$(printf '%s\n' "$manifest" | awk -F'"' '/"End-LSN"/ {print $4; exit}')"
+backup_start_lsn="$(printf '%s\n' "$manifest" | awk -F'"' '/"Start-LSN"/ {for (i=1; i<=NF; i++) if ($i == "Start-LSN") {print $(i+2); exit}}')"
+backup_end_lsn="$(printf '%s\n' "$manifest" | awk -F'"' '/"End-LSN"/ {for (i=1; i<=NF; i++) if ($i == "End-LSN") {print $(i+2); exit}}')"
 [[ -n "$backup_start_lsn" && -n "$backup_end_lsn" ]] \
   || fail "backup manifest did not expose WAL range identity"
 backup_manifest_sha256="$(
