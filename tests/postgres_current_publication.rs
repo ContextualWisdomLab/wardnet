@@ -234,8 +234,9 @@ fn prepare_database() -> Option<PostgresContainer> {
         ),
         "create externally managed runtime LOGIN",
     );
-    let mapper = std::fs::read_to_string("deploy/postgresql/reputation_state_runtime_principal.sql")
-        .expect("runtime principal mapper must exist");
+    let mapper =
+        std::fs::read_to_string("deploy/postgresql/reputation_state_runtime_principal.sql")
+            .expect("runtime principal mapper must exist");
     assert_success(
         psql_with_runtime_principal(&container, &mapper),
         "map external LOGIN to bounded runtime capability",
@@ -322,7 +323,10 @@ async fn typed_read_returns_only_complete_last_known_good_publication() {
     assert_eq!(current.evidence_snapshot_ref(), "snapshot-generation-9");
     assert_eq!(current.completeness_ref(), "complete-generation-9");
     assert_eq!(current.producer_lifecycle_ref(), "lifecycle-generation-9");
-    assert_eq!(current.actor_subject_id(), "subject:current-publication-test");
+    assert_eq!(
+        current.actor_subject_id(),
+        "subject:current-publication-test"
+    );
     assert_eq!(current.decision_id(), "decision:generation-9");
 
     assert!(
