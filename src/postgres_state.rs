@@ -307,9 +307,13 @@ impl UnboundContextProbe {
     }
 }
 
+type ReconnectFuture = Pin<Box<dyn Future<Output = PostgresStateResult<Client>> + Send>>;
+type ReconnectFactory = Box<dyn FnMut() -> ReconnectFuture + Send>;
+
 struct PoolInner {
     connections: Vec<Arc<Mutex<Client>>>,
     next_connection: AtomicUsize,
+    reconnect: Mutex<ReconnectFactory>,
 }
 
 /// Small async PostgreSQL connection pool with transaction-local tenant binding.
@@ -480,13 +484,30 @@ impl<'client> TenantTransaction<'client> {
     }
 }
 
+async fn connect_client<T>(config: &Config, tls: T) -> PostgresStateResult<Client>
+where
+    T: MakeTlsConnect<Socket> + Send + 'static,
+    T::TlsConnect: Send,
+    T::Stream: Send + 'static,
+    <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    let (client, connection) = config.connect(tls).await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(client)
+}
+
 impl PostgresTenantPool {
     /// Connect a fixed-size pool with a caller-supplied TLS implementation.
     ///
     /// The DSN is intentionally an argument rather than environment authority; callers must
     /// obtain secret material through Wardnet's credential boundary. Passing [`NoTls`] here is
     /// not a production policy decision; the only Wardnet convenience that does so is the
-    /// loopback-only integration fixture constructor.
+    /// loopback-only integration fixture constructor. Replenishment retains a private parsed
+    /// [`Config`] plus the caller's TLS factory for the pool lifetime. That intentionally extends
+    /// connection secret material only as an in-process reconnect capability; it is never exposed
+    /// through getters, logs, events, runtime configuration, or security evidence.
     pub(crate) async fn connect_with_tls<T>(
         dsn: &str,
         pool_size: usize,
@@ -502,19 +523,26 @@ impl PostgresTenantPool {
             return Err(PostgresStateError::InvalidPoolSize);
         }
 
+        let config = dsn.parse::<Config>()?;
         let mut connections = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            let (client, connection) = tokio_postgres::connect(dsn, tls.clone()).await?;
-            tokio::spawn(async move {
-                let _ = connection.await;
-            });
+            let client = connect_client(&config, tls.clone()).await?;
             connections.push(Arc::new(Mutex::new(client)));
         }
+
+        let reconnect_config = config;
+        let reconnect_tls = tls;
+        let reconnect: ReconnectFactory = Box::new(move || {
+            let config = reconnect_config.clone();
+            let tls = reconnect_tls.clone();
+            Box::pin(async move { connect_client(&config, tls).await })
+        });
 
         Ok(Self {
             inner: Arc::new(PoolInner {
                 connections,
                 next_connection: AtomicUsize::new(0),
+                reconnect: Mutex::new(reconnect),
             }),
         })
     }
@@ -661,19 +689,42 @@ impl PostgresTenantPool {
     /// Checkout the next driver-open pool member before starting any database operation.
     ///
     /// A failed query or transaction is never replayed on another member: its commit outcome may
-    /// be ambiguous. This method skips only clients that tokio-postgres already reports closed.
+    /// be ambiguous. A closed slot is repaired under that slot's mutex before any database work,
+    /// so concurrent checkouts cannot create competing replacements for one failed member. One
+    /// checkout attempts each closed slot at most once; a failed reconnect therefore falls through
+    /// to unrelated healthy members without spinning.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
-            let client = Arc::clone(&self.inner.connections[index])
+            let mut client = Arc::clone(&self.inner.connections[index])
                 .lock_owned()
                 .await;
             if !client.is_closed() {
                 return Ok(client);
             }
+
+            match self.reconnect_client().await {
+                Ok(replacement) => {
+                    *client = replacement;
+                    return Ok(client);
+                }
+                Err(_) => {
+                    // The caller-facing contract is pool availability, not connection diagnostics.
+                    // Do not log or surface reconnect errors because they can contain endpoint or
+                    // credential-adjacent material; continue to any unrelated healthy pool member.
+                }
+            }
         }
         Err(PostgresStateError::PoolUnavailable)
+    }
+
+    async fn reconnect_client(&self) -> PostgresStateResult<Client> {
+        let future = {
+            let mut reconnect = self.inner.reconnect.lock().await;
+            (reconnect)()
+        };
+        future.await
     }
 }
 
