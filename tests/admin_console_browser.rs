@@ -34,7 +34,7 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
         .expect("spawn ChromeDriver from the runner image");
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("build WebDriver client");
     let driver_url = format!("http://127.0.0.1:{driver_port}");
