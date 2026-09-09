@@ -348,10 +348,7 @@ async fn typed_repository_refuses_unaudited_publication_without_residue() {
     let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
 
     let unaudited = pool
-        .publish_reputation_source(
-            &tenant,
-            &unaudited_publication(None, "generation-8", 8),
-        )
+        .publish_reputation_source(&tenant, &unaudited_publication(None, "generation-8", 8))
         .await;
     assert!(
         matches!(unaudited, Err(PostgresStateError::InvalidAuditContext(_))),
