@@ -13,6 +13,7 @@ const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publ
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
 const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_principal.sql";
 const RUNTIME_PRINCIPAL: &str = "wardnet_app";
+const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct PostgresContainer {
@@ -144,6 +145,15 @@ fn published_port(name: &str) -> u16 {
         .expect("published PostgreSQL port must be numeric")
 }
 
+fn final_startup_announced(name: &str) -> bool {
+    let logs = run_docker(&["logs", name], None);
+    if !logs.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&logs.stdout).contains(FINAL_STARTUP_MARKER)
+        || String::from_utf8_lossy(&logs.stderr).contains(FINAL_STARTUP_MARKER)
+}
+
 fn start_postgres() -> PostgresContainer {
     let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = format!(
@@ -169,6 +179,7 @@ fn start_postgres() -> PostgresContainer {
 
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
+        let final_startup = final_startup_announced(&name);
         let status = Command::new("docker")
             .args([
                 "exec",
@@ -183,12 +194,12 @@ fn start_postgres() -> PostgresContainer {
             .stderr(Stdio::null())
             .status()
             .expect("pg_isready command must start");
-        if status.success() {
+        if final_startup && status.success() {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "PostgreSQL 18.4 container did not become ready within 60 seconds"
+            "PostgreSQL 18.4 final server did not become ready within 60 seconds"
         );
         thread::sleep(Duration::from_millis(500));
     }
