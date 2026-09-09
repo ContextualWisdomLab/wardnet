@@ -13,6 +13,8 @@ const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
 const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
+const VERSION_MIGRATION_PATH: &str = "migrations/0004_reputation_state_schema_version.sql";
+const AUDIT_MIGRATION_PATH: &str = "migrations/0005_reputation_source_publication_audit.sql";
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
 const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_principal.sql";
 const RUNTIME_PRINCIPAL: &str = "wardnet_repository_app";
@@ -200,6 +202,8 @@ fn prepare_database() -> Option<PostgresContainer> {
         (GENERATION_MIGRATION_PATH, "apply generation migration"),
         (ADMISSION_MIGRATION_PATH, "apply admission migration"),
         (PUBLICATION_MIGRATION_PATH, "apply publication migration"),
+        (VERSION_MIGRATION_PATH, "apply schema-version migration"),
+        (AUDIT_MIGRATION_PATH, "apply publication-audit migration"),
         (ROLE_INSTALLER_PATH, "install capability roles"),
     ] {
         let sql = std::fs::read_to_string(path).expect("PostgreSQL fixture SQL must exist");
