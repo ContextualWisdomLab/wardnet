@@ -109,6 +109,7 @@ fn start_postgres() -> Option<PostgresContainer> {
     let available = Command::new("docker")
         .arg("version")
         .arg("--format")
+        .arg("{{.Server.Version}}")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
