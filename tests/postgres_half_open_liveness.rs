@@ -431,7 +431,7 @@ async fn established_half_open_session_cannot_stall_healthy_pool_capacity_or_all
     assert!(slow_valid.tenant_id().is_none());
     proxy.set_backend_delay(0);
 
-    proxy.blackhole_connection(1);
+    proxy.blackhole_connection(2);
     let selective = tokio::time::timeout(BUYER_PATH_GUARD, pool.probe_unbound_context()).await;
     let selective = selective.expect(
         "an established driver-known-open session with no PostgreSQL protocol progress must not hang checkout beyond the buyer-path liveness bound",
@@ -441,8 +441,8 @@ async fn established_half_open_session_cannot_stall_healthy_pool_capacity_or_all
     );
     assert_ne!(
         selective.backend_pid(),
-        first.backend_pid(),
-        "the blackholed first physical runtime session must not execute the Wardnet probe"
+        second.backend_pid(),
+        "the selected blackholed physical runtime session must not execute the Wardnet probe"
     );
     assert!(selective.tenant_id().is_none());
 
