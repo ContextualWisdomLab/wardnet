@@ -2943,7 +2943,7 @@ main{padding:20px;max-width:1600px;margin:0 auto}
 .tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 .tile .label{font-size:var(--fs-cap);color:var(--sub);text-transform:uppercase;letter-spacing:.04em}
 .tile .metric{font-size:var(--fs-metric);font-weight:700;margin-top:4px;word-break:break-word}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;align-items:start}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;align-items:start}
 section.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 section.card h2{font-size:var(--fs-h2);margin:0 0 12px}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -4723,7 +4723,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &empty_feed,
-            ),
+            )
         )
         .await;
         assert_eq!(invalid_feed.status(), StatusCode::BAD_REQUEST);
@@ -4899,7 +4899,7 @@ mod tests {
                 "/api/threat-feeds/import/phishing-database",
                 Some("secret"),
                 &invalid_request,
-            ),
+            )
         )
         .await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
@@ -4912,7 +4912,7 @@ mod tests {
                     "/api/threat-feeds/import/phishing-database",
                     Some("secret"),
                     &payload,
-                ),
+                )
             )
             .await,
         )
@@ -5031,7 +5031,7 @@ mod tests {
                 "/api/threat-feeds/import/phishing-database",
                 Some("secret"),
                 &payload,
-            ),
+            )
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -5108,7 +5108,7 @@ mod tests {
                 "/api/threat-intel/cisa-kev",
                 Some("secret"),
                 &invalid_request,
-            ),
+            )
         )
         .await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
@@ -5121,7 +5121,7 @@ mod tests {
                     "/api/threat-intel/cisa-kev",
                     Some("secret"),
                     &payload,
-                ),
+                )
             )
             .await,
         )
@@ -5206,7 +5206,7 @@ mod tests {
                 "/api/threat-intel/cisa-kev",
                 None,
                 &kev_import_request(),
-            ),
+            )
         )
         .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -5254,7 +5254,7 @@ mod tests {
                 "/api/threat-intel/cisa-kev",
                 Some("secret"),
                 &payload,
-            ),
+            )
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -5318,7 +5318,7 @@ mod tests {
                 "/api/threat-intel/cisa-kev",
                 Some("secret"),
                 &payload,
-            ),
+            )
         )
         .await;
         assert_eq!(imported.status(), StatusCode::CREATED);
@@ -5390,7 +5390,7 @@ mod tests {
                 "/api/threat-intel/cisa-kev",
                 Some("secret"),
                 &payload,
-            ),
+            )
         )
         .await;
         assert_eq!(first_import.status(), StatusCode::CREATED);
@@ -5402,7 +5402,7 @@ mod tests {
                 "/api/threat-intel/cisa-kev",
                 Some("secret"),
                 &payload,
-            ),
+            )
         )
         .await;
         assert_eq!(second_import.status(), StatusCode::CREATED);
@@ -5457,7 +5457,7 @@ mod tests {
                     "/api/threat-feeds/import",
                     Some("secret"),
                     feed,
-                ),
+                )
             )
             .await;
             assert_eq!(imported.status(), StatusCode::CREATED);
@@ -5488,7 +5488,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &feed_a_refresh,
-            ),
+            )
         )
         .await;
         assert_eq!(refreshed.status(), StatusCode::CREATED);
@@ -5515,7 +5515,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &feed_b_refresh,
-            ),
+            )
         )
         .await;
         assert_eq!(refreshed.status(), StatusCode::CREATED);
@@ -5554,7 +5554,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &feed,
-            ),
+            )
         )
         .await;
         assert_eq!(imported.status(), StatusCode::CREATED);
@@ -5586,7 +5586,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &refresh,
-            ),
+            )
         )
         .await;
         assert_eq!(refreshed.status(), StatusCode::CREATED);
@@ -5618,7 +5618,7 @@ mod tests {
                 "/api/threats",
                 Some("secret"),
                 &operator_indicator,
-            ),
+            )
         )
         .await;
         assert_eq!(created.status(), StatusCode::CREATED);
@@ -5641,7 +5641,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &feed,
-            ),
+            )
         )
         .await;
         assert_eq!(imported.status(), StatusCode::CREATED);
@@ -5665,7 +5665,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 Some("secret"),
                 &refresh,
-            ),
+            )
         )
         .await;
         assert_eq!(refreshed.status(), StatusCode::CREATED);
@@ -5705,7 +5705,7 @@ mod tests {
                 "/api/threats",
                 Some("secret"),
                 &operator_indicator,
-            ),
+            )
         )
         .await;
         assert_eq!(created.status(), StatusCode::CREATED);
@@ -5738,7 +5738,7 @@ mod tests {
                     "/api/threat-feeds/import",
                     Some("secret"),
                     &feed,
-                ),
+                )
             )
             .await,
         )
@@ -5906,8 +5906,8 @@ mod tests {
                     "upstream": "mock://x",
                     "mode": "block",
                     "enabled": true
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(route_resp.status(), StatusCode::CREATED);
@@ -6059,8 +6059,8 @@ mod tests {
                     "upstream": "mock://x",
                     "mode": "block",
                     "enabled": true
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(route_resp.status(), StatusCode::CREATED);
@@ -6195,8 +6195,8 @@ mod tests {
                     "upstream": "mock://x",
                     "mode": "block",
                     "enabled": true
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(route_resp.status(), StatusCode::CREATED);
@@ -6270,8 +6270,8 @@ mod tests {
                 None,
                 &serde_json::json!({
                     "objects_url": format!("http://{taxii_addr}/api1/collections/lab/objects/")
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
@@ -6290,8 +6290,8 @@ mod tests {
                     "ttl_seconds": 3600,
                     "username": "analyst",
                     "password": "not-logged"
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -6343,8 +6343,8 @@ mod tests {
                     "upstream": "mock://x",
                     "mode": "block",
                     "enabled": true
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(route_resp.status(), StatusCode::CREATED);
@@ -6503,8 +6503,8 @@ mod tests {
                     "upstream": "mock://x",
                     "mode": "block",
                     "enabled": true
-                }),
-            ),
+                })
+            )
         )
         .await;
         assert_eq!(route_resp.status(), StatusCode::CREATED);
@@ -7503,7 +7503,7 @@ mod tests {
                     enabled: true,
                     block_threshold: None,
                 },
-            ),
+            )
         )
         .await;
         assert_eq!(route_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -7523,8 +7523,8 @@ mod tests {
                     severity: Severity::High,
                     source: "unit".to_string(),
                     ttl_seconds: 60,
-                },
-            ),
+                }
+            )
         )
         .await;
         assert_eq!(threat_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -7545,8 +7545,8 @@ mod tests {
                     source: "unit".to_string(),
                     ttl_seconds: 300,
                     prefix_len: None,
-                },
-            ),
+                }
+            )
         )
         .await;
         assert_eq!(dnsbl_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -7561,7 +7561,7 @@ mod tests {
                 "/api/commercial/license",
                 None,
                 &enterprise_profile(),
-            ),
+            )
         )
         .await;
         assert_eq!(license_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -7578,7 +7578,7 @@ mod tests {
                 "/api/threat-feeds/import",
                 None,
                 &threat_feed_import(),
-            ),
+            )
         )
         .await;
         assert_eq!(feed_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -7970,7 +7970,7 @@ mod tests {
                 base_url: "http://127.0.0.1:1".to_string(),
                 token: "t".to_string(),
                 model: "m".to_string(),
-            })),
+            }))
         );
         assert_eq!(
             app_request(
@@ -8036,7 +8036,7 @@ mod tests {
                 "/api/soc/analyze",
                 None,
                 &serde_json::json!({"event_id": 1}),
-            ),
+            )
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
