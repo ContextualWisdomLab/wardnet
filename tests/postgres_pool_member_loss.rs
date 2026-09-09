@@ -274,7 +274,10 @@ async fn typed_repository_uses_surviving_pool_member_after_one_backend_is_lost()
         .await
         .expect("second pool member must be reachable")
         .backend_pid();
-    assert_ne!(first_pid, second_pid, "fixture requires two physical backends");
+    assert_ne!(
+        first_pid, second_pid,
+        "fixture requires two physical backends"
+    );
 
     let terminated = assert_success(
         psql(
