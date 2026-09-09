@@ -408,7 +408,10 @@ async fn all_closed_members_fail_closed_within_the_reconnect_readiness_bound() {
         .await
         .expect("second original pool member must be reachable")
         .backend_pid();
-    assert_ne!(first_pid, second_pid, "fixture requires two physical backends");
+    assert_ne!(
+        first_pid, second_pid,
+        "fixture requires two physical backends"
+    );
 
     proxy.stall_new_connections();
     for backend_pid in [first_pid, second_pid] {
