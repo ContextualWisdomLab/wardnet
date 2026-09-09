@@ -197,12 +197,30 @@ fn start_postgres() -> Option<PostgresContainer> {
 fn prepare_database() -> Option<PostgresContainer> {
     let container = start_postgres()?;
     for (path, context) in [
-        ("migrations/0001_reputation_source_generation.sql", "apply generation migration"),
-        ("migrations/0002_reputation_source_generation_admission.sql", "apply admission migration"),
-        ("migrations/0003_reputation_source_publication.sql", "apply publication migration"),
-        ("migrations/0004_reputation_state_schema_version.sql", "apply schema-version migration"),
-        ("migrations/0005_reputation_source_publication_audit.sql", "apply publication-audit migration"),
-        ("deploy/postgresql/reputation_state_roles.sql", "install capability roles"),
+        (
+            "migrations/0001_reputation_source_generation.sql",
+            "apply generation migration",
+        ),
+        (
+            "migrations/0002_reputation_source_generation_admission.sql",
+            "apply admission migration",
+        ),
+        (
+            "migrations/0003_reputation_source_publication.sql",
+            "apply publication migration",
+        ),
+        (
+            "migrations/0004_reputation_state_schema_version.sql",
+            "apply schema-version migration",
+        ),
+        (
+            "migrations/0005_reputation_source_publication_audit.sql",
+            "apply publication-audit migration",
+        ),
+        (
+            "deploy/postgresql/reputation_state_roles.sql",
+            "install capability roles",
+        ),
     ] {
         let sql = std::fs::read_to_string(path).expect("PostgreSQL fixture SQL must exist");
         assert_success(psql(&container, &sql), context);
@@ -225,7 +243,11 @@ fn prepare_database() -> Option<PostgresContainer> {
     Some(container)
 }
 
-fn publication(expected_prior: Option<&str>, generation: &str, ordinal: i64) -> ReputationSourcePublication {
+fn publication(
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+) -> ReputationSourcePublication {
     ReputationSourcePublication::new(
         "urlhaus",
         expected_prior,
