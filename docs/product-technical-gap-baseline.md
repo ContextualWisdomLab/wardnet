@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-09-09. Re-read live refs, PRs, reviews/threads, exact-head checks, rulesets, security evidence and releases before merge, release, restack or foreign-owner handoff. This is Wardnet's sole commercial/product-technical current-state ledger; detailed RED→GREEN receipts stay in the owning PR and issue histories.
+Snapshot date: 2026-09-10. Re-read live refs, PRs, reviews/threads, exact-head checks, rulesets, security evidence and releases before merge, release, restack or foreign-owner handoff. This is Wardnet's sole commercial/product-technical current-state ledger; detailed RED→GREEN receipts stay in the owning PR and issue histories.
 
 ## Authority boundary
 
@@ -34,7 +34,7 @@ Wardnet #140 remains the Runtime Configuration consumer specimen at `93a51f9706c
 
 ## PostgreSQL production-state prerequisite stack
 
-Current canonical branch dependency order is `#140 -> #193 -> #194 -> #196 -> #198 -> #199 -> #200 -> #207 -> #208 -> #209 -> #212 -> #216 -> #217 -> #219 -> #221 -> #223 -> #224 -> #225 -> #226 -> #228 -> #229 -> #231 -> #233 -> #234 -> #236`. Issue #227 defines #228's complete-published-read acceptance, #230 defines #231's capacity-replenishment acceptance, #232 defines #233/#234 degraded-readiness work, and #235 defines #236's ambiguous-commit acceptance rather than adding issue nodes to branch ancestry. Every parent movement requires ordinary non-force adoption and fresh exact-head gates; predecessor GREEN does not transfer.
+Current canonical branch dependency order is `#140 -> #193 -> #194 -> #196 -> #198 -> #199 -> #200 -> #207 -> #208 -> #209 -> #212 -> #216 -> #217 -> #219 -> #221 -> #223 -> #224 -> #225 -> #226 -> #228 -> #229 -> #231 -> #233 -> #234 -> #236 -> #241`. Issue #227 defines #228's complete-published-read acceptance, #230 defines #231's capacity-replenishment acceptance, #232 defines #233/#234 degraded-readiness work, #235 defines #236's ambiguous-commit acceptance, and #239 defines #241's physical-backup/WAL/PITR recovery acceptance rather than adding issue nodes to branch ancestry. Every parent movement requires ordinary non-force adoption and fresh exact-head gates; predecessor GREEN does not transfer.
 
 #193 makes PostgreSQL authority explicit/fail-closed for production; #194 keeps PostgreSQL DSN material inside `CredentialRegistry`; #196 rejects blank DSN material without normalizing admitted bytes; #198 rejects non-string/non-null credential-file DSN values.
 
@@ -66,7 +66,9 @@ Current canonical branch dependency order is `#140 -> #193 -> #194 -> #196 -> #1
 
 #235 defines the two-direction ambiguous-COMMIT durability acceptance now implemented by Draft #236 on exact parent #234. Valid test-only RED `8c14c4c9a520c13e058b35f43e5e7cd703f04bb9`, CI `34331950247` / rust `102402350581`, ran on real PostgreSQL 18.4 after formatting and all 142 library tests passed; its four commit-ambiguity cases then failed only at the final classification boundary because Wardnet returned `PostgreSQL operation failed: connection closed` rather than `PostgreSQL commit outcome is unknown after transport loss`. Minimum production `fb849a09b48eb4738d33591b4d60db2aee6704fa` adds a typed `CommitOutcomeUnknown` and maps only a closed transport while awaiting COMMIT to that outcome, without automatically replaying a query or transaction. Current #236 exact `e1131c2ce1078322b48caa87b2088b1866b08626` has terminal SUCCESS CI `34336708591` and Fuzz `34336708581`; fresh submitted reviews and inline threads are zero. #236 remains Draft behind #234, so this is branch evidence rather than protected truth and must be reacquired after parent/protected integration movement.
 
-Production PostgreSQL authority remains disabled. #80/#192 still require the #234/#236 lineage to reach protected truth, any separately unresolved divergent-writer/unreliable-network semantics, #239's authoritative physical-backup/WAL/PITR restore acceptance with retention/encryption and measured RPO/RTO, protected integration, operability evidence and immutable release. An admitted or partially persisted generation must never silently become current truth.
+#239's physical-recovery acceptance is now implemented by Draft #241 on exact parent #236. Predecessor `78c0d6327f77a9b7d3c3c9e9ffd1fdf0af3edc5d` reached the real PostgreSQL 18.4 drill and exposed a receipt-key mismatch plus an unexecuted unsafe-role assertion; the minimum repair aligned the receipt with the executed partial role/RLS hostile case and added a separate real PostgreSQL guard that creates a `CREATEDB` LOGIN, requires canonical runtime-principal mapping to reject it, and proves no residual `wardnet_runtime` membership. Formatter-only follow-up produced current exact `992d9c366c47515a121b786197c872db81957dcc`. CI `34375192687` / rust `102546106310` is terminal SUCCESS on that unchanged head: exact checkout, formatting, full locked tests including destructive base-backup/WAL/PITR source-destruction recovery and unsafe-role guard, and strict Clippy all passed. The recovery receipt proves manifest verification, archived-WAL use beyond the base backup, declared-target recovery, zero lost controlled publication transactions, measured non-zero RTO, restored FORCE RLS/tenant isolation/publication/audit/current-head/schema evidence, ABA/divergent-replay rejection, unbound-runtime denial and a post-restore publication; corrupt manifest, missing WAL, unreachable target, partial role/RLS state and elevated runtime-role mapping fail closed. #241 remains Draft behind #236, so this is branch evidence only.
+
+Production PostgreSQL authority remains disabled. #80/#192 still require the #234/#236/#241 lineage to reach protected truth, separately unresolved divergent-writer/unreliable-network semantics, production backup/WAL retention/encryption/storage/IAM and operability evidence, protected integration, and immutable release. An admitted or partially persisted generation must never silently become current truth.
 
 ## Gateway and Agent Artifact Admission security lanes
 
@@ -96,7 +98,7 @@ Authority and safety remain ahead of feature breadth. Current release-blocking o
 
 1. satisfiable protected governance and authenticated exact-head central evidence;
 2. protected management authentication and Runtime Configuration truth;
-3. #80/#192 PostgreSQL production authority through protected #234/#236 integration, then #239 backup/WAL/PITR recovery and remaining divergent-writer/unreliable-network/operability acceptance;
+3. #80/#192 PostgreSQL production authority through protected #234/#236/#241 integration, then remaining divergent-writer/unreliable-network semantics plus production backup/WAL retention/encryption/storage/IAM and operability evidence;
 4. trusted client attribution and bounded/distributed admission reconstructed without duplicate #140/#165 authority;
 5. immutable EgressWeave authorization/evidence integration for outbound transport;
 6. deployed attack-path evidence and proven Coraza/CRS + Suricata enforcement without inventing substitute detection authority;
