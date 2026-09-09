@@ -37,6 +37,8 @@ pub enum PostgresStateError {
     InvalidAuditContext(&'static str),
     /// The publication conflicts with immutable history or current-head ordering.
     PublicationConflict,
+    /// A current head exists without its exact immutable publication and audit evidence.
+    IncompletePublication,
     /// The canonical publication function returned an undocumented outcome.
     InvalidPublicationOutcome,
     /// A connection pool with no connections cannot fail closed.
@@ -60,6 +62,9 @@ impl fmt::Display for PostgresStateError {
             Self::PublicationConflict => {
                 formatter.write_str("reputation source publication conflicts with durable state")
             }
+            Self::IncompletePublication => formatter.write_str(
+                "current reputation source publication is incomplete or inconsistent",
+            ),
             Self::InvalidPublicationOutcome => formatter
                 .write_str("PostgreSQL publication function returned an unsupported outcome"),
             Self::InvalidPoolSize => {
@@ -208,6 +213,79 @@ pub enum PublicationOutcome {
     Replay,
 }
 
+/// Complete immutable current reputation-source publication selected by the durable head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentReputationSourcePublication {
+    source_id: String,
+    prior_source_generation: Option<String>,
+    source_generation: String,
+    source_generation_ordinal: i64,
+    completed_at_unix: i64,
+    provenance_ref: String,
+    evidence_snapshot_ref: String,
+    completeness_ref: String,
+    producer_lifecycle_ref: String,
+    actor_subject_id: String,
+    decision_id: String,
+}
+
+impl CurrentReputationSourcePublication {
+    /// Return the source identity selected by the current publication head.
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    /// Return the exact prior published generation, if this was not the initial publication.
+    pub fn prior_source_generation(&self) -> Option<&str> {
+        self.prior_source_generation.as_deref()
+    }
+
+    /// Return the opaque generation token selected by the current publication head.
+    pub fn source_generation(&self) -> &str {
+        &self.source_generation
+    }
+
+    /// Return the authenticated monotonic ordinal bound to the selected generation.
+    pub fn source_generation_ordinal(&self) -> i64 {
+        self.source_generation_ordinal
+    }
+
+    /// Return the source completion time persisted with the selected publication.
+    pub fn completed_at_unix(&self) -> i64 {
+        self.completed_at_unix
+    }
+
+    /// Return the immutable provenance reference for the selected publication.
+    pub fn provenance_ref(&self) -> &str {
+        &self.provenance_ref
+    }
+
+    /// Return the immutable evidence-snapshot reference for the selected publication.
+    pub fn evidence_snapshot_ref(&self) -> &str {
+        &self.evidence_snapshot_ref
+    }
+
+    /// Return the immutable completeness proof reference for the selected publication.
+    pub fn completeness_ref(&self) -> &str {
+        &self.completeness_ref
+    }
+
+    /// Return the producer-lifecycle reference for the selected publication.
+    pub fn producer_lifecycle_ref(&self) -> &str {
+        &self.producer_lifecycle_ref
+    }
+
+    /// Return the subject identity attributable to the selected publication.
+    pub fn actor_subject_id(&self) -> &str {
+        &self.actor_subject_id
+    }
+
+    /// Return the decision identity attributable to the selected publication.
+    pub fn decision_id(&self) -> &str {
+        &self.decision_id
+    }
+}
+
 /// Safe diagnostic proving that a checked-out pooled connection has no tenant authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnboundContextProbe {
@@ -322,6 +400,81 @@ impl<'client> TenantTransaction<'client> {
         }
 
         Ok(outcome)
+    }
+
+    async fn current_reputation_source_publication(
+        &self,
+        source_id: String,
+    ) -> PostgresStateResult<Option<CurrentReputationSourcePublication>> {
+        let row = self
+            .client
+            .query_opt(
+                "SELECT h.source_generation, h.source_generation_ordinal, p.source_id, p.prior_source_generation, p.source_generation, p.source_generation_ordinal, p.completed_at_unix, p.provenance_ref, p.evidence_snapshot_ref, p.completeness_ref, p.producer_lifecycle_ref, a.actor_subject_id, a.decision_id FROM public.reputation_source_publication_head AS h LEFT JOIN public.reputation_source_publication AS p ON p.tenant_id = h.tenant_id AND p.source_id = h.source_id AND p.source_generation = h.source_generation AND p.source_generation_ordinal = h.source_generation_ordinal LEFT JOIN public.reputation_source_publication_audit AS a ON a.tenant_id = p.tenant_id AND a.source_id = p.source_id AND a.source_generation = p.source_generation WHERE h.source_id = $1",
+                &[&source_id],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let head_generation: String = row.try_get(0)?;
+        let head_ordinal: i64 = row.try_get(1)?;
+        let publication_source_id: Option<String> = row.try_get(2)?;
+        let prior_source_generation: Option<String> = row.try_get(3)?;
+        let publication_generation: Option<String> = row.try_get(4)?;
+        let publication_ordinal: Option<i64> = row.try_get(5)?;
+        let completed_at_unix: Option<i64> = row.try_get(6)?;
+        let provenance_ref: Option<String> = row.try_get(7)?;
+        let evidence_snapshot_ref: Option<String> = row.try_get(8)?;
+        let completeness_ref: Option<String> = row.try_get(9)?;
+        let producer_lifecycle_ref: Option<String> = row.try_get(10)?;
+        let actor_subject_id: Option<String> = row.try_get(11)?;
+        let decision_id: Option<String> = row.try_get(12)?;
+
+        let (
+            Some(publication_source_id),
+            Some(publication_generation),
+            Some(publication_ordinal),
+            Some(completed_at_unix),
+            Some(provenance_ref),
+            Some(evidence_snapshot_ref),
+            Some(completeness_ref),
+            Some(producer_lifecycle_ref),
+            Some(actor_subject_id),
+            Some(decision_id),
+        ) = (
+            publication_source_id,
+            publication_generation,
+            publication_ordinal,
+            completed_at_unix,
+            provenance_ref,
+            evidence_snapshot_ref,
+            completeness_ref,
+            producer_lifecycle_ref,
+            actor_subject_id,
+            decision_id,
+        )
+        else {
+            return Err(PostgresStateError::IncompletePublication);
+        };
+
+        if publication_generation != head_generation || publication_ordinal != head_ordinal {
+            return Err(PostgresStateError::IncompletePublication);
+        }
+
+        Ok(Some(CurrentReputationSourcePublication {
+            source_id: publication_source_id,
+            prior_source_generation,
+            source_generation: publication_generation,
+            source_generation_ordinal: publication_ordinal,
+            completed_at_unix,
+            provenance_ref,
+            evidence_snapshot_ref,
+            completeness_ref,
+            producer_lifecycle_ref,
+            actor_subject_id,
+            decision_id,
+        }))
     }
 }
 
@@ -459,6 +612,27 @@ impl PostgresTenantPool {
             Box::pin(async move {
                 transaction
                     .publish_reputation_source(tenant_value, publication)
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Read the complete last-known-good publication for one tenant/source.
+    ///
+    /// The lookup is scoped by the same transaction-local tenant boundary as publication. A source
+    /// with no head returns `None`; a head that cannot resolve to its exact immutable publication
+    /// plus attribution evidence fails closed rather than surfacing partial durable state.
+    pub async fn current_reputation_source_publication(
+        &self,
+        tenant_id: &TenantId,
+        source_id: &str,
+    ) -> PostgresStateResult<Option<CurrentReputationSourcePublication>> {
+        let source_id = validate_publication_text(source_id)?;
+        self.with_tenant_transaction(tenant_id, move |transaction| {
+            Box::pin(async move {
+                transaction
+                    .current_reputation_source_publication(source_id)
                     .await
             })
         })
