@@ -440,6 +440,78 @@ async fn all_closed_members_fail_closed_within_the_reconnect_readiness_bound() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_background_repair_cannot_escape_the_all_dead_readiness_bound() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let proxy = NewConnectionStallProxy::start(container.host_port);
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        proxy.port()
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("two-member loopback pool must connect through the fault proxy");
+
+    let first_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("first original pool member must be reachable")
+        .backend_pid();
+    let second_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("second original pool member must be reachable")
+        .backend_pid();
+    assert_ne!(
+        first_pid, second_pid,
+        "fixture requires two physical backends"
+    );
+
+    proxy.stall_new_connections();
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({first_pid});"),
+        ),
+        "terminate the first pooled backend before background repair",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    for _ in 0..2 {
+        let healthy = pool
+            .probe_unbound_context()
+            .await
+            .expect("healthy peer must remain usable while the failed slot repairs in background");
+        assert_eq!(healthy.backend_pid(), second_pid);
+        assert_eq!(healthy.tenant_id(), None);
+    }
+
+    let terminated = assert_success(
+        psql(
+            &container,
+            &format!("SELECT pg_terminate_backend({second_pid});"),
+        ),
+        "terminate the remaining healthy backend while peer repair is stalled",
+    );
+    assert_eq!(terminated.trim(), "t");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result =
+        tokio::time::timeout(Duration::from_millis(750), pool.probe_unbound_context()).await;
+    proxy.release_new_connections();
+
+    let unavailable = result.expect(
+        "a stalled background repair must not hold a slot mutex beyond Wardnet's all-dead readiness window",
+    );
+    assert!(
+        matches!(unavailable, Err(PostgresStateError::PoolUnavailable)),
+        "slot-lock contention caused by background repair must fail closed with stable PoolUnavailable",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn caller_cancellation_preempts_internal_reconnect_readiness_timeout() {
     let Some(container) = prepare_database() else {
         return;
