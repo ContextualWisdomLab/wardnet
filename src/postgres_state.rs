@@ -71,9 +71,7 @@ impl fmt::Display for PostgresStateError {
             Self::InvalidPoolSize => {
                 formatter.write_str("PostgreSQL pool size must be greater than zero")
             }
-            Self::PoolUnavailable => {
-                formatter.write_str("PostgreSQL pool has no open connection")
-            }
+            Self::PoolUnavailable => formatter.write_str("PostgreSQL pool has no open connection"),
             Self::InvalidLoopbackFixture(reason) => {
                 write!(formatter, "invalid loopback PostgreSQL fixture: {reason}")
             }
