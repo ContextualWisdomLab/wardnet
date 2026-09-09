@@ -244,6 +244,32 @@ fn publication(
         format!("lifecycle-{generation}"),
     )
     .expect("fixture publication must validate")
+    .with_audit_context(
+        PublicationAuditContext::new(
+            "subject:repository-fixture",
+            format!("decision:publish-{generation}-{ordinal}"),
+        )
+        .expect("fixture audit context must validate"),
+    )
+}
+
+fn unaudited_publication(
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+) -> ReputationSourcePublication {
+    ReputationSourcePublication::new(
+        "urlhaus",
+        expected_prior,
+        generation,
+        ordinal,
+        1_700_000_000 + ordinal,
+        format!("provenance-{generation}"),
+        format!("snapshot-{generation}"),
+        format!("complete-{generation}"),
+        format!("lifecycle-{generation}"),
+    )
+    .expect("fixture publication must validate")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -322,7 +348,10 @@ async fn typed_repository_refuses_unaudited_publication_without_residue() {
     let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
 
     let unaudited = pool
-        .publish_reputation_source(&tenant, &publication(None, "generation-8", 8))
+        .publish_reputation_source(
+            &tenant,
+            &unaudited_publication(None, "generation-8", 8),
+        )
         .await;
     assert!(
         matches!(unaudited, Err(PostgresStateError::InvalidAuditContext(_))),
