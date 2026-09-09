@@ -9,10 +9,10 @@
 -- The outer publication function is SECURITY DEFINER. Its owner therefore gets
 -- only the table/function privileges needed by that bounded transaction. The
 -- runtime capability receives read access and outer-function EXECUTE, never
--- direct mutation or inner-admission authority. Schema version 5 adds optional
--- publication-audit evidence; this installer remains replayable against the
--- supported pre-audit boundary so upgrades can migrate before privilege
--- convergence.
+-- direct mutation or inner-admission authority. Schema version 5 requires
+-- attributable publication-audit evidence for every new publication; this
+-- installer remains replayable against the supported pre-audit boundary so
+-- upgrades can migrate before privilege convergence.
 --
 -- The full installation is one explicit transaction so an ownership-transfer
 -- or privilege failure cannot strand capability roles or temporary authority.
