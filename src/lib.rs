@@ -2943,7 +2943,7 @@ main{padding:20px;max-width:1600px;margin:0 auto}
 .tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 .tile .label{font-size:var(--fs-cap);color:var(--sub);text-transform:uppercase;letter-spacing:.04em}
 .tile .metric{font-size:var(--fs-metric);font-weight:700;margin-top:4px;word-break:break-word}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;align-items:start}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:16px;align-items:start}
 section.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 section.card h2{font-size:var(--fs-h2);margin:0 0 12px}
 table{width:100%;border-collapse:collapse;font-size:13px}
