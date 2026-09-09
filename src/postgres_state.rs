@@ -49,6 +49,8 @@ pub enum PostgresStateError {
     PoolUnavailable,
     /// The plaintext integration constructor was requested outside loopback.
     InvalidLoopbackFixture(&'static str),
+    /// The connection closed while Wardnet was awaiting COMMIT, so durable outcome is unknown.
+    CommitOutcomeUnknown,
     /// PostgreSQL rejected a connection, transaction, or query operation.
     Postgres(tokio_postgres::Error),
 }
@@ -76,6 +78,9 @@ impl fmt::Display for PostgresStateError {
             Self::PoolUnavailable => formatter.write_str("PostgreSQL pool has no open connection"),
             Self::InvalidLoopbackFixture(reason) => {
                 write!(formatter, "invalid loopback PostgreSQL fixture: {reason}")
+            }
+            Self::CommitOutcomeUnknown => {
+                formatter.write_str("PostgreSQL commit outcome is unknown after transport loss")
             }
             Self::Postgres(error) => write!(formatter, "PostgreSQL operation failed: {error}"),
         }
@@ -856,7 +861,16 @@ impl ActiveTransaction {
     }
 
     async fn commit(mut self) -> PostgresStateResult<()> {
-        self.client().batch_execute("COMMIT").await?;
+        self.client()
+            .batch_execute("COMMIT")
+            .await
+            .map_err(|error| {
+                if error.is_closed() {
+                    PostgresStateError::CommitOutcomeUnknown
+                } else {
+                    PostgresStateError::Postgres(error)
+                }
+            })?;
         self.active = false;
         self.client.take();
         Ok(())
@@ -1011,5 +1025,9 @@ mod tests {
             parse_publication_outcome("unexpected"),
             Err(PostgresStateError::InvalidPublicationOutcome)
         ));
+        assert_eq!(
+            PostgresStateError::CommitOutcomeUnknown.to_string(),
+            "PostgreSQL commit outcome is unknown after transport loss"
+        );
     }
 }
