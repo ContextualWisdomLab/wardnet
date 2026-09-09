@@ -102,7 +102,7 @@ wait_for_promoted_restore() {
   while (( SECONDS < deadline )); do
     if docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null | grep -qx true; then
       promoted="$(
-        printf 'SELECT (NOT pg_is_in_recovery())::text;\n' \
+        printf 'SELECT NOT pg_is_in_recovery();\n' \
           | psql_super "$container" postgres 2>/dev/null \
           | tr -d '[:space:]' || true
       )"
@@ -129,7 +129,7 @@ assert_never_promotes() {
       return 0
     fi
     promoted="$(
-      printf 'SELECT (NOT pg_is_in_recovery())::text;\n' \
+      printf 'SELECT NOT pg_is_in_recovery();\n' \
         | psql_super "$container" postgres 2>/dev/null \
         | tr -d '[:space:]' || true
     )"
@@ -316,7 +316,7 @@ unreachable_target_lsn="$(
   || fail "source WAL/timeline identity is incomplete"
 
 [[ "$(
-  printf "SELECT ('%s'::pg_lsn > '%s'::pg_lsn)::text;\n" "$recovery_target_lsn" "$backup_end_lsn" \
+  printf "SELECT ('%s'::pg_lsn > '%s'::pg_lsn);\n" "$recovery_target_lsn" "$backup_end_lsn" \
     | psql_super "$source_container" postgres \
     | tr -d '[:space:]'
 )" == "t" ]] || fail "post-backup target must be beyond the base backup WAL boundary"
@@ -388,7 +388,7 @@ latest_recovered_lsn="$(
     | tr -d '[:space:]'
 )"
 [[ "$(
-  printf "SELECT ('%s'::pg_lsn >= '%s'::pg_lsn)::text;\n" "$latest_recovered_lsn" "$recovery_target_lsn" \
+  printf "SELECT ('%s'::pg_lsn >= '%s'::pg_lsn);\n" "$latest_recovered_lsn" "$recovery_target_lsn" \
     | psql_super "$restore_container" postgres \
     | tr -d '[:space:]'
 )" == "t" ]] || fail "recovered WAL position did not reach declared target"
@@ -403,7 +403,7 @@ recovered_publication_count="$(
 rpo_lost_publication_transactions=0
 
 runtime_superuser="$(
-  printf "SELECT rolsuper::text FROM pg_catalog.pg_roles WHERE rolname = '%s';\n" "$RUNTIME_PRINCIPAL" \
+  printf "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = '%s';\n" "$RUNTIME_PRINCIPAL" \
     | psql_super "$restore_container" postgres \
     | tr -d '[:space:]'
 )"
