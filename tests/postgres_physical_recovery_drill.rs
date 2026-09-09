@@ -96,7 +96,8 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
         "corrupt_manifest_failed_closed",
         "missing_wal_failed_closed",
         "unreachable_target_failed_closed",
-        "partial_role_or_rls_state_failed_closed",
+        "partial_schema_or_rls_state_failed_closed",
+        "unsafe_role_mapping_failed_closed",
     ] {
         required_true(hostile, key);
     }
