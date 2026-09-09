@@ -115,6 +115,28 @@ fn psql_with_runtime_principal(container: &PostgresContainer, sql: &str) -> Outp
     )
 }
 
+fn psql_as_runtime(container: &PostgresContainer, sql: &str) -> Output {
+    run_docker(
+        &[
+            "exec",
+            "-i",
+            &container.name,
+            "psql",
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            RUNTIME_PRINCIPAL,
+            "-d",
+            "postgres",
+        ],
+        Some(sql),
+    )
+}
+
 fn start_postgres() -> Option<PostgresContainer> {
     if !Command::new("docker")
         .arg("version")
@@ -330,6 +352,35 @@ async fn typed_repository_rejects_historical_aba_and_keeps_last_known_good_publi
             Err(PostgresStateError::PublicationConflict)
         ),
         "same ordinal bound to a different token must fail closed: {ordinal_collision:?}"
+    );
+}
+
+#[test]
+fn runtime_publication_capability_refuses_missing_audit_context_without_residue() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+
+    let direct = psql_as_runtime(
+        &container,
+        "BEGIN; SELECT set_config('wardnet.tenant_id', 'tenant-a', true); SELECT public.wardnet_publish_reputation_source_generation('tenant-a', 'urlhaus', NULL, 'generation-8', 8, 1700000008, 'provenance-generation-8', 'snapshot-generation-8', 'complete-generation-8', 'lifecycle-generation-8'); COMMIT;",
+    );
+    assert!(
+        !direct.status.success(),
+        "runtime mutation capability must reject a publication that lacks actor/decision audit context"
+    );
+
+    let residue = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_generation), (SELECT count(*) FROM public.reputation_source_publication), (SELECT count(*) FROM public.reputation_source_publication_head), (SELECT count(*) FROM public.reputation_source_publication_audit));",
+        ),
+        "inspect direct unaudited publication residue",
+    );
+    assert_eq!(
+        residue.trim(),
+        "0:0:0:0",
+        "rejected unaudited runtime publication must roll back generation, publication, head, and audit state"
     );
 }
 
