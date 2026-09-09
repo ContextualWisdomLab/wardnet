@@ -181,7 +181,7 @@ fn startup_migration_rejects_current_version_without_forced_rls() {
     let injected = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', relrowsecurity, relforcerowsecurity, (SELECT schema_version = 4 FROM public.wardnet_schema_version WHERE component = 'reputation_state')) FROM pg_catalog.pg_class WHERE oid = 'public.reputation_source_generation'::regclass;",
+            "SELECT concat_ws(':', relrowsecurity, relforcerowsecurity, (SELECT schema_version = 5 FROM public.wardnet_schema_version WHERE component = 'reputation_state')) FROM pg_catalog.pg_class WHERE oid = 'public.reputation_source_generation'::regclass;",
         ),
         "inspect injected forced-RLS drift",
     );
@@ -204,7 +204,7 @@ fn startup_migration_rejects_current_version_without_forced_rls() {
     let preserved = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', relrowsecurity, relforcerowsecurity, (SELECT schema_version = 4 FROM public.wardnet_schema_version WHERE component = 'reputation_state')) FROM pg_catalog.pg_class WHERE oid = 'public.reputation_source_generation'::regclass;",
+            "SELECT concat_ws(':', relrowsecurity, relforcerowsecurity, (SELECT schema_version = 5 FROM public.wardnet_schema_version WHERE component = 'reputation_state')) FROM pg_catalog.pg_class WHERE oid = 'public.reputation_source_generation'::regclass;",
         ),
         "inspect refused forced-RLS drift",
     );

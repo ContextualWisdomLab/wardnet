@@ -5,17 +5,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use waf_ids_ai_soc::postgres_state::{
-    PostgresStateError, PostgresTenantPool, PublicationOutcome, ReputationSourcePublication,
-    TenantId,
+    PostgresStateError, PostgresTenantPool, PublicationAuditContext, PublicationOutcome,
+    ReputationSourcePublication, TenantId,
 };
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
 const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
+const VERSION_MIGRATION_PATH: &str = "migrations/0004_reputation_state_schema_version.sql";
+const AUDIT_MIGRATION_PATH: &str = "migrations/0005_reputation_source_publication_audit.sql";
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
 const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_principal.sql";
 const RUNTIME_PRINCIPAL: &str = "wardnet_repository_app";
+const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct PostgresContainer {
@@ -113,6 +116,28 @@ fn psql_with_runtime_principal(container: &PostgresContainer, sql: &str) -> Outp
     )
 }
 
+fn psql_as_runtime(container: &PostgresContainer, sql: &str) -> Output {
+    run_docker(
+        &[
+            "exec",
+            "-i",
+            &container.name,
+            "psql",
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            RUNTIME_PRINCIPAL,
+            "-d",
+            "postgres",
+        ],
+        Some(sql),
+    )
+}
+
 fn start_postgres() -> Option<PostgresContainer> {
     if !Command::new("docker")
         .arg("version")
@@ -170,12 +195,16 @@ fn start_postgres() -> Option<PostgresContainer> {
             .stderr(Stdio::null())
             .status()
             .expect("pg_isready command must start");
-        if status.success() {
+        let logs = run_docker(&["logs", &name], None);
+        let final_server_started = logs.status.success()
+            && (String::from_utf8_lossy(&logs.stdout).contains(FINAL_STARTUP_MARKER)
+                || String::from_utf8_lossy(&logs.stderr).contains(FINAL_STARTUP_MARKER));
+        if status.success() && final_server_started {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "PostgreSQL 18.4 container did not become ready within 60 seconds"
+            "PostgreSQL 18.4 final server did not become ready within 60 seconds"
         );
         thread::sleep(Duration::from_millis(500));
     }
@@ -200,6 +229,8 @@ fn prepare_database() -> Option<PostgresContainer> {
         (GENERATION_MIGRATION_PATH, "apply generation migration"),
         (ADMISSION_MIGRATION_PATH, "apply admission migration"),
         (PUBLICATION_MIGRATION_PATH, "apply publication migration"),
+        (VERSION_MIGRATION_PATH, "apply schema-version migration"),
+        (AUDIT_MIGRATION_PATH, "apply publication-audit migration"),
         (ROLE_INSTALLER_PATH, "install capability roles"),
     ] {
         let sql = std::fs::read_to_string(path).expect("PostgreSQL fixture SQL must exist");
@@ -224,6 +255,32 @@ fn prepare_database() -> Option<PostgresContainer> {
 }
 
 fn publication(
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+) -> ReputationSourcePublication {
+    ReputationSourcePublication::new(
+        "urlhaus",
+        expected_prior,
+        generation,
+        ordinal,
+        1_700_000_000 + ordinal,
+        format!("provenance-{generation}"),
+        format!("snapshot-{generation}"),
+        format!("complete-{generation}"),
+        format!("lifecycle-{generation}"),
+    )
+    .expect("fixture publication must validate")
+    .with_audit_context(
+        PublicationAuditContext::new(
+            "subject:repository-fixture",
+            format!("decision:publish-{generation}-{ordinal}"),
+        )
+        .expect("fixture audit context must validate"),
+    )
+}
+
+fn unaudited_publication(
     expected_prior: Option<&str>,
     generation: &str,
     ordinal: i64,
@@ -300,5 +357,115 @@ async fn typed_repository_rejects_historical_aba_and_keeps_last_known_good_publi
             Err(PostgresStateError::PublicationConflict)
         ),
         "same ordinal bound to a different token must fail closed: {ordinal_collision:?}"
+    );
+}
+
+#[test]
+fn runtime_publication_capability_refuses_missing_audit_context_without_residue() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+
+    let direct = psql_as_runtime(
+        &container,
+        "BEGIN; SELECT set_config('wardnet.tenant_id', 'tenant-a', true); SELECT public.wardnet_publish_reputation_source_generation('tenant-a', 'urlhaus', NULL, 'generation-8', 8, 1700000008, 'provenance-generation-8', 'snapshot-generation-8', 'complete-generation-8', 'lifecycle-generation-8'); COMMIT;",
+    );
+    assert!(
+        !direct.status.success(),
+        "runtime mutation capability must reject a publication that lacks actor/decision audit context"
+    );
+
+    let residue = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_generation), (SELECT count(*) FROM public.reputation_source_publication), (SELECT count(*) FROM public.reputation_source_publication_head), (SELECT count(*) FROM public.reputation_source_publication_audit));",
+        ),
+        "inspect direct unaudited publication residue",
+    );
+    assert_eq!(
+        residue.trim(),
+        "0:0:0:0",
+        "rejected unaudited runtime publication must roll back generation, publication, head, and audit state"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_repository_refuses_unaudited_publication_without_residue() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("loopback integration pool must connect");
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+
+    let unaudited = pool
+        .publish_reputation_source(&tenant, &unaudited_publication(None, "generation-8", 8))
+        .await;
+    assert!(
+        matches!(unaudited, Err(PostgresStateError::InvalidAuditContext(_))),
+        "typed application publication must fail closed before durable mutation when actor/decision attribution is absent: {unaudited:?}"
+    );
+
+    let residue = assert_success(
+        psql(
+            &container,
+            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_generation), (SELECT count(*) FROM public.reputation_source_publication), (SELECT count(*) FROM public.reputation_source_publication_head), (SELECT count(*) FROM public.reputation_source_publication_audit));",
+        ),
+        "inspect unaudited publication residue",
+    );
+    assert_eq!(
+        residue.trim(),
+        "0:0:0:0",
+        "rejected unaudited typed publication must leave no admitted generation, publication, head, or audit residue"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_publication_is_attributable_and_exact_replay_does_not_duplicate_audit() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        container.host_port
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("loopback integration pool must connect");
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+    let publication = publication(None, "generation-8", 8).with_audit_context(
+        PublicationAuditContext::new("subject:feed-sync", "decision:publish-generation-8")
+            .expect("audit context must validate"),
+    );
+
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &publication)
+            .await
+            .expect("audited publication must commit"),
+        PublicationOutcome::Committed
+    );
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &publication)
+            .await
+            .expect("byte-identical audited publication must replay"),
+        PublicationOutcome::Replay
+    );
+
+    let audit = assert_success(
+        psql(
+            &container,
+            "SELECT tenant_id || '|' || source_id || '|' || source_generation || '|' || actor_subject_id || '|' || decision_id || '|' || count(*)::text FROM public.reputation_source_publication_audit GROUP BY tenant_id, source_id, source_generation, actor_subject_id, decision_id;",
+        ),
+        "read authoritative publication audit",
+    );
+    assert_eq!(
+        audit.trim(),
+        "tenant-a|urlhaus|generation-8|subject:feed-sync|decision:publish-generation-8|1",
+        "one committed publication must have exactly one attributable audit record and exact replay must not duplicate it"
     );
 }

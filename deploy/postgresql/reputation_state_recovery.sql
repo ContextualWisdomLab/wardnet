@@ -10,11 +10,12 @@
 -- and executed independently of the caller's working directory.
 \set ON_ERROR_STOP on
 
--- The supported inputs are deliberately narrow:
+-- The publication layer still has only two recoverable structural inputs:
 --   * complete 0002: the entire publication boundary is absent; or
---   * complete 0003: publication tables and the outer capability all exist.
--- Anything between those states needs diagnosis. Speculatively applying 0003
--- over a partial shape would turn an interrupted/foreign schema into authority.
+--   * complete 0003-or-later: publication tables and outer capability exist.
+-- Anything between those states needs diagnosis. Once the complete publication
+-- layer exists, the canonical serialized startup migrator owns version 3 -> 5,
+-- version 4 -> 5, current-version replay, and future/partial refusal.
 SELECT
     to_regclass('public.reputation_source_publication') IS NULL
         AND to_regclass('public.reputation_source_publication_head') IS NULL
@@ -31,7 +32,7 @@ SELECT
 \if :publication_boundary_absent
     \ir ../../migrations/0003_reputation_source_publication.sql
 \elif :publication_boundary_complete
-    \echo 'Wardnet publication schema is complete; reconverging capability roles.'
+    \echo 'Wardnet publication schema is structurally complete; reconverging supported version.'
 \else
     DO $wardnet_partial_recovery$
     BEGIN
@@ -40,17 +41,19 @@ SELECT
     $wardnet_partial_recovery$;
 \endif
 
+\ir reputation_state_migrate.sql
 \ir reputation_state_roles.sql
 
--- A supported 0003 rollback intentionally removes publication history and the
--- last-known-good head while preserving admitted generation identity. Reapply
--- plus role convergence must not turn that surviving identity into permission
--- to establish an unrelated `expected_prior = NULL` head. Withhold the runtime
--- publication capability globally while any recovered source chain has durable
--- generation identity but no authoritative publication head. The deployment /
--- recovery principal may replay verified evidence through the SECURITY DEFINER
--- capability; rerunning this script then re-enables the bounded runtime grant
--- through the canonical role installer once every such evidence gap is closed.
+-- A supported publication rollback intentionally removes publication history
+-- and the last-known-good head while preserving admitted generation identity.
+-- Reapply plus role convergence must not turn that surviving identity into
+-- permission to establish an unrelated `expected_prior = NULL` head. Withhold
+-- the runtime publication capability globally while any recovered source chain
+-- has durable generation identity but no authoritative publication head. The
+-- deployment/recovery principal may replay verified evidence through the
+-- SECURITY DEFINER capability; rerunning this script then re-enables the bounded
+-- runtime grant through the canonical role installer once every evidence gap is
+-- closed.
 DO $wardnet_recovery$
 BEGIN
     IF EXISTS (

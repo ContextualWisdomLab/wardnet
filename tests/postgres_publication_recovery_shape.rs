@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
 const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_generation_admission.sql";
+const AUDIT_ROLLBACK_PATH: &str = "migrations/0005_reputation_source_publication_audit.down.sql";
+const VERSION_ROLLBACK_PATH: &str = "migrations/0004_reputation_state_schema_version.down.sql";
 const PUBLICATION_ROLLBACK_PATH: &str = "migrations/0003_reputation_source_publication.down.sql";
 const RECOVERY_PATH_IN_CONTAINER: &str = "/wardnet/deploy/postgresql/reputation_state_recovery.sql";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
@@ -191,6 +193,10 @@ fn recovery_accepts_only_complete_supported_schema_shapes_and_is_restartable() {
         .expect("generation migration must exist");
     let admission_migration =
         std::fs::read_to_string(ADMISSION_MIGRATION_PATH).expect("admission migration must exist");
+    let audit_rollback =
+        std::fs::read_to_string(AUDIT_ROLLBACK_PATH).expect("audit rollback must exist");
+    let version_rollback =
+        std::fs::read_to_string(VERSION_ROLLBACK_PATH).expect("version rollback must exist");
     let publication_rollback = std::fs::read_to_string(PUBLICATION_ROLLBACK_PATH)
         .expect("publication rollback must exist");
     let Some(container) = start_postgres() else {
@@ -214,17 +220,25 @@ fn recovery_accepts_only_complete_supported_schema_shapes_and_is_restartable() {
     let recovered_from_0002 = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', to_regclass('public.reputation_source_publication') IS NOT NULL, to_regclass('public.reputation_source_publication_head') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL, (SELECT r.rolname = 'wardnet_state_owner' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_roles r ON r.oid = p.proowner WHERE p.oid = 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'::regprocedure), has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'));",
+            "SELECT concat_ws(':', to_regclass('public.reputation_source_publication') IS NOT NULL, to_regclass('public.reputation_source_publication_head') IS NOT NULL, to_regprocedure('public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)') IS NOT NULL, to_regclass('public.reputation_source_publication_audit') IS NOT NULL, (SELECT schema_version = 5 FROM public.wardnet_schema_version WHERE component = 'reputation_state'), (SELECT r.rolname = 'wardnet_state_owner' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_roles r ON r.oid = p.proowner WHERE p.oid = 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)'::regprocedure), has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'));",
         ),
-        "inspect recovered complete 0003 boundary",
+        "inspect recovered current boundary",
     );
-    assert_eq!(recovered_from_0002.trim(), "t:t:t:t:t");
+    assert_eq!(recovered_from_0002.trim(), "t:t:t:t:t:t:t");
 
     assert_success(
         psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
-        "replay recovery from an already complete 0003 boundary",
+        "replay recovery from an already complete current boundary",
     );
 
+    assert_success(
+        psql(&container, &audit_rollback),
+        "roll version 5 back to version 4",
+    );
+    assert_success(
+        psql(&container, &version_rollback),
+        "roll version 4 back to complete 0003",
+    );
     assert_success(
         psql(&container, &publication_rollback),
         "return to the supported 0002 schema boundary",

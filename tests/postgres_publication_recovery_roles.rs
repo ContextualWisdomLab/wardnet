@@ -10,7 +10,7 @@ const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_genera
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
 const PUBLICATION_ROLLBACK_PATH: &str = "migrations/0003_reputation_source_publication.down.sql";
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
-const RECOVERY_PATH: &str = "deploy/postgresql/reputation_state_recovery.sql";
+const RECOVERY_PATH_IN_CONTAINER: &str = "/wardnet/deploy/postgresql/reputation_state_recovery.sql";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -183,12 +183,28 @@ fn start_postgres() -> Option<PostgresContainer> {
     }
 }
 
+fn stage_recovery_tree(container: &PostgresContainer) {
+    assert_success(
+        run_docker(&["exec", &container.name, "mkdir", "-p", "/wardnet"], None),
+        "create recovery fixture root",
+    );
+    let destination = format!("{}:/wardnet/", container.name);
+    assert_success(
+        run_docker(&["cp", "migrations", &destination], None),
+        "stage canonical migrations",
+    );
+    assert_success(
+        run_docker(&["cp", "deploy", &destination], None),
+        "stage deployment recovery assets",
+    );
+}
+
 fn publication_sql(expected_prior: Option<&str>, generation: &str, ordinal: i64) -> String {
     let prior = expected_prior
         .map(|value| format!("'{value}'"))
         .unwrap_or_else(|| "NULL".to_string());
     format!(
-        "BEGIN; SELECT set_config('wardnet.tenant_id', 'tenant-a', true); SELECT public.wardnet_publish_reputation_source_generation('tenant-a', 'feed-a', {prior}, '{generation}', {ordinal}, {ordinal}, 'provenance-{ordinal}', 'evidence-{ordinal}', 'complete-{ordinal}', 'lifecycle-{ordinal}'); COMMIT;"
+        "BEGIN; SELECT set_config('wardnet.tenant_id', 'tenant-a', true), set_config('wardnet.actor_subject_id', 'subject:publication-recovery-fixture', true), set_config('wardnet.decision_id', 'decision:recover-{generation}-{ordinal}', true); SELECT public.wardnet_publish_reputation_source_generation('tenant-a', 'feed-a', {prior}, '{generation}', {ordinal}, {ordinal}, 'provenance-{ordinal}', 'evidence-{ordinal}', 'complete-{ordinal}', 'lifecycle-{ordinal}'); COMMIT;"
     )
 }
 
@@ -285,31 +301,9 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
     );
     assert_eq!(still_unrecovered.trim(), "t:t");
 
+    stage_recovery_tree(&container);
     assert_success(
-        run_docker(
-            &[
-                "exec",
-                &container.name,
-                "mkdir",
-                "-p",
-                "/tmp/wardnet-recovery",
-            ],
-            None,
-        ),
-        "create recovery staging directory",
-    );
-    for path in [ROLE_INSTALLER_PATH, RECOVERY_PATH] {
-        let destination = format!("{}:/tmp/wardnet-recovery/", container.name);
-        assert_success(
-            run_docker(&["cp", path, &destination], None),
-            "stage recovery asset",
-        );
-    }
-    assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "reconverge publication owner while withholding unsafe runtime publication",
     );
 
@@ -330,13 +324,10 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
 
     assert_success(
         publish_as_recovery_admin(&container, None, "generation-1", 1),
-        "restore authoritative generation-one publication evidence under recovery authority",
+        "restore attributable generation-one publication evidence under recovery authority",
     );
     assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "reactivate bounded runtime publication after the evidence gap closes",
     );
     let runtime_reactivated = assert_success(
@@ -352,19 +343,16 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
         "publish generation two through restored exact-prior runtime capability",
     );
     assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "replay role recovery idempotently",
     );
 
     let final_state = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', (SELECT count(*) = 2 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 2 FROM public.reputation_source_publication WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 1 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND source_generation = 'generation-1' AND source_generation_ordinal = 1), (SELECT source_generation = 'generation-2' AND source_generation_ordinal = 2 FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'));",
+            "SELECT concat_ws(':', (SELECT count(*) = 2 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 2 FROM public.reputation_source_publication WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 1 FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND source_generation = 'generation-1' AND source_generation_ordinal = 1), (SELECT source_generation = 'generation-2' AND source_generation_ordinal = 2 FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a'), (SELECT count(*) = 2 FROM public.reputation_source_publication_audit WHERE tenant_id = 'tenant-a' AND source_id = 'feed-a' AND actor_subject_id = 'subject:publication-recovery-fixture' AND decision_id IN ('decision:recover-generation-1-1', 'decision:recover-generation-2-2')), has_function_privilege('wardnet_runtime', 'public.wardnet_publish_reputation_source_generation(text,text,text,text,bigint,bigint,text,text,text,text)', 'EXECUTE'));",
         ),
-        "inspect preserved history after idempotent recovery replay",
+        "inspect preserved attributable history after idempotent recovery replay",
     );
-    assert_eq!(final_state.trim(), "t:t:t:t:t");
+    assert_eq!(final_state.trim(), "t:t:t:t:t:t");
 }
