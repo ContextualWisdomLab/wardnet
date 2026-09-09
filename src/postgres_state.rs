@@ -22,6 +22,7 @@ use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::{Client, Config, NoTls, Socket};
 
 const MAX_TENANT_ID_BYTES: usize = 256;
+const MAX_AUDIT_REFERENCE_BYTES: usize = 512;
 const PUBLICATION_CONFLICT_SQLSTATE: &str = "40001";
 const PUBLICATION_CONFLICT_MESSAGE: &str = "reputation_source_publication_conflict";
 
@@ -32,6 +33,8 @@ pub enum PostgresStateError {
     InvalidTenantId(&'static str),
     /// A typed publication command violates Wardnet's application contract.
     InvalidPublication(&'static str),
+    /// Publication audit attribution violates Wardnet's bounded reference contract.
+    InvalidAuditContext(&'static str),
     /// The publication conflicts with immutable history or current-head ordering.
     PublicationConflict,
     /// The canonical publication function returned an undocumented outcome.
@@ -50,6 +53,9 @@ impl fmt::Display for PostgresStateError {
             Self::InvalidTenantId(reason) => write!(formatter, "invalid tenant identity: {reason}"),
             Self::InvalidPublication(reason) => {
                 write!(formatter, "invalid reputation source publication: {reason}")
+            }
+            Self::InvalidAuditContext(reason) => {
+                write!(formatter, "invalid publication audit context: {reason}")
             }
             Self::PublicationConflict => {
                 formatter.write_str("reputation source publication conflicts with durable state")
@@ -110,6 +116,26 @@ impl TenantId {
     }
 }
 
+/// Validated identity and decision references attributable to one publication command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationAuditContext {
+    actor_subject_id: String,
+    decision_id: String,
+}
+
+impl PublicationAuditContext {
+    /// Build a bounded audit context without treating identity references as credentials.
+    pub fn new(
+        actor_subject_id: impl AsRef<str>,
+        decision_id: impl AsRef<str>,
+    ) -> PostgresStateResult<Self> {
+        Ok(Self {
+            actor_subject_id: validate_audit_reference(actor_subject_id.as_ref())?,
+            decision_id: validate_audit_reference(decision_id.as_ref())?,
+        })
+    }
+}
+
 /// Immutable command for one tenant-scoped reputation-source publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReputationSourcePublication {
@@ -122,6 +148,7 @@ pub struct ReputationSourcePublication {
     evidence_snapshot_ref: String,
     completeness_ref: String,
     producer_lifecycle_ref: String,
+    audit_context: Option<PublicationAuditContext>,
 }
 
 impl ReputationSourcePublication {
@@ -161,7 +188,14 @@ impl ReputationSourcePublication {
             evidence_snapshot_ref: validate_publication_text(evidence_snapshot_ref.as_ref())?,
             completeness_ref: validate_publication_text(completeness_ref.as_ref())?,
             producer_lifecycle_ref: validate_publication_text(producer_lifecycle_ref.as_ref())?,
+            audit_context: None,
         })
+    }
+
+    /// Attach actor/decision attribution to the publication's durable transaction.
+    pub fn with_audit_context(mut self, audit_context: PublicationAuditContext) -> Self {
+        self.audit_context = Some(audit_context);
+        self
     }
 }
 
@@ -232,6 +266,15 @@ impl<'client> TenantTransaction<'client> {
         tenant_id: String,
         publication: ReputationSourcePublication,
     ) -> PostgresStateResult<PublicationOutcome> {
+        if let Some(audit_context) = publication.audit_context.as_ref() {
+            self.client
+                .query_one(
+                    "SELECT set_config('wardnet.actor_subject_id', $1, true), set_config('wardnet.decision_id', $2, true)",
+                    &[&audit_context.actor_subject_id, &audit_context.decision_id],
+                )
+                .await?;
+        }
+
         let row = self
             .client
             .query_one(
@@ -251,8 +294,32 @@ impl<'client> TenantTransaction<'client> {
             )
             .await
             .map_err(map_publication_error)?;
-        let outcome: String = row.try_get(0)?;
-        parse_publication_outcome(&outcome)
+        let raw_outcome: String = row.try_get(0)?;
+        let outcome = parse_publication_outcome(&raw_outcome)?;
+
+        if outcome == PublicationOutcome::Replay
+            && let Some(audit_context) = publication.audit_context.as_ref()
+        {
+            let existing = self
+                .client
+                .query_opt(
+                    "SELECT actor_subject_id, decision_id FROM public.reputation_source_publication_audit WHERE tenant_id = $1 AND source_id = $2 AND source_generation = $3",
+                    &[&tenant_id, &publication.source_id, &publication.source_generation],
+                )
+                .await?;
+            let Some(existing) = existing else {
+                return Err(PostgresStateError::PublicationConflict);
+            };
+            let existing_actor: String = existing.try_get(0)?;
+            let existing_decision: String = existing.try_get(1)?;
+            if existing_actor != audit_context.actor_subject_id
+                || existing_decision != audit_context.decision_id
+            {
+                return Err(PostgresStateError::PublicationConflict);
+            }
+        }
+
+        Ok(outcome)
     }
 }
 
@@ -431,6 +498,25 @@ fn validate_publication_text(raw: &str) -> PostgresStateResult<String> {
     Ok(raw.to_owned())
 }
 
+fn validate_audit_reference(raw: &str) -> PostgresStateResult<String> {
+    if raw.is_empty() {
+        return Err(PostgresStateError::InvalidAuditContext(
+            "references must be nonempty",
+        ));
+    }
+    if raw != raw.trim() {
+        return Err(PostgresStateError::InvalidAuditContext(
+            "references must not contain leading or trailing whitespace",
+        ));
+    }
+    if raw.len() > MAX_AUDIT_REFERENCE_BYTES {
+        return Err(PostgresStateError::InvalidAuditContext(
+            "references exceed 512 UTF-8 bytes",
+        ));
+    }
+    Ok(raw.to_owned())
+}
+
 fn parse_publication_outcome(raw: &str) -> PostgresStateResult<PublicationOutcome> {
     match raw {
         "committed" => Ok(PublicationOutcome::Committed),
@@ -594,6 +680,22 @@ mod tests {
                 "lifecycle",
             ),
             Err(PostgresStateError::InvalidPublication(_))
+        ));
+    }
+
+    #[test]
+    fn publication_audit_context_rejects_blank_untrimmed_and_oversized_references() {
+        assert!(matches!(
+            PublicationAuditContext::new("", "decision:1"),
+            Err(PostgresStateError::InvalidAuditContext(_))
+        ));
+        assert!(matches!(
+            PublicationAuditContext::new(" subject:1", "decision:1"),
+            Err(PostgresStateError::InvalidAuditContext(_))
+        ));
+        assert!(matches!(
+            PublicationAuditContext::new("subject:1", "x".repeat(513)),
+            Err(PostgresStateError::InvalidAuditContext(_))
         ));
     }
 
