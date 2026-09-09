@@ -92,7 +92,10 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
         "the controlled recovery fixture must lose zero committed Wardnet publication transactions"
     );
     assert!(
-        receipt.get("rto_ms").and_then(Value::as_u64).is_some_and(|value| value > 0),
+        receipt
+            .get("rto_ms")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0),
         "RTO must be measured from declared restore start through the first successful bounded runtime verification"
     );
 
