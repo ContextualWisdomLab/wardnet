@@ -114,7 +114,10 @@ async fn precommit_loss_proves_rollback_before_commit_unknown_red() {
         "lost COMMIT transport must never be reported as known success"
     );
     assert!(proxy.commit_was_withheld(), "fixture must intercept COMMIT");
-    assert!(!proxy.commit_was_forwarded(), "COMMIT must not reach PostgreSQL");
+    assert!(
+        !proxy.commit_was_forwarded(),
+        "COMMIT must not reach PostgreSQL"
+    );
     assert!(!proxy.commit_completed_before_drop());
     assert_eq!(
         proxy.connection_count(),
