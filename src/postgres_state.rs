@@ -79,8 +79,9 @@ impl fmt::Display for PostgresStateError {
             Self::InvalidLoopbackFixture(reason) => {
                 write!(formatter, "invalid loopback PostgreSQL fixture: {reason}")
             }
-            Self::CommitOutcomeUnknown => formatter
-                .write_str("PostgreSQL commit outcome is unknown after transport loss"),
+            Self::CommitOutcomeUnknown => {
+                formatter.write_str("PostgreSQL commit outcome is unknown after transport loss")
+            }
             Self::Postgres(error) => write!(formatter, "PostgreSQL operation failed: {error}"),
         }
     }
