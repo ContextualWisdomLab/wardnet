@@ -77,10 +77,15 @@ fn physical_recovery_drill_preserves_security_authority_and_zero_publication_rpo
         required_true(&receipt, key);
     }
 
-    assert_eq!(required_u64(&receipt, "rpo_lost_publication_transactions"), 0);
+    assert_eq!(
+        required_u64(&receipt, "rpo_lost_publication_transactions"),
+        0
+    );
     assert!(required_u64(&receipt, "rto_ms") > 0);
     assert_eq!(
-        receipt.get("runtime_login_is_superuser").and_then(Value::as_bool),
+        receipt
+            .get("runtime_login_is_superuser")
+            .and_then(Value::as_bool),
         Some(false)
     );
 
