@@ -738,12 +738,11 @@ impl PostgresTenantPool {
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
             let connection = Arc::clone(&self.inner.connections[index]);
-            let mut client = match tokio::time::timeout_at(reconnect_deadline, connection.lock_owned())
-                .await
-            {
-                Ok(client) => client,
-                Err(_) => break,
-            };
+            let mut client =
+                match tokio::time::timeout_at(reconnect_deadline, connection.lock_owned()).await {
+                    Ok(client) => client,
+                    Err(_) => break,
+                };
             if !client.is_closed() {
                 return Ok(client);
             }
