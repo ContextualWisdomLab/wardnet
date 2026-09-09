@@ -238,25 +238,27 @@ pub struct PostgresTenantPool {
     inner: Arc<PoolInner>,
 }
 
-/// Borrowed transaction surface. Callers can execute only repository-owned fixed SQL here;
-/// tenant identity binding itself is always parameterized by [`PostgresTenantPool`].
-pub struct TenantTransaction<'client> {
+/// Crate-private borrowed transaction seam for typed repository methods and white-box tests.
+/// Ordinary application callers cannot submit SQL through this surface.
+pub(crate) struct TenantTransaction<'client> {
     client: &'client Client,
 }
 
-/// Boxed operation future used to keep the tenant transaction borrow scoped to one checkout.
-pub type TenantTransactionFuture<'client, T> =
+/// Crate-private boxed future keeping a tenant transaction borrow scoped to one checkout.
+pub(crate) type TenantTransactionFuture<'client, T> =
     Pin<Box<dyn Future<Output = PostgresStateResult<T>> + Send + 'client>>;
 
 impl<'client> TenantTransaction<'client> {
-    /// Execute fixed repository SQL that returns one `BIGINT` scalar.
-    pub async fn query_scalar_i64(&self, sql: &str) -> PostgresStateResult<i64> {
+    /// Execute fixed white-box test SQL returning one `BIGINT` scalar.
+    #[cfg(test)]
+    pub(crate) async fn query_scalar_i64(&self, sql: &str) -> PostgresStateResult<i64> {
         let row = self.client.query_one(sql, &[]).await?;
         Ok(row.try_get(0)?)
     }
 
-    /// Execute fixed repository SQL that returns one non-null text scalar.
-    pub async fn query_scalar_text(&self, sql: &str) -> PostgresStateResult<String> {
+    /// Execute fixed white-box test SQL returning one non-null text scalar.
+    #[cfg(test)]
+    pub(crate) async fn query_scalar_text(&self, sql: &str) -> PostgresStateResult<String> {
         let row = self.client.query_one(sql, &[]).await?;
         Ok(row.try_get(0)?)
     }
@@ -394,10 +396,10 @@ impl PostgresTenantPool {
 
     /// Run one operation inside a transaction whose tenant identity is local to that transaction.
     ///
-    /// The connection stays locked from `BEGIN` through `COMMIT`/`ROLLBACK`. Cancellation drops
-    /// the scope, which transfers the owned checkout into a rollback task; the mutex therefore
-    /// cannot be reacquired until rollback has completed.
-    pub async fn with_tenant_transaction<T, F>(
+    /// This seam is crate-private: production callers use typed repository methods. It remains
+    /// available to the colocated real-PostgreSQL white-box suite so commit/error/cancellation
+    /// cleanup can be verified without exporting an arbitrary-SQL application API.
+    pub(crate) async fn with_tenant_transaction<T, F>(
         &self,
         tenant_id: &TenantId,
         operation: F,
@@ -599,6 +601,16 @@ impl Drop for ActiveTransaction {
             let _ = client.batch_execute("ROLLBACK").await;
         });
     }
+}
+
+#[cfg(test)]
+mod tenant_context_integration_tests {
+    use crate as waf_ids_ai_soc;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test_support/postgres_tenant_context_pool.rs"
+    ));
 }
 
 #[cfg(test)]
