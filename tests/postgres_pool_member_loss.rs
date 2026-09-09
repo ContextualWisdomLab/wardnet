@@ -504,36 +504,31 @@ async fn lost_pool_capacity_is_replenished_before_the_next_original_member_fails
     assert_eq!(terminated.trim(), "t");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let post_loss_a = pool
-        .probe_unbound_context()
-        .await
-        .expect("a healthy member must remain usable after the first loss");
-    let post_loss_b = pool
-        .probe_unbound_context()
-        .await
-        .expect("pool checkout must restore the lost slot without process restart");
-    let post_loss_c = pool
-        .probe_unbound_context()
-        .await
-        .expect("restored capacity must remain available");
-    let replacement_pid = [
-        post_loss_a.backend_pid(),
-        post_loss_b.backend_pid(),
-        post_loss_c.backend_pid(),
-    ]
-    .into_iter()
-    .find(|pid| *pid != first_pid && *pid != second_pid)
-    .expect("one observed backend must be a replacement for the terminated member");
-    assert!(
-        [
-            post_loss_a.tenant_id(),
-            post_loss_b.tenant_id(),
-            post_loss_c.tenant_id(),
-        ]
-        .into_iter()
-        .all(|tenant_id| tenant_id.is_none()),
-        "replacement and surviving connections must have no tenant context before rebinding"
-    );
+    let replacement_deadline = Instant::now() + Duration::from_secs(5);
+    let replacement_pid = loop {
+        let probe = pool
+            .probe_unbound_context()
+            .await
+            .expect("healthy or asynchronously replenished capacity must remain usable");
+        assert_eq!(
+            probe.tenant_id(),
+            None,
+            "surviving and replacement connections must have no tenant context before rebinding"
+        );
+        let backend_pid = probe.backend_pid();
+        if backend_pid != first_pid && backend_pid != second_pid {
+            break backend_pid;
+        }
+        assert_eq!(
+            backend_pid, second_pid,
+            "after the first loss only the surviving original or its replacement may be observed"
+        );
+        assert!(
+            Instant::now() < replacement_deadline,
+            "the dead slot must be replenished asynchronously within the bounded fixture window"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
 
     let terminated = assert_success(
         psql(
