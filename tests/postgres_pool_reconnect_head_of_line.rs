@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,8 +63,7 @@ impl NewConnectionStallProxy {
                         let stop = Arc::clone(&accept_stop);
                         thread::spawn(move || {
                             if stall.load(Ordering::Acquire) {
-                                while stall.load(Ordering::Acquire)
-                                    && !stop.load(Ordering::Acquire)
+                                while stall.load(Ordering::Acquire) && !stop.load(Ordering::Acquire)
                                 {
                                     thread::sleep(Duration::from_millis(10));
                                 }
@@ -348,7 +347,10 @@ async fn slow_reconnect_does_not_block_an_unrelated_healthy_pool_member() {
         .await
         .expect("second original pool member must be reachable")
         .backend_pid();
-    assert_ne!(first_pid, second_pid, "fixture requires two physical backends");
+    assert_ne!(
+        first_pid, second_pid,
+        "fixture requires two physical backends"
+    );
 
     proxy.stall_new_connections();
     let terminated = assert_success(
