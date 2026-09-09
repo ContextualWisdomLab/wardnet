@@ -15,6 +15,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_postgres::config::{Host, SslMode};
@@ -23,6 +24,7 @@ use tokio_postgres::{Client, Config, NoTls, Socket};
 
 const MAX_TENANT_ID_BYTES: usize = 256;
 const MAX_AUDIT_REFERENCE_BYTES: usize = 512;
+const POSTGRES_RECONNECT_READINESS_TIMEOUT: Duration = Duration::from_millis(500);
 const PUBLICATION_CONFLICT_SQLSTATE: &str = "40001";
 const PUBLICATION_CONFLICT_MESSAGE: &str = "reputation_source_publication_conflict";
 
@@ -694,8 +696,10 @@ impl PostgresTenantPool {
     /// exists, a closed peer is repaired in the background only after this scan and only while that
     /// repair task owns the peer's slot mutex, so slow reconnect cannot hide or block established
     /// healthy capacity and concurrent checkouts cannot create competing replacements. When no
-    /// healthy member is immediately available, checkout keeps the existing blocking path: wait for
-    /// slots in round-robin order, recheck under the slot mutex, and repair before database work.
+    /// healthy member is immediately available, checkout gives the complete reconnect fallback one
+    /// bounded readiness window. Socket, TLS, authentication, and PostgreSQL startup progress must
+    /// finish within that single window; exhaustion fails closed with [`PostgresStateError::PoolUnavailable`]
+    /// before any database operation starts.
     async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
         let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         let mut healthy = None;
@@ -727,6 +731,8 @@ impl PostgresTenantPool {
             return Ok(client);
         }
 
+        let reconnect_deadline =
+            tokio::time::Instant::now() + POSTGRES_RECONNECT_READINESS_TIMEOUT;
         for offset in 0..self.inner.connections.len() {
             let index = start.wrapping_add(offset) % self.inner.connections.len();
             let mut client = Arc::clone(&self.inner.connections[index])
@@ -736,16 +742,17 @@ impl PostgresTenantPool {
                 return Ok(client);
             }
 
-            match self.reconnect_client().await {
-                Ok(replacement) => {
+            match tokio::time::timeout_at(reconnect_deadline, self.reconnect_client()).await {
+                Ok(Ok(replacement)) => {
                     *client = replacement;
                     return Ok(client);
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     // The caller-facing contract is pool availability, not connection diagnostics.
                     // Do not log or surface reconnect errors because they can contain endpoint or
                     // credential-adjacent material; continue to any unrelated healthy pool member.
                 }
+                Err(_) => break,
             }
         }
         Err(PostgresStateError::PoolUnavailable)
