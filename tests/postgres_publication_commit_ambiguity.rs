@@ -2,13 +2,13 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use waf_ids_ai_soc::postgres_state::{
-    PostgresTenantPool, PublicationAuditContext, PublicationOutcome, ReputationSourcePublication,
-    TenantId,
+    PostgresStateError, PostgresTenantPool, PublicationAuditContext, PublicationOutcome,
+    ReputationSourcePublication, TenantId,
 };
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
@@ -21,8 +21,28 @@ const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql"
 const PRINCIPAL_MAPPER_PATH: &str = "deploy/postgresql/reputation_state_runtime_principal.sql";
 const RUNTIME_PRINCIPAL: &str = "wardnet_commit_ambiguity_app";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
-const EXPECTED_COMMIT_UNKNOWN: &str = "reputation source publication commit outcome is unknown";
+const MAX_PROTOCOL_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const COMMIT_UNKNOWN_DISPLAY: &str =
+    "PostgreSQL commit outcome is unknown after transport loss";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitFault {
+    PassThrough = 0,
+    DropBeforeCommit = 1,
+    DropAfterCommit = 2,
+}
+
+impl CommitFault {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            1 => Self::DropBeforeCommit,
+            2 => Self::DropAfterCommit,
+            _ => Self::PassThrough,
+        }
+    }
+}
 
 struct PostgresContainer {
     name: String,
@@ -39,56 +59,79 @@ impl Drop for PostgresContainer {
     }
 }
 
-/// Protocol-aware loopback fault proxy that can drop the first backend message
-/// emitted after one forwarded simple-query COMMIT. Reading that backend frame
-/// proves PostgreSQL executed the COMMIT far enough to generate its response;
-/// the client intentionally never receives that response.
-struct CommitAckDropProxy {
+struct CommitFaultProxy {
     address: SocketAddr,
-    arm_drop: Arc<AtomicBool>,
-    acknowledgement_dropped: Arc<AtomicBool>,
+    mode: Arc<AtomicU8>,
     stop: Arc<AtomicBool>,
+    commit_forwarded: Arc<AtomicBool>,
+    commit_completed: Arc<AtomicBool>,
+    precommit_withheld: Arc<AtomicBool>,
+    connection_count: Arc<AtomicU64>,
 }
 
-impl CommitAckDropProxy {
+impl CommitFaultProxy {
     fn start(upstream_port: u16) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fault proxy must bind loopback");
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .expect("commit fault proxy must bind loopback");
         listener
             .set_nonblocking(true)
-            .expect("fault proxy listener must become nonblocking");
+            .expect("commit fault proxy listener must become nonblocking");
         let address = listener
             .local_addr()
-            .expect("fault proxy must expose its loopback address");
-        let arm_drop = Arc::new(AtomicBool::new(false));
-        let acknowledgement_dropped = Arc::new(AtomicBool::new(false));
+            .expect("commit fault proxy must expose its loopback address");
+
+        let mode = Arc::new(AtomicU8::new(CommitFault::PassThrough as u8));
         let stop = Arc::new(AtomicBool::new(false));
-        let accept_arm = Arc::clone(&arm_drop);
-        let accept_dropped = Arc::clone(&acknowledgement_dropped);
+        let commit_forwarded = Arc::new(AtomicBool::new(false));
+        let commit_completed = Arc::new(AtomicBool::new(false));
+        let precommit_withheld = Arc::new(AtomicBool::new(false));
+        let connection_count = Arc::new(AtomicU64::new(0));
+
+        let accept_mode = Arc::clone(&mode);
         let accept_stop = Arc::clone(&stop);
+        let accept_forwarded = Arc::clone(&commit_forwarded);
+        let accept_completed = Arc::clone(&commit_completed);
+        let accept_withheld = Arc::clone(&precommit_withheld);
+        let accept_connections = Arc::clone(&connection_count);
 
         thread::spawn(move || {
             while !accept_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((client, _)) => {
+                        accept_connections.fetch_add(1, Ordering::AcqRel);
                         let upstream = TcpStream::connect(("127.0.0.1", upstream_port))
-                            .expect("fault proxy must reach PostgreSQL");
-                        let arm = Arc::clone(&accept_arm);
-                        let dropped = Arc::clone(&accept_dropped);
-                        thread::spawn(move || proxy_connection(client, upstream, arm, dropped));
+                            .expect("commit fault proxy must reach PostgreSQL");
+                        let mode = Arc::clone(&accept_mode);
+                        let forwarded = Arc::clone(&accept_forwarded);
+                        let completed = Arc::clone(&accept_completed);
+                        let withheld = Arc::clone(&accept_withheld);
+                        thread::spawn(move || {
+                            proxy_connection(
+                                client,
+                                upstream,
+                                mode,
+                                forwarded,
+                                completed,
+                                withheld,
+                            );
+                        });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                     }
-                    Err(error) => panic!("fault proxy accept failed: {error}"),
+                    Err(error) => panic!("commit fault proxy accept failed: {error}"),
                 }
             }
         });
 
         Self {
             address,
-            arm_drop,
-            acknowledgement_dropped,
+            mode,
             stop,
+            commit_forwarded,
+            commit_completed,
+            precommit_withheld,
+            connection_count,
         }
     }
 
@@ -96,128 +139,220 @@ impl CommitAckDropProxy {
         self.address.port()
     }
 
-    fn arm_one_commit_ack_drop(&self) {
-        self.acknowledgement_dropped.store(false, Ordering::Release);
-        self.arm_drop.store(true, Ordering::Release);
+    fn arm_drop_after_commit(&self) {
+        self.commit_forwarded.store(false, Ordering::Release);
+        self.commit_completed.store(false, Ordering::Release);
+        self.precommit_withheld.store(false, Ordering::Release);
+        self.mode
+            .store(CommitFault::DropAfterCommit as u8, Ordering::Release);
     }
 
-    fn acknowledgement_dropped(&self) -> bool {
-        self.acknowledgement_dropped.load(Ordering::Acquire)
+    fn arm_drop_before_commit(&self) {
+        self.commit_forwarded.store(false, Ordering::Release);
+        self.commit_completed.store(false, Ordering::Release);
+        self.precommit_withheld.store(false, Ordering::Release);
+        self.mode
+            .store(CommitFault::DropBeforeCommit as u8, Ordering::Release);
+    }
+
+    fn commit_was_forwarded(&self) -> bool {
+        self.commit_forwarded.load(Ordering::Acquire)
+    }
+
+    fn commit_completed_before_drop(&self) -> bool {
+        self.commit_completed.load(Ordering::Acquire)
+    }
+
+    fn commit_was_withheld(&self) -> bool {
+        self.precommit_withheld.load(Ordering::Acquire)
+    }
+
+    fn connection_count(&self) -> u64 {
+        self.connection_count.load(Ordering::Acquire)
     }
 }
 
-impl Drop for CommitAckDropProxy {
+impl Drop for CommitFaultProxy {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
     }
 }
 
 fn proxy_connection(
-    mut client: TcpStream,
-    mut upstream: TcpStream,
-    arm_drop: Arc<AtomicBool>,
-    acknowledgement_dropped: Arc<AtomicBool>,
+    client: TcpStream,
+    upstream: TcpStream,
+    mode: Arc<AtomicU8>,
+    commit_forwarded: Arc<AtomicBool>,
+    commit_completed: Arc<AtomicBool>,
+    precommit_withheld: Arc<AtomicBool>,
 ) {
-    let mut frontend = client
+    let client_reader = client
         .try_clone()
-        .expect("fault proxy client stream must clone");
-    let mut backend_writer = upstream
+        .expect("proxy client stream must clone for frontend relay");
+    let upstream_writer = upstream
         .try_clone()
-        .expect("fault proxy upstream stream must clone");
-    let drop_backend_response = Arc::new(AtomicBool::new(false));
-    let frontend_drop = Arc::clone(&drop_backend_response);
+        .expect("proxy upstream stream must clone for frontend relay");
+    let frontend_forwarded = Arc::clone(&commit_forwarded);
+    let frontend_withheld = Arc::clone(&precommit_withheld);
+    let drop_after_commit = Arc::new(AtomicBool::new(false));
+    let frontend_drop_after_commit = Arc::clone(&drop_after_commit);
 
-    let frontend_thread = thread::spawn(move || {
-        // PostgreSQL startup packet has no type byte. Relay it once, then every
-        // frontend packet uses the normal type + int32 length framing.
-        let mut startup_length = [0_u8; 4];
-        if frontend.read_exact(&mut startup_length).is_err() {
-            return;
-        }
-        let startup_size = u32::from_be_bytes(startup_length) as usize;
-        if startup_size < 4 {
-            return;
-        }
-        let mut startup_body = vec![0_u8; startup_size - 4];
-        if frontend.read_exact(&mut startup_body).is_err() {
-            return;
-        }
-        if backend_writer.write_all(&startup_length).is_err()
-            || backend_writer.write_all(&startup_body).is_err()
-            || backend_writer.flush().is_err()
-        {
-            return;
-        }
-
-        loop {
-            let mut message_type = [0_u8; 1];
-            if frontend.read_exact(&mut message_type).is_err() {
-                break;
-            }
-            let mut length = [0_u8; 4];
-            if frontend.read_exact(&mut length).is_err() {
-                break;
-            }
-            let message_size = u32::from_be_bytes(length) as usize;
-            if message_size < 4 {
-                break;
-            }
-            let mut body = vec![0_u8; message_size - 4];
-            if frontend.read_exact(&mut body).is_err() {
-                break;
-            }
-
-            let is_commit = message_type[0] == b'Q' && body.as_slice() == b"COMMIT\0";
-            if backend_writer.write_all(&message_type).is_err()
-                || backend_writer.write_all(&length).is_err()
-                || backend_writer.write_all(&body).is_err()
-                || backend_writer.flush().is_err()
-            {
-                break;
-            }
-
-            if is_commit && arm_drop.swap(false, Ordering::AcqRel) {
-                frontend_drop.store(true, Ordering::Release);
-            }
-        }
-        let _ = backend_writer.shutdown(Shutdown::Both);
+    let frontend = thread::spawn(move || {
+        relay_frontend(
+            client_reader,
+            upstream_writer,
+            mode,
+            frontend_forwarded,
+            frontend_withheld,
+            frontend_drop_after_commit,
+        )
     });
 
+    relay_backend(upstream, client, drop_after_commit, commit_completed);
+    let _ = frontend.join();
+}
+
+fn relay_frontend(
+    mut client: TcpStream,
+    mut upstream: TcpStream,
+    mode: Arc<AtomicU8>,
+    commit_forwarded: Arc<AtomicBool>,
+    precommit_withheld: Arc<AtomicBool>,
+    drop_after_commit: Arc<AtomicBool>,
+) {
+    let Some(startup) = read_startup_packet(&mut client).expect("frontend startup packet must parse")
+    else {
+        return;
+    };
+    if upstream.write_all(&startup).is_err() {
+        return;
+    }
+
     loop {
-        let mut message_type = [0_u8; 1];
-        if upstream.read_exact(&mut message_type).is_err() {
-            break;
-        }
-        let mut length = [0_u8; 4];
-        if upstream.read_exact(&mut length).is_err() {
-            break;
-        }
-        let message_size = u32::from_be_bytes(length) as usize;
-        if message_size < 4 {
-            break;
-        }
-        let mut body = vec![0_u8; message_size - 4];
-        if upstream.read_exact(&mut body).is_err() {
-            break;
+        let Some((message_type, frame, payload)) =
+            read_typed_message(&mut client).expect("frontend PostgreSQL frame must parse")
+        else {
+            return;
+        };
+
+        if message_type == b'Q' && simple_query_is_commit(&payload) {
+            let armed = CommitFault::from_raw(
+                mode.swap(CommitFault::PassThrough as u8, Ordering::AcqRel),
+            );
+            match armed {
+                CommitFault::DropBeforeCommit => {
+                    precommit_withheld.store(true, Ordering::Release);
+                    let _ = client.shutdown(Shutdown::Both);
+                    let _ = upstream.shutdown(Shutdown::Both);
+                    return;
+                }
+                CommitFault::DropAfterCommit => {
+                    commit_forwarded.store(true, Ordering::Release);
+                    drop_after_commit.store(true, Ordering::Release);
+                    if upstream.write_all(&frame).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                CommitFault::PassThrough => {}
+            }
         }
 
-        if drop_backend_response.swap(false, Ordering::AcqRel) {
-            acknowledgement_dropped.store(true, Ordering::Release);
-            let _ = client.shutdown(Shutdown::Both);
-            let _ = upstream.shutdown(Shutdown::Both);
-            break;
-        }
-
-        if client.write_all(&message_type).is_err()
-            || client.write_all(&length).is_err()
-            || client.write_all(&body).is_err()
-            || client.flush().is_err()
-        {
-            break;
+        if upstream.write_all(&frame).is_err() {
+            return;
         }
     }
-    let _ = client.shutdown(Shutdown::Both);
-    let _ = frontend_thread.join();
+}
+
+fn relay_backend(
+    mut upstream: TcpStream,
+    mut client: TcpStream,
+    drop_after_commit: Arc<AtomicBool>,
+    commit_completed: Arc<AtomicBool>,
+) {
+    let mut commit_command_complete = false;
+    loop {
+        let Some((message_type, frame, _)) =
+            read_typed_message(&mut upstream).expect("backend PostgreSQL frame must parse")
+        else {
+            let _ = client.shutdown(Shutdown::Both);
+            return;
+        };
+
+        if drop_after_commit.load(Ordering::Acquire) {
+            if message_type == b'C' {
+                commit_command_complete = true;
+            } else if message_type == b'Z' && commit_command_complete {
+                commit_completed.store(true, Ordering::Release);
+                let _ = client.shutdown(Shutdown::Both);
+                let _ = upstream.shutdown(Shutdown::Both);
+                return;
+            }
+        }
+
+        if client.write_all(&frame).is_err() {
+            let _ = upstream.shutdown(Shutdown::Both);
+            return;
+        }
+    }
+}
+
+fn read_startup_packet(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
+    let mut length_bytes = [0_u8; 4];
+    if !read_exact_or_eof(stream, &mut length_bytes)? {
+        return Ok(None);
+    }
+    let length = u32::from_be_bytes(length_bytes) as usize;
+    validate_frame_length(length)?;
+    let mut body = vec![0_u8; length - 4];
+    stream.read_exact(&mut body)?;
+
+    let mut frame = Vec::with_capacity(length);
+    frame.extend_from_slice(&length_bytes);
+    frame.extend_from_slice(&body);
+    Ok(Some(frame))
+}
+
+fn read_typed_message(stream: &mut TcpStream) -> io::Result<Option<(u8, Vec<u8>, Vec<u8>)>> {
+    let mut message_type = [0_u8; 1];
+    if !read_exact_or_eof(stream, &mut message_type)? {
+        return Ok(None);
+    }
+    let mut length_bytes = [0_u8; 4];
+    stream.read_exact(&mut length_bytes)?;
+    let length = u32::from_be_bytes(length_bytes) as usize;
+    validate_frame_length(length)?;
+    let mut payload = vec![0_u8; length - 4];
+    stream.read_exact(&mut payload)?;
+
+    let mut frame = Vec::with_capacity(length + 1);
+    frame.push(message_type[0]);
+    frame.extend_from_slice(&length_bytes);
+    frame.extend_from_slice(&payload);
+    Ok(Some((message_type[0], frame, payload)))
+}
+
+fn validate_frame_length(length: usize) -> io::Result<()> {
+    if !(4..=MAX_PROTOCOL_MESSAGE_BYTES).contains(&length) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PostgreSQL protocol frame length is outside the bounded fixture contract",
+        ));
+    }
+    Ok(())
+}
+
+fn read_exact_or_eof(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<bool> {
+    match stream.read_exact(buffer) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn simple_query_is_commit(payload: &[u8]) -> bool {
+    let query = payload.strip_suffix(&[0]).unwrap_or(payload);
+    query.eq_ignore_ascii_case(b"COMMIT")
 }
 
 fn run_docker(args: &[&str], stdin: Option<&str>) -> Output {
@@ -416,102 +551,295 @@ fn prepare_database() -> Option<PostgresContainer> {
     Some(container)
 }
 
-fn publication(actor: &str, evidence: &str) -> ReputationSourcePublication {
+fn publication(
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+) -> ReputationSourcePublication {
+    publication_with(
+        expected_prior,
+        generation,
+        ordinal,
+        &format!("provenance-{generation}"),
+        "subject:commit-fixture",
+        &format!("decision:publish-{generation}-{ordinal}"),
+    )
+}
+
+fn publication_with(
+    expected_prior: Option<&str>,
+    generation: &str,
+    ordinal: i64,
+    provenance_ref: &str,
+    actor_subject_id: &str,
+    decision_id: &str,
+) -> ReputationSourcePublication {
     ReputationSourcePublication::new(
         "urlhaus",
-        None,
-        "generation-9",
-        9,
-        1_700_000_009,
-        "provenance-generation-9",
-        evidence,
-        "complete-generation-9",
-        "lifecycle-generation-9",
+        expected_prior,
+        generation,
+        ordinal,
+        1_700_000_000 + ordinal,
+        provenance_ref,
+        format!("snapshot-{generation}"),
+        format!("complete-{generation}"),
+        format!("lifecycle-{generation}"),
     )
     .expect("fixture publication must validate")
     .with_audit_context(
-        PublicationAuditContext::new(actor, "decision:publish-generation-9")
+        PublicationAuditContext::new(actor_subject_id, decision_id)
             .expect("fixture audit context must validate"),
     )
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn committed_but_unacknowledged_publication_is_reconciled_without_automatic_replay() {
-    let Some(container) = prepare_database() else {
-        return;
-    };
-    let proxy = CommitAckDropProxy::start(container.host_port);
+async fn connect_pool(container: &PostgresContainer, proxy: &CommitFaultProxy) -> PostgresTenantPool {
     let dsn = format!(
         "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
         proxy.port()
     );
-    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 1)
+    PostgresTenantPool::connect_loopback_test(&dsn, 1)
         .await
-        .expect("one-member runtime pool must connect through the protocol fault proxy");
-    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
-    let exact = publication("subject:commit-ambiguity", "snapshot-generation-9");
+        .expect("loopback runtime pool must connect through the protocol fault proxy")
+}
 
-    proxy.arm_one_commit_ack_drop();
-    let first = pool.publish_reputation_source(&tenant, &exact).await;
-    assert!(
-        first.is_err(),
-        "lost COMMIT acknowledgement must never claim success"
-    );
+fn generation_9_residue(container: &PostgresContainer) -> String {
+    assert_success(
+        psql(
+            container,
+            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_generation WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-9'), (SELECT count(*) FROM public.reputation_source_publication WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-9'), (SELECT count(*) FROM public.reputation_source_publication_audit WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-9'), (SELECT count(*) FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus' AND source_generation = 'generation-9'));",
+        ),
+        "inspect generation-9 durable residue",
+    )
+}
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !proxy.acknowledgement_dropped() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
+fn await_generation_9_absent(container: &PostgresContainer) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if generation_9_residue(container).trim() == "0:0:0:0" {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pre-COMMIT transport loss must roll back staged generation-9 state"
+        );
+        thread::sleep(Duration::from_millis(25));
     }
-    assert!(
-        proxy.acknowledgement_dropped(),
-        "fixture must prove it dropped a backend frame only after forwarding COMMIT"
-    );
+}
 
-    let residue = assert_success(
-        psql(
-            &container,
-            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_publication WHERE tenant_id='tenant-a' AND source_id='urlhaus' AND source_generation='generation-9'), (SELECT count(*) FROM public.reputation_source_publication_audit WHERE tenant_id='tenant-a' AND source_id='urlhaus' AND source_generation='generation-9'), (SELECT count(*) FROM public.reputation_source_publication_head WHERE tenant_id='tenant-a' AND source_id='urlhaus' AND source_generation='generation-9'));",
+fn assert_commit_unknown(result: Result<PublicationOutcome, PostgresStateError>) {
+    match result {
+        Ok(outcome) => panic!(
+            "a lost COMMIT acknowledgement must not be reported as a known publication outcome: {outcome:?}"
         ),
-        "inspect committed-but-unacknowledged publication residue",
-    );
-    assert_eq!(
-        residue.trim(),
-        "1:1:1",
-        "server must have one durable publication, audit tuple, and current head before reconciliation"
-    );
+        Err(error) => assert_eq!(
+            error.to_string(),
+            COMMIT_UNKNOWN_DISPLAY,
+            "commit-stage transport loss needs a stable typed ambiguity outcome instead of a generic PostgreSQL/pool error"
+        ),
+    }
+}
 
-    thread::sleep(Duration::from_millis(100));
+fn assert_conflict(result: Result<PublicationOutcome, PostgresStateError>, context: &str) {
+    assert!(
+        matches!(result, Err(PostgresStateError::PublicationConflict)),
+        "{context}: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_but_ack_lost_reconciles_only_the_byte_identical_publication() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let proxy = CommitFaultProxy::start(container.host_port);
+    let pool = connect_pool(&container, &proxy).await;
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+    let other_tenant = TenantId::parse("tenant-b").expect("tenant identity must validate");
+
     assert_eq!(
-        pool.publish_reputation_source(&tenant, &exact)
+        pool.publish_reputation_source(&tenant, &publication(None, "generation-8", 8))
             .await
-            .expect("explicit exact reconciliation must succeed after reconnect"),
-        PublicationOutcome::Replay,
-        "same immutable typed command must reconcile through durable replay rather than duplicate publication"
+            .expect("baseline publication must commit"),
+        PublicationOutcome::Committed
     );
 
-    let divergent = pool
-        .publish_reputation_source(
-            &tenant,
-            &publication("subject:different", "snapshot-generation-9-different"),
-        )
-        .await;
+    let generation_9 = publication(Some("generation-8"), "generation-9", 9);
+    proxy.arm_drop_after_commit();
+    let ambiguous = pool.publish_reputation_source(&tenant, &generation_9).await;
+    assert_commit_unknown(ambiguous);
     assert!(
-        divergent.is_err(),
-        "divergent evidence or attribution must not become a recovery path: {divergent:?}"
+        proxy.commit_was_forwarded(),
+        "fault fixture must prove that the generation-9 COMMIT reached PostgreSQL"
     );
-    let residue_after = assert_success(
+    assert!(
+        proxy.commit_completed_before_drop(),
+        "fault fixture must observe PostgreSQL CommandComplete plus ReadyForQuery before dropping the terminal acknowledgement"
+    );
+    assert_eq!(
+        proxy.connection_count(),
+        1,
+        "Wardnet must not reconnect or replay publication work before an explicit caller retry"
+    );
+    assert_eq!(
+        generation_9_residue(&container).trim(),
+        "1:1:1:1",
+        "a server-completed COMMIT with a lost client acknowledgement must leave exactly one immutable generation/publication/audit/head tuple"
+    );
+
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &generation_9)
+            .await
+            .expect("byte-identical explicit reconciliation must read durable state"),
+        PublicationOutcome::Replay
+    );
+    assert_eq!(
+        generation_9_residue(&container).trim(),
+        "1:1:1:1",
+        "explicit reconciliation must not duplicate durable publication state"
+    );
+
+    let changed_evidence = publication_with(
+        Some("generation-8"),
+        "generation-9",
+        9,
+        "provenance-generation-9-divergent",
+        "subject:commit-fixture",
+        "decision:publish-generation-9-9",
+    );
+    assert_conflict(
+        pool.publish_reputation_source(&tenant, &changed_evidence).await,
+        "changed evidence must not reconcile an ambiguous commit",
+    );
+
+    let changed_prior = publication(None, "generation-9", 9);
+    assert_conflict(
+        pool.publish_reputation_source(&tenant, &changed_prior).await,
+        "changed prior-generation expectation must not reconcile an ambiguous commit",
+    );
+
+    let changed_actor = publication_with(
+        Some("generation-8"),
+        "generation-9",
+        9,
+        "provenance-generation-9",
+        "subject:different-actor",
+        "decision:publish-generation-9-9",
+    );
+    assert_conflict(
+        pool.publish_reputation_source(&tenant, &changed_actor).await,
+        "changed actor attribution must not reconcile an ambiguous commit",
+    );
+
+    let changed_decision = publication_with(
+        Some("generation-8"),
+        "generation-9",
+        9,
+        "provenance-generation-9",
+        "subject:commit-fixture",
+        "decision:different-decision",
+    );
+    assert_conflict(
+        pool.publish_reputation_source(&tenant, &changed_decision).await,
+        "changed decision attribution must not reconcile an ambiguous commit",
+    );
+
+    let probe = pool
+        .probe_unbound_context()
+        .await
+        .expect("replacement checkout must remain usable");
+    assert_eq!(
+        probe.tenant_id(),
+        None,
+        "replacement checkout must not retain transaction-local tenant authority"
+    );
+    assert!(
+        pool.current_reputation_source_publication(&other_tenant, "urlhaus")
+            .await
+            .expect("cross-tenant lookup must remain a valid empty read")
+            .is_none(),
+        "tenant B must not see tenant A's reconciled publication"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn precommit_connection_loss_rolls_back_and_exact_retry_commits_once() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let proxy = CommitFaultProxy::start(container.host_port);
+    let pool = connect_pool(&container, &proxy).await;
+    let tenant = TenantId::parse("tenant-a").expect("tenant identity must validate");
+    let other_tenant = TenantId::parse("tenant-b").expect("tenant identity must validate");
+
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &publication(None, "generation-8", 8))
+            .await
+            .expect("baseline publication must commit"),
+        PublicationOutcome::Committed
+    );
+
+    let generation_9 = publication(Some("generation-8"), "generation-9", 9);
+    proxy.arm_drop_before_commit();
+    let ambiguous = pool.publish_reputation_source(&tenant, &generation_9).await;
+    assert_commit_unknown(ambiguous);
+    assert!(
+        proxy.commit_was_withheld(),
+        "fault fixture must prove that it intercepted the generation-9 COMMIT frame"
+    );
+    assert!(
+        !proxy.commit_was_forwarded(),
+        "pre-COMMIT fault must not send the intercepted COMMIT frame to PostgreSQL"
+    );
+    assert!(
+        !proxy.commit_completed_before_drop(),
+        "pre-COMMIT fault must not fabricate server completion evidence"
+    );
+    assert_eq!(
+        proxy.connection_count(),
+        1,
+        "Wardnet must not reconnect or replay publication work before an explicit caller retry"
+    );
+
+    await_generation_9_absent(&container);
+    let current = assert_success(
         psql(
             &container,
-            "SELECT concat_ws(':', (SELECT count(*) FROM public.reputation_source_publication WHERE tenant_id='tenant-a' AND source_id='urlhaus' AND source_generation='generation-9'), (SELECT count(*) FROM public.reputation_source_publication_audit WHERE tenant_id='tenant-a' AND source_id='urlhaus' AND source_generation='generation-9'), (SELECT count(*) FROM public.reputation_source_publication_head WHERE tenant_id='tenant-a' AND source_id='urlhaus' AND source_generation='generation-9'));",
+            "SELECT source_generation FROM public.reputation_source_publication_head WHERE tenant_id = 'tenant-a' AND source_id = 'urlhaus';",
         ),
-        "inspect post-reconciliation publication residue",
+        "inspect head after pre-COMMIT loss",
     );
-    assert_eq!(residue_after.trim(), "1:1:1");
-
-    let first_error = first.expect_err("lost acknowledgement must remain an error");
     assert_eq!(
-        first_error.to_string(),
-        EXPECTED_COMMIT_UNKNOWN,
-        "commit-stage transport loss needs a stable unknown-outcome classification rather than a generic PostgreSQL connection error"
+        current.trim(),
+        "generation-8",
+        "server rollback must keep the baseline publication authoritative"
+    );
+
+    assert_eq!(
+        pool.publish_reputation_source(&tenant, &generation_9)
+            .await
+            .expect("explicit retry after proven pre-COMMIT loss may commit"),
+        PublicationOutcome::Committed
+    );
+    assert_eq!(
+        generation_9_residue(&container).trim(),
+        "1:1:1:1",
+        "explicit retry after server rollback must commit generation 9 exactly once"
+    );
+
+    let probe = pool
+        .probe_unbound_context()
+        .await
+        .expect("replacement checkout must remain usable");
+    assert_eq!(
+        probe.tenant_id(),
+        None,
+        "replacement checkout must not retain transaction-local tenant authority"
+    );
+    assert!(
+        pool.current_reputation_source_publication(&other_tenant, "urlhaus")
+            .await
+            .expect("cross-tenant lookup must remain a valid empty read")
+            .is_none(),
+        "tenant B must not see tenant A's retried publication"
     );
 }
