@@ -43,6 +43,8 @@ pub enum PostgresStateError {
     InvalidPublicationOutcome,
     /// A connection pool with no connections cannot fail closed.
     InvalidPoolSize,
+    /// Every configured PostgreSQL pool member has already closed.
+    PoolUnavailable,
     /// The plaintext integration constructor was requested outside loopback.
     InvalidLoopbackFixture(&'static str),
     /// PostgreSQL rejected a connection, transaction, or query operation.
@@ -68,6 +70,9 @@ impl fmt::Display for PostgresStateError {
                 .write_str("PostgreSQL publication function returned an unsupported outcome"),
             Self::InvalidPoolSize => {
                 formatter.write_str("PostgreSQL pool size must be greater than zero")
+            }
+            Self::PoolUnavailable => {
+                formatter.write_str("PostgreSQL pool has no open connection")
             }
             Self::InvalidLoopbackFixture(reason) => {
                 write!(formatter, "invalid loopback PostgreSQL fixture: {reason}")
@@ -560,8 +565,7 @@ impl PostgresTenantPool {
         T: Send,
         F: for<'client> FnOnce(TenantTransaction<'client>) -> TenantTransactionFuture<'client, T>,
     {
-        let connection = self.next_connection();
-        let guard = connection.lock_owned().await;
+        let guard = self.next_connection().await?;
         let scope = ActiveTransaction::begin(guard).await?;
         let tenant_value = tenant_id.as_str();
         scope
@@ -643,8 +647,7 @@ impl PostgresTenantPool {
     /// This is deliberately not a general raw-query escape hatch. It exists to prove pooled
     /// connection hygiene without granting unbound application state reads.
     pub async fn probe_unbound_context(&self) -> PostgresStateResult<UnboundContextProbe> {
-        let connection = self.next_connection();
-        let client = connection.lock_owned().await;
+        let client = self.next_connection().await?;
         let row = client
             .query_one(
                 "SELECT pg_backend_pid()::bigint, NULLIF(current_setting('wardnet.tenant_id', true), '')",
@@ -657,10 +660,22 @@ impl PostgresTenantPool {
         })
     }
 
-    fn next_connection(&self) -> Arc<Mutex<Client>> {
-        let index = self.inner.next_connection.fetch_add(1, Ordering::Relaxed)
-            % self.inner.connections.len();
-        Arc::clone(&self.inner.connections[index])
+    /// Checkout the next driver-open pool member before starting any database operation.
+    ///
+    /// A failed query or transaction is never replayed on another member: its commit outcome may
+    /// be ambiguous. This method skips only clients that tokio-postgres already reports closed.
+    async fn next_connection(&self) -> PostgresStateResult<OwnedMutexGuard<Client>> {
+        let start = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..self.inner.connections.len() {
+            let index = start.wrapping_add(offset) % self.inner.connections.len();
+            let client = Arc::clone(&self.inner.connections[index])
+                .lock_owned()
+                .await;
+            if !client.is_closed() {
+                return Ok(client);
+            }
+        }
+        Err(PostgresStateError::PoolUnavailable)
     }
 }
 
