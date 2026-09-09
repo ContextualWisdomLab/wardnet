@@ -109,7 +109,6 @@ fn start_postgres() -> Option<PostgresContainer> {
     let available = Command::new("docker")
         .arg("version")
         .arg("--format")
-        .arg("{{.Server.Version}}")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -231,7 +230,10 @@ fn recovery_accepts_only_complete_supported_schema_shapes_and_is_restartable() {
         "replay recovery from an already complete current boundary",
     );
 
-    assert_success(psql(&container, &audit_rollback), "roll version 5 back to version 4");
+    assert_success(
+        psql(&container, &audit_rollback),
+        "roll version 5 back to version 4",
+    );
     assert_success(
         psql(&container, &version_rollback),
         "roll version 4 back to complete 0003",
