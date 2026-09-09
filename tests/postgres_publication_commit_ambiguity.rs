@@ -194,6 +194,8 @@ fn proxy_connection(
         .expect("proxy upstream stream must clone for frontend relay");
     let frontend_forwarded = Arc::clone(&commit_forwarded);
     let frontend_withheld = Arc::clone(&precommit_withheld);
+    let drop_after_commit = Arc::new(AtomicBool::new(false));
+    let frontend_drop_after_commit = Arc::clone(&drop_after_commit);
 
     let frontend = thread::spawn(move || {
         relay_frontend(
@@ -202,10 +204,11 @@ fn proxy_connection(
             mode,
             frontend_forwarded,
             frontend_withheld,
+            frontend_drop_after_commit,
         )
     });
 
-    relay_backend(upstream, client, commit_forwarded, commit_completed);
+    relay_backend(upstream, client, drop_after_commit, commit_completed);
     let _ = frontend.join();
 }
 
@@ -215,6 +218,7 @@ fn relay_frontend(
     mode: Arc<AtomicU8>,
     commit_forwarded: Arc<AtomicBool>,
     precommit_withheld: Arc<AtomicBool>,
+    drop_after_commit: Arc<AtomicBool>,
 ) {
     let Some(startup) = read_startup_packet(&mut client).expect("frontend startup packet must parse")
     else {
@@ -244,6 +248,7 @@ fn relay_frontend(
                 }
                 CommitFault::DropAfterCommit => {
                     commit_forwarded.store(true, Ordering::Release);
+                    drop_after_commit.store(true, Ordering::Release);
                     if upstream.write_all(&frame).is_err() {
                         return;
                     }
@@ -262,7 +267,7 @@ fn relay_frontend(
 fn relay_backend(
     mut upstream: TcpStream,
     mut client: TcpStream,
-    commit_forwarded: Arc<AtomicBool>,
+    drop_after_commit: Arc<AtomicBool>,
     commit_completed: Arc<AtomicBool>,
 ) {
     let mut commit_command_complete = false;
@@ -274,7 +279,7 @@ fn relay_backend(
             return;
         };
 
-        if commit_forwarded.load(Ordering::Acquire) {
+        if drop_after_commit.load(Ordering::Acquire) {
             if message_type == b'C' {
                 commit_command_complete = true;
             } else if message_type == b'Z' && commit_command_complete {
