@@ -286,12 +286,22 @@ printf 'SELECT pg_switch_wal();\n' | psql_super "$source_container" postgres >/d
 [[ "$(publish_runtime "$source_container" tenant-a generation-8 generation-9 9 subject:recovery-a decision:a-9 | tr -d '[:space:]')" == "committed" ]] \
   || fail "post-backup tenant-a generation-9 publication did not commit"
 
+# Close the segment containing the post-backup publication, then write a named
+# restore-point WAL record in the following segment. The target is therefore a
+# concrete post-commit WAL record beyond the backup replay floor rather than a
+# sampled flush pointer that can coincide with a segment boundary.
+printf 'SELECT pg_switch_wal();\n' | psql_super "$source_container" postgres >/dev/null
+recovery_target_name="wardnet-pitr-${SUFFIX}"
 recovery_target_lsn="$(
+  printf "SELECT pg_create_restore_point('%s')::text;\n" "$recovery_target_name" \
+    | psql_super "$source_container" postgres \
+    | tr -d '[:space:]'
+)"
+source_wal_lsn="$(
   printf 'SELECT pg_current_wal_flush_lsn()::text;\n' \
     | psql_super "$source_container" postgres \
     | tr -d '[:space:]'
 )"
-source_wal_lsn="$recovery_target_lsn"
 source_timeline="$(
   printf 'SELECT timeline_id::text FROM pg_control_checkpoint();\n' \
     | psql_super "$source_container" postgres \
