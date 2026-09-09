@@ -1,14 +1,18 @@
 -- Least-privilege capability roles for Wardnet reputation-state publication.
 --
--- Run this after migrations 0001..0003 as the database migration/cluster
--- administrator. These are NOLOGIN capability roles: credentials and login
--- principals stay in the deployment/IAM boundary rather than this repository
--- artifact. Schema migrations intentionally do not create cluster roles.
+-- Run this after the supported reputation-state migrations as the database
+-- migration/cluster administrator. These are NOLOGIN capability roles:
+-- credentials and login principals stay in the deployment/IAM boundary rather
+-- than this repository artifact. Schema migrations intentionally do not create
+-- cluster roles.
 --
 -- The outer publication function is SECURITY DEFINER. Its owner therefore gets
 -- only the table/function privileges needed by that bounded transaction. The
 -- runtime capability receives read access and outer-function EXECUTE, never
--- direct mutation or inner-admission authority.
+-- direct mutation or inner-admission authority. Schema version 5 adds optional
+-- publication-audit evidence; this installer remains replayable against the
+-- supported pre-audit boundary so upgrades can migrate before privilege
+-- convergence.
 --
 -- The full installation is one explicit transaction so an ownership-transfer
 -- or privilege failure cannot strand capability roles or temporary authority.
@@ -46,6 +50,15 @@ REVOKE ALL PRIVILEGES ON TABLE
     public.reputation_source_publication,
     public.reputation_source_publication_head
 FROM wardnet_state_owner, wardnet_runtime;
+
+DO $wardnet_audit_revoke$
+BEGIN
+    IF to_regclass('public.reputation_source_publication_audit') IS NOT NULL THEN
+        REVOKE ALL PRIVILEGES ON TABLE public.reputation_source_publication_audit
+            FROM wardnet_state_owner, wardnet_runtime;
+    END IF;
+END
+$wardnet_audit_revoke$;
 
 REVOKE EXECUTE ON FUNCTION public.wardnet_admit_reputation_source_generation(
     text,
@@ -88,6 +101,15 @@ GRANT SELECT, INSERT ON TABLE public.reputation_source_publication
 GRANT SELECT, INSERT, UPDATE ON TABLE public.reputation_source_publication_head
     TO wardnet_state_owner;
 
+DO $wardnet_audit_owner_grants$
+BEGIN
+    IF to_regclass('public.reputation_source_publication_audit') IS NOT NULL THEN
+        GRANT SELECT, INSERT ON TABLE public.reputation_source_publication_audit
+            TO wardnet_state_owner;
+    END IF;
+END
+$wardnet_audit_owner_grants$;
+
 ALTER FUNCTION public.wardnet_publish_reputation_source_generation(
     text,
     text,
@@ -110,6 +132,16 @@ GRANT SELECT ON TABLE
     public.reputation_source_publication,
     public.reputation_source_publication_head
 TO wardnet_runtime;
+
+DO $wardnet_audit_runtime_grants$
+BEGIN
+    IF to_regclass('public.reputation_source_publication_audit') IS NOT NULL THEN
+        GRANT SELECT ON TABLE public.reputation_source_publication_audit
+            TO wardnet_runtime;
+    END IF;
+END
+$wardnet_audit_runtime_grants$;
+
 GRANT EXECUTE ON FUNCTION public.wardnet_publish_reputation_source_generation(
     text,
     text,
@@ -131,6 +163,17 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE
     public.reputation_source_publication,
     public.reputation_source_publication_head
 FROM wardnet_runtime;
+
+DO $wardnet_audit_runtime_revoke$
+BEGIN
+    IF to_regclass('public.reputation_source_publication_audit') IS NOT NULL THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+            ON TABLE public.reputation_source_publication_audit
+            FROM wardnet_runtime;
+    END IF;
+END
+$wardnet_audit_runtime_revoke$;
+
 REVOKE EXECUTE ON FUNCTION public.wardnet_admit_reputation_source_generation(
     text,
     text,
