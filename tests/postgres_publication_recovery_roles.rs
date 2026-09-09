@@ -10,7 +10,7 @@ const ADMISSION_MIGRATION_PATH: &str = "migrations/0002_reputation_source_genera
 const PUBLICATION_MIGRATION_PATH: &str = "migrations/0003_reputation_source_publication.sql";
 const PUBLICATION_ROLLBACK_PATH: &str = "migrations/0003_reputation_source_publication.down.sql";
 const ROLE_INSTALLER_PATH: &str = "deploy/postgresql/reputation_state_roles.sql";
-const RECOVERY_PATH: &str = "deploy/postgresql/reputation_state_recovery.sql";
+const RECOVERY_PATH_IN_CONTAINER: &str = "/wardnet/deploy/postgresql/reputation_state_recovery.sql";
 const FINAL_STARTUP_MARKER: &str = "PostgreSQL init process complete; ready for start up.";
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -183,6 +183,22 @@ fn start_postgres() -> Option<PostgresContainer> {
     }
 }
 
+fn stage_recovery_tree(container: &PostgresContainer) {
+    assert_success(
+        run_docker(&["exec", &container.name, "mkdir", "-p", "/wardnet"], None),
+        "create recovery fixture root",
+    );
+    let destination = format!("{}:/wardnet/", container.name);
+    assert_success(
+        run_docker(&["cp", "migrations", &destination], None),
+        "stage canonical migrations",
+    );
+    assert_success(
+        run_docker(&["cp", "deploy", &destination], None),
+        "stage deployment recovery assets",
+    );
+}
+
 fn publication_sql(expected_prior: Option<&str>, generation: &str, ordinal: i64) -> String {
     let prior = expected_prior
         .map(|value| format!("'{value}'"))
@@ -285,31 +301,9 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
     );
     assert_eq!(still_unrecovered.trim(), "t:t");
 
+    stage_recovery_tree(&container);
     assert_success(
-        run_docker(
-            &[
-                "exec",
-                &container.name,
-                "mkdir",
-                "-p",
-                "/tmp/wardnet-recovery",
-            ],
-            None,
-        ),
-        "create recovery staging directory",
-    );
-    for path in [ROLE_INSTALLER_PATH, RECOVERY_PATH] {
-        let destination = format!("{}:/tmp/wardnet-recovery/", container.name);
-        assert_success(
-            run_docker(&["cp", path, &destination], None),
-            "stage recovery asset",
-        );
-    }
-    assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "reconverge publication owner while withholding unsafe runtime publication",
     );
 
@@ -333,10 +327,7 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
         "restore authoritative generation-one publication evidence under recovery authority",
     );
     assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "reactivate bounded runtime publication after the evidence gap closes",
     );
     let runtime_reactivated = assert_success(
@@ -352,10 +343,7 @@ fn publication_recovery_reconverges_authority_without_reactivating_an_evidence_g
         "publish generation two through restored exact-prior runtime capability",
     );
     assert_success(
-        psql_file(
-            &container,
-            "/tmp/wardnet-recovery/reputation_state_recovery.sql",
-        ),
+        psql_file(&container, RECOVERY_PATH_IN_CONTAINER),
         "replay role recovery idempotently",
     );
 
