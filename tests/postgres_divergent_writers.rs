@@ -1,6 +1,9 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -439,7 +442,8 @@ async fn assert_single_candidate_residue(admin: &Client, tenant: &TenantId, sour
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn divergent_runtime_writers_serialize_one_authoritative_publication_without_global_locking() {
+async fn divergent_runtime_writers_serialize_one_authoritative_publication_without_global_locking()
+{
     let Some(container) = prepare_database() else {
         return;
     };
