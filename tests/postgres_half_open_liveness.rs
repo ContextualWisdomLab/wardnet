@@ -287,7 +287,10 @@ fn start_postgres() -> Option<PostgresContainer> {
     }
 
     let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let name = format!("wardnet-postgres-half-open-{}-{sequence}", std::process::id());
+    let name = format!(
+        "wardnet-postgres-half-open-{}-{sequence}",
+        std::process::id()
+    );
     assert_success(
         run_docker(
             &[
@@ -446,7 +449,9 @@ async fn established_half_open_session_cannot_stall_healthy_pool_capacity_or_all
     proxy.blackhole_every_connection();
     let all_blackholed = tokio::time::timeout(BUYER_PATH_GUARD, pool.probe_unbound_context())
         .await
-        .expect("all-blackholed runtime capacity must fail closed inside the repository liveness bound");
+        .expect(
+            "all-blackholed runtime capacity must fail closed inside the repository liveness bound",
+        );
     assert!(
         matches!(all_blackholed, Err(PostgresStateError::PoolUnavailable)),
         "all established/replacement sessions without PostgreSQL protocol progress must report typed pool unavailability: {all_blackholed:?}"
