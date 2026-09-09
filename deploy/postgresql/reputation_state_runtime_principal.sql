@@ -60,12 +60,13 @@ $wardnet_unsafe_capability_roles$;
 -- but SET-capable membership in an elevated role could still acquire them, so
 -- reject any direct or indirect privileged-role membership as well as any
 -- access to Wardnet's state-owner role. The principal must also arrive without
--- out-of-band mutation or inner-admission privileges on Wardnet state objects;
--- otherwise adding wardnet_runtime would preserve a wider effective authority
--- than this mapper is allowed to establish. Runtime membership is valid only
--- when absent (first mapping) or already present as the mapper's exact bounded
--- direct edge (idempotent replay); any alternate role path to wardnet_runtime
--- is outside this artifact's authority and therefore fails closed.
+-- out-of-band mutation or inner-admission privileges on Wardnet state objects,
+-- including version-5 publication-audit evidence when present. Otherwise adding
+-- wardnet_runtime would preserve a wider effective authority than this mapper is
+-- allowed to establish. Runtime membership is valid only when absent (first
+-- mapping) or already present as the mapper's exact bounded direct edge
+-- (idempotent replay); any alternate role path to wardnet_runtime is outside
+-- this artifact's authority and therefore fails closed.
 SELECT
     count(*) = 1
         AND bool_and(rolcanlogin)
@@ -126,6 +127,22 @@ SELECT
             'public.reputation_source_publication_head',
             'INSERT,UPDATE,REFERENCES'
         )
+        AND NOT coalesce(
+            pg_catalog.has_table_privilege(
+                :'wardnet_runtime_principal',
+                to_regclass('public.reputation_source_publication_audit'),
+                'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+            ),
+            false
+        )
+        AND NOT coalesce(
+            pg_catalog.has_any_column_privilege(
+                :'wardnet_runtime_principal',
+                to_regclass('public.reputation_source_publication_audit'),
+                'INSERT,UPDATE,REFERENCES'
+            ),
+            false
+        )
         AND NOT pg_catalog.has_function_privilege(
             :'wardnet_runtime_principal',
             'public.wardnet_admit_reputation_source_generation(text,text,text,bigint,bigint,text)',
@@ -178,7 +195,7 @@ WHERE rolname = :'wardnet_runtime_principal'
 \else
 DO $wardnet_unsafe_runtime_principal$
 BEGIN
-    RAISE EXCEPTION 'Wardnet runtime principal mapping refused: principal is absent, non-login, non-inheriting, privileged, state-owner capable, already has Wardnet mutation/inner-admission authority, or already has an unbounded runtime membership path.';
+    RAISE EXCEPTION 'Wardnet runtime principal mapping refused: principal is absent, non-login, non-inheriting, privileged, state-owner capable, already has Wardnet state/audit mutation or inner-admission authority, or already has an unbounded runtime membership path.';
 END
 $wardnet_unsafe_runtime_principal$;
 \endif
