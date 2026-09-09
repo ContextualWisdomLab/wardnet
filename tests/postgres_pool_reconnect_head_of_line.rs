@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use waf_ids_ai_soc::postgres_state::PostgresTenantPool;
+use waf_ids_ai_soc::postgres_state::{PostgresStateError, PostgresTenantPool};
 
 const POSTGRES_IMAGE: &str = "postgres:18.4-bookworm";
 const GENERATION_MIGRATION_PATH: &str = "migrations/0001_reputation_source_generation.sql";
@@ -381,5 +381,57 @@ async fn slow_reconnect_does_not_block_an_unrelated_healthy_pool_member() {
         probe.tenant_id(),
         None,
         "healthy-member fallback must not expose tenant context before rebinding",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_closed_members_fail_closed_within_the_reconnect_readiness_bound() {
+    let Some(container) = prepare_database() else {
+        return;
+    };
+    let proxy = NewConnectionStallProxy::start(container.host_port);
+    let dsn = format!(
+        "host=127.0.0.1 port={} user={RUNTIME_PRINCIPAL} dbname=postgres sslmode=disable",
+        proxy.port()
+    );
+    let pool = PostgresTenantPool::connect_loopback_test(&dsn, 2)
+        .await
+        .expect("two-member loopback pool must connect through the fault proxy");
+
+    let first_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("first original pool member must be reachable")
+        .backend_pid();
+    let second_pid = pool
+        .probe_unbound_context()
+        .await
+        .expect("second original pool member must be reachable")
+        .backend_pid();
+    assert_ne!(first_pid, second_pid, "fixture requires two physical backends");
+
+    proxy.stall_new_connections();
+    for backend_pid in [first_pid, second_pid] {
+        let terminated = assert_success(
+            psql(
+                &container,
+                &format!("SELECT pg_terminate_backend({backend_pid});"),
+            ),
+            "terminate an original pooled backend",
+        );
+        assert_eq!(terminated.trim(), "t");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result =
+        tokio::time::timeout(Duration::from_millis(750), pool.probe_unbound_context()).await;
+    proxy.release_new_connections();
+
+    let unavailable = result.expect(
+        "when no healthy member exists, Wardnet's own reconnect/readiness policy must terminate before the buyer-path bound rather than leave the caller responsible for cancellation",
+    );
+    assert!(
+        matches!(unavailable, Err(PostgresStateError::PoolUnavailable)),
+        "a bounded exhausted reconnect window must fail closed with stable PoolUnavailable",
     );
 }
