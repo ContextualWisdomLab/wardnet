@@ -71,6 +71,31 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
         .expect("W3C session id")
         .to_owned();
 
+    // Delay browser network traffic just enough to observe the page's shipped
+    // loading state after the document itself has loaded. This is not a fake DOM
+    // fixture: Chrome still requests the real Wardnet route and API endpoints.
+    cdp(
+        &client,
+        &driver_url,
+        &session_id,
+        "Network.enable",
+        json!({}),
+    )
+    .await;
+    cdp(
+        &client,
+        &driver_url,
+        &session_id,
+        "Network.emulateNetworkConditions",
+        json!({
+            "offline": false,
+            "latency": 400,
+            "downloadThroughput": -1,
+            "uploadThroughput": -1
+        }),
+    )
+    .await;
+
     wd_post(
         &client,
         &driver_url,
@@ -80,11 +105,44 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
     )
     .await;
     wait_for_document(&client, &driver_url, &session_id).await;
+    assert!(
+        execute_bool(
+            &client,
+            &driver_url,
+            &session_id,
+            "return [...document.querySelectorAll('.muted')].some(e=>e.textContent.trim()==='Loading…');",
+        )
+        .await,
+        "real browser must observe the shipped loading state while API requests are pending"
+    );
+
+    cdp(
+        &client,
+        &driver_url,
+        &session_id,
+        "Network.emulateNetworkConditions",
+        json!({
+            "offline": false,
+            "latency": 0,
+            "downloadThroughput": -1,
+            "uploadThroughput": -1
+        }),
+    )
+    .await;
+
+    wait_until_bool(
+        &client,
+        &driver_url,
+        &session_id,
+        "return ![...document.querySelectorAll('#routesBody,#threatsBody,#dnsblBody,#readinessBody,#eventsBody')].some(e=>e.textContent.trim()==='Loading…');",
+        "normal console API state",
+    )
+    .await;
 
     // Keyboard contract: the first Tab must expose the shipped skip link and
     // activating it must transfer focus to the explicit main landmark target.
     send_key(&client, &driver_url, &session_id, "\u{e004}").await;
-    assert_eq!(
+    assert!(
         execute_bool(
             &client,
             &driver_url,
@@ -92,7 +150,6 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
             "return document.activeElement === document.querySelector('a.skip') && getComputedStyle(document.activeElement).left === '0px';",
         )
         .await,
-        true,
         "first keyboard stop must be the visibly focused skip link"
     );
     send_key(&client, &driver_url, &session_id, "\u{e007}").await;
@@ -109,12 +166,12 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
 
     // Chrome's accessibility tree is the acceptance authority for computed
     // name/description, not merely the presence of ARIA strings in source.
-    let ax_tree = wd_post(
+    let ax_tree = cdp(
         &client,
         &driver_url,
         &session_id,
-        "goog/cdp/execute",
-        json!({"cmd": "Accessibility.getFullAXTree", "params": {}}),
+        "Accessibility.getFullAXTree",
+        json!({}),
     )
     .await;
     let nodes = ax_tree
@@ -146,16 +203,14 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
 
     // Empty admin credentials intentionally exercise the permission-denied
     // presentation path on the real audit endpoint.
-    assert!(
-        execute_bool(
-            &client,
-            &driver_url,
-            &session_id,
-            "const e=document.querySelector('#auditBody .err'); return !!e && e.getClientRects().length>0;",
-        )
-        .await,
-        "permission denial must remain visible inside the audit card"
-    );
+    wait_until_bool(
+        &client,
+        &driver_url,
+        &session_id,
+        "const e=document.querySelector('#auditBody .err'); return !!e && e.getClientRects().length>0;",
+        "visible audit permission denial",
+    )
+    .await;
 
     for width in [375_u64, 768, 1440] {
         wd_post(
@@ -222,8 +277,9 @@ fn spawn_ready_gateway() -> (Child, String) {
         .split_whitespace()
         .last()
         .expect("listening address")
-        .trim();
-    (child, format!("http://{address}/"))
+        .trim()
+        .trim_end_matches('/');
+    (child, format!("{address}/"))
 }
 
 async fn wait_for_driver(client: &Client, driver_url: &str) {
@@ -242,21 +298,30 @@ async fn wait_for_driver(client: &Client, driver_url: &str) {
 }
 
 async fn wait_for_document(client: &Client, driver_url: &str, session_id: &str) {
+    wait_until_bool(
+        client,
+        driver_url,
+        session_id,
+        "return document.readyState === 'complete' && !!document.getElementById('main');",
+        "Wardnet console document",
+    )
+    .await;
+}
+
+async fn wait_until_bool(
+    client: &Client,
+    driver_url: &str,
+    session_id: &str,
+    script: &str,
+    description: &str,
+) {
     for _ in 0..50 {
-        if execute_bool(
-            client,
-            driver_url,
-            session_id,
-            "return document.readyState === 'complete' && !!document.getElementById('main');",
-        )
-        .await
-        {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+        if execute_bool(client, driver_url, session_id, script).await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("Wardnet console did not become browser-ready");
+    panic!("timed out waiting for {description}");
 }
 
 async fn send_key(client: &Client, driver_url: &str, session_id: &str, key: &str) {
@@ -291,6 +356,23 @@ async fn execute_bool(client: &Client, driver_url: &str, session_id: &str, scrip
     .pointer("/value")
     .and_then(Value::as_bool)
     .unwrap_or(false)
+}
+
+async fn cdp(
+    client: &Client,
+    driver_url: &str,
+    session_id: &str,
+    command: &str,
+    params: Value,
+) -> Value {
+    wd_post(
+        client,
+        driver_url,
+        session_id,
+        "goog/cdp/execute",
+        json!({"cmd": command, "params": params}),
+    )
+    .await
 }
 
 async fn wd_post(
