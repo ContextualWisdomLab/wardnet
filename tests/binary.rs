@@ -29,6 +29,27 @@ fn binary_serves_then_shuts_down_on_sigterm() {
 }
 
 #[test]
+#[cfg(unix)]
+fn binary_serves_then_shuts_down_on_sigint() {
+    let mut child = spawn_ready_gateway();
+
+    // Interactive supervisors and local operators use SIGINT. Treating it as
+    // the platform default would skip the application's graceful shutdown and
+    // any cleanup/coverage flush that depends on the server future completing.
+    let signalled = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(signalled.success(), "failed to deliver SIGINT");
+
+    let exit = child.wait().expect("await gateway exit");
+    assert!(
+        exit.success(),
+        "gateway should exit cleanly on SIGINT: {exit:?}"
+    );
+}
+
+#[test]
 #[cfg(not(unix))]
 fn binary_serves_until_force_stopped_on_windows() {
     let mut child = spawn_ready_gateway();
