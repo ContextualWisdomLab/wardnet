@@ -270,12 +270,20 @@ fn validate_credential_file_permissions(_file: &File) -> Result<(), ConfigError>
     Err(ConfigError::InvalidCredential)
 }
 
+/// Open the reviewed policy configuration once, validate authority on that same
+/// descriptor, then materialize bounded bytes. Splitting the permission check
+/// into a pathname metadata call followed by a second open would reintroduce a
+/// filesystem TOCTOU interval. See
+/// `docs/doctoring/agent-artifact-admission-configuration-integrity.md`.
 fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
     let file = File::open(path).map_err(|_| ConfigError::Io)?;
     validate_config_file_permissions(&file)?;
     read_open_file_bounded(file, maximum_bytes)
 }
 
+/// Reject Unix policy files writable by group or other principals while
+/// preserving read-only visibility. Policy integrity, not confidentiality, is
+/// the invariant at this boundary; credentials use a separate stricter check.
 #[cfg(unix)]
 fn validate_config_file_permissions(file: &File) -> Result<(), ConfigError> {
     use std::os::unix::fs::PermissionsExt;
@@ -291,6 +299,10 @@ fn validate_config_file_permissions(file: &File) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Fail closed where Wardnet has no tested native ACL-equivalence contract for
+/// configuration mutation authority. Adding a platform-specific ACL model is a
+/// separate compatibility change; silently accepting unverifiable authority is
+/// not an equivalent security boundary.
 #[cfg(not(unix))]
 fn validate_config_file_permissions(_file: &File) -> Result<(), ConfigError> {
     Err(ConfigError::InvalidConfiguration)
