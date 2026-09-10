@@ -27,11 +27,9 @@ fn approved_pip_install_cannot_gain_caller_selected_log_write_authority() {
             vec!["--loc", "/tmp/wardnet-pip.log"],
         ] {
             let mut intent = control_intent.clone();
-            intent.argv.extend(
-                log_arguments
-                    .iter()
-                    .map(|argument| (*argument).to_string()),
-            );
+            intent
+                .argv
+                .extend(log_arguments.iter().map(|argument| (*argument).to_string()));
 
             let decision = admission_decision(&policy, &intent);
             assert_eq!(
