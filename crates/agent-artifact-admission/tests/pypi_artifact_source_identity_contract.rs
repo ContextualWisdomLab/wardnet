@@ -98,6 +98,7 @@ fn approved_pypi_intent(artifact_argument: &str) -> InstallIntent {
             artifact_argument.to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
+            "--no-input".to_string(),
         ],
         manifest_sha256: MANIFEST_SHA256.to_string(),
         source: InstructionSource {
