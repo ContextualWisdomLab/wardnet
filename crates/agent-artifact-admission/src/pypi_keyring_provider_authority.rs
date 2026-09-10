@@ -19,13 +19,26 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
 
     arguments
         .iter()
+        .enumerate()
         .skip(1)
-        .any(|argument| is_keyring_provider_option(argument))
+        .any(|(index, argument)| {
+            let (option, attached_value) = argument
+                .split_once('=')
+                .map_or((argument.as_str(), None), |(flag, value)| (flag, Some(value)));
+            if !is_keyring_provider_option(option) {
+                return false;
+            }
+
+            attached_value
+                .or_else(|| arguments.get(index + 1).map(String::as_str))
+                .is_some_and(expands_keyring_authority)
+        })
 }
 
 fn is_keyring_provider_option(argument: &str) -> bool {
-    let option = argument
-        .split_once('=')
-        .map_or(argument, |(flag, _value)| flag);
-    option.starts_with("--k") && "--keyring-provider".starts_with(option)
+    argument.starts_with("--k") && "--keyring-provider".starts_with(argument)
+}
+
+fn expands_keyring_authority(provider: &str) -> bool {
+    matches!(provider, "import" | "subprocess")
 }
