@@ -2925,7 +2925,7 @@ const ADMIN_HTML: &str = r##"<!doctype html>
 body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--canvas);color:var(--ink);font-size:var(--fs-body);line-height:1.5}
 a.skip{position:absolute;left:-9999px;top:0;background:var(--brand);color:var(--on-brand);padding:10px 16px;z-index:30;border-radius:0 0 6px 0}
 a.skip:focus{left:0}
-header.app{display:flex;align-items:center;gap:16px;padding:16px 24px;background:var(--brand);color:var(--on-brand)}
+header.app{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:16px 24px;background:var(--brand);color:var(--on-brand)}
 header.app h1{font-size:var(--fs-h1);margin:0;font-weight:600;flex:1}
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .hdr-input{min-height:44px;border-radius:6px;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.12);color:var(--on-brand);padding:0 12px;font:inherit;width:200px}
@@ -2947,6 +2947,7 @@ main{padding:20px;max-width:1600px;margin:0 auto}
 section.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 section.card h2{font-size:var(--fs-h2);margin:0 0 12px}
 table{width:100%;border-collapse:collapse;font-size:13px}
+.table-wrap{overflow-x:auto}
 caption{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
 th{color:var(--sub);font-weight:600;font-size:var(--fs-cap);text-transform:uppercase;letter-spacing:.03em}
@@ -3120,8 +3121,8 @@ function statusBadge(s){const m={pass:'b-pass',fail:'b-fail',active:'b-pass',eva
 function mono(t){return '<span class="badge mono b-neutral">'+esc(t)+'</span>';}
 function table(capt,cols,rows){
   if(!rows.length)return '<p class="empty">No entries.</p>';
-  return '<table><caption>'+esc(capt)+'</caption><thead><tr>'+cols.map(c=>'<th scope="col">'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+
-    rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+  return '<div class="table-wrap"><table><caption>'+esc(capt)+'</caption><thead><tr>'+cols.map(c=>'<th scope="col">'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+
+    rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
 }
 function toast(msg,ok){const d=document.createElement('div');d.className='toast '+(ok?'ok':'bad');d.textContent=msg;$('toast').appendChild(d);setTimeout(()=>d.remove(),4500);}
 async function guard(id,fn){try{await fn();}catch(e){$(id).innerHTML='<p class="err">Error: '+esc(e.message)+'</p>';}}
