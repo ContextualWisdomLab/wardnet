@@ -70,9 +70,22 @@ async fn shipped_console_meets_browser_accessibility_and_responsive_contract() {
         .expect("W3C session id")
         .to_owned();
 
-    // Delay browser network traffic just enough to observe the page's shipped
-    // loading state after the document itself has loaded. This is not a fake DOM
-    // fixture: Chrome still requests the real Wardnet route and API endpoints.
+    // Hold API initiation long enough for Chrome to expose the real shipped
+    // loading state after navigation. Responses still come from Wardnet's real
+    // endpoints; this only makes the degraded-network timing deterministic.
+    cdp(
+        &client,
+        &driver_url,
+        &session_id,
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({
+            "source": "{ const originalFetch = window.fetch.bind(window); window.fetch = (...args) => new Promise(resolve => setTimeout(resolve, 1000)).then(() => originalFetch(...args)); }"
+        }),
+    )
+    .await;
+
+    // Add transport latency as a second degraded-network constraint. The
+    // document and API responses remain the actual Wardnet route and endpoints.
     cdp(
         &client,
         &driver_url,
