@@ -11,6 +11,7 @@ mod http;
 mod oci_transport;
 mod policy;
 mod pypi_hash_mode;
+mod uv_configuration_authority;
 
 pub use admission::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate,
@@ -81,6 +82,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::MissingSafetyFlag)
         {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if uv_configuration_authority::requests_unapproved_uv_configuration_authority(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
