@@ -14,7 +14,19 @@ fn approved_pip_install_cannot_inherit_unreviewed_overwrite_authority() {
             "the exact approved {executable} install must remain admissible before adding overwrite authority"
         );
 
-        for overwrite_option in ["-I", "--ignore-installed"] {
+        for overwrite_option in [
+            "-I",
+            "-Iv",
+            "--ignore-i",
+            "--ignore-in",
+            "--ignore-ins",
+            "--ignore-inst",
+            "--ignore-insta",
+            "--ignore-instal",
+            "--ignore-install",
+            "--ignore-installe",
+            "--ignore-installed",
+        ] {
             let mut hostile = control_intent.clone();
             hostile.argv.push(overwrite_option.to_string());
 
