@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,10 @@ const MAX_CREDENTIAL_FILE_BYTES: u64 = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_ADMIN_TOKEN_BYTES: usize = 4096;
 const MIN_ADMIN_TOKEN_BYTES: usize = 32;
+#[cfg(target_os = "linux")]
+const LINUX_O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_os = "linux")]
+const LINUX_O_NONBLOCK: i32 = 0o4000;
 
 /// Immutable process configuration for the agent-artifact admission service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,28 +250,43 @@ fn valid_executable(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+'))
 }
 
+/// Acquire security-sensitive local configuration through one Linux descriptor.
+/// `O_NOFOLLOW` binds the decision to a non-symlink final component and
+/// `O_NONBLOCK` prevents a FIFO from stalling startup before type validation.
+#[cfg(target_os = "linux")]
+fn open_local_authority_file(path: &Path) -> Result<File, ConfigError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(LINUX_O_NOFOLLOW | LINUX_O_NONBLOCK)
+        .open(path)
+        .map_err(|_| ConfigError::Io)
+}
+
+/// Fail closed on platforms where Wardnet has not implemented an equivalent
+/// no-follow, nonblocking local-file authority contract.
+#[cfg(not(target_os = "linux"))]
+fn open_local_authority_file(_path: &Path) -> Result<File, ConfigError> {
+    Err(ConfigError::Io)
+}
+
 fn read_credential_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
-    let file = File::open(path).map_err(|_| ConfigError::Io)?;
+    let file = open_local_authority_file(path)?;
     validate_credential_file_permissions(&file)?;
     read_open_file_bounded(file, maximum_bytes)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn validate_credential_file_permissions(file: &File) -> Result<(), ConfigError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = file
-        .metadata()
-        .map_err(|_| ConfigError::Io)?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
+    let metadata = file.metadata().map_err(|_| ConfigError::Io)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err(ConfigError::InvalidCredential);
     }
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn validate_credential_file_permissions(_file: &File) -> Result<(), ConfigError> {
     Err(ConfigError::InvalidCredential)
 }
@@ -276,24 +297,21 @@ fn validate_credential_file_permissions(_file: &File) -> Result<(), ConfigError>
 /// filesystem TOCTOU interval. See
 /// `docs/doctoring/agent-artifact-admission-configuration-integrity.md`.
 fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
-    let file = File::open(path).map_err(|_| ConfigError::Io)?;
+    let file = open_local_authority_file(path)?;
     validate_config_file_permissions(&file)?;
     read_open_file_bounded(file, maximum_bytes)
 }
 
-/// Reject Unix policy files writable by group or other principals while
-/// preserving read-only visibility. Policy integrity, not confidentiality, is
-/// the invariant at this boundary; credentials use a separate stricter check.
-#[cfg(unix)]
+/// Reject non-regular policy inputs and Linux policy files writable by group or
+/// other principals while preserving read-only visibility. Policy integrity,
+/// not confidentiality, is the invariant at this boundary; credentials use a
+/// separate stricter check.
+#[cfg(target_os = "linux")]
 fn validate_config_file_permissions(file: &File) -> Result<(), ConfigError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = file
-        .metadata()
-        .map_err(|_| ConfigError::Io)?
-        .permissions()
-        .mode();
-    if mode & 0o022 != 0 {
+    let metadata = file.metadata().map_err(|_| ConfigError::Io)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o022 != 0 {
         return Err(ConfigError::InvalidConfiguration);
     }
     Ok(())
@@ -303,7 +321,7 @@ fn validate_config_file_permissions(file: &File) -> Result<(), ConfigError> {
 /// configuration mutation authority. Adding a platform-specific ACL model is a
 /// separate compatibility change; silently accepting unverifiable authority is
 /// not an equivalent security boundary.
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn validate_config_file_permissions(_file: &File) -> Result<(), ConfigError> {
     Err(ConfigError::InvalidConfiguration)
 }
