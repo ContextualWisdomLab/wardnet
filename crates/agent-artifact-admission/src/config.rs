@@ -272,7 +272,28 @@ fn validate_credential_file_permissions(_file: &File) -> Result<(), ConfigError>
 
 fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
     let file = File::open(path).map_err(|_| ConfigError::Io)?;
+    validate_config_file_permissions(&file)?;
     read_open_file_bounded(file, maximum_bytes)
+}
+
+#[cfg(unix)]
+fn validate_config_file_permissions(file: &File) -> Result<(), ConfigError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = file
+        .metadata()
+        .map_err(|_| ConfigError::Io)?
+        .permissions()
+        .mode();
+    if mode & 0o022 != 0 {
+        return Err(ConfigError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_config_file_permissions(_file: &File) -> Result<(), ConfigError> {
+    Ok(())
 }
 
 fn read_open_file_bounded(file: File, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
