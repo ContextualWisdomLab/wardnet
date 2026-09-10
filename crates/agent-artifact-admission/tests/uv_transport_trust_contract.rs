@@ -39,7 +39,9 @@ fn uv_equals_form_cannot_disable_tls_for_an_approved_artifact_source() {
                 "approved coordinates must not authorize the caller's TLS override for {host}"
             );
             assert!(
-                decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot),
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
                 "TLS authority must be classified explicitly: {:?}",
                 decision.reason_codes
             );
@@ -57,7 +59,9 @@ fn uv_separate_value_is_classified_as_a_transport_trust_override() {
 
     assert_eq!(decision.decision, DecisionKind::Block);
     assert!(
-        decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot),
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
         "an extra operand rejection alone must not hide the TLS override: {:?}",
         decision.reason_codes
     );
