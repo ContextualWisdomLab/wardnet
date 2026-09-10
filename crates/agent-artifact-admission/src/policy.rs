@@ -504,6 +504,7 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         "--globalconfig",
         "--ca",
         "--cafile",
+        "--cert",
         "--strict-ssl",
         "--git",
         "--path",
