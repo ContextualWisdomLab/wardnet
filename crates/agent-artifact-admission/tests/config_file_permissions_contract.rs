@@ -4,7 +4,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wardnet_agent_artifact_admission::{AdmissionPolicy, AdmissionServiceConfig, load_config};
+use wardnet_agent_artifact_admission::{
+    AdmissionPolicy, AdmissionServiceConfig, ConfigError, load_config,
+};
 
 fn temp_path() -> std::path::PathBuf {
     let nonce = SystemTime::now()
@@ -48,11 +50,15 @@ fn configuration_loader_rejects_group_or_other_write_authority() {
         );
     }
 
+    // This contract targets policy-integrity failure specifically. A generic I/O or
+    // JSON error would hide a regression in the permission boundary instead of
+    // proving that unintended write authority is what caused the rejection.
     for unsafe_mode in [0o660, 0o606, 0o664, 0o646, 0o666] {
         fs::set_permissions(&path, fs::Permissions::from_mode(unsafe_mode))
             .expect("unsafe configuration mode must apply");
-        assert!(
-            load_config(&path).is_err(),
+        assert_eq!(
+            load_config(&path),
+            Err(ConfigError::InvalidConfiguration),
             "configuration mode {unsafe_mode:o} grants group/other policy mutation authority"
         );
     }
