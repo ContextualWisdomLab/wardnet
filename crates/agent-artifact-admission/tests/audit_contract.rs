@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use wardnet_agent_artifact_admission::{
@@ -93,6 +95,52 @@ fn file_sink_appends_complete_synchronized_ndjson_records() {
             serde_json::from_str(line).expect("each audit line must be complete JSON");
         assert_eq!(parsed["request_id"], intent.request_id);
     }
+
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_sink_rejects_existing_regular_file_with_group_or_other_permissions() {
+    let (intent, decision) = sensitive_blocked_attempt();
+    let record = build_audit_record(&intent, &decision).expect("audit record must build");
+
+    for mode in [0o666, 0o640, 0o604] {
+        let path = temp_path(&format!("unsafe-mode-{mode:o}"));
+        fs::write(&path, b"existing-audit-record\n").expect("audit fixture must write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+            .expect("audit fixture permissions must be set");
+        let sink = FileAuditSink::new(path.clone());
+
+        assert!(
+            sink.append(&record).is_err(),
+            "pre-existing audit file mode {mode:o} must fail closed before security evidence is appended"
+        );
+        assert_eq!(
+            fs::read(&path).expect("audit fixture must remain readable"),
+            b"existing-audit-record\n",
+            "unsafe pre-existing audit storage must remain unmodified"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_sink_accepts_existing_owner_only_regular_file() {
+    let path = temp_path("existing-owner-only");
+    fs::write(&path, b"existing-audit-record\n").expect("audit fixture must write");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .expect("audit fixture must be owner-only");
+    let (intent, decision) = sensitive_blocked_attempt();
+    let record = build_audit_record(&intent, &decision).expect("audit record must build");
+    let sink = FileAuditSink::new(path.clone());
+
+    sink.append(&record)
+        .expect("owner-only pre-existing audit storage must remain appendable");
+    let body = fs::read_to_string(&path).expect("audit file must be readable");
+    assert_eq!(body.lines().count(), 2);
 
     let _ = fs::remove_file(path);
 }
