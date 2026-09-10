@@ -14,22 +14,39 @@ fn approved_pip_install_cannot_inherit_unreviewed_force_reinstall_authority() {
             "the exact approved {executable} install must remain admissible before adding force-reinstall authority"
         );
 
-        let mut hostile = control_intent;
-        hostile.argv.push("--force-reinstall".to_string());
+        for force_reinstall_option in [
+            "--fo",
+            "--for",
+            "--forc",
+            "--force",
+            "--force-",
+            "--force-r",
+            "--force-re",
+            "--force-rei",
+            "--force-rein",
+            "--force-reins",
+            "--force-reinst",
+            "--force-reinsta",
+            "--force-reinstal",
+            "--force-reinstall",
+        ] {
+            let mut hostile = control_intent.clone();
+            hostile.argv.push(force_reinstall_option.to_string());
 
-        let decision = admission_decision(&policy, &hostile);
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} --force-reinstall requests a fresh installation mutation outside the reviewed artifact authority and must fail closed"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .iter()
-                .any(|reason| reason.as_str() == "artifact_not_approved"),
-            "{executable} --force-reinstall must include the stable artifact_not_approved reason"
-        );
+            let decision = admission_decision(&policy, &hostile);
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {force_reinstall_option} requests fresh installation mutation outside the reviewed artifact authority and must fail closed"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "artifact_not_approved"),
+                "{executable} {force_reinstall_option} must include the stable artifact_not_approved reason"
+            );
+        }
     }
 }
 
