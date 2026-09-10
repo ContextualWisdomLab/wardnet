@@ -19,7 +19,8 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
         return false;
     }
 
-    arguments.iter().skip(2).any(|argument| {
-        argument == "--config-file" || argument.starts_with("--config-file=")
-    })
+    arguments
+        .iter()
+        .skip(2)
+        .any(|argument| argument == "--config-file" || argument.starts_with("--config-file="))
 }
