@@ -16,9 +16,7 @@ fn approved_pip_install_cannot_inherit_unreviewed_keyring_provider_authority() {
 
         for provider in ["subprocess", "import"] {
             let mut hostile = control_intent.clone();
-            hostile
-                .argv
-                .push(format!("--keyring-provider={provider}"));
+            hostile.argv.push(format!("--keyring-provider={provider}"));
 
             let decision = admission_decision(&policy, &hostile);
             assert_eq!(
