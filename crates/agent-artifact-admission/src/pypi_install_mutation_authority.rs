@@ -21,5 +21,13 @@ pub(crate) fn requests_unapproved_pypi_install_mutation(intent: &InstallIntent) 
     arguments
         .iter()
         .skip(1)
-        .any(|argument| matches!(argument.as_str(), "-I" | "--ignore-installed"))
+        .any(|argument| matches_ignore_installed_option(argument))
+}
+
+fn matches_ignore_installed_option(argument: &str) -> bool {
+    if argument == "-I" || argument == "-Iv" {
+        return true;
+    }
+
+    argument.len() >= "--ignore-i".len() && "--ignore-installed".starts_with(argument)
 }
