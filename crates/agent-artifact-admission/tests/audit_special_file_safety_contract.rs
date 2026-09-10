@@ -53,7 +53,10 @@ fn file_sink_rejects_fifo_without_blocking_on_open() {
 
     let deadline = Instant::now() + HELPER_DEADLINE;
     let status = loop {
-        match child.try_wait().expect("FIFO helper status must be readable") {
+        match child
+            .try_wait()
+            .expect("FIFO helper status must be readable")
+        {
             Some(status) => break Some(status),
             None if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
             None => break None,
