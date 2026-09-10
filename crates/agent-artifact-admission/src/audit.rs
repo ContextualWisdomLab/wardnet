@@ -2,6 +2,8 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -155,12 +157,13 @@ impl FileAuditSink {
     fn open_append_only(&self) -> io::Result<File> {
         #[cfg(target_os = "linux")]
         {
+            let (parent, file_name) = open_parent_without_symlinks(Path::new(&self.path))?;
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .mode(0o600)
                 .custom_flags(LINUX_O_NOFOLLOW | LINUX_O_NONBLOCK)
-                .open(Path::new(&self.path))?;
+                .open(proc_fd_child(&parent, file_name))?;
             let metadata = file.metadata()?;
             if !metadata.is_file()
                 || metadata.permissions().mode() & 0o077 != 0
@@ -182,6 +185,68 @@ impl FileAuditSink {
             ))
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_parent_without_symlinks(path: &Path) -> io::Result<(File, &std::ffi::OsStr)> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit storage path must name a file",
+        )
+    })?;
+    let parent_path = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut directory = open_directory_without_following(if parent_path.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    })?;
+
+    for component in parent_path.components() {
+        use std::path::Component;
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                directory = open_directory_without_following(&proc_fd_child(
+                    &directory,
+                    std::ffi::OsStr::new(".."),
+                ))?;
+            }
+            Component::Normal(name) => {
+                directory = open_directory_without_following(&proc_fd_child(&directory, name))?;
+            }
+            Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "audit storage path contains an unsupported prefix",
+                ));
+            }
+        }
+    }
+
+    Ok((directory, file_name))
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory_without_following(path: &Path) -> io::Result<File> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(LINUX_O_NOFOLLOW | LINUX_O_NONBLOCK)
+        .open(path)?;
+    if !directory.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "audit storage path component must be a directory",
+        ));
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn proc_fd_child(parent: &File, child: &std::ffi::OsStr) -> PathBuf {
+    PathBuf::from("/proc/self/fd")
+        .join(parent.as_raw_fd().to_string())
+        .join(child)
 }
 
 impl AuditSink for FileAuditSink {

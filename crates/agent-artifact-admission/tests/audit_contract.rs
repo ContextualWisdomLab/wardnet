@@ -184,6 +184,41 @@ fn file_sink_rejects_hard_linked_owner_only_regular_file() {
     let _ = fs::remove_file(target);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn file_sink_rejects_symlinked_parent_directory_without_writing() {
+    let target_directory = temp_path("parent-symlink-target").with_extension("");
+    let configured_root = temp_path("parent-symlink-root").with_extension("");
+    let symlinked_parent = configured_root.join("linked");
+    fs::create_dir_all(&target_directory).expect("target directory fixture must be created");
+    fs::create_dir_all(&configured_root).expect("configured root fixture must be created");
+    std::os::unix::fs::symlink(&target_directory, &symlinked_parent)
+        .expect("parent symlink fixture must be created");
+
+    let configured_path = symlinked_parent.join("audit.ndjson");
+    let resolved_target = target_directory.join("audit.ndjson");
+    let (intent, decision) = sensitive_blocked_attempt();
+    let record = build_audit_record(&intent, &decision).expect("audit record must build");
+    let sink = FileAuditSink::new(configured_path);
+
+    let append_result = sink.append(&record);
+    let redirected_file_was_created = resolved_target.exists();
+
+    let _ = fs::remove_file(&resolved_target);
+    let _ = fs::remove_file(&symlinked_parent);
+    let _ = fs::remove_dir(&configured_root);
+    let _ = fs::remove_dir(&target_directory);
+
+    assert!(
+        append_result.is_err(),
+        "audit storage must fail closed when any parent path component is a symlink"
+    );
+    assert!(
+        !redirected_file_was_created,
+        "audit evidence must not be created through a symlinked parent directory"
+    );
+}
+
 #[test]
 fn file_sink_rejects_oversized_serialized_record_without_writing() {
     let path = temp_path("oversized");
