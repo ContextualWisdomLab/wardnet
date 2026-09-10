@@ -17,6 +17,8 @@ fn approved_pip_install_cannot_gain_caller_selected_report_write_authority() {
         for report_arguments in [
             vec!["--report=/tmp/wardnet-install-report.json"],
             vec!["--report", "/tmp/wardnet-install-report.json"],
+            vec!["--rep=/tmp/wardnet-install-report.json"],
+            vec!["--rep", "/tmp/wardnet-install-report.json"],
         ] {
             let mut intent = control_intent.clone();
             intent.argv.extend(
