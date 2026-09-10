@@ -72,6 +72,29 @@ fn pip_separate_proxy_value_is_explicitly_classified_as_trust_authority() {
     }
 }
 
+#[test]
+fn pip_no_proxy_env_cannot_disable_reviewed_runtime_proxy_selection() {
+    for executable in ["pip", "pip3"] {
+        let (policy, mut intent) = approved_pip_install(executable);
+        intent.argv.push("--no-proxy-env".to_string());
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{executable} must not let caller argv disable runtime proxy selection"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "proxy-environment suppression must be classified explicitly: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
 fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     let artifact = ArtifactCoordinate {
         ecosystem: "pypi".to_string(),
