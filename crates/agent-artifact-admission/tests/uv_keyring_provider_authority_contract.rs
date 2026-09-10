@@ -33,6 +33,16 @@ fn separate_uv_subprocess_provider_carries_credential_authority_reason() {
 }
 
 #[test]
+fn unknown_non_disabled_uv_keyring_provider_fails_closed() {
+    let (policy, mut hostile) = approved_uv_install();
+    hostile
+        .argv
+        .push("--keyring-provider=import".to_string());
+
+    assert_alternate_trust_root_block(&policy, &hostile);
+}
+
+#[test]
 fn explicit_disabled_uv_keyring_provider_preserves_reviewed_baseline() {
     let (policy, mut intent) = approved_uv_install();
     intent
@@ -52,14 +62,14 @@ fn assert_alternate_trust_root_block(policy: &AdmissionPolicy, intent: &InstallI
     assert_eq!(
         decision.decision,
         DecisionKind::Block,
-        "uv subprocess keyring delegates credential lookup to a PATH-resolved helper outside the reviewed artifact authority"
+        "any caller-selected non-disabled uv keyring provider must fail closed instead of inheriting new credential-helper authority after a client capability change"
     );
     assert!(
         decision
             .reason_codes
             .iter()
             .any(|reason| reason.as_str() == "alternate_trust_root"),
-        "uv subprocess keyring authority must carry the stable alternate_trust_root reason"
+        "uv keyring-provider expansion must carry the stable alternate_trust_root reason"
     );
 }
 
