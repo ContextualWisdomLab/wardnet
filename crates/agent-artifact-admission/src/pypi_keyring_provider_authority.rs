@@ -1,9 +1,7 @@
 use crate::InstallIntent;
 
 /// Return whether a direct pip install delegates credential lookup to a caller-selected provider.
-pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(
-    intent: &InstallIntent,
-) -> bool {
+pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
     };
