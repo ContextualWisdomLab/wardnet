@@ -14,7 +14,7 @@ pub(crate) fn requests_client_certificate_override(intent: &InstallIntent) -> bo
     arguments
         .first()
         .is_some_and(|argument| argument == "install")
-        && arguments.iter().any(|argument| {
-            argument == "--client-cert" || argument.starts_with("--client-cert=")
-        })
+        && arguments
+            .iter()
+            .any(|argument| argument == "--client-cert" || argument.starts_with("--client-cert="))
 }
