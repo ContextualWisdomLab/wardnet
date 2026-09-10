@@ -119,7 +119,8 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_keyring_provider_authority::requests_unapproved_pypi_keyring_provider_authority(intent) {
+    if pypi_keyring_provider_authority::requests_unapproved_pypi_keyring_provider_authority(intent)
+    {
         if !decision
             .reason_codes
             .contains(&ReasonCode::AlternateTrustRoot)
