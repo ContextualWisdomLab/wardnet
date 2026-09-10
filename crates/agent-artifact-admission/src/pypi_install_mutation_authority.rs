@@ -18,10 +18,9 @@ pub(crate) fn requests_unapproved_pypi_install_mutation(intent: &InstallIntent) 
         return false;
     }
 
-    arguments
-        .iter()
-        .skip(1)
-        .any(|argument| matches_ignore_installed_option(argument))
+    arguments.iter().skip(1).any(|argument| {
+        matches_ignore_installed_option(argument) || matches_force_reinstall_option(argument)
+    })
 }
 
 fn matches_ignore_installed_option(argument: &str) -> bool {
@@ -30,4 +29,8 @@ fn matches_ignore_installed_option(argument: &str) -> bool {
     }
 
     argument.len() >= "--ignore-i".len() && "--ignore-installed".starts_with(argument)
+}
+
+fn matches_force_reinstall_option(argument: &str) -> bool {
+    argument.len() >= "--fo".len() && "--force-reinstall".starts_with(argument)
 }
