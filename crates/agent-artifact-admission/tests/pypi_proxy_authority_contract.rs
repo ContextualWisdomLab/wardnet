@@ -9,35 +9,69 @@ const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
 
 #[test]
 fn approved_pip_install_without_proxy_override_remains_allowed() {
-    let (policy, intent) = approved_pip_install("pip");
+    for executable in ["pip", "pip3"] {
+        let (policy, intent) = approved_pip_install(executable);
 
-    let decision = admission_decision(&policy, &intent);
+        let decision = admission_decision(&policy, &intent);
 
-    assert_eq!(decision.decision, DecisionKind::Allow);
-    assert!(decision.reason_codes.is_empty());
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Allow,
+            "{executable} baseline must remain admissible"
+        );
+        assert!(decision.reason_codes.is_empty());
+    }
 }
 
 #[test]
 fn pip_proxy_override_cannot_inherit_artifact_approval() {
-    let (policy, mut intent) = approved_pip_install("pip");
-    intent
-        .argv
-        .push("--proxy=http://attacker.invalid:8080".to_string());
+    for executable in ["pip", "pip3"] {
+        let (policy, mut intent) = approved_pip_install(executable);
+        intent
+            .argv
+            .push("--proxy=http://attacker.invalid:8080".to_string());
 
-    let decision = admission_decision(&policy, &intent);
+        let decision = admission_decision(&policy, &intent);
 
-    assert_eq!(
-        decision.decision,
-        DecisionKind::Block,
-        "an approved artifact must not authorize a caller-selected pip proxy"
-    );
-    assert!(
-        decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot),
-        "proxy routing authority must be classified explicitly: {:?}",
-        decision.reason_codes
-    );
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{executable} must not let an approved artifact authorize a caller-selected proxy"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "attached proxy routing authority must be classified explicitly: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
+#[test]
+fn pip_separate_proxy_value_is_explicitly_classified_as_trust_authority() {
+    for executable in ["pip", "pip3"] {
+        let (policy, mut intent) = approved_pip_install(executable);
+        intent.argv.push("--proxy".to_string());
+        intent
+            .argv
+            .push("http://attacker.invalid:8080".to_string());
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{executable} separate proxy syntax must fail closed"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "separate proxy syntax must be classified as trust authority rather than relying only on positional-operand rejection: {:?}",
+            decision.reason_codes
+        );
+    }
 }
 
 fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
