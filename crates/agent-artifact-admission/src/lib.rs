@@ -92,9 +92,7 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .reason_codes
             .contains(&ReasonCode::AlternateInstallRoot)
         {
-            decision
-                .reason_codes
-                .push(ReasonCode::AlternateInstallRoot);
+            decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
