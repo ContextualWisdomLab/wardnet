@@ -14,24 +14,35 @@ fn approved_pip_install_cannot_gain_caller_selected_cache_directory_authority() 
             "the exact approved {executable} install must remain admissible before adding cache-directory authority"
         );
 
-        let mut hostile = control_intent.clone();
-        hostile
-            .argv
-            .push("--cache-dir=/tmp/wardnet-pip-cache".to_string());
+        for cache_arguments in [
+            vec!["--cache-dir=/tmp/wardnet-pip-cache"],
+            vec!["--cache-dir", "/tmp/wardnet-pip-cache"],
+            vec!["--ca=/tmp/wardnet-pip-cache"],
+            vec!["--ca", "/tmp/wardnet-pip-cache"],
+        ] {
+            let mut hostile = control_intent.clone();
+            hostile.argv.extend(
+                cache_arguments
+                    .iter()
+                    .map(|argument| (*argument).to_string()),
+            );
 
-        let decision = admission_decision(&policy, &hostile);
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} --cache-dir grants caller-selected filesystem cache authority and must fail closed"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .iter()
-                .any(|reason| reason.as_str() == "alternate_install_root"),
-            "{executable} --cache-dir must include the stable alternate_install_root reason"
-        );
+            let decision = admission_decision(&policy, &hostile);
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {} grants caller-selected filesystem cache authority and must fail closed",
+                cache_arguments.join(" ")
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "alternate_install_root"),
+                "{executable} {} must include the stable alternate_install_root reason",
+                cache_arguments.join(" ")
+            );
+        }
     }
 }
 
