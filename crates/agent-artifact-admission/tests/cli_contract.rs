@@ -1,6 +1,9 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, AdmissionServiceConfig, ApprovedArtifact, ApprovedManifest, CredentialFile,
     load_admin_token, load_config, parse_cli_args, validate_service_config,
@@ -182,6 +185,9 @@ fn loaders_are_bounded_strict_and_do_not_accept_short_credentials() {
         serde_json::to_vec(&credential).expect("credential must serialize"),
     )
     .expect("credential fixture must write");
+    #[cfg(unix)]
+    fs::set_permissions(&credential_path, fs::Permissions::from_mode(0o600))
+        .expect("credential fixture must be owner-only");
     assert_eq!(
         load_admin_token(&credential_path).expect("valid credential must load"),
         credential.admin_token
@@ -202,5 +208,37 @@ fn loaders_are_bounded_strict_and_do_not_accept_short_credentials() {
     assert!(load_admin_token(&credential_path).is_err());
 
     let _ = fs::remove_file(config_path);
+    let _ = fs::remove_file(credential_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn credential_loader_rejects_group_or_other_permissions() {
+    let credential_path = temp_path("credential-permissions");
+    let credential = CredentialFile {
+        admin_token: "0123456789abcdef0123456789abcdef".to_string(),
+    };
+    let encoded = serde_json::to_vec(&credential).expect("credential must serialize");
+    fs::write(&credential_path, &encoded).expect("credential fixture must write");
+
+    for secure_mode in [0o600, 0o400] {
+        fs::set_permissions(&credential_path, fs::Permissions::from_mode(secure_mode))
+            .expect("secure credential mode must apply");
+        assert_eq!(
+            load_admin_token(&credential_path).expect("owner-only credential must load"),
+            credential.admin_token,
+            "mode {secure_mode:o}"
+        );
+    }
+
+    for unsafe_mode in [0o640, 0o604, 0o620, 0o602, 0o610, 0o601] {
+        fs::set_permissions(&credential_path, fs::Permissions::from_mode(unsafe_mode))
+            .expect("unsafe credential mode must apply");
+        assert!(
+            load_admin_token(&credential_path).is_err(),
+            "credential mode {unsafe_mode:o} exposed authority outside the owner boundary"
+        );
+    }
+
     let _ = fs::remove_file(credential_path);
 }
