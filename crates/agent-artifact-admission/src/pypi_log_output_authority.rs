@@ -18,16 +18,31 @@ pub(crate) fn requests_unapproved_pypi_log_output_authority(intent: &InstallInte
         return false;
     }
 
-    arguments.iter().skip(1).any(|argument| {
-        matches_path_option(argument, "--log")
-            || matches_path_option(argument, "--log-file")
-            || matches_path_option(argument, "--local-log")
-    })
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| matches_pip_log_option(argument))
 }
 
-fn matches_path_option(argument: &str, option: &str) -> bool {
-    argument == option
-        || argument
-            .strip_prefix(option)
-            .is_some_and(|suffix| suffix.starts_with('='))
+/// pip uses Python optparse, which accepts unambiguous long-option prefixes.
+/// Keep this accepted-language set explicit so an ambiguous prefix such as
+/// `--lo` is not reinterpreted by Wardnet as valid caller authority.
+fn matches_pip_log_option(argument: &str) -> bool {
+    let option = argument.split_once('=').map_or(argument, |(name, _)| name);
+    matches!(
+        option,
+        "--log"
+            | "--log-"
+            | "--log-f"
+            | "--log-fi"
+            | "--log-fil"
+            | "--log-file"
+            | "--loc"
+            | "--loca"
+            | "--local"
+            | "--local-"
+            | "--local-l"
+            | "--local-lo"
+            | "--local-log"
+    )
 }
