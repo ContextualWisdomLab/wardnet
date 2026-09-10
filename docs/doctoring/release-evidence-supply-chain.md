@@ -14,8 +14,8 @@ Issue #84 is intentionally broader than this slice. Authentication, fail-closed 
 - Do not rebuild an artifact later merely to attach evidence. The package archive, source-input hashes, SBOM, and provenance are generated in the same workflow from one checked-out source identity.
 - Do not use floating GitHub Action refs. Release actions are pinned to immutable commit SHAs.
 - Do not treat an attestation as a security verdict. Provenance establishes the relationship between an artifact and its build context; it does not prove that the artifact is vulnerability-free or policy-compliant.
-- Do not claim SLSA v1.2 as an approved baseline. As rechecked on 2026-09-04, SLSA v1.1 is the latest Approved Specification published by the SLSA project. Likewise, NIST SP 800-218r1 / SSDF 1.2 is an Initial Public Draft, while NIST SP 800-218 / SSDF 1.1 remains the finalized publication baseline.
-- SPDX 3.1 is still a release candidate as of this decision. The workflow emits SPDX JSON through the pinned Anchore/Syft action; later promotion policy must explicitly validate the emitted schema/profile rather than inferring compliance from a filename.
+- Use SLSA v1.2 as the current Approved Specification baseline. Rechecked against the SLSA specification on 2026-09-10: v1.2 is Approved and supersedes the earlier v1.1 baseline. NIST SP 800-218r1 / SSDF 1.2 remains an Initial Public Draft, while NIST SP 800-218 / SSDF 1.1 remains the finalized NIST publication baseline.
+- SPDX 3.1 remains pre-final as of this decision: the SPDX project published 3.1-RC1 for testing and validation in January 2026, while the current stable specification remains SPDX 3.0.1. The workflow emits SPDX JSON through the pinned Anchore/Syft action; later promotion policy must explicitly validate the emitted schema/profile rather than inferring compliance from a filename.
 
 ## Selected boundary
 
@@ -28,6 +28,8 @@ The workflow deliberately has `contents: read`. It does not create a tag, GitHub
 ## RED → GREEN evidence
 
 `tests/release_evidence_contract.rs` is the executable architecture fence. Its first commit requires a release workflow with protected-main binding, exact quality gates, locked build metadata, SHA-256 evidence, SPDX generation, attestation, immutable action pins, and non-persisted checkout credentials. That RED precedes the workflow implementation. The GREEN candidate adds only the release-evidence workflow and supporting documentation; it does not weaken any existing gate.
+
+The standards-status defect corrected on 2026-09-10 was a documentation RED against the authoritative upstream specifications: this file still described SLSA v1.1 as the latest Approved Specification after SLSA v1.2 had become Approved, while issue #84 already referenced v1.2. The minimum repair updates only the standards-status/traceability text; it does not change release behavior or claim SLSA conformance from the workflow alone.
 
 Exact-head hosted execution remains authoritative. Source inspection or a predecessor run is not GREEN. The candidate remains dependent on the Rust toolchain prerequisite represented by PR #77 and must be non-force restacked or retargeted when that prerequisite reaches protected `main`.
 
@@ -47,4 +49,6 @@ National Institute of Standards and Technology. (2025). *Secure software develop
 
 SPDX Workgroup. (2024). *SPDX specification 3.0.1*. Linux Foundation. https://spdx.github.io/spdx-spec/v3.0.1/
 
-Supply-chain Levels for Software Artifacts. (2025). *SLSA version 1.1*. https://slsa.dev/spec/v1.1/
+SPDX Workgroup. (2026, January 26). *SPDX 3.1 ontology and schema available for review*. https://spdx.dev/spdx-3-1-ontology-and-schema-available-for-review/
+
+Supply-chain Levels for Software Artifacts. (2025). *SLSA version 1.2*. https://slsa.dev/spec/v1.2/
