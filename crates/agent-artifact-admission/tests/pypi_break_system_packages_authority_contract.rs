@@ -3,6 +3,29 @@ use wardnet_agent_artifact_admission::{
     InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
 };
 
+const BREAK_SYSTEM_PACKAGES_OPTIONS: &[&str] = &[
+    "--br",
+    "--bre",
+    "--brea",
+    "--break",
+    "--break-",
+    "--break-s",
+    "--break-sy",
+    "--break-sys",
+    "--break-syst",
+    "--break-syste",
+    "--break-system",
+    "--break-system-",
+    "--break-system-p",
+    "--break-system-pa",
+    "--break-system-pac",
+    "--break-system-pack",
+    "--break-system-packa",
+    "--break-system-packag",
+    "--break-system-package",
+    "--break-system-packages",
+];
+
 #[test]
 fn approved_pip_install_cannot_disable_externally_managed_environment_protection() {
     for executable in ["pip", "pip3"] {
@@ -14,22 +37,24 @@ fn approved_pip_install_cannot_disable_externally_managed_environment_protection
             "the exact approved {executable} install must remain admissible before adding the externally-managed override"
         );
 
-        let mut hostile = control_intent.clone();
-        hostile.argv.push("--break-system-packages".to_string());
+        for override_option in BREAK_SYSTEM_PACKAGES_OPTIONS {
+            let mut hostile = control_intent.clone();
+            hostile.argv.push((*override_option).to_string());
 
-        let decision = admission_decision(&policy, &hostile);
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} --break-system-packages disables pip's externally-managed installation protection and must fail closed"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .iter()
-                .any(|reason| reason.as_str() == "missing_safety_flag"),
-            "{executable} --break-system-packages must include the stable missing_safety_flag reason"
-        );
+            let decision = admission_decision(&policy, &hostile);
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {override_option} disables pip's externally-managed installation protection and must fail closed"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "missing_safety_flag"),
+                "{executable} {override_option} must include the stable missing_safety_flag reason"
+            );
+        }
     }
 }
 
