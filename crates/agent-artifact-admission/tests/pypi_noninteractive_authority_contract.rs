@@ -4,45 +4,38 @@ use wardnet_agent_artifact_admission::{
 };
 
 #[test]
-fn approved_pip_install_cannot_gain_caller_selected_report_write_authority() {
+fn approved_pip_install_must_disable_interactive_credential_discovery() {
     for executable in ["pip", "pip3"] {
-        let (policy, control_intent) = approved_pip_install(executable);
-        let control = admission_decision(&policy, &control_intent);
+        let (policy, mut interactive_intent) = approved_pip_install(executable);
+
+        let interactive = admission_decision(&policy, &interactive_intent);
         assert_eq!(
-            control.decision,
-            DecisionKind::Allow,
-            "the exact approved {executable} install must remain admissible before adding report output authority"
+            interactive.decision,
+            DecisionKind::Block,
+            "an otherwise reviewed {executable} install must not inherit interactive or ambient credential-provider authority"
+        );
+        assert!(
+            interactive
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "missing_safety_flag"),
+            "missing canonical --no-input must produce the stable missing_safety_flag reason"
         );
 
-        for report_arguments in [
-            vec!["--report=/tmp/wardnet-install-report.json"],
-            vec!["--report", "/tmp/wardnet-install-report.json"],
-            vec!["--rep=/tmp/wardnet-install-report.json"],
-            vec!["--rep", "/tmp/wardnet-install-report.json"],
-        ] {
-            let mut intent = control_intent.clone();
-            intent.argv.extend(
-                report_arguments
-                    .iter()
-                    .map(|argument| (*argument).to_string()),
-            );
-
-            let decision = admission_decision(&policy, &intent);
-            assert_eq!(
-                decision.decision,
-                DecisionKind::Block,
-                "{executable} {} grants caller-selected report write authority and must fail closed",
-                report_arguments.join(" ")
-            );
-            assert!(
-                decision
-                    .reason_codes
-                    .iter()
-                    .any(|reason| reason.as_str() == "alternate_install_root"),
-                "{executable} {} must include the stable alternate_install_root reason",
-                report_arguments.join(" ")
-            );
-        }
+        interactive_intent.argv.push("--no-input".to_string());
+        let noninteractive = admission_decision(&policy, &interactive_intent);
+        assert_eq!(
+            noninteractive.decision,
+            DecisionKind::Allow,
+            "canonical --no-input must preserve the exact reviewed {executable} install baseline"
+        );
+        assert!(
+            !noninteractive
+                .reason_codes
+                .iter()
+                .any(|reason| reason.as_str() == "missing_safety_flag"),
+            "the canonical noninteractive guard must satisfy the safety invariant"
+        );
     }
 }
 
@@ -58,7 +51,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     };
     let policy = AdmissionPolicy {
         policy_id: "enterprise-default".to_string(),
-        policy_revision: "2026-09-11.1".to_string(),
+        policy_revision: "2026-09-11.8".to_string(),
         allowed_executables: vec![executable.to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
@@ -75,7 +68,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
         }],
     };
     let intent = InstallIntent {
-        request_id: format!("req-{executable}-report-authority"),
+        request_id: format!("req-{executable}-noninteractive-authority"),
         actor_id: "agent:codex:test".to_string(),
         workspace_id: "ContextualWisdomLab/wardnet".to_string(),
         operation: "install".to_string(),
@@ -85,7 +78,6 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
             "cwl-example==1.2.3".to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
-            "--no-input".to_string(),
         ],
         manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),

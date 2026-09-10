@@ -127,6 +127,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
             ARTIFACT_ARGUMENT.to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
+            "--no-input".to_string(),
         ],
         manifest_sha256: MANIFEST_DIGEST.to_string(),
         source: InstructionSource {
