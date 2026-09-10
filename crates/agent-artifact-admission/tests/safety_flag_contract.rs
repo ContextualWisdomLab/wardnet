@@ -161,3 +161,32 @@ fn pip_boolean_override_cannot_disable_required_hash_checking() {
         decision.reason_codes
     );
 }
+
+#[test]
+fn uv_hidden_boolean_override_cannot_disable_required_hash_checking() {
+    let mut policy = approved_pip_policy();
+    policy.allowed_executables = vec!["uv".to_string()];
+
+    let mut intent = approved_pip_intent("--no-deps");
+    intent.argv = vec![
+        "uv".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "example-package==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+        "--no-require-hashes".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "missing_safety_flag"),
+        "uv's hidden --no-require-hashes overrides --require-hashes and must fail admission closed: {:?}",
+        decision.reason_codes
+    );
+}
