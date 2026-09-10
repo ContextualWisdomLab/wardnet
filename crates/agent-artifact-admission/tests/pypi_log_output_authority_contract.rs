@@ -14,26 +14,39 @@ fn approved_pip_install_cannot_gain_caller_selected_log_write_authority() {
             "the exact approved {executable} install must remain admissible before adding log output authority"
         );
 
-        for log_argument in [
-            "--log=/tmp/wardnet-pip.log",
-            "--log-file=/tmp/wardnet-pip.log",
-            "--local-log=/tmp/wardnet-pip.log",
+        for log_arguments in [
+            vec!["--log=/tmp/wardnet-pip.log"],
+            vec!["--log", "/tmp/wardnet-pip.log"],
+            vec!["--log-file=/tmp/wardnet-pip.log"],
+            vec!["--log-file", "/tmp/wardnet-pip.log"],
+            vec!["--local-log=/tmp/wardnet-pip.log"],
+            vec!["--local-log", "/tmp/wardnet-pip.log"],
+            vec!["--log-f=/tmp/wardnet-pip.log"],
+            vec!["--log-f", "/tmp/wardnet-pip.log"],
+            vec!["--loc=/tmp/wardnet-pip.log"],
+            vec!["--loc", "/tmp/wardnet-pip.log"],
         ] {
             let mut intent = control_intent.clone();
-            intent.argv.push(log_argument.to_string());
+            intent.argv.extend(
+                log_arguments
+                    .iter()
+                    .map(|argument| (*argument).to_string()),
+            );
 
             let decision = admission_decision(&policy, &intent);
             assert_eq!(
                 decision.decision,
                 DecisionKind::Block,
-                "{executable} {log_argument} grants caller-selected log write authority and must fail closed"
+                "{executable} {} grants caller-selected log write authority and must fail closed",
+                log_arguments.join(" ")
             );
             assert!(
                 decision
                     .reason_codes
                     .iter()
                     .any(|reason| reason.as_str() == "alternate_install_root"),
-                "{executable} {log_argument} must include the stable alternate_install_root reason"
+                "{executable} {} must include the stable alternate_install_root reason",
+                log_arguments.join(" ")
             );
         }
     }
