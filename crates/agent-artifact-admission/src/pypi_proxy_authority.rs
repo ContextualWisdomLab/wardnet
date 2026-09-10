@@ -17,8 +17,9 @@ pub(crate) fn requests_unapproved_pypi_proxy_authority(intent: &InstallIntent) -
         return false;
     }
 
-    arguments
-        .iter()
-        .skip(1)
-        .any(|argument| argument == "--proxy" || argument.starts_with("--proxy="))
+    arguments.iter().skip(1).any(|argument| {
+        argument == "--no-proxy-env"
+            || argument == "--proxy"
+            || argument.starts_with("--proxy=")
+    })
 }
