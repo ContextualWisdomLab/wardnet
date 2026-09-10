@@ -20,6 +20,8 @@ use crate::{
 const MAX_AUDIT_LINE_BYTES: usize = 64 * 1024;
 #[cfg(target_os = "linux")]
 const LINUX_O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_os = "linux")]
+const LINUX_O_NONBLOCK: i32 = 0o4000;
 
 /// Minimized content-addressed artifact identity persisted in audit evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +159,7 @@ impl FileAuditSink {
                 .create(true)
                 .append(true)
                 .mode(0o600)
-                .custom_flags(LINUX_O_NOFOLLOW)
+                .custom_flags(LINUX_O_NOFOLLOW | LINUX_O_NONBLOCK)
                 .open(Path::new(&self.path))?;
             if !file.metadata()?.is_file() {
                 return Err(io::Error::new(
