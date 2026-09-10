@@ -87,6 +87,9 @@ fn approved_pypi_install(
         ],
     };
     argv.push("--require-hashes".to_string());
+    if matches!(executable, "pip" | "pip3") {
+        argv.push("--no-input".to_string());
+    }
     if include_no_deps {
         argv.push("--no-deps".to_string());
     }
