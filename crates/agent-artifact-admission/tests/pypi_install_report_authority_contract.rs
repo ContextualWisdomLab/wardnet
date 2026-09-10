@@ -19,9 +19,11 @@ fn approved_pip_install_cannot_gain_caller_selected_report_write_authority() {
             vec!["--report", "/tmp/wardnet-install-report.json"],
         ] {
             let mut intent = control_intent.clone();
-            intent
-                .argv
-                .extend(report_arguments.iter().map(|argument| (*argument).to_string()));
+            intent.argv.extend(
+                report_arguments
+                    .iter()
+                    .map(|argument| (*argument).to_string()),
+            );
 
             let decision = admission_decision(&policy, &intent);
             assert_eq!(
