@@ -53,9 +53,7 @@ fn pip_separate_proxy_value_is_explicitly_classified_as_trust_authority() {
     for executable in ["pip", "pip3"] {
         let (policy, mut intent) = approved_pip_install(executable);
         intent.argv.push("--proxy".to_string());
-        intent
-            .argv
-            .push("http://attacker.invalid:8080".to_string());
+        intent.argv.push("http://attacker.invalid:8080".to_string());
 
         let decision = admission_decision(&policy, &intent);
 
