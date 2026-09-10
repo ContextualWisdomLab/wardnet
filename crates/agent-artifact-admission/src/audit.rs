@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -162,10 +162,13 @@ impl FileAuditSink {
                 .custom_flags(LINUX_O_NOFOLLOW | LINUX_O_NONBLOCK)
                 .open(Path::new(&self.path))?;
             let metadata = file.metadata()?;
-            if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            if !metadata.is_file()
+                || metadata.permissions().mode() & 0o077 != 0
+                || metadata.nlink() != 1
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "audit storage must be an owner-only regular file",
+                    "audit storage must be a single-link owner-only regular file",
                 ));
             }
             Ok(file)

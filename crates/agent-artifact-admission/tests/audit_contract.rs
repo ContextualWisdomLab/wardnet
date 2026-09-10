@@ -1,6 +1,6 @@
 use std::fs;
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use wardnet_agent_artifact_admission::{
@@ -143,6 +143,45 @@ fn file_sink_accepts_existing_owner_only_regular_file() {
     assert_eq!(body.lines().count(), 2);
 
     let _ = fs::remove_file(path);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_sink_rejects_hard_linked_owner_only_regular_file() {
+    let target = temp_path("hard-link-target");
+    let path = temp_path("hard-link-audit");
+    let original = b"sensitive-owner-only-file\n";
+    fs::write(&target, original).expect("hard-link target fixture must write");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+        .expect("hard-link target must be owner-only");
+    fs::hard_link(&target, &path).expect("audit hard-link fixture must be created");
+
+    let target_metadata = fs::metadata(&target).expect("target metadata must be readable");
+    let audit_metadata = fs::metadata(&path).expect("audit metadata must be readable");
+    assert_eq!(target_metadata.ino(), audit_metadata.ino());
+    assert!(target_metadata.nlink() > 1);
+
+    let (intent, decision) = sensitive_blocked_attempt();
+    let record = build_audit_record(&intent, &decision).expect("audit record must build");
+    let sink = FileAuditSink::new(path.clone());
+
+    assert!(
+        sink.append(&record).is_err(),
+        "multiply-linked audit storage must fail closed before mutating the shared inode"
+    );
+    assert_eq!(
+        fs::read(&target).expect("hard-link target must remain readable"),
+        original,
+        "the aliased target must remain byte-identical"
+    );
+    assert_eq!(
+        fs::read(&path).expect("audit hard link must remain readable"),
+        original,
+        "the configured audit path must remain byte-identical"
+    );
+
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(target);
 }
 
 #[test]
