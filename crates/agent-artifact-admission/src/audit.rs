@@ -1,6 +1,8 @@
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,6 +18,8 @@ use crate::{
 };
 
 const MAX_AUDIT_LINE_BYTES: usize = 64 * 1024;
+#[cfg(target_os = "linux")]
+const LINUX_O_NOFOLLOW: i32 = 0o400000;
 
 /// Minimized content-addressed artifact identity persisted in audit evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,10 +151,30 @@ impl FileAuditSink {
     }
 
     fn open_append_only(&self) -> io::Result<File> {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(Path::new(&self.path))
+        #[cfg(target_os = "linux")]
+        {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .custom_flags(LINUX_O_NOFOLLOW)
+                .open(Path::new(&self.path))?;
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "audit storage must be a regular file",
+                ));
+            }
+            Ok(file)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "secure audit-file opening is not implemented on this platform",
+            ))
+        }
     }
 }
 
