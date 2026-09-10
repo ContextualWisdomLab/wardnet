@@ -5,35 +5,44 @@ use wardnet_agent_artifact_admission::{
 
 #[test]
 fn approved_pip_install_cannot_gain_caller_selected_report_write_authority() {
-    let (policy, mut intent) = approved_pip_install();
+    for executable in ["pip", "pip3"] {
+        let (policy, control_intent) = approved_pip_install(executable);
+        let control = admission_decision(&policy, &control_intent);
+        assert_eq!(
+            control.decision,
+            DecisionKind::Allow,
+            "the exact approved {executable} install must remain admissible before adding report output authority"
+        );
 
-    let control = admission_decision(&policy, &intent);
-    assert_eq!(
-        control.decision,
-        DecisionKind::Allow,
-        "the exact approved pip install must remain admissible before adding report output authority"
-    );
+        for report_arguments in [
+            vec!["--report=/tmp/wardnet-install-report.json"],
+            vec!["--report", "/tmp/wardnet-install-report.json"],
+        ] {
+            let mut intent = control_intent.clone();
+            intent
+                .argv
+                .extend(report_arguments.iter().map(|argument| (*argument).to_string()));
 
-    intent
-        .argv
-        .push("--report=/tmp/wardnet-install-report.json".to_string());
-    let decision = admission_decision(&policy, &intent);
-
-    assert_eq!(
-        decision.decision,
-        DecisionKind::Block,
-        "pip --report grants a caller-selected filesystem write destination and must fail closed"
-    );
-    assert!(
-        decision
-            .reason_codes
-            .iter()
-            .any(|reason| reason.as_str() == "alternate_install_root"),
-        "pip --report must use the stable alternate_install_root reason"
-    );
+            let decision = admission_decision(&policy, &intent);
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {} grants caller-selected report write authority and must fail closed",
+                report_arguments.join(" ")
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "alternate_install_root"),
+                "{executable} {} must include the stable alternate_install_root reason",
+                report_arguments.join(" ")
+            );
+        }
+    }
 }
 
-fn approved_pip_install() -> (AdmissionPolicy, InstallIntent) {
+fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     let artifact = ArtifactCoordinate {
         ecosystem: "pypi".to_string(),
         name: "cwl-example".to_string(),
@@ -46,7 +55,7 @@ fn approved_pip_install() -> (AdmissionPolicy, InstallIntent) {
     let policy = AdmissionPolicy {
         policy_id: "enterprise-default".to_string(),
         policy_revision: "2026-09-11.1".to_string(),
-        allowed_executables: vec!["pip".to_string()],
+        allowed_executables: vec![executable.to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
             sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -62,12 +71,12 @@ fn approved_pip_install() -> (AdmissionPolicy, InstallIntent) {
         }],
     };
     let intent = InstallIntent {
-        request_id: "req-pip-report-authority".to_string(),
+        request_id: format!("req-{executable}-report-authority"),
         actor_id: "agent:codex:test".to_string(),
         workspace_id: "ContextualWisdomLab/wardnet".to_string(),
         operation: "install".to_string(),
         argv: vec![
-            "pip".to_string(),
+            executable.to_string(),
             "install".to_string(),
             "cwl-example==1.2.3".to_string(),
             "--require-hashes".to_string(),
