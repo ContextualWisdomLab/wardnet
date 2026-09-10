@@ -7,7 +7,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Registered eagerly, before `run_from_env` binds its listener and prints
     // the readiness line, so a termination signal delivered immediately on
     // startup cannot race the OS-level handler installation and fall through
-    // to the default "kill" disposition.
+    // to the default "kill" disposition. The lifecycle decision and systems
+    // evidence are recorded in docs/architecture.md and
+    // docs/papers/graceful-shutdown-systems-research.md.
     let shutdown = install_shutdown_signal();
     waf_ids_ai_soc::run_from_env(Box::pin(shutdown)).await
 }
