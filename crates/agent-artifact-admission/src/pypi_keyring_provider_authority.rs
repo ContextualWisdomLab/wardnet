@@ -17,7 +17,15 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
         return false;
     }
 
-    arguments.iter().skip(1).any(|argument| {
-        argument == "--keyring-provider" || argument.starts_with("--keyring-provider=")
-    })
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| is_keyring_provider_option(argument))
+}
+
+fn is_keyring_provider_option(argument: &str) -> bool {
+    let option = argument
+        .split_once('=')
+        .map_or(argument, |(flag, _value)| flag);
+    option.starts_with("--k") && "--keyring-provider".starts_with(option)
 }
