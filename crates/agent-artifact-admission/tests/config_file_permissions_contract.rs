@@ -4,9 +4,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wardnet_agent_artifact_admission::{
-    AdmissionPolicy, AdmissionServiceConfig, load_config,
-};
+use wardnet_agent_artifact_admission::{AdmissionPolicy, AdmissionServiceConfig, load_config};
 
 fn temp_path() -> std::path::PathBuf {
     let nonce = SystemTime::now()
