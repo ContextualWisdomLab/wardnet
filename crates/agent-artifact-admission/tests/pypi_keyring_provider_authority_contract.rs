@@ -40,6 +40,25 @@ fn approved_pip_install_cannot_inherit_unreviewed_keyring_provider_authority() {
                 "{executable} {suffix:?} must include the stable alternate_trust_root reason"
             );
         }
+
+        for provider in ["auto", "disabled"] {
+            let mut narrowed = control_intent.clone();
+            narrowed.argv.push(format!("--keyring-provider={provider}"));
+
+            let decision = admission_decision(&policy, &narrowed);
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Allow,
+                "{executable} --keyring-provider={provider} does not expand credential-provider authority beyond the reviewed no-input baseline"
+            );
+            assert!(
+                !decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "alternate_trust_root"),
+                "non-expanding keyring mode must not be mislabeled as an alternate trust root"
+            );
+        }
     }
 }
 
