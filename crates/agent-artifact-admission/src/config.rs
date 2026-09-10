@@ -129,7 +129,7 @@ pub fn load_config(path: &Path) -> Result<AdmissionServiceConfig, ConfigError> {
 
 /// Load the bounded credentials document and return its validated bearer token.
 pub fn load_admin_token(path: &Path) -> Result<String, ConfigError> {
-    let bytes = read_bounded(path, MAX_CREDENTIAL_FILE_BYTES)?;
+    let bytes = read_credential_bounded(path, MAX_CREDENTIAL_FILE_BYTES)?;
     let credential: CredentialFile =
         serde_json::from_slice(&bytes).map_err(|_| ConfigError::InvalidJson)?;
     validate_admin_token(&credential.admin_token)?;
@@ -244,8 +244,38 @@ fn valid_executable(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+'))
 }
 
+fn read_credential_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
+    let file = File::open(path).map_err(|_| ConfigError::Io)?;
+    validate_credential_file_permissions(&file)?;
+    read_open_file_bounded(file, maximum_bytes)
+}
+
+#[cfg(unix)]
+fn validate_credential_file_permissions(file: &File) -> Result<(), ConfigError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = file
+        .metadata()
+        .map_err(|_| ConfigError::Io)?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(ConfigError::InvalidCredential);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_credential_file_permissions(_file: &File) -> Result<(), ConfigError> {
+    Err(ConfigError::InvalidCredential)
+}
+
 fn read_bounded(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
     let file = File::open(path).map_err(|_| ConfigError::Io)?;
+    read_open_file_bounded(file, maximum_bytes)
+}
+
+fn read_open_file_bounded(file: File, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
     let mut bytes = Vec::new();
     file.take(maximum_bytes + 1)
         .read_to_end(&mut bytes)
