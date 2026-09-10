@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -161,10 +161,11 @@ impl FileAuditSink {
                 .mode(0o600)
                 .custom_flags(LINUX_O_NOFOLLOW | LINUX_O_NONBLOCK)
                 .open(Path::new(&self.path))?;
-            if !file.metadata()?.is_file() {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
                 return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "audit storage must be a regular file",
+                    io::ErrorKind::PermissionDenied,
+                    "audit storage must be an owner-only regular file",
                 ));
             }
             Ok(file)
