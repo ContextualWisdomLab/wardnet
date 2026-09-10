@@ -16,6 +16,7 @@ mod pypi_install_mutation_authority;
 mod pypi_install_report_authority;
 mod pypi_keyring_provider_authority;
 mod pypi_log_output_authority;
+mod pypi_noninteractive_authority;
 mod pypi_proxy_authority;
 mod pypi_system_package_authority;
 mod uv_configuration_authority;
@@ -135,6 +136,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::AlternateInstallRoot)
         {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_noninteractive_authority::misses_required_noninteractive_mode(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag)
+        {
+            decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
