@@ -10,7 +10,6 @@ mod dependency_cardinality;
 mod http;
 mod oci_transport;
 mod policy;
-mod pypi_client_authentication;
 mod pypi_hash_mode;
 
 pub use admission::{
@@ -82,15 +81,6 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::MissingSafetyFlag)
         {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
-        }
-        decision.decision = DecisionKind::Block;
-    }
-    if pypi_client_authentication::requests_client_certificate_override(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
-            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
