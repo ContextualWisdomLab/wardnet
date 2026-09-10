@@ -293,7 +293,7 @@ fn validate_config_file_permissions(file: &File) -> Result<(), ConfigError> {
 
 #[cfg(not(unix))]
 fn validate_config_file_permissions(_file: &File) -> Result<(), ConfigError> {
-    Ok(())
+    Err(ConfigError::InvalidConfiguration)
 }
 
 fn read_open_file_bounded(file: File, maximum_bytes: u64) -> Result<Vec<u8>, ConfigError> {
