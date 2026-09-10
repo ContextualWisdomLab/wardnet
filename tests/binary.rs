@@ -3,7 +3,9 @@
 //! Spawns the real gateway binary, waits until it reports readiness (proving it
 //! bound the listener), then stops it with the platform-appropriate mechanism.
 //! Running the binary under `cargo llvm-cov` records coverage for `main.rs` and
-//! `shutdown_signal`, which cannot be reached from in-process unit tests.
+//! `shutdown_signal`, which cannot be reached from in-process unit tests. The
+//! lifecycle rationale and systems research are recorded in `docs/architecture.md`
+//! and `docs/papers/graceful-shutdown-systems-research.md`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
