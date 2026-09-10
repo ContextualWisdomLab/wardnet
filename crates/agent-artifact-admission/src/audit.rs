@@ -213,8 +213,7 @@ fn open_parent_without_symlinks(path: &Path) -> io::Result<(File, &std::ffi::OsS
                 ))?;
             }
             Component::Normal(name) => {
-                directory =
-                    open_directory_without_following(&proc_fd_child(&directory, name))?;
+                directory = open_directory_without_following(&proc_fd_child(&directory, name))?;
             }
             Component::Prefix(_) => {
                 return Err(io::Error::new(
