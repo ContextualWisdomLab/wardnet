@@ -496,6 +496,7 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         "--index",
         "--default-index",
         "--trusted-host",
+        "--allow-insecure-host",
         "--find-links",
         "--registry",
         "--registry-url",
