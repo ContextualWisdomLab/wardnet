@@ -1,0 +1,33 @@
+use crate::InstallIntent;
+
+/// Return whether a direct pip install asks for mutation authority over an
+/// existing installation that is not represented by the reviewed artifact.
+pub(crate) fn requests_unapproved_pypi_install_mutation(intent: &InstallIntent) -> bool {
+    let Some(executable) = intent.argv.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(executable, "pip" | "pip3") {
+        return false;
+    }
+
+    let arguments = &intent.argv[1..];
+    if !arguments
+        .first()
+        .is_some_and(|argument| argument == "install")
+    {
+        return false;
+    }
+
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| matches_ignore_installed_option(argument))
+}
+
+fn matches_ignore_installed_option(argument: &str) -> bool {
+    if argument == "-I" || argument == "-Iv" {
+        return true;
+    }
+
+    argument.len() >= "--ignore-i".len() && "--ignore-installed".starts_with(argument)
+}
