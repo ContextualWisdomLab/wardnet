@@ -14,6 +14,7 @@ mod pypi_cache_directory_authority;
 mod pypi_hash_mode;
 mod pypi_install_mutation_authority;
 mod pypi_install_report_authority;
+mod pypi_keyring_provider_authority;
 mod pypi_log_output_authority;
 mod pypi_proxy_authority;
 mod pypi_system_package_authority;
@@ -115,6 +116,16 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::AlternateInstallRoot)
         {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_keyring_provider_authority::requests_unapproved_pypi_keyring_provider_authority(intent)
+    {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
