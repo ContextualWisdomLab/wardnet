@@ -11,6 +11,7 @@ mod http;
 mod oci_transport;
 mod policy;
 mod pypi_hash_mode;
+mod pypi_proxy_authority;
 mod uv_configuration_authority;
 
 pub use admission::{
@@ -82,6 +83,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::MissingSafetyFlag)
         {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_proxy_authority::requests_unapproved_pypi_proxy_authority(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
