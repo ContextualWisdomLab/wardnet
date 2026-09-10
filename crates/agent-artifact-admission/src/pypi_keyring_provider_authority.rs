@@ -24,7 +24,9 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
         .any(|(index, argument)| {
             let (option, attached_value) = argument
                 .split_once('=')
-                .map_or((argument.as_str(), None), |(flag, value)| (flag, Some(value)));
+                .map_or((argument.as_str(), None), |(flag, value)| {
+                    (flag, Some(value))
+                });
             if !is_keyring_provider_option(option) {
                 return false;
             }
