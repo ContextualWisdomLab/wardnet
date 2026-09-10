@@ -14,22 +14,30 @@ fn approved_pip_install_cannot_inherit_unreviewed_keyring_provider_authority() {
             "the exact approved {executable} install must remain admissible before adding credential-provider authority"
         );
 
-        for provider in ["subprocess", "import"] {
+        let hostile_argv_suffixes = [
+            vec!["--keyring-provider=subprocess".to_string()],
+            vec!["--keyring-provider=import".to_string()],
+            vec!["--keyring-provider".to_string(), "subprocess".to_string()],
+            vec!["--k=subprocess".to_string()],
+            vec!["--k".to_string(), "import".to_string()],
+        ];
+
+        for suffix in hostile_argv_suffixes {
             let mut hostile = control_intent.clone();
-            hostile.argv.push(format!("--keyring-provider={provider}"));
+            hostile.argv.extend(suffix.clone());
 
             let decision = admission_decision(&policy, &hostile);
             assert_eq!(
                 decision.decision,
                 DecisionKind::Block,
-                "{executable} --keyring-provider={provider} delegates ambient credential-provider authority outside the reviewed artifact and must fail closed"
+                "{executable} {suffix:?} delegates ambient credential-provider authority outside the reviewed artifact and must fail closed"
             );
             assert!(
                 decision
                     .reason_codes
                     .iter()
                     .any(|reason| reason.as_str() == "alternate_trust_root"),
-                "{executable} --keyring-provider={provider} must include the stable alternate_trust_root reason"
+                "{executable} {suffix:?} must include the stable alternate_trust_root reason"
             );
         }
     }
