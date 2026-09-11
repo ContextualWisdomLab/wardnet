@@ -2246,8 +2246,8 @@ async fn import_kev_feed(
 
 /// Validates the transport policy shared by outbound feed URLs.
 ///
-/// The URL must be absolute and use HTTPS, except that loopback hosts may use
-/// HTTP for local tests. Callers remain responsible for authorizing the host.
+/// The URL must be absolute and use HTTPS; loopback hosts may use HTTP.
+/// Callers remain responsible for any source-specific host authorization.
 fn validate_http_url(value: &str) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
     let host = parsed.host_str().ok_or("feed URL host is required")?;
