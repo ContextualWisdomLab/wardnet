@@ -7,21 +7,21 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
     };
     let arguments = &intent.argv[1..];
 
-    let (provider_arguments, pip_compatible_abbreviation, import_expands_authority) =
+    let (provider_arguments, pip_compatible_abbreviation, non_disabled_provider_expands_authority) =
         match executable {
             "pip" | "pip3"
                 if arguments
                     .first()
                     .is_some_and(|argument| argument == "install") =>
             {
-                (&arguments[1..], true, true)
+                (&arguments[1..], true, false)
             }
             "uv" if arguments.first().is_some_and(|argument| argument == "pip")
                 && arguments
                     .get(1)
                     .is_some_and(|argument| argument == "install") =>
             {
-                (&arguments[2..], false, false)
+                (&arguments[2..], false, true)
             }
             _ => return false,
         };
@@ -42,7 +42,11 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
             attached_value
                 .or_else(|| provider_arguments.get(index + 1).map(String::as_str))
                 .is_some_and(|provider| {
-                    provider == "subprocess" || (import_expands_authority && provider == "import")
+                    if non_disabled_provider_expands_authority {
+                        provider != "disabled"
+                    } else {
+                        provider == "subprocess" || provider == "import"
+                    }
                 })
         })
 }
