@@ -18,7 +18,21 @@ fn uv_symlink_link_mode_cannot_inherit_artifact_approval() {
     let (policy, mut intent) = approved_uv_install();
     intent.argv.push("--link-mode=symlink".to_string());
 
-    let decision = admission_decision(&policy, &intent);
+    assert_symlink_link_mode_is_blocked(&policy, &intent);
+}
+
+#[test]
+fn uv_separate_symlink_link_mode_cannot_inherit_artifact_approval() {
+    let (policy, mut intent) = approved_uv_install();
+    intent
+        .argv
+        .extend(["--link-mode".to_string(), "symlink".to_string()]);
+
+    assert_symlink_link_mode_is_blocked(&policy, &intent);
+}
+
+fn assert_symlink_link_mode_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
+    let decision = admission_decision(policy, intent);
 
     assert_eq!(
         decision.decision,

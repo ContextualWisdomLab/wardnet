@@ -20,6 +20,7 @@ mod pypi_noninteractive_authority;
 mod pypi_proxy_authority;
 mod pypi_system_package_authority;
 mod uv_configuration_authority;
+mod uv_link_mode_authority;
 
 pub use admission::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate,
@@ -163,6 +164,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::MissingSafetyFlag)
         {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if uv_link_mode_authority::requests_unapproved_uv_symlink_link_mode(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::ArtifactNotApproved)
+        {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
