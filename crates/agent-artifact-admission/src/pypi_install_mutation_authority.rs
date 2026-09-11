@@ -46,11 +46,8 @@ fn requests_uv_pip_mutation(arguments: &[String]) -> bool {
 }
 
 fn matches_ignore_installed_option(argument: &str) -> bool {
-    if argument == "-I" || argument == "-Iv" {
-        return true;
-    }
-
-    argument.len() >= "--ignore-i".len() && "--ignore-installed".starts_with(argument)
+    matches_pip_no_value_short_cluster(argument, b'I')
+        || (argument.len() >= "--ignore-i".len() && "--ignore-installed".starts_with(argument))
 }
 
 fn matches_force_reinstall_option(argument: &str) -> bool {
@@ -58,7 +55,24 @@ fn matches_force_reinstall_option(argument: &str) -> bool {
 }
 
 fn matches_upgrade_option(argument: &str) -> bool {
-    matches!(argument, "-U" | "--upgrade")
+    matches_pip_no_value_short_cluster(argument, b'U') || argument == "--upgrade"
+}
+
+/// Classify only the reviewed direct-pip no-value short-option cluster grammar.
+///
+/// `pip` inherits `optparse` clustering for no-value `-v`, `-q`, `-I`, and `-U`
+/// selectors. Value-taking or unknown short options are deliberately excluded so
+/// their remaining bytes cannot be misclassified as embedded mutation authority.
+fn matches_pip_no_value_short_cluster(argument: &str, required_flag: u8) -> bool {
+    let Some(cluster) = argument.strip_prefix('-') else {
+        return false;
+    };
+    let bytes = cluster.as_bytes();
+    !bytes.is_empty()
+        && bytes
+            .iter()
+            .all(|byte| matches!(*byte, b'v' | b'q' | b'I' | b'U'))
+        && bytes.contains(&required_flag)
 }
 
 fn matches_uv_reinstall_option(argument: &str) -> bool {
@@ -70,11 +84,53 @@ fn matches_uv_reinstall_option(argument: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{matches_upgrade_option, matches_uv_reinstall_option};
+    use super::{
+        matches_ignore_installed_option, matches_upgrade_option, matches_uv_reinstall_option,
+    };
+
+    #[test]
+    fn direct_pip_ignore_installed_matcher_accepts_only_reviewed_mutation_selectors() {
+        for argument in [
+            "-I",
+            "-Iv",
+            "-Ivv",
+            "-vI",
+            "-qI",
+            "-IU",
+            "-UI",
+            "--ignore-i",
+            "--ignore-installed",
+        ] {
+            assert!(
+                matches_ignore_installed_option(argument),
+                "reviewed pip ignore-installed selector must be classified: {argument}"
+            );
+        }
+
+        for argument in [
+            "-",
+            "-v",
+            "-q",
+            "-U",
+            "-iI",
+            "-rI",
+            "-tI",
+            "-Ixyz",
+            "-u",
+            "--ignore",
+            "--ignore-installedx",
+            "cwl-example==1.2.3",
+        ] {
+            assert!(
+                !matches_ignore_installed_option(argument),
+                "value-taking, malformed, or unrelated argv must not inherit ignore-installed semantics: {argument}"
+            );
+        }
+    }
 
     #[test]
     fn direct_pip_upgrade_matcher_accepts_only_reviewed_mutation_selectors() {
-        for argument in ["-U", "--upgrade"] {
+        for argument in ["-U", "-Uv", "-Uvv", "-vU", "-qU", "-IU", "-UI", "--upgrade"] {
             assert!(
                 matches_upgrade_option(argument),
                 "reviewed pip upgrade selector must be classified: {argument}"
@@ -82,6 +138,14 @@ mod tests {
         }
 
         for argument in [
+            "-",
+            "-v",
+            "-q",
+            "-I",
+            "-iU",
+            "-rU",
+            "-tU",
+            "-Uxyz",
             "--upgrade-strategy=eager",
             "--upgrade-strategy",
             "--up",

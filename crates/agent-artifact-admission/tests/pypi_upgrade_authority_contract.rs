@@ -14,7 +14,7 @@ fn approved_pip_install_cannot_inherit_unreviewed_upgrade_authority() {
             "the exact approved {executable} install must remain admissible before adding upgrade authority"
         );
 
-        for upgrade_option in ["-U", "--upgrade"] {
+        for upgrade_option in ["-U", "-Uv", "-Uvv", "-vU", "-qU", "-UI", "-IU", "--upgrade"] {
             let mut hostile = control_intent.clone();
             hostile.argv.push(upgrade_option.to_string());
 

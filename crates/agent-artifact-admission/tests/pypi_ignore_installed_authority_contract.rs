@@ -17,6 +17,9 @@ fn approved_pip_install_cannot_inherit_unreviewed_overwrite_authority() {
         for overwrite_option in [
             "-I",
             "-Iv",
+            "-Ivv",
+            "-vI",
+            "-qI",
             "--ignore-i",
             "--ignore-in",
             "--ignore-ins",
