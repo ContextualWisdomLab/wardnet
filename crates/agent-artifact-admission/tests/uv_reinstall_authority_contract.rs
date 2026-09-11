@@ -40,7 +40,9 @@ fn assert_reinstall_authority_is_blocked(argument: &str) {
         "caller-selected uv reinstall authority must not inherit approval for the reviewed ordinary install: {argument}"
     );
     assert!(
-        decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved),
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ArtifactNotApproved),
         "uv reinstall authority must carry the stable artifact_not_approved reason: {:?}",
         decision.reason_codes
     );
