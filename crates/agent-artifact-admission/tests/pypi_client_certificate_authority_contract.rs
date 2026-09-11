@@ -60,24 +60,26 @@ fn pip_client_certificate_unambiguous_prefix_cannot_inherit_artifact_approval() 
 #[test]
 fn pip_separate_client_certificate_value_is_explicitly_classified_as_trust_authority() {
     for executable in ["pip", "pip3"] {
-        let (policy, mut intent) = approved_pip_install(executable);
-        intent.argv.push("--client-cert".to_string());
-        intent.argv.push("/tmp/attacker-client.pem".to_string());
+        for option in ["--client-cert", "--cl"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv.push(option.to_string());
+            intent.argv.push("/tmp/attacker-client.pem".to_string());
 
-        let decision = admission_decision(&policy, &intent);
+            let decision = admission_decision(&policy, &intent);
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} separate client-certificate syntax must fail closed"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::AlternateTrustRoot),
-            "separate client-certificate syntax must be classified as trust authority rather than relying only on positional-operand rejection: {:?}",
-            decision.reason_codes
-        );
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} separate {option} syntax must fail closed"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "separate {option} syntax must be classified as trust authority rather than relying only on positional-operand rejection: {:?}",
+                decision.reason_codes
+            );
+        }
     }
 }
 
