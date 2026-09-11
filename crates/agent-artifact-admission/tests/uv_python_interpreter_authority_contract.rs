@@ -31,10 +31,7 @@ fn uv_separate_python_interpreter_cannot_inherit_artifact_approval() {
     assert_python_interpreter_override_is_blocked(&policy, &intent);
 }
 
-fn assert_python_interpreter_override_is_blocked(
-    policy: &AdmissionPolicy,
-    intent: &InstallIntent,
-) {
+fn assert_python_interpreter_override_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
     assert_eq!(
