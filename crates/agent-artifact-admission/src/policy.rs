@@ -524,6 +524,10 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
             && arguments
                 .iter()
                 .any(|argument| argument.starts_with("--config.")))
+        || (executable == "uv"
+            && arguments
+                .iter()
+                .any(|argument| matches_cli_flag(argument, "--system-certs")))
 }
 
 fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bool {
