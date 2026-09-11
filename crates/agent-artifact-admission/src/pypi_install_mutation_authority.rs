@@ -24,7 +24,9 @@ fn requests_direct_pip_mutation(arguments: &[String]) -> bool {
     }
 
     arguments.iter().skip(1).any(|argument| {
-        matches_ignore_installed_option(argument) || matches_force_reinstall_option(argument)
+        matches_ignore_installed_option(argument)
+            || matches_force_reinstall_option(argument)
+            || matches_upgrade_option(argument)
     })
 }
 
@@ -55,6 +57,10 @@ fn matches_force_reinstall_option(argument: &str) -> bool {
     argument.len() >= "--fo".len() && "--force-reinstall".starts_with(argument)
 }
 
+fn matches_upgrade_option(argument: &str) -> bool {
+    matches!(argument, "-U" | "--upgrade")
+}
+
 fn matches_uv_reinstall_option(argument: &str) -> bool {
     matches!(
         argument,
@@ -64,7 +70,32 @@ fn matches_uv_reinstall_option(argument: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::matches_uv_reinstall_option;
+    use super::{matches_upgrade_option, matches_uv_reinstall_option};
+
+    #[test]
+    fn direct_pip_upgrade_matcher_accepts_only_reviewed_mutation_selectors() {
+        for argument in ["-U", "--upgrade"] {
+            assert!(
+                matches_upgrade_option(argument),
+                "reviewed pip upgrade selector must be classified: {argument}"
+            );
+        }
+
+        for argument in [
+            "--upgrade-strategy=eager",
+            "--upgrade-strategy",
+            "--up",
+            "--upgrades",
+            "-u",
+            "--no-deps",
+            "cwl-example==1.2.3",
+        ] {
+            assert!(
+                !matches_upgrade_option(argument),
+                "distinct or unreviewed argv must not inherit upgrade semantics: {argument}"
+            );
+        }
+    }
 
     #[test]
     fn uv_reinstall_matcher_accepts_only_documented_mutation_selectors() {
