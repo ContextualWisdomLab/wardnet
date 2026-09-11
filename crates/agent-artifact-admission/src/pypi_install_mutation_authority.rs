@@ -47,8 +47,7 @@ fn requests_uv_pip_mutation(arguments: &[String]) -> bool {
 
 fn matches_ignore_installed_option(argument: &str) -> bool {
     matches_pip_no_value_short_cluster(argument, b'I')
-        || (argument.len() >= "--ignore-i".len()
-            && "--ignore-installed".starts_with(argument))
+        || (argument.len() >= "--ignore-i".len() && "--ignore-installed".starts_with(argument))
 }
 
 fn matches_force_reinstall_option(argument: &str) -> bool {
@@ -127,16 +126,7 @@ mod tests {
 
     #[test]
     fn direct_pip_upgrade_matcher_accepts_only_reviewed_mutation_selectors() {
-        for argument in [
-            "-U",
-            "-Uv",
-            "-Uvv",
-            "-vU",
-            "-qU",
-            "-IU",
-            "-UI",
-            "--upgrade",
-        ] {
+        for argument in ["-U", "-Uv", "-Uvv", "-vU", "-qU", "-IU", "-UI", "--upgrade"] {
             assert!(
                 matches_upgrade_option(argument),
                 "reviewed pip upgrade selector must be classified: {argument}"
