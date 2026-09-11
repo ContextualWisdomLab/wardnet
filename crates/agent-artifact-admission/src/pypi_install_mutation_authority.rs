@@ -108,6 +108,10 @@ mod tests {
         }
 
         for argument in [
+            "-",
+            "-v",
+            "-q",
+            "-U",
             "-iI",
             "-rI",
             "-tI",
@@ -134,6 +138,10 @@ mod tests {
         }
 
         for argument in [
+            "-",
+            "-v",
+            "-q",
+            "-I",
             "-iU",
             "-rU",
             "-tU",
