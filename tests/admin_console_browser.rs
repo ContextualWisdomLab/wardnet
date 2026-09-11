@@ -295,12 +295,11 @@ fn spawn_ready_gateway() -> (Child, String) {
         "unexpected startup: {line:?}"
     );
     let address = line
-        .split_whitespace()
-        .last()
-        .expect("listening address")
-        .trim()
+        .split_once("listening on ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .expect("listening URL")
         .trim_end_matches('/');
-    (child, format!("http://{address}/"))
+    (child, format!("{address}/"))
 }
 
 async fn wait_for_driver(client: &Client, driver_url: &str) {
