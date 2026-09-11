@@ -40,9 +40,40 @@ fn binary_serves_until_force_stopped_on_windows() {
     );
 }
 
+#[test]
+fn binary_fail_closes_non_loopback_listen_without_admin() {
+    let output = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
+        .env("BIND_ADDR", "0.0.0.0:0")
+        .env_remove("ADMIN_TOKEN")
+        .env_remove("ADMIN_TOKENS")
+        .env_remove("WAF_IDS_CREDENTIALS_PATH")
+        .env_remove("WAF_IDS_STATE_PATH")
+        .output()
+        .expect("spawn gateway binary for fail-closed check");
+    assert!(
+        !output.status.success(),
+        "public bind without credentials must exit non-zero: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("refusing to bind 0.0.0.0:0"),
+        "operator error must name the refused address:\n{combined}"
+    );
+    assert!(
+        !combined.contains("waf-ids-ai-soc listening on"),
+        "process must not print readiness after fail-closed startup:\n{combined}"
+    );
+}
+
 fn spawn_ready_gateway() -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_waf-ids-ai-soc"))
         .env("BIND_ADDR", "127.0.0.1:0")
+        .env_remove("ADMIN_TOKEN")
+        .env_remove("ADMIN_TOKENS")
+        .env_remove("WAF_IDS_CREDENTIALS_PATH")
         .env_remove("WAF_IDS_STATE_PATH")
         .env_remove("EVENT_LIMIT")
         .env_remove("RATE_LIMIT")
@@ -58,7 +89,7 @@ fn spawn_ready_gateway() -> Child {
     let mut line = String::new();
     reader.read_line(&mut line).expect("read readiness line");
     assert!(
-        line.contains("listening on"),
+        line.contains("waf-ids-ai-soc listening on"),
         "unexpected startup line: {line:?}"
     );
     child
