@@ -9,33 +9,46 @@ const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
 
 #[test]
 fn pypi_install_cannot_import_unreviewed_constraint_authority() {
-    for (executable, flag) in [
-        ("pip", "--constraint=https://x.invalid/c.txt"),
-        ("pip3", "-chttps://x.invalid/c.txt"),
-        ("pip", "--build-constraint=https://x.invalid/b.txt"),
-        ("uv", "--constraint=https://x.invalid/c.txt"),
-        ("uv", "--constraints=https://x.invalid/c.txt"),
-        ("uv", "-chttps://x.invalid/c.txt"),
-        ("uv", "--build-constraint=https://x.invalid/b.txt"),
-        ("uv", "--build-constraints=https://x.invalid/b.txt"),
-        ("uv", "-bhttps://x.invalid/b.txt"),
-    ] {
+    let cases: [(&str, &[&str]); 17] = [
+        ("pip", &["--constraint=https://x.invalid/c.txt"]),
+        ("pip", &["--constraint", "https://x.invalid/c.txt"]),
+        ("pip3", &["-chttps://x.invalid/c.txt"]),
+        ("pip3", &["-c", "https://x.invalid/c.txt"]),
+        ("pip", &["--build-constraint=https://x.invalid/b.txt"]),
+        ("pip", &["--build-constraint", "https://x.invalid/b.txt"]),
+        ("uv", &["--constraint=https://x.invalid/c.txt"]),
+        ("uv", &["--constraint", "https://x.invalid/c.txt"]),
+        ("uv", &["--constraints=https://x.invalid/c.txt"]),
+        ("uv", &["--constraints", "https://x.invalid/c.txt"]),
+        ("uv", &["-chttps://x.invalid/c.txt"]),
+        ("uv", &["-c", "https://x.invalid/c.txt"]),
+        ("uv", &["--build-constraint=https://x.invalid/b.txt"]),
+        ("uv", &["--build-constraint", "https://x.invalid/b.txt"]),
+        ("uv", &["--build-constraints=https://x.invalid/b.txt"]),
+        ("uv", &["-bhttps://x.invalid/b.txt"]),
+        ("uv", &["-b", "https://x.invalid/b.txt"]),
+    ];
+
+    for (executable, arguments) in cases {
         let (policy, mut intent) = approved_pypi_install(executable);
-        intent.argv.push(flag.to_string());
+        intent
+            .argv
+            .extend(arguments.iter().map(|argument| (*argument).to_string()));
 
         let decision = admission_decision(&policy, &intent);
+        let invocation = arguments.join(" ");
 
         assert_eq!(
             decision.decision,
             DecisionKind::Block,
-            "{executable} {flag} must not let an unreviewed constraints document influence the approved artifact/build identity"
+            "{executable} {invocation} must not let an unreviewed constraints document influence the approved artifact/build identity"
         );
         assert!(
             decision
                 .reason_codes
                 .iter()
                 .any(|reason| reason.as_str() == "artifact_not_approved"),
-            "{executable} {flag} must report that the external constraint authority is outside the reviewed artifact set"
+            "{executable} {invocation} must report that the external constraint authority is outside the reviewed artifact set"
         );
     }
 }
