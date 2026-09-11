@@ -16,11 +16,10 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
             {
                 (&arguments[1..], true, true)
             }
-            "uv"
-                if arguments.first().is_some_and(|argument| argument == "pip")
-                    && arguments
-                        .get(1)
-                        .is_some_and(|argument| argument == "install") =>
+            "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+                && arguments
+                    .get(1)
+                    .is_some_and(|argument| argument == "install") =>
             {
                 (&arguments[2..], false, false)
             }
