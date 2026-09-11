@@ -23,7 +23,9 @@ pub(crate) fn requests_unapproved_pypi_target_abbreviation(intent: &InstallInten
     }
 
     arguments.iter().skip(1).any(|argument| {
-        let option = argument.split_once('=').map_or(argument.as_str(), |(name, _)| name);
+        let option = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(name, _)| name);
         matches_pip_target_option(option)
     })
 }
