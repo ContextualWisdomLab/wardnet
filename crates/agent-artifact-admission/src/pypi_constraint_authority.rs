@@ -18,11 +18,7 @@ pub(crate) fn requests_unapproved_pypi_constraint_authority(intent: &InstallInte
             arguments.iter().any(|argument| {
                 matches_short_value_option(argument, "-c")
                     || matches_pip_long_value_option(argument, "--constraint", "--cons")
-                    || matches_pip_long_value_option(
-                        argument,
-                        "--build-constraint",
-                        "--build-c",
-                    )
+                    || matches_pip_long_value_option(argument, "--build-constraint", "--build-c")
             })
         }
         "uv" if arguments.first().is_some_and(|argument| argument == "pip")
@@ -92,17 +88,16 @@ mod tests {
             } else {
                 matches_pip_long_value_option(argument, "--constraint", "--cons")
             };
-            assert!(matched, "accepted pip constraint prefix must be classified: {argument}");
+            assert!(
+                matched,
+                "accepted pip constraint prefix must be classified: {argument}"
+            );
         }
 
         for argument in ["--con", "--build-", "--config-settings", "--constraints"] {
             assert!(
                 !matches_pip_long_value_option(argument, "--constraint", "--cons")
-                    && !matches_pip_long_value_option(
-                        argument,
-                        "--build-constraint",
-                        "--build-c"
-                    ),
+                    && !matches_pip_long_value_option(argument, "--build-constraint", "--build-c"),
                 "ambiguous or unrelated pip option must not be classified: {argument}"
             );
         }
