@@ -17,8 +17,12 @@ pub(crate) fn requests_unapproved_pypi_constraint_authority(intent: &InstallInte
         {
             arguments.iter().any(|argument| {
                 matches_short_value_option(argument, "-c")
-                    || matches_long_value_option(argument, "--constraint")
-                    || matches_long_value_option(argument, "--build-constraint")
+                    || matches_pip_long_value_option(argument, "--constraint", "--cons")
+                    || matches_pip_long_value_option(
+                        argument,
+                        "--build-constraint",
+                        "--build-c",
+                    )
             })
         }
         "uv" if arguments.first().is_some_and(|argument| argument == "pip")
@@ -39,6 +43,21 @@ pub(crate) fn requests_unapproved_pypi_constraint_authority(intent: &InstallInte
     }
 }
 
+/// Match pip's documented option and the shortest unambiguous prefixes accepted
+/// by its optparse-compatible long-option parser for this security authority.
+fn matches_pip_long_value_option(
+    argument: &str,
+    canonical: &str,
+    shortest_accepted_prefix: &str,
+) -> bool {
+    let option = argument
+        .split_once('=')
+        .map_or(argument, |(option, _)| option);
+
+    option == canonical
+        || (option.len() >= shortest_accepted_prefix.len() && canonical.starts_with(option))
+}
+
 fn matches_long_value_option(argument: &str, option: &str) -> bool {
     argument == option
         || argument
@@ -51,4 +70,41 @@ fn matches_short_value_option(argument: &str, option: &str) -> bool {
         || argument
             .strip_prefix(option)
             .is_some_and(|suffix| !suffix.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_pip_long_value_option;
+
+    #[test]
+    fn pip_constraint_prefix_matcher_starts_at_verified_unambiguous_prefix() {
+        for argument in [
+            "--cons",
+            "--const",
+            "--constraint",
+            "--cons=https://x.invalid/c.txt",
+            "--build-c",
+            "--build-const=https://x.invalid/b.txt",
+            "--build-constraint",
+        ] {
+            let matched = if argument.starts_with("--build-") {
+                matches_pip_long_value_option(argument, "--build-constraint", "--build-c")
+            } else {
+                matches_pip_long_value_option(argument, "--constraint", "--cons")
+            };
+            assert!(matched, "accepted pip constraint prefix must be classified: {argument}");
+        }
+
+        for argument in ["--con", "--build-", "--config-settings", "--constraints"] {
+            assert!(
+                !matches_pip_long_value_option(argument, "--constraint", "--cons")
+                    && !matches_pip_long_value_option(
+                        argument,
+                        "--build-constraint",
+                        "--build-c"
+                    ),
+                "ambiguous or unrelated pip option must not be classified: {argument}"
+            );
+        }
+    }
 }
