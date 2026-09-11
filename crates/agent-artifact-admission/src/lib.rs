@@ -10,6 +10,7 @@ mod dependency_cardinality;
 mod http;
 mod oci_transport;
 mod policy;
+mod pypi_build_directory_retention_authority;
 mod pypi_cache_directory_authority;
 mod pypi_certificate_store_authority;
 mod pypi_client_certificate_authority;
@@ -88,6 +89,17 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::ArtifactNotApproved)
         {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_build_directory_retention_authority::requests_unapproved_pypi_build_directory_retention(
+        intent,
+    ) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateInstallRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
