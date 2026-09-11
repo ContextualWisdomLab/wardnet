@@ -20,11 +20,13 @@ The existing `pypi_install_mutation_authority` remains the single classifier for
 
 The rule does not authorize or implement installation, package selection, interpreter-environment mutation, target-directory mutation, rollback, quarantine, egress policy, or sandbox behavior. Those concerns remain with their canonical owners and downstream execution boundary.
 
-## RED → repair evidence
+## RED → GREEN evidence
 
 The formatter-clean test-only RED head is `39f25a6d6e2416ecb0fd106d25b6503a74f2d1ff`. Hosted CI run `34654851862`, job `103444903328`, passed checkout, Rust toolchain setup and `cargo fmt --check`, then reached `cargo test --locked --workspace`. The new hostile contract failed exactly because `pip -U` returned `Allow` where `Block` was required. Existing workspace tests before that assertion remained green.
 
-The minimum production repair was introduced at `c6308e69eb164395709a21ee8b16387068484aa3`. It extends the existing mutation classifier with exact `-U` / `--upgrade` matching and adds precision unit tests that reject conflation with `--upgrade-strategy`, guessed prefixes, lowercase `-u`, pluralized variants, unrelated options, and artifact operands. Exact-head GREEN remains a hosted evidence requirement and is recorded only after the current documentation-bearing head completes CI successfully.
+The minimum production repair was introduced at `c6308e69eb164395709a21ee8b16387068484aa3`. It extends the existing mutation classifier with exact `-U` / `--upgrade` matching and adds precision unit tests that reject conflation with `--upgrade-strategy`, guessed prefixes, lowercase `-u`, pluralized variants, unrelated options, and artifact operands.
+
+The first documentation-bearing GREEN head is `278f75dd0b9d0f61f188b4e6f86db253918e12cc`. Hosted CI run `34655220420`, job `103446030862`, completed `cargo fmt --check`, `cargo test --locked --workspace`, and Clippy successfully. This evidence proves the hostile contract and the existing workspace on the repaired lineage. The subsequent documentation-only commit that records this result changes no Rust source or test semantics, but it still requires its own terminal repository checks before merge because predecessor conclusions do not transfer to a moved head.
 
 ## Primary-source trace
 
