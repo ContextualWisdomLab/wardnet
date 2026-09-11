@@ -59,16 +59,13 @@ fn requests_pip_indirect_source_abbreviation(argument: &str) -> bool {
         .split_once('=')
         .map_or(argument, |(option, _)| option);
 
-    [
-        ("--requirement", "--requirem"),
-        ("--editable", "--ed"),
-    ]
-    .iter()
-    .any(|(canonical, shortest_accepted_prefix)| {
-        option.len() >= shortest_accepted_prefix.len()
-            && option != *canonical
-            && canonical.starts_with(option)
-    })
+    [("--requirement", "--requirem"), ("--editable", "--ed")]
+        .iter()
+        .any(|(canonical, shortest_accepted_prefix)| {
+            option.len() >= shortest_accepted_prefix.len()
+                && option != *canonical
+                && canonical.starts_with(option)
+        })
 }
 
 /// Require registry/index-backed package ecosystems to encode the exact
