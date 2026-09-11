@@ -10,23 +10,32 @@ const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
 #[test]
 fn pip_install_cannot_import_unreviewed_dependency_group() {
     for executable in ["pip", "pip3"] {
-        let (policy, mut intent) = approved_pip_install(executable);
-        intent.argv.push("--group=developer-tools".to_string());
+        for arguments in [
+            &["--group=developer-tools"][..],
+            &["--group", "developer-tools"][..],
+            &["--group=./subproject/pyproject.toml:developer-tools"][..],
+        ] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent
+                .argv
+                .extend(arguments.iter().map(|argument| (*argument).to_string()));
 
-        let decision = admission_decision(&policy, &intent);
+            let decision = admission_decision(&policy, &intent);
+            let invocation = arguments.join(" ");
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} --group must not add pyproject dependency-group members outside the reviewed artifact set"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .iter()
-                .any(|reason| reason.as_str() == "artifact_not_approved"),
-            "{executable} --group must report that dependency-group members are outside reviewed artifact authority"
-        );
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {invocation} must not add pyproject dependency-group members outside the reviewed artifact set"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "artifact_not_approved"),
+                "{executable} {invocation} must report that dependency-group members are outside reviewed artifact authority"
+            );
+        }
     }
 }
 
