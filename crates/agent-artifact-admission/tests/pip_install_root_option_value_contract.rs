@@ -109,6 +109,7 @@ fn approved_pip_install() -> (AdmissionPolicy, InstallIntent) {
             "cwl-example==1.2.3".to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
+            "--no-input".to_string(),
         ],
         manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),
