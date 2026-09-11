@@ -24,6 +24,8 @@ OWASP's current SSRF prevention guidance reaches the same design conclusion for 
 
 The production repair therefore removes request-selected feed URLs and the `allow_non_default_hosts` switch rather than attempting to make that switch safer. The hostile regression asserts the security property directly: request-selected loopback input cannot cause a loopback fetch. It does not require one incidental HTTP status code, because an upstream availability failure can legitimately change the response status without reopening the SSRF path.
 
+The positive and hostile properties are intentionally proven by separate fixtures without widening production configuration. The in-module `phishing_database_import_endpoint_supports_blocking_flow` test injects server-owned loopback domain/IP sources through the `cfg(test)`-only `AppState::with_phishing_database_urls` seam and proves `CREATED`, imported threat/DNSBL state, audit evidence, and subsequent gateway blocking. The integration regression independently submits the removed legacy URL/host-relaxation fields and proves the attacker loopback counter remains zero. Combining those properties by exposing the test seam to non-test code, or by depending on the live upstream for deterministic success, would weaken either the production trust boundary or reproducibility without adding security evidence.
+
 ## Ownership and non-goals
 
 Wardnet owns the Phishing.Database import contract, its product-specific source authority, the resulting threat-feed evidence, and the final SOC/security policy state. It does not own a second general egress policy engine.
@@ -48,7 +50,8 @@ The repair is accepted only when one exact PR head proves all of the following:
 3. production feed resolution is server-owned, while loopback override remains test-only;
 4. the no-redirect client and sanctioned-host validation remain present;
 5. the carried hostile regression proves the request-selected loopback endpoint receives zero fetches;
-6. then-live CI, fuzz, security/static-analysis, review/thread, and protected-integration evidence are reacquired for that exact head.
+6. the server-owned positive fixture proves successful import, audit evidence, and downstream gateway enforcement without granting production mirror authority;
+7. then-live CI, fuzz, security/static-analysis, review/thread, and protected-integration evidence are reacquired for that exact head.
 
 Predecessor success does not transfer after source, documentation, base, or merge-head movement.
 
