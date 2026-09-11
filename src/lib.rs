@@ -126,6 +126,10 @@ impl AppState {
         Ok(Self::new(data, config))
     }
 
+    /// Builds shared application state without test feed URL overrides.
+    ///
+    /// Feed requests use a client that does not follow redirects. Test builds
+    /// retain the built-in feed URLs until an override method is called.
     fn new(data: AppData, config: AppConfig) -> Self {
         Self {
             inner: Arc::new(RwLock::new(data)),
@@ -176,11 +180,10 @@ impl AppState {
         KEV_DEFAULT_URL
     }
 
-    /// Override the Phishing.Database domain/IP feed URLs (default: the real
-    /// upstream raw.githubusercontent.com files). Deployment-time config only,
-    /// for pointing at a local mock server in tests -- see
-    /// `validate_phishing_database_source_url`, which restricts the fetch to
-    /// the sanctioned Phishing.Database hosts (or loopback). Builder-style.
+    /// Sets test-only domain and IP feed URL overrides for Phishing.Database.
+    ///
+    /// The URLs are not validated until they are fetched; only sanctioned
+    /// upstream hosts and loopback test servers are accepted at that point.
     #[cfg(test)]
     pub fn with_phishing_database_urls(
         mut self,
@@ -193,6 +196,7 @@ impl AppState {
     }
 
     #[cfg(test)]
+    /// Returns the test override for the domain feed, or the built-in URL.
     fn phishing_database_domain_url(&self) -> &str {
         self.phishing_database_domain_url
             .as_deref()
@@ -200,11 +204,13 @@ impl AppState {
     }
 
     #[cfg(not(test))]
+    /// Returns the built-in domain feed URL used by production builds.
     fn phishing_database_domain_url(&self) -> &str {
         PHISHING_DATABASE_DEFAULT_DOMAIN_URL
     }
 
     #[cfg(test)]
+    /// Returns the test override for the IP feed, or the built-in URL.
     fn phishing_database_ip_url(&self) -> &str {
         self.phishing_database_ip_url
             .as_deref()
@@ -212,6 +218,7 @@ impl AppState {
     }
 
     #[cfg(not(test))]
+    /// Returns the built-in IP feed URL used by production builds.
     fn phishing_database_ip_url(&self) -> &str {
         PHISHING_DATABASE_DEFAULT_IP_URL
     }
@@ -2010,6 +2017,11 @@ fn apply_engine_enforcement_hints(
     written
 }
 
+/// Imports selected Phishing.Database feeds from server-owned source URLs.
+///
+/// Request fields control feed metadata and which datasets are imported, but
+/// cannot select fetch locations. A successful import updates the selected
+/// threat and/or DNSBL state and records an audit entry.
 async fn import_phishing_database_feed(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2098,6 +2110,10 @@ async fn import_phishing_database_feed(
     }
 }
 
+/// Validates Phishing.Database import metadata and dataset selection.
+///
+/// Rejects blank feed identifiers or sources, a zero TTL, an empty dataset
+/// selection, and a zero limit for either enabled dataset.
 fn validate_phishing_database_import_request(
     request: &PhishingDatabaseImportRequest,
 ) -> Result<(), &'static str> {
@@ -2209,6 +2225,10 @@ async fn import_kev_feed(
     }
 }
 
+/// Validates the transport policy shared by outbound feed URLs.
+///
+/// The URL must be absolute and use HTTPS, except that loopback hosts may use
+/// HTTP for local tests. Callers remain responsible for authorizing the host.
 fn validate_http_url(value: &str) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
     let host = parsed.host_str().ok_or("feed URL host is required")?;
@@ -2225,6 +2245,7 @@ fn validate_http_url(value: &str) -> Result<(), &'static str> {
 // URL override, so this fetch path stays structurally independent and fixed to
 // the built-in CISA host; loopback is allowed only for tests that inject a
 // local mock via `with_kev_catalog_url`.
+/// Restricts a KEV catalog URL to the CISA host or a loopback test server.
 fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
     validate_http_url(url)
         .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
@@ -2248,6 +2269,10 @@ fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
 // server-side state, never the request body, but it must still land on a
 // sanctioned Phishing.Database host (or loopback for tests). Mirrors
 // `validate_kev_catalog_url`; the runtime override exists only under `cfg(test)`.
+/// Restricts a Phishing.Database feed URL to sanctioned hosts or loopback.
+///
+/// This applies the shared HTTPS policy before checking source authorization;
+/// loopback remains available for test fixtures.
 fn validate_phishing_database_source_url(url: &str) -> Result<(), String> {
     validate_http_url(url)
         .map_err(|message| format!("invalid phishing-database feed URL {url}: {message}"))?;
@@ -2824,6 +2849,10 @@ async fn apply_threat_feed_import(
         .await
 }
 
+/// Fetches a validated Phishing.Database feed as bounded UTF-8 text.
+///
+/// Redirects are not followed, non-success responses are rejected, and both
+/// declared and streamed body sizes are capped before conversion to text.
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
