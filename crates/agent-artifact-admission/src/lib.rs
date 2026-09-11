@@ -18,6 +18,7 @@ mod pypi_keyring_provider_authority;
 mod pypi_log_output_authority;
 mod pypi_noninteractive_authority;
 mod pypi_proxy_authority;
+mod pypi_registry_authority;
 mod pypi_system_package_authority;
 mod uv_configuration_authority;
 mod uv_link_mode_authority;
@@ -150,6 +151,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         decision.decision = DecisionKind::Block;
     }
     if pypi_proxy_authority::requests_unapproved_pypi_proxy_authority(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_registry_authority::disables_reviewed_registry(intent) {
         if !decision
             .reason_codes
             .contains(&ReasonCode::AlternateTrustRoot)
