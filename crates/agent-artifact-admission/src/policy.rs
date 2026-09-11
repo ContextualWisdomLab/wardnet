@@ -262,9 +262,13 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
         .collect();
     let positional_arguments: Vec<&str> = arguments
         .iter()
+        .enumerate()
         .skip(command_prefix_len)
-        .filter(|argument| !argument.starts_with('-'))
-        .map(String::as_str)
+        .filter(|(index, argument)| {
+            !argument.starts_with('-')
+                && !is_uv_python_selector_value(executable, arguments, *index)
+        })
+        .map(|(_, argument)| argument.as_str())
         .collect();
 
     if intent
@@ -280,6 +284,18 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
     {
         push_reason(reason_codes, ReasonCode::ArtifactNotApproved);
     }
+}
+
+fn is_uv_python_selector_value(executable: &str, arguments: &[String], index: usize) -> bool {
+    executable == "uv"
+        && arguments.first().is_some_and(|argument| argument == "pip")
+        && arguments
+            .get(1)
+            .is_some_and(|argument| argument == "install")
+        && index
+            .checked_sub(1)
+            .and_then(|previous| arguments.get(previous))
+            .is_some_and(|argument| matches!(argument.as_str(), "--python" | "-p"))
 }
 
 fn artifact_ecosystem_matches_executable(executable: &str, ecosystem: &str) -> bool {
