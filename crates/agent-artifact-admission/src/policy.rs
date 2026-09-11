@@ -266,7 +266,7 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
         .skip(command_prefix_len)
         .filter(|(index, argument)| {
             !argument.starts_with('-')
-                && !is_uv_python_selector_value(executable, arguments, *index)
+                && !is_install_root_selector_value(executable, arguments, *index)
         })
         .map(|(_, argument)| argument.as_str())
         .collect();
@@ -286,16 +286,77 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
     }
 }
 
-fn is_uv_python_selector_value(executable: &str, arguments: &[String], index: usize) -> bool {
-    executable == "uv"
-        && arguments.first().is_some_and(|argument| argument == "pip")
-        && arguments
-            .get(1)
-            .is_some_and(|argument| argument == "install")
-        && index
-            .checked_sub(1)
-            .and_then(|previous| arguments.get(previous))
-            .is_some_and(|argument| matches!(argument.as_str(), "--python" | "-p"))
+/// Return whether `arguments[index]` is the separate-token value consumed by a
+/// recognized install-root selector for the active supported install grammar.
+/// Attached values remain option tokens and are already excluded by the
+/// positional-operand filter.
+fn is_install_root_selector_value(executable: &str, arguments: &[String], index: usize) -> bool {
+    let Some(previous) = index
+        .checked_sub(1)
+        .and_then(|previous| arguments.get(previous))
+        .map(String::as_str)
+    else {
+        return false;
+    };
+
+    let value_flags: &[&str] = match executable {
+        "npm"
+            if arguments
+                .first()
+                .is_some_and(|argument| matches!(argument.as_str(), "install" | "i")) =>
+        {
+            &["--prefix", "--workspace", "-w", "--location"]
+        }
+        "pnpm"
+            if arguments
+                .first()
+                .is_some_and(|argument| matches!(argument.as_str(), "add" | "install")) =>
+        {
+            &[
+                "--prefix",
+                "--dir",
+                "-C",
+                "--filter",
+                "-F",
+                "--filter-prod",
+                "--location",
+            ]
+        }
+        "yarn" if arguments.first().is_some_and(|argument| argument == "add") => {
+            &["--prefix", "--location"]
+        }
+        "bun"
+            if arguments
+                .first()
+                .is_some_and(|argument| matches!(argument.as_str(), "add" | "install")) =>
+        {
+            &["--prefix", "--cwd", "--filter", "-F", "--location"]
+        }
+        "pip" | "pip3"
+            if arguments
+                .first()
+                .is_some_and(|argument| argument == "install") =>
+        {
+            &["--target", "-t", "--root", "--prefix"]
+        }
+        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+            && arguments
+                .get(1)
+                .is_some_and(|argument| argument == "install") =>
+        {
+            &["--target", "-t", "--root", "--prefix", "--python", "-p"]
+        }
+        "cargo"
+            if arguments
+                .first()
+                .is_some_and(|argument| argument == "install") =>
+        {
+            &["--root", "--config", "--target-dir"]
+        }
+        _ => return false,
+    };
+
+    value_flags.contains(&previous)
 }
 
 fn artifact_ecosystem_matches_executable(executable: &str, ecosystem: &str) -> bool {
@@ -711,4 +772,103 @@ pub fn sha256_hex(input: &[u8]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_install_root_selector_value;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn install_root_selector_values_are_consumed_only_by_supported_install_grammars() {
+        let cases: [(&str, Vec<&str>, &[&str]); 8] = [
+            (
+                "npm",
+                vec!["install", "pkg"],
+                &["--prefix", "--workspace", "-w", "--location"],
+            ),
+            (
+                "pnpm",
+                vec!["add", "pkg"],
+                &[
+                    "--prefix",
+                    "--dir",
+                    "-C",
+                    "--filter",
+                    "-F",
+                    "--filter-prod",
+                    "--location",
+                ],
+            ),
+            ("yarn", vec!["add", "pkg"], &["--prefix", "--location"]),
+            (
+                "bun",
+                vec!["add", "pkg"],
+                &["--prefix", "--cwd", "--filter", "-F", "--location"],
+            ),
+            (
+                "pip",
+                vec!["install", "pkg"],
+                &["--target", "-t", "--root", "--prefix"],
+            ),
+            (
+                "pip3",
+                vec!["install", "pkg"],
+                &["--target", "-t", "--root", "--prefix"],
+            ),
+            (
+                "uv",
+                vec!["pip", "install", "pkg"],
+                &["--target", "-t", "--root", "--prefix", "--python", "-p"],
+            ),
+            (
+                "cargo",
+                vec!["install", "pkg"],
+                &["--root", "--config", "--target-dir"],
+            ),
+        ];
+
+        for (executable, prefix, flags) in cases {
+            for flag in flags {
+                let mut arguments = prefix.clone();
+                arguments.extend([flag, "selector-value"]);
+                let arguments = strings(&arguments);
+                let value_index = arguments.len() - 1;
+                assert!(
+                    is_install_root_selector_value(executable, &arguments, value_index),
+                    "{executable} {flag} must consume its separate selector value"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn install_root_selector_value_helper_does_not_hide_unknown_or_wrong_grammar_operands() {
+        let unknown = strings(&["install", "pkg", "--cache-dir", "attacker"]);
+        assert!(!is_install_root_selector_value(
+            "pip",
+            &unknown,
+            unknown.len() - 1
+        ));
+
+        let wrong_command = strings(&["download", "pkg", "--target", "attacker"]);
+        assert!(!is_install_root_selector_value(
+            "pip",
+            &wrong_command,
+            wrong_command.len() - 1
+        ));
+
+        let attached = strings(&["install", "pkg", "--target=/tmp/escape", "attacker"]);
+        assert!(!is_install_root_selector_value(
+            "pip",
+            &attached,
+            attached.len() - 1
+        ));
+
+        let first = strings(&["selector-value"]);
+        assert!(!is_install_root_selector_value("pip", &first, 0));
+    }
 }
