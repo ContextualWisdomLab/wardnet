@@ -16,7 +16,7 @@ Protected/default Wardnet truth is `main@f8260f1e03836039ff9463dd99fa982e4e270c4
 
 Live ruleset `18156473` still carries the generic one-approval solo-maintainer incompatibility tracked by `.github#772`. Self-approval and model/bot-as-human approval remain forbidden. Deterministic workflow/security/SAST/coverage/package/SBOM/provenance/thread/deletion/non-fast-forward controls stay fail closed; routine administrator bypass is not merge evidence.
 
-Runner/materialization remains `.github#712` authority when an exact candidate genuinely has no checkout/runner/materialization evidence. Delegated CodeQL current-head verdict settlement remains `.github#1929` or its live successor. Wardnet does not copy central workflow logic, pin mutable central repair heads, add no-op source changes to manufacture dispatch, or promote a later dispatch over a failed required workflow.
+Runner/materialization remains `.github#712` authority when an exact candidate genuinely has no checkout/runner/materialization evidence. Delegated CodeQL current-head verdict settlement remains `.github#1929`; current repair successor `.github#2040` is still an open mutable PR and its recorded base predates current protected central `.github/main`, so it is owner-path progress rather than immutable production authority. Wardnet does not copy central workflow logic, pin mutable central repair heads, add no-op source changes to manufacture dispatch, or promote a later dispatch over a failed required workflow.
 
 PR #130 is the sole writer for this ledger. Every refresh advances its own exact head, so this file deliberately does not embed #130's current SHA as product evidence.
 
@@ -25,6 +25,12 @@ PR #130 is the sole writer for this ledger. Every refresh advances its own exact
 Fresh read-only inventory keeps `context-graph-contracts` protected/default `develop@99cb5468ba3c15c5e79688f53dee74724fae2d13` and `enterprise-architecture-core` protected/default `develop@dd71e40a86385fb7861b0f1be19891a3f3e29ece`. Wardnet does not write either repository while the Context Fabric owner is active. Wardnet, CGC and EA have no immutable GitHub Release at this snapshot, so no mutable CGC/EA proposal is production dependency authority.
 
 CGC #4/#21 remain Draft/unreleased owner work. EA #40 remains Draft owner work. Wardnet does not duplicate their source or promote Wardnet findings into authoritative EA truth; future projection must use released CGC contracts/provenance only.
+
+## Commercial authority separation
+
+Draft #162 owns the naming/authority repair that separates the 2B KRW customer-contract readiness predicate from the standing USD 20 billion product-quality ambition. Reverse-direction restack #315 normally merged protected `main@f8260f1e03836039ff9463dd99fa982e4e270c4b` into the commercial-authority branch with expected-head protection and no force/rebase, producing current exact #162 head `3e3a19a115448d5787ceaa34929018fb832fdd3d` on the current protected base.
+
+The protected-main-relative delta remains exactly six paths: `CLAUDE.md`, `README.md`, `docs/commercial/20b-krw-sale-readiness.md`, `docs/commercial/2b-krw-customer-contract-readiness.md`, `docs/commercial/usd-20b-product-quality-bar.md`, and `tests/commercial_authority_architecture.rs`. Protected #155 authentication/security truth is inherited rather than copied. Current exact CI `34577138782` and SAST Semgrep `34577138762` are SUCCESS; Security Scan `34577138789` is queued/non-passing and required CodeQL `34577138720` is FAILURE at the delegated settlement boundary. Keep Draft; no predecessor evidence, no-op redispatch, self/model approval or routine bypass substitutes for exact-current terminal evidence.
 
 ## Agent Artifact Admission
 
@@ -56,7 +62,7 @@ Production composition still requires an immutable compatible EgressWeave author
 
 The durable-state stack remains dependency ordered through #140 → #193 → #194 → #196 → #198 → #199 → #200 → #207 → #208 → #209 → #212 → #216 → #217 → #219 → #221 → #223 → #224 → #225 → #226 → #228 → #229 → #231 → #233 → #234 → #236 → #241 → #242 → #244. Any parent/protected-base movement requires ordinary non-force adoption and fresh exact-head evidence.
 
-Root #140 remains on pre-#155 protected ancestry. Restack helper #310 is now Draft and mechanically conflicted against `main@f8260f1e03836039ff9463dd99fa982e4e270c4b`; this is a repair finding, not a close condition. Its repair must preserve #140's six-file Runtime Configuration boundary while adopting #155's overlapping `src/credentials.rs` and `src/lib.rs` authentication delta, without force/rebase or widening secret authority.
+Root #140 remains on pre-#155 protected ancestry. Restack helper #310 is Draft and mechanically conflicted against `main@f8260f1e03836039ff9463dd99fa982e4e270c4b`; this is a repair finding, not a close condition. Fresh changed-path comparison isolates the semantic overlap to `src/credentials.rs` and `src/lib.rs`: #140's other four paths do not overlap #155. Repair must preserve #140's immutable non-secret `RuntimeConfiguration` bootstrap/architecture-fitness authority and all #155 credential/header/RBAC/public-bind/401-403/`auth_mode` security semantics, keep secrets under the hardened `CredentialRegistry`, keep parse helpers single-sourced in `runtime_config.rs`, and inherit every non-overlapping protected path. Wholesale ours/theirs selection, force/rebase or dependent stack movement would discard valid authority and is forbidden.
 
 The Draft lineage establishes fail-closed PostgreSQL authority selection, credential indirection, immutable generation identity, atomic publication/head persistence under FORCE RLS, least-privilege roles, failure-atomic migration/recovery, externally managed LOGIN mapping, transaction-local tenant binding, typed publication/replay/conflict semantics, mandatory actor/decision attribution, removal of arbitrary raw-SQL escape hatches, authoritative-complete reads, bounded pool replenishment/readiness, ambiguous-COMMIT fail-closed handling, physical recovery drills, divergent-writer serialization and no automatic replay after database work begins.
 
@@ -68,11 +74,11 @@ Draft #127 owns the shipped server-rendered admin-console UI acceptance: real-br
 
 After reverse-direction restack #306, protected #155 changed the startup readiness line to append `auth_mode=<mode>`. Exact `20ace70dc3747b6e3dc0ab54c268f26b368fcaa7` then produced hosted CI RED `34569117311`: the browser fixture parsed the final whitespace token instead of the readiness URL. Concurrent `720e6d0602cf8ea3c7b10d475a626f4aa41c2b4f` was read and preserved but remained RED in CI `34571469777` because it constructed `http://auth_mode=production/`. Minimum causal repair `6c8494098dfe325a6b45922290b43f698931ea13` parses the first token after stable `listening on ` and does not alter production auth, route, network policy or test CSS.
 
-Exact-current CI `34573088259` is SUCCESS and executed the real Chrome/ChromeDriver shipped-route acceptance. Fuzz `34573088263` is in progress; SAST `34573088243`, Security `34573088322`, and CodeQL `34573088251` remain queued/non-passing at this snapshot. The UI Delivery Gate is therefore functional-browser GREEN but overall PARTIAL until all required exact-current gates settle.
+On unchanged exact `6c8494098dfe325a6b45922290b43f698931ea13`, CI `34573088259`, Fuzz `34573088263`, Security Scan `34573088322`, and SAST Semgrep `34573088243` are terminal SUCCESS. Required CodeQL `34573088251` is terminal FAILURE at the delegated settlement boundary. The UI Delivery Gate is therefore functional/browser/accessibility/responsive GREEN but overall PARTIAL because a required central gate is RED; no source churn or bypass is justified.
 
 Draft #245 carries the test-first Unix SIGINT graceful-shutdown repair. Current exact `ca499853b152f80f6bd642060f1b55c5e832e9c5` has CI `34565440911`, Fuzz `34565440918`, Security `34565440891`, and SAST `34565440879` SUCCESS; required CodeQL `34565440897` is FAILURE at the delegated settlement boundary.
 
-Draft #134 has non-force adopted protected #155 through restack #314 and is current exact `b6c1f2cfb9d05f36b5ef14c7be6004c00af762d4`. Its unique delta remains the 38-line support-bundle count/secret-redaction regression. CI `34572688789`, Fuzz `34572688651`, and SAST `34572688741` are SUCCESS; Security `34572688686` and CodeQL `34572688797` remain queued/non-passing. Ready metadata was corrected back to Draft.
+Draft #134 has non-force adopted protected #155 through restack #314 and is current exact `b6c1f2cfb9d05f36b5ef14c7be6004c00af762d4`. Its unique delta remains the 38-line support-bundle count/secret-redaction regression. CI `34572688789`, Fuzz `34572688651`, Security `34572688686`, and SAST Semgrep `34572688741` are terminal SUCCESS; required CodeQL `34572688797` is terminal FAILURE at the delegated settlement boundary. Ready metadata was corrected back to Draft.
 
 ## Rust reproducibility and release evidence
 
@@ -90,10 +96,10 @@ No mutable CGC/EA/EgressWeave/contextual-orchestrator/quarantine/AppGuardrail he
 
 ## Execution order
 
-Keep #129 and #291 exact-source security lanes unchanged while `.github#1929` repairs required CodeQL settlement; their repository/security lanes are already exact-head GREEN and no-op churn is forbidden.
+Keep #129 and #291 exact-source security lanes unchanged while `.github#1929` repairs required CodeQL settlement; their repository/security lanes are already exact-head GREEN and no-op churn is forbidden. #162 likewise keeps its current source while Security settles and required CodeQL remains RED.
 
-For #127, retain the executed readiness-parser RED→GREEN and allow the unchanged current head's remaining security/Fuzz/CodeQL lanes to settle. For #181 and #77, repository/security lanes are GREEN while required CodeQL is RED; do not bypass or rerun-storm. #164 remains correctly stacked behind #77. #134 remains Draft while current Security/CodeQL lanes settle.
+For #127 and #134, the earlier queue snapshots are superseded: repository/security lanes are now terminal GREEN while required CodeQL is RED. For #181 and #77, repository/security lanes are also GREEN while required CodeQL is RED; do not bypass or rerun-storm. #164 remains correctly stacked behind #77.
 
-Repair #310/#140 foundation-first by ordinary non-force integration, then restack dependent trusted-proxy/PostgreSQL lanes in dependency order and invalidate/reacquire their exact-head evidence. Continue central queue/materialization, delegated CodeQL, Dependency Review availability, Context Fabric branch topology and solo-maintainer governance through `.github#712`, `.github#1929`, `.github#810`, `.github#1137` and `.github#772` rather than leaf workarounds.
+Repair #310/#140 foundation-first by ordinary non-force semantic conflict integration, then restack dependent trusted-proxy/PostgreSQL lanes in dependency order and invalidate/reacquire their exact-head evidence. Continue central queue/materialization, delegated CodeQL, Dependency Review availability, Context Fabric branch topology and solo-maintainer governance through `.github#712`, `.github#1929`/live successor, `.github#810`, `.github#1137` and `.github#772` rather than leaf workarounds.
 
 Only after protected prerequisites and all then-live gates are terminal-valid should Wardnet create version/tag/package/SBOM/provenance/reproducibility/rollback evidence and publish an immutable release. No force updates, destructive rebases, gate weakening, self/model approval, routine bypass, source copying, cross-service SQL, mutable dependency authority or predecessor-evidence transfer.
