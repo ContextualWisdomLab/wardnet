@@ -31,6 +31,38 @@ fn uv_separate_python_interpreter_cannot_inherit_artifact_approval() {
     assert_python_interpreter_override_is_blocked(&policy, &intent);
 }
 
+#[test]
+fn uv_short_python_interpreter_value_is_not_misclassified_as_an_artifact() {
+    let (policy, mut intent) = approved_uv_install();
+    intent
+        .argv
+        .extend(["-p".to_string(), "/usr/bin/python3".to_string()]);
+
+    assert_python_interpreter_override_is_blocked(&policy, &intent);
+}
+
+#[test]
+fn uv_python_selector_does_not_hide_a_real_unapproved_artifact_operand() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv.extend([
+        "unreviewed-package==9.9.9".to_string(),
+        "--python".to_string(),
+        "/usr/bin/python3".to_string(),
+    ]);
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert_eq!(
+        decision.reason_codes,
+        vec![
+            ReasonCode::AlternateInstallRoot,
+            ReasonCode::ArtifactNotApproved,
+        ],
+        "only the interpreter option value is consumed; a second package operand remains an artifact-policy violation"
+    );
+}
+
 fn assert_python_interpreter_override_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
@@ -42,7 +74,7 @@ fn assert_python_interpreter_override_is_blocked(policy: &AdmissionPolicy, inten
     assert_eq!(
         decision.reason_codes,
         vec![ReasonCode::AlternateInstallRoot],
-        "uv --python must fail causally as caller-selected installation-environment authority"
+        "uv Python selection must fail causally as caller-selected installation-environment authority"
     );
 }
 
