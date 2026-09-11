@@ -30,6 +30,15 @@ pub(crate) fn requests_unapproved_artifact_source(intent: &InstallIntent) -> boo
         return false;
     }
 
+    if matches!(executable, "pip" | "pip3")
+        && arguments
+            .iter()
+            .skip(1)
+            .any(|argument| requests_pip_indirect_source_abbreviation(argument))
+    {
+        return true;
+    }
+
     intent.artifacts.iter().any(|artifact| {
         !artifact_argument_matches_reviewed_source(
             &artifact.ecosystem,
@@ -37,6 +46,28 @@ pub(crate) fn requests_unapproved_artifact_source(intent: &InstallIntent) -> boo
             &artifact.version,
             &artifact.artifact_argument,
         )
+    })
+}
+
+/// Direct pip uses Python's optparse-compatible parser, which accepts
+/// unambiguous long-option prefixes. Canonical `--requirement`/`--editable`
+/// and their short spellings are already rejected by the policy evaluator;
+/// this source-identity boundary covers only the accepted long abbreviations
+/// that otherwise introduce an undeclared requirements or editable source.
+fn requests_pip_indirect_source_abbreviation(argument: &str) -> bool {
+    let option = argument
+        .split_once('=')
+        .map_or(argument, |(option, _)| option);
+
+    [
+        ("--requirement", "--requirem"),
+        ("--editable", "--ed"),
+    ]
+    .iter()
+    .any(|(canonical, shortest_accepted_prefix)| {
+        option.len() >= shortest_accepted_prefix.len()
+            && option != *canonical
+            && canonical.starts_with(option)
     })
 }
 
@@ -54,5 +85,38 @@ pub(crate) fn artifact_argument_matches_reviewed_source(
         "npm" => artifact_argument == format!("{name}@{version}"),
         "pypi" => artifact_argument == format!("{name}=={version}"),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requests_pip_indirect_source_abbreviation;
+
+    #[test]
+    fn pip_indirect_source_abbreviations_are_bounded_to_verified_prefixes() {
+        for option in [
+            "--requirem=attacker-requirements.txt",
+            "--requireme",
+            "--ed=git+https://attacker.invalid/example.git",
+            "--edit",
+        ] {
+            assert!(
+                requests_pip_indirect_source_abbreviation(option),
+                "accepted pip indirect-source abbreviation must be classified: {option}"
+            );
+        }
+
+        for option in [
+            "--requ=attacker-requirements.txt",
+            "--e=git+https://attacker.invalid/example.git",
+            "--requirement=attacker-requirements.txt",
+            "--editable=git+https://attacker.invalid/example.git",
+            "--extra-index-url=https://attacker.invalid/simple",
+        ] {
+            assert!(
+                !requests_pip_indirect_source_abbreviation(option),
+                "ambiguous, canonical, or unrelated option must not be classified as a pip abbreviation: {option}"
+            );
+        }
     }
 }
