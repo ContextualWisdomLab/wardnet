@@ -26,7 +26,9 @@ fn uv_break_system_packages_cannot_inherit_artifact_approval() {
         "caller-selected uv authority to modify an externally managed Python installation must not inherit ordinary artifact approval"
     );
     assert!(
-        decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag),
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
         "uv break-system-packages authority must carry the stable missing_safety_flag reason: {:?}",
         decision.reason_codes
     );
