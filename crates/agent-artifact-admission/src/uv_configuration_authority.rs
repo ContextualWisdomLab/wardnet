@@ -1,7 +1,7 @@
 use crate::InstallIntent;
 
-/// Return whether an approved uv install delegates package-source and trust
-/// configuration to a caller-selected configuration file.
+/// Return whether an approved uv install delegates package-source or trust
+/// authority to caller-selected uv configuration.
 pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
@@ -19,8 +19,10 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
         return false;
     }
 
-    arguments
-        .iter()
-        .skip(2)
-        .any(|argument| argument == "--config-file" || argument.starts_with("--config-file="))
+    arguments.iter().skip(2).any(|argument| {
+        argument == "--config-file"
+            || argument.starts_with("--config-file=")
+            || argument == "--torch-backend"
+            || argument.starts_with("--torch-backend=")
+    })
 }
