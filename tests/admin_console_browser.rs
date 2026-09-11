@@ -300,7 +300,7 @@ fn spawn_ready_gateway() -> (Child, String) {
         .expect("listening address")
         .trim()
         .trim_end_matches('/');
-    (child, format!("{address}/"))
+    (child, format!("http://{address}/"))
 }
 
 async fn wait_for_driver(client: &Client, driver_url: &str) {
