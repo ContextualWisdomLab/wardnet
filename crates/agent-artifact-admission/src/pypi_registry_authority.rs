@@ -1,7 +1,7 @@
 use crate::InstallIntent;
 
 /// Return whether a direct Python package install disables or replaces the exact
-/// reviewed registry/source authority.
+/// reviewed registry/source authority or relaxes its reviewed transport trust.
 pub(crate) fn disables_reviewed_registry(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
@@ -26,7 +26,8 @@ pub(crate) fn disables_reviewed_registry(intent: &InstallIntent) -> bool {
     arguments.iter().any(|argument| {
         argument == "--no-index"
             || (matches!(executable, "pip" | "pip3")
-                && requests_pip_source_selector_abbreviation(argument))
+                && (requests_pip_source_selector_abbreviation(argument)
+                    || requests_pip_trusted_host_abbreviation(argument)))
     })
 }
 
@@ -53,9 +54,28 @@ fn requests_pip_source_selector_abbreviation(argument: &str) -> bool {
     })
 }
 
+/// Direct pip also accepts unambiguous prefixes of `--trusted-host`. `--tr` is
+/// the shortest verified prefix while `--t` remains ambiguous with other pip
+/// options. Classify only the accepted direct-pip abbreviation language here;
+/// canonical `--trusted-host` remains covered by the generic exact-option guard.
+fn requests_pip_trusted_host_abbreviation(argument: &str) -> bool {
+    const CANONICAL: &str = "--trusted-host";
+    const SHORTEST_ACCEPTED_PREFIX: &str = "--tr";
+
+    let option = argument
+        .split_once('=')
+        .map_or(argument, |(option, _)| option);
+
+    option.len() >= SHORTEST_ACCEPTED_PREFIX.len()
+        && option != CANONICAL
+        && CANONICAL.starts_with(option)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::requests_pip_source_selector_abbreviation;
+    use super::{
+        requests_pip_source_selector_abbreviation, requests_pip_trusted_host_abbreviation,
+    };
 
     #[test]
     fn pip_source_selector_abbreviations_are_bounded_to_accepted_prefixes() {
@@ -88,6 +108,32 @@ mod tests {
             assert!(
                 !requests_pip_source_selector_abbreviation(option),
                 "ambiguous, full, or unrelated option must not be classified as a pip abbreviation: {option}"
+            );
+        }
+    }
+
+    #[test]
+    fn pip_trusted_host_abbreviations_are_bounded_to_verified_prefixes() {
+        for option in [
+            "--tr=attacker.invalid",
+            "--tru=attacker.invalid",
+            "--trusted-h=attacker.invalid",
+        ] {
+            assert!(
+                requests_pip_trusted_host_abbreviation(option),
+                "accepted pip trusted-host abbreviation must be classified: {option}"
+            );
+        }
+
+        for option in [
+            "--t=attacker.invalid",
+            "--trusted-host=attacker.invalid",
+            "--trusted-host-extra=attacker.invalid",
+            "--timeout=10",
+        ] {
+            assert!(
+                !requests_pip_trusted_host_abbreviation(option),
+                "ambiguous, canonical, or unrelated option must not be classified as a pip abbreviation: {option}"
             );
         }
     }
