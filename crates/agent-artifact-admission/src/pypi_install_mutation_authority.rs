@@ -56,8 +56,10 @@ fn matches_force_reinstall_option(argument: &str) -> bool {
 }
 
 fn matches_uv_reinstall_option(argument: &str) -> bool {
-    matches!(argument, "--reinstall" | "--force-reinstall" | "--reinstall-package")
-        || argument.starts_with("--reinstall-package=")
+    matches!(
+        argument,
+        "--reinstall" | "--force-reinstall" | "--reinstall-package"
+    ) || argument.starts_with("--reinstall-package=")
 }
 
 #[cfg(test)]
