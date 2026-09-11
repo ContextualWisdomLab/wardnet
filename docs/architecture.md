@@ -86,7 +86,7 @@ flowchart LR
 - Default bind address is localhost.
 - Remote management requires `ADMIN_TOKEN` plus external TLS and identity controls.
 - Runtime configuration is loaded once at bootstrap and handed inward as an immutable snapshot; application code does not read operational env vars directly.
-- `WAF_IDS_STATE_PATH` enables JSON state persistence for standalone operation. Without it, the service uses seeded in-memory state.
+- `WAF_IDS_STATE_PATH` enables JSON state persistence only when its bootstrap value is non-empty after trimming. Absent, empty, or whitespace-only input preserves the seeded in-memory state mode.
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
 - Block mode is route-scoped to avoid global accidental enforcement.
 - JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
