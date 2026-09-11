@@ -596,7 +596,13 @@ pub fn record_audit_log(data: &mut AppData, entry: NewAuditLogEntry) -> AuditLog
 pub fn select_route<'a>(routes: &'a [RouteConfig], path: &str) -> Option<&'a RouteConfig> {
     routes
         .iter()
-        .filter(|route| route.enabled && path.starts_with(&route.path_prefix))
+        .filter(|route| {
+            route.enabled
+                && (path == route.path_prefix
+                    || (path.starts_with(&route.path_prefix)
+                        && (route.path_prefix.ends_with('/')
+                            || path.as_bytes().get(route.path_prefix.len()) == Some(&b'/'))))
+        })
         .max_by_key(|route| route.path_prefix.len())
 }
 
