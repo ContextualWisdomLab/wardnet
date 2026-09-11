@@ -66,7 +66,9 @@ impl RuntimeConfiguration {
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let bind_addr = lookup("BIND_ADDR").unwrap_or_else(|| Self::DEFAULT_BIND_ADDR.to_string());
-        let state_path = lookup("WAF_IDS_STATE_PATH").map(PathBuf::from);
+        let state_path = lookup("WAF_IDS_STATE_PATH")
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from);
         let dnsbl_origin =
             lookup("DNSBL_ORIGIN").unwrap_or_else(|| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string());
         let event_limit_raw = lookup("EVENT_LIMIT");
