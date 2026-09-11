@@ -57,17 +57,17 @@ Exact-head GREEN is not claimed here. It requires a successor exact head contain
 
 ## Traceability
 
-Astral Software, Inc. (2026). *Commands: `uv pip install` — `--system-certs`*. uv. https://docs.astral.sh/uv/reference/cli/
+Astral Software, Inc. (n.d.). *Commands: uv pip install — --system-certs*. uv. Retrieved September 11, 2026, from https://docs.astral.sh/uv/reference/cli/
 
-Astral Software, Inc. (2026). *Settings*. uv. https://docs.astral.sh/uv/reference/settings/
+Astral Software, Inc. (n.d.). *Settings*. uv. Retrieved September 11, 2026, from https://docs.astral.sh/uv/reference/settings/
 
 National Institute of Standards and Technology. (2025). *Security and privacy controls for information systems and organizations, Release 5.2.0* (NIST SP 800-53 Rev. 5). CM-6 requires security-relevant configuration settings to be established, implemented, and controlled; SC-17 addresses public-key-infrastructure certificates. Release 5.2.0 was finalized August 27, 2025. https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final
 
-National Institute of Standards and Technology. (2026). *Security configuration settings*. Risk Management Framework. https://csrc.nist.gov/Projects/risk-management/about-rmf/implement-step/security-configuration-settings
+National Institute of Standards and Technology. (2026, July 24). *Security configuration settings*. Risk Management Framework. https://csrc.nist.gov/Projects/risk-management/about-rmf/implement-step/security-configuration-settings
 
-MITRE. (2026). *CWE-15: External control of system or configuration setting* (CWE 4.20). https://cwe.mitre.org/data/definitions/15.html
+MITRE. (2026, April 30). *CWE-15: External control of system or configuration setting* (CWE 4.20). https://cwe.mitre.org/data/definitions/15.html
 
-MITRE. (2026). *CWE-295: Improper certificate validation* (CWE 4.20). https://cwe.mitre.org/data/definitions/295.html
+MITRE. (2026, April 30). *CWE-295: Improper certificate validation* (CWE 4.20). https://cwe.mitre.org/data/definitions/295.html
 
 ## Follow-up
 
