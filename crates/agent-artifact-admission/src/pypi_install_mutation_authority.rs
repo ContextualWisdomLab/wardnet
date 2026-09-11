@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn direct_pip_upgrade_matcher_accepts_only_reviewed_mutation_selectors() {
-        for argument in ["-U", "--upgrade"] {
+        for argument in ["-U", "-Uv", "-vU", "-IU", "-UI", "--upgrade"] {
             assert!(
                 matches_upgrade_option(argument),
                 "reviewed pip upgrade selector must be classified: {argument}"
