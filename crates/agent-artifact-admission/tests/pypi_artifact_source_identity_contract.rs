@@ -41,13 +41,13 @@ fn pypi_requirement_cannot_replace_reviewed_index_coordinate() {
 fn pypi_install_cannot_disable_reviewed_registry_index() {
     let artifact_argument = format!("{PACKAGE_NAME}=={PACKAGE_VERSION}");
 
-    for executable in ["pip", "uv"] {
+    for executable in ["pip", "pip3", "uv"] {
         let mut policy = approved_pypi_policy(&artifact_argument);
         policy.allowed_executables = vec![executable.to_string()];
         let mut intent = approved_pypi_intent(&artifact_argument);
         intent.argv = match executable {
-            "pip" => vec![
-                "pip".to_string(),
+            "pip" | "pip3" => vec![
+                executable.to_string(),
                 "install".to_string(),
                 artifact_argument.clone(),
                 "--require-hashes".to_string(),
