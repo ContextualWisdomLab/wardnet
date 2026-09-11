@@ -68,6 +68,26 @@ fn pip_certificate_bundle_unambiguous_prefix_is_explicit_trust_authority() {
 }
 
 #[test]
+fn pip_separate_certificate_prefix_value_is_explicit_trust_authority() {
+    for executable in ["pip", "pip3"] {
+        let (policy, mut intent) = approved_pip_install(executable);
+        intent.argv.push("--ce".to_string());
+        intent.argv.push("/tmp/attacker-ca.pem".to_string());
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block, "{executable}");
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "pip's separate-value --ce prefix must be classified as trust authority independently of operand validation: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
+#[test]
 fn pip_separate_certificate_value_is_classified_as_alternate_trust_authority() {
     let (policy, mut intent) = approved_pip_install("pip");
     intent.argv.push("--cert".to_string());
