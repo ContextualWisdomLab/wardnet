@@ -1,7 +1,8 @@
-FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS build
+FROM rust:bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS build
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml ./
 COPY src ./src
 COPY crates ./crates
 RUN cargo build --locked --release

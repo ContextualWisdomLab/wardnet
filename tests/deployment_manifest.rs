@@ -208,80 +208,82 @@ fn named_list_item_block<'a>(
         .collect()
 }
 
-/// Locate `ADMIN_TOKEN` on the `waf-ids-ai-soc` gateway container only.
+/// Locate `ADMIN_TOKEN` on the one canonical `waf-ids-ai-soc` Deployment.
 ///
-/// Duplicate entries, literal fallback values, and `secretKeyRef.optional: true`
-/// are treated as absent (fail closed).
+/// Duplicate target Deployments, duplicate token entries, literal fallback values,
+/// and `secretKeyRef.optional: true` are treated as absent (fail closed).
 fn external_admin_secret_ref(manifest: &str) -> Option<ExternalAdminSecretRef<'_>> {
-    manifest.split("\n---\n").find_map(|document| {
+    let mut target_documents = manifest.split("\n---\n").filter(|document| {
         let lines = document.lines().collect::<Vec<_>>();
-        if !lines.iter().any(|line| line.trim() == "kind: Deployment") {
-            return None;
-        }
+        lines.iter().any(|line| line.trim() == "kind: Deployment")
+            && mapping_value(&lines, "metadata:", 0, "name:") == Some("waf-ids-ai-soc")
+            && mapping_value(&lines, "metadata:", 0, "namespace:") == Some("waf-ids-ai-soc")
+    });
 
-        if mapping_value(&lines, "metadata:", 0, "name:") != Some("waf-ids-ai-soc") {
-            return None;
-        }
+    let document = target_documents.next()?;
+    if target_documents.next().is_some() {
+        return None;
+    }
 
-        let namespace = mapping_value(&lines, "metadata:", 0, "namespace:")?;
-        let workload_spec = nested_block(&lines, "spec:", 0);
-        let pod_template = nested_block(&workload_spec, "template:", 2);
-        let pod_spec = nested_block(&pod_template, "spec:", 4);
-        let containers = nested_block(&pod_spec, "containers:", 6);
-        let gateway = named_list_item_block(&containers, "gateway", 8);
-        let env = nested_block(&gateway, "env:", 10);
-        let admin_token_entries = env
-            .iter()
-            .filter(|line| yaml_named_entry_matches(line, 12, "ADMIN_TOKEN"))
-            .count();
-        if admin_token_entries != 1 {
-            return None;
-        }
+    let lines = document.lines().collect::<Vec<_>>();
+    let namespace = mapping_value(&lines, "metadata:", 0, "namespace:")?;
+    let workload_spec = nested_block(&lines, "spec:", 0);
+    let pod_template = nested_block(&workload_spec, "template:", 2);
+    let pod_spec = nested_block(&pod_template, "spec:", 4);
+    let containers = nested_block(&pod_spec, "containers:", 6);
+    let gateway = named_list_item_block(&containers, "gateway", 8);
+    let env = nested_block(&gateway, "env:", 10);
+    let admin_token_entries = env
+        .iter()
+        .filter(|line| yaml_named_entry_matches(line, 12, "ADMIN_TOKEN"))
+        .count();
+    if admin_token_entries != 1 {
+        return None;
+    }
 
-        let env_block = named_list_item_block(&env, "ADMIN_TOKEN", 12);
-        if env_block
-            .iter()
-            .any(|line| line.trim().starts_with("value:"))
-        {
-            return None;
-        }
-        let secret_ref_index = env_block
-            .iter()
-            .position(|line| line.trim() == "secretKeyRef:")?;
-        let secret_ref_indent = leading_spaces(env_block[secret_ref_index]);
-        let secret_ref_block = env_block[secret_ref_index + 1..]
-            .iter()
-            .take_while(|line| line.trim().is_empty() || leading_spaces(line) > secret_ref_indent)
-            .copied()
-            .collect::<Vec<_>>();
+    let env_block = named_list_item_block(&env, "ADMIN_TOKEN", 12);
+    if env_block
+        .iter()
+        .any(|line| line.trim().starts_with("value:"))
+    {
+        return None;
+    }
+    let secret_ref_index = env_block
+        .iter()
+        .position(|line| line.trim() == "secretKeyRef:")?;
+    let secret_ref_indent = leading_spaces(env_block[secret_ref_index]);
+    let secret_ref_block = env_block[secret_ref_index + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || leading_spaces(line) > secret_ref_indent)
+        .copied()
+        .collect::<Vec<_>>();
 
-        let secret_name = secret_ref_block.iter().find_map(|line| {
-            line.trim()
-                .strip_prefix("name:")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })?;
-        let secret_key = secret_ref_block.iter().find_map(|line| {
-            line.trim()
-                .strip_prefix("key:")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })?;
-        match secret_ref_block.iter().find_map(|line| {
-            line.trim()
-                .strip_prefix("optional:")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        }) {
-            None | Some("false") => {}
-            Some(_) => return None,
-        }
+    let secret_name = secret_ref_block.iter().find_map(|line| {
+        line.trim()
+            .strip_prefix("name:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })?;
+    let secret_key = secret_ref_block.iter().find_map(|line| {
+        line.trim()
+            .strip_prefix("key:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })?;
+    match secret_ref_block.iter().find_map(|line| {
+        line.trim()
+            .strip_prefix("optional:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }) {
+        None | Some("false") => {}
+        Some(_) => return None,
+    }
 
-        Some(ExternalAdminSecretRef {
-            namespace,
-            secret_name,
-            secret_key,
-        })
+    Some(ExternalAdminSecretRef {
+        namespace,
+        secret_name,
+        secret_key,
     })
 }
 
@@ -386,6 +388,44 @@ spec:
             secret_key: "WRONG_KEY",
         })
     );
+}
+
+#[test]
+fn duplicate_target_deployments_fail_closed_even_when_first_is_valid() {
+    let duplicate_target_manifest = r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: waf-ids-ai-soc-admin
+                  key: ADMIN_TOKEN
+                  optional: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waf-ids-ai-soc
+  namespace: waf-ids-ai-soc
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: ADMIN_TOKEN
+              value: repository-visible-fallback
+"#;
+
+    assert_eq!(external_admin_secret_ref(duplicate_target_manifest), None);
 }
 
 #[test]
