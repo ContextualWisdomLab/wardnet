@@ -20,7 +20,11 @@ The minimum repair keeps the existing install-root classifier unchanged and chan
 
 Astral documents `--python, -p` for `uv pip install` as selecting the Python interpreter into which packages are installed and cautions that an alternative interpreter path can modify a system Python installation. That makes interpreter selection material to the destination/effective environment of an admitted install, not package identity. Wardnet may classify that submitted authority and emit durable admission evidence, but it does not discover the effective runtime environment or execute the install.
 
+Peer-reviewed software-supply-chain research supports treating dependency-manager installation as a security-sensitive boundary and retaining evidence that identifies the exact operation and artifact authority being exercised. Ohm et al. (2020) analyzed 174 malicious packages distributed through npm, PyPI, and RubyGems and explicitly linked dependency-manager resolution and installation to real supply-chain attack paths. Torres-Arias et al. (2019) showed that end-to-end supply-chain integrity depends on verifiable evidence for the steps and artifacts that actually participated in delivery. Neither paper specifies `uv` command-line syntax; together they support the narrower Wardnet decision that package-manager admission and its audit reasons must remain precise rather than conflating an interpreter selector with a package operand.
+
 This control follows the secure-development principle of repairing the root parsing/evidence defect rather than weakening the denial or treating the false secondary reason as harmless. NIST's current SSDF 1.2 work continues to emphasize secure and reliable development practices that address vulnerability root causes; the cited revision is an Initial Public Draft and is therefore supporting guidance rather than a finalized requirement. OWASP's 2026 agent-security work likewise emphasizes constraining the effective reach of agent tools and permissions. Those sources support a narrow deterministic admission boundary; they do not transfer quarantine, runtime, identity, egress, or orchestration ownership into Wardnet.
+
+The academic papers are cited and linked rather than vendored in this PR; Wardnet does not infer repository redistribution rights from public availability alone.
 
 ## Traceability
 
@@ -38,4 +42,8 @@ Astral Software. (2026). *uv command reference: uv pip install*. https://docs.as
 
 National Institute of Standards and Technology. (2025). *Secure Software Development Framework (SSDF) version 1.2: Recommendations for mitigating the risk of software vulnerabilities* (NIST SP 800-218r1, Initial Public Draft). https://csrc.nist.gov/news/2025/draft-ssdf-version-1-2
 
+Ohm, M., Plate, H., Sykosch, A., & Meier, M. (2020). Backstabber's knife collection: A review of open source software supply chain attacks. In *Detection of intrusions and malware, and vulnerability assessment (DIMVA 2020)* (Lecture Notes in Computer Science, Vol. 12223, pp. 23–43). Springer. https://doi.org/10.1007/978-3-030-52683-2_2
+
 OWASP GenAI Security Project. (2026, September 1). *OWASP GenAI Security Project unveils 2026 Top 10 for LLM applications, new Agent Control Standard and sponsors as community tops 30,000 members*. https://genai.owasp.org/2026/09/01/owasp-genai-security-project-unveils-2026-top-10-for-llm-applications-new-agent-control-standard-and-sponsors-as-community-tops-30000-members/
+
+Torres-Arias, S., Afzali, H., Kuppusamy, T. K., Curtmola, R., & Cappos, J. (2019). in-toto: Providing farm-to-table guarantees for bits and bytes. In *28th USENIX Security Symposium (USENIX Security 19)* (pp. 1393–1410). USENIX Association. https://www.usenix.org/conference/usenixsecurity19/presentation/torres-arias
