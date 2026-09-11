@@ -15,9 +15,7 @@ fn approved_direct_pip_install_cannot_disable_requires_python_compatibility() {
         );
 
         let mut hostile = control_intent;
-        hostile
-            .argv
-            .push("--ignore-requires-python".to_string());
+        hostile.argv.push("--ignore-requires-python".to_string());
 
         let decision = admission_decision(&policy, &hostile);
         assert_eq!(
