@@ -6,9 +6,7 @@ use crate::InstallIntent;
 /// Wardnet classifies only the caller-selected argv authority. Effective
 /// temporary-directory placement, filesystem isolation, and final cleanup stay
 /// owned by the quarantine runtime.
-pub(crate) fn requests_unapproved_pypi_build_directory_retention(
-    intent: &InstallIntent,
-) -> bool {
+pub(crate) fn requests_unapproved_pypi_build_directory_retention(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
     };
