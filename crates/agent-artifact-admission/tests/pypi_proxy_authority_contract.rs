@@ -54,24 +54,26 @@ fn pip_proxy_override_cannot_inherit_artifact_approval() {
 #[test]
 fn pip_separate_proxy_value_is_explicitly_classified_as_trust_authority() {
     for executable in ["pip", "pip3"] {
-        let (policy, mut intent) = approved_pip_install(executable);
-        intent.argv.push("--proxy".to_string());
-        intent.argv.push("http://attacker.invalid:8080".to_string());
+        for proxy_option in ["--proxy", "--prox"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv.push(proxy_option.to_string());
+            intent.argv.push("http://attacker.invalid:8080".to_string());
 
-        let decision = admission_decision(&policy, &intent);
+            let decision = admission_decision(&policy, &intent);
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "{executable} separate proxy syntax must fail closed"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::AlternateTrustRoot),
-            "separate proxy syntax must be classified as trust authority rather than relying only on positional-operand rejection: {:?}",
-            decision.reason_codes
-        );
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} separate proxy syntax {proxy_option:?} must fail closed"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "separate proxy syntax {proxy_option:?} must be classified as trust authority rather than relying only on positional-operand rejection: {:?}",
+                decision.reason_codes
+            );
+        }
     }
 }
 
