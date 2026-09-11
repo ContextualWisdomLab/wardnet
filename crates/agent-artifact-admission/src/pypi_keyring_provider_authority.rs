@@ -7,24 +7,25 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
     };
     let arguments = &intent.argv[1..];
 
-    let (provider_arguments, pip_compatible_abbreviation, import_expands_authority) = match executable {
-        "pip" | "pip3"
-            if arguments
-                .first()
-                .is_some_and(|argument| argument == "install") =>
-        {
-            (&arguments[1..], true, true)
-        }
-        "uv"
-            if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
+    let (provider_arguments, pip_compatible_abbreviation, import_expands_authority) =
+        match executable {
+            "pip" | "pip3"
+                if arguments
+                    .first()
                     .is_some_and(|argument| argument == "install") =>
-        {
-            (&arguments[2..], false, false)
-        }
-        _ => return false,
-    };
+            {
+                (&arguments[1..], true, true)
+            }
+            "uv"
+                if arguments.first().is_some_and(|argument| argument == "pip")
+                    && arguments
+                        .get(1)
+                        .is_some_and(|argument| argument == "install") =>
+            {
+                (&arguments[2..], false, false)
+            }
+            _ => return false,
+        };
 
     provider_arguments
         .iter()
