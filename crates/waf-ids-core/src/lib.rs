@@ -1234,6 +1234,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             true,
         ),
         buyer_evidence_endpoint(
+            "gateway_readiness",
+            "GET",
+            "/readyz",
+            "application/json",
+            "enabled-route readiness snapshot for probes, load balancers, and buyer validation",
+            true,
+        ),
+        buyer_evidence_endpoint(
             "license",
             "GET",
             "/api/commercial/license",
@@ -1287,6 +1295,14 @@ fn buyer_evidence_endpoints() -> Vec<BuyerEvidenceEndpoint> {
             "/api/support-bundle",
             "application/json",
             "support and due-diligence handoff package without admin secrets",
+            true,
+        ),
+        buyer_evidence_endpoint(
+            "prometheus_metrics",
+            "GET",
+            "/metrics",
+            "text/plain; version=0.0.4; charset=utf-8",
+            "Prometheus exposition for KPI and readiness scraping evidence",
             true,
         ),
         buyer_evidence_endpoint(

@@ -10,3 +10,4 @@
 ### Operations
 
 - Documented administrator credential provisioning, rotation, rollout verification, rollback, evidence handling, and the boundary with the separate runtime-authentication fail-closed work tracked in issue #78.
+- Added gateway readiness and Prometheus metrics evidence to `GET /api/support-bundle` so buyer/support handoff can compare the bundle directly against `/readyz` and `/metrics`.
