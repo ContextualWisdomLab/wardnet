@@ -180,8 +180,9 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_install_root_abbreviation_authority::requests_unapproved_pypi_target_abbreviation(intent)
-    {
+    if pypi_install_root_abbreviation_authority::requests_unapproved_pypi_target_abbreviation(
+        intent,
+    ) {
         if !decision
             .reason_codes
             .contains(&ReasonCode::AlternateInstallRoot)
