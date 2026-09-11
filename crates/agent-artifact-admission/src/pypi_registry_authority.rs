@@ -23,7 +23,5 @@ pub(crate) fn disables_reviewed_registry(intent: &InstallIntent) -> bool {
         return false;
     }
 
-    arguments
-        .iter()
-        .any(|argument| argument == "--no-index" || argument.starts_with("--no-index="))
+    arguments.iter().any(|argument| argument == "--no-index")
 }
