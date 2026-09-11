@@ -20,21 +20,22 @@ pub(crate) fn requests_unapproved_uv_symlink_link_mode(intent: &InstallIntent) -
     }
 
     let install_arguments = &arguments[2..];
-    install_arguments.iter().enumerate().any(|(index, argument)| {
-        argument == "--link-mode=symlink"
-            || (argument == "--link-mode"
-                && install_arguments
-                    .get(index + 1)
-                    .is_some_and(|value| value == "symlink"))
-    })
+    install_arguments
+        .iter()
+        .enumerate()
+        .any(|(index, argument)| {
+            argument == "--link-mode=symlink"
+                || (argument == "--link-mode"
+                    && install_arguments
+                        .get(index + 1)
+                        .is_some_and(|value| value == "symlink"))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::requests_unapproved_uv_symlink_link_mode;
-    use crate::{
-        ArtifactCoordinate, InstallIntent, InstructionSource, InstructionSourceKind,
-    };
+    use crate::{ArtifactCoordinate, InstallIntent, InstructionSource, InstructionSourceKind};
 
     fn intent(argv: &[&str]) -> InstallIntent {
         InstallIntent {
@@ -43,8 +44,8 @@ mod tests {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
             operation: "install".to_string(),
             argv: argv.iter().map(|value| (*value).to_string()).collect(),
-            manifest_sha256:
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             source: InstructionSource {
                 kind: InstructionSourceKind::ReviewedConfig,
                 uri: None,
@@ -56,9 +57,8 @@ mod tests {
                 version: "1.2.3".to_string(),
                 registry_url: "https://pypi.org/simple".to_string(),
                 owner: "ContextualWisdomLab".to_string(),
-                sha256:
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                        .to_string(),
+                sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .to_string(),
                 artifact_argument: "cwl-example==1.2.3".to_string(),
             }],
         }
