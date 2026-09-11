@@ -30,7 +30,7 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 
 ### Code exploration
 
-- There is no `.codegraph/` index in this repo, so use normal search (grep/ripgrep, `cargo` tooling, editor navigation). If a `.codegraph/` index is added later, prefer CodeGraph (`codegraph explore "<query>"` or the code-review-graph MCP tools) before grep/find — it surfaces callers/callees/impact that text search misses.
+- This repo has a `.codegraph/` index. Prefer CodeGraph (`codegraph explore "<query>"` or the code-review-graph MCP tools) before grep/find for caller/callee/impact exploration; use normal search (`grep`/`ripgrep`, `cargo` tooling, editor navigation) only when the index cannot answer the query.
 
 ### Config & secrets (KV, not env)
 
