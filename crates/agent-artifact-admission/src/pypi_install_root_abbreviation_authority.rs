@@ -30,6 +30,12 @@ pub(crate) fn requests_unapproved_pypi_install_root_abbreviation(intent: &Instal
     })
 }
 
+/// Preserve the existing admission call site while classifying the complete
+/// reviewed direct-pip install-root abbreviation surface.
+pub(crate) fn requests_unapproved_pypi_target_abbreviation(intent: &InstallIntent) -> bool {
+    requests_unapproved_pypi_install_root_abbreviation(intent)
+}
+
 /// Pinned pip uses Python optparse abbreviation semantics. `--ta` is the
 /// shortest verified unambiguous prefix of `--target`; `--t` is deliberately
 /// excluded because it is ambiguous on the reviewed option surface.
