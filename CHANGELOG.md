@@ -18,3 +18,9 @@
   treating process env as long-lived application authority; see Saltzer and
   Schroeder (1975), NIST SP 800-57 Part 1 Rev. 5, and the repository copy at
   `docs/papers/nist-sp-800-57-part-1-rev-5.pdf`.
+- Preserved protected startup semantics for `WAF_IDS_STATE_PATH`: absent,
+  empty, and whitespace-only bootstrap values all keep seeded in-memory state;
+  only a non-empty trimmed value enables JSON file persistence. The Runtime
+  Configuration adapter now enforces the same invariant before constructing a
+  `PathBuf`, with a hostile regression covering empty, space-only, and tab-only
+  inputs.
