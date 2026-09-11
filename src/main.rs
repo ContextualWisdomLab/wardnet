@@ -5,22 +5,29 @@
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Registered eagerly, before `run_from_env` binds its listener and prints
-    // the readiness line, so a SIGTERM delivered immediately on startup (as
-    // container runtimes and the e2e test harness do) cannot race the OS-level
-    // handler installation and fall through to the default "kill" disposition.
+    // the readiness line, so a termination signal delivered immediately on
+    // startup cannot race the OS-level handler installation and fall through
+    // to the default "kill" disposition. The lifecycle decision and systems
+    // evidence are recorded in docs/architecture.md and
+    // docs/papers/graceful-shutdown-systems-research.md.
     let shutdown = install_shutdown_signal();
     waf_ids_ai_soc::run_from_env(Box::pin(shutdown)).await
 }
 
 #[cfg(all(not(test), unix))]
 fn install_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
-    // `tokio::signal::unix::signal` registers the handler synchronously on
-    // call; only the subsequent `.recv()` wait is deferred to the returned
+    // `tokio::signal::unix::signal` registers each handler synchronously on
+    // call; only the subsequent `.recv()` waits are deferred to the returned
     // future, so callers must invoke this *before* announcing readiness.
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("install SIGINT handler");
     async move {
-        term.recv().await;
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = interrupt.recv() => {}
+        }
     }
 }
 

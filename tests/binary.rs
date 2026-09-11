@@ -3,7 +3,9 @@
 //! Spawns the real gateway binary, waits until it reports readiness (proving it
 //! bound the listener), then stops it with the platform-appropriate mechanism.
 //! Running the binary under `cargo llvm-cov` records coverage for `main.rs` and
-//! `shutdown_signal`, which cannot be reached from in-process unit tests.
+//! `shutdown_signal`, which cannot be reached from in-process unit tests. The
+//! lifecycle rationale and systems research are recorded in `docs/architecture.md`
+//! and `docs/papers/graceful-shutdown-systems-research.md`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -25,6 +27,27 @@ fn binary_serves_then_shuts_down_on_sigterm() {
     assert!(
         exit.success(),
         "gateway should exit cleanly on SIGTERM: {exit:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn binary_serves_then_shuts_down_on_sigint() {
+    let mut child = spawn_ready_gateway();
+
+    // Interactive supervisors and local operators use SIGINT. Treating it as
+    // the platform default would skip the application's graceful shutdown and
+    // any cleanup/coverage flush that depends on the server future completing.
+    let signalled = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(signalled.success(), "failed to deliver SIGINT");
+
+    let exit = child.wait().expect("await gateway exit");
+    assert!(
+        exit.success(),
+        "gateway should exit cleanly on SIGINT: {exit:?}"
     );
 }
 

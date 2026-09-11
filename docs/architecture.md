@@ -41,6 +41,19 @@ flowchart LR
 - `/api/events.ndjson`: security events as newline-delimited JSON for lightweight SOC/SIEM ingestion tests.
 - `scripts/smoke.sh`: external smoke test for health, admin, auth, route writes, license writes, feed imports, block enforcement, KPIs, readiness, DNSBL export, support bundle, and restart persistence.
 
+## Process lifecycle
+
+Wardnet has one graceful-shutdown authority: the future installed by the binary entrypoint and passed into `run_from_env`. On Unix, `src/main.rs` registers handlers for both `SIGTERM` and `SIGINT` before `run_from_env` can bind and announce readiness, then resolves that single shutdown future when either signal is received. On Windows, the existing Tokio Ctrl-C handler remains the shutdown input. The gateway does not add signal polling, a second shutdown coordinator, elapsed-time success inference, or automatic restart/retry behavior.
+
+The invariant is operational rather than domain-specific: once Wardnet reports readiness, an operator or supervisor sending an ordinary termination/interrupt signal must enter the same Axum graceful-shutdown path instead of falling through to the operating system's default terminating disposition. `tests/binary.rs` exercises the shipped Unix binary for both SIGTERM and SIGINT so the acceptance covers the entrypoint and handler-registration order rather than only a helper function.
+
+The minimum design choice is to compose both Unix signals into one `tokio::select!` future. Keeping SIGTERM-only handling was rejected because interactive SIGINT then bypasses graceful shutdown. Replacing the path with generic polling or a second lifecycle service was rejected because it creates another shutdown authority without evidence of a need. Registering handlers only after readiness was rejected because it leaves a startup interval in which POSIX default signal disposition can terminate the process outside the graceful path. This decision does not change gateway policy, state authority, EgressWeave transport authorization, quarantine execution, contextual-orchestrator routing, or appguardrail analysis ownership.
+
+Primary references:
+
+- The Open Group. (2024). *POSIX.1-2024, `<signal.h>`*. https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/signal.h.html — defines SIGINT as the terminal interrupt signal and SIGTERM as the termination signal and establishes their process-signal semantics.
+- Tokio Project. (n.d.). *`tokio::signal::unix::SignalKind`*. https://docs.rs/tokio/latest/tokio/signal/unix/struct.SignalKind.html — maps `SignalKind::interrupt()` to SIGINT and `SignalKind::terminate()` to SIGTERM; Wardnet uses this API with the `signal` feature enabled.
+
 ## Near-Term Integrations
 
 - **WAF**: Coraza/OWASP CRS audit JSON/NDJSON ingest is available at `POST /api/waf/coraza/audit` (admin token). Interrupted transactions and CRS rule messages become `SecurityEvent` rows and feed gateway enforcement (DNSBL + `client_ip`/`path` threat indicators) so subsequent gateway decisions block matching clients. In-process Coraza embedding remains a follow-up — do not replace CRS with hand-rolled rules.
