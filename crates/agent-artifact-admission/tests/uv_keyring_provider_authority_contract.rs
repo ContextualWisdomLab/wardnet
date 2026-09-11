@@ -24,10 +24,9 @@ fn approved_uv_install_cannot_delegate_credentials_to_keyring_subprocess() {
 #[test]
 fn separate_uv_subprocess_provider_carries_credential_authority_reason() {
     let (policy, mut hostile) = approved_uv_install();
-    hostile.argv.extend([
-        "--keyring-provider".to_string(),
-        "subprocess".to_string(),
-    ]);
+    hostile
+        .argv
+        .extend(["--keyring-provider".to_string(), "subprocess".to_string()]);
 
     assert_alternate_trust_root_block(&policy, &hostile);
 }
@@ -43,9 +42,7 @@ fn unknown_non_disabled_uv_keyring_provider_fails_closed() {
 #[test]
 fn explicit_disabled_uv_keyring_provider_preserves_reviewed_baseline() {
     let (policy, mut intent) = approved_uv_install();
-    intent
-        .argv
-        .push("--keyring-provider=disabled".to_string());
+    intent.argv.push("--keyring-provider=disabled".to_string());
 
     let decision = admission_decision(&policy, &intent);
     assert_eq!(
