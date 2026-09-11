@@ -9,13 +9,15 @@ const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
 
 #[test]
 fn pypi_install_cannot_import_unreviewed_constraint_authority() {
-    let cases: [(&str, &[&str]); 17] = [
+    let cases: [(&str, &[&str]); 19] = [
         ("pip", &["--constraint=https://x.invalid/c.txt"]),
         ("pip", &["--constraint", "https://x.invalid/c.txt"]),
+        ("pip", &["--cons=https://x.invalid/c.txt"]),
         ("pip3", &["-chttps://x.invalid/c.txt"]),
         ("pip3", &["-c", "https://x.invalid/c.txt"]),
         ("pip", &["--build-constraint=https://x.invalid/b.txt"]),
         ("pip", &["--build-constraint", "https://x.invalid/b.txt"]),
+        ("pip", &["--build-c=https://x.invalid/b.txt"]),
         ("uv", &["--constraint=https://x.invalid/c.txt"]),
         ("uv", &["--constraint", "https://x.invalid/c.txt"]),
         ("uv", &["--constraints=https://x.invalid/c.txt"]),
