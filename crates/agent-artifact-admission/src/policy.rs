@@ -339,11 +339,10 @@ fn is_install_root_selector_value(executable: &str, arguments: &[String], index:
         {
             &["--target", "-t", "--root", "--prefix"]
         }
-        "uv"
-            if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install") =>
+        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
+            && arguments
+                .get(1)
+                .is_some_and(|argument| argument == "install") =>
         {
             &["--target", "-t", "--root", "--prefix", "--python", "-p"]
         }
