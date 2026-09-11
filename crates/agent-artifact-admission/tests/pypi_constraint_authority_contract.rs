@@ -10,24 +10,15 @@ const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
 #[test]
 fn pypi_install_cannot_import_unreviewed_constraint_authority() {
     for (executable, flag) in [
-        ("pip", "--constraint=https://attacker.invalid/constraints.txt"),
-        ("pip3", "-chttps://attacker.invalid/constraints.txt"),
-        (
-            "pip",
-            "--build-constraint=https://attacker.invalid/build-constraints.txt",
-        ),
-        ("uv", "--constraint=https://attacker.invalid/constraints.txt"),
-        ("uv", "--constraints=https://attacker.invalid/constraints.txt"),
-        ("uv", "-chttps://attacker.invalid/constraints.txt"),
-        (
-            "uv",
-            "--build-constraint=https://attacker.invalid/build-constraints.txt",
-        ),
-        (
-            "uv",
-            "--build-constraints=https://attacker.invalid/build-constraints.txt",
-        ),
-        ("uv", "-bhttps://attacker.invalid/build-constraints.txt"),
+        ("pip", "--constraint=https://x.invalid/c.txt"),
+        ("pip3", "-chttps://x.invalid/c.txt"),
+        ("pip", "--build-constraint=https://x.invalid/b.txt"),
+        ("uv", "--constraint=https://x.invalid/c.txt"),
+        ("uv", "--constraints=https://x.invalid/c.txt"),
+        ("uv", "-chttps://x.invalid/c.txt"),
+        ("uv", "--build-constraint=https://x.invalid/b.txt"),
+        ("uv", "--build-constraints=https://x.invalid/b.txt"),
+        ("uv", "-bhttps://x.invalid/b.txt"),
     ] {
         let (policy, mut intent) = approved_pypi_install(executable);
         intent.argv.push(flag.to_string());
