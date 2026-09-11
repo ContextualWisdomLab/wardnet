@@ -110,7 +110,8 @@ fn requests_unapproved_pypi_artifact_variant(intent: &InstallIntent) -> bool {
 }
 
 fn requests_unapproved_pip_variant(argument: &String) -> bool {
-    matches_value_flag(argument, "--platform")
+    requests_pip_artifact_variant_abbreviation(argument)
+        || matches_value_flag(argument, "--platform")
         || matches_value_flag(argument, "--python-version")
         || matches_value_flag(argument, "--implementation")
         || matches_value_flag(argument, "--abi")
@@ -120,6 +121,43 @@ fn requests_unapproved_pip_variant(argument: &String) -> bool {
         || argument == "--no-build-isolation"
         || matches_short_value_flag(argument, "-C")
         || matches_value_flag(argument, "--config-settings")
+}
+
+/// Direct pip uses Python's optparse-compatible long-option grammar. Classify
+/// only prefixes verified as unambiguous for artifact/build selectors; uv and
+/// other installers intentionally keep their independent grammars.
+fn requests_pip_artifact_variant_abbreviation(argument: &str) -> bool {
+    let (option, has_attached_value) = argument
+        .split_once('=')
+        .map_or((argument, false), |(option, _)| (option, true));
+
+    let value_selectors = [
+        ("--platform", "--pl"),
+        ("--python-version", "--python-"),
+        ("--implementation", "--im"),
+        ("--abi", "--a"),
+        ("--no-binary", "--no-bi"),
+        ("--only-binary", "--o"),
+        ("--config-settings", "--conf"),
+    ];
+    if value_selectors
+        .iter()
+        .any(|(canonical, shortest)| matches_pip_long_abbreviation(option, canonical, shortest))
+    {
+        return true;
+    }
+
+    !has_attached_value
+        && [
+            ("--prefer-binary", "--prefe"),
+            ("--no-build-isolation", "--no-bu"),
+        ]
+        .iter()
+        .any(|(canonical, shortest)| matches_pip_long_abbreviation(option, canonical, shortest))
+}
+
+fn matches_pip_long_abbreviation(option: &str, canonical: &str, shortest: &str) -> bool {
+    option.len() >= shortest.len() && option != canonical && canonical.starts_with(option)
 }
 
 fn requests_unapproved_uv_pip_variant(argument: &String) -> bool {
@@ -188,4 +226,62 @@ fn requests_all_tags_short_bundle(argument: &str) -> bool {
 
 fn is_true_boolean(value: &str) -> bool {
     matches!(value.to_ascii_lowercase().as_str(), "1" | "t" | "true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requests_pip_artifact_variant_abbreviation;
+
+    #[test]
+    fn pip_artifact_variant_abbreviations_are_bounded_to_verified_prefixes() {
+        for option in [
+            "--pl",
+            "--pl=manylinux2014_x86_64",
+            "--python-",
+            "--python-=3.11",
+            "--im",
+            "--im=cp",
+            "--a",
+            "--a=cp311",
+            "--no-bi",
+            "--no-bi=:all:",
+            "--o",
+            "--o=:all:",
+            "--prefe",
+            "--no-bu",
+            "--conf",
+            "--conf=backend-mode=unsafe",
+        ] {
+            assert!(
+                requests_pip_artifact_variant_abbreviation(option),
+                "verified direct-pip artifact/build abbreviation must be classified: {option}"
+            );
+        }
+
+        for option in [
+            "--p",
+            "--py",
+            "--i",
+            "--no-b",
+            "--pref",
+            "--con",
+            "--platform",
+            "--python-version=3.11",
+            "--implementation",
+            "--abi=cp311",
+            "--no-binary=:all:",
+            "--only-binary=:all:",
+            "--prefer-binary",
+            "--no-build-isolation",
+            "--config-settings=backend-mode=unsafe",
+            "--prefe=true",
+            "--no-bu=true",
+            "--extra-index-url=https://attacker.invalid/simple",
+        ] {
+            assert!(
+                !requests_pip_artifact_variant_abbreviation(option),
+                "ambiguous, canonical, invalid-valued Boolean, or unrelated option must not be guessed as a pip abbreviation: {option}"
+            );
+        }
+    }
 }
