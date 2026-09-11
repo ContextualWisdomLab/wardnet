@@ -61,8 +61,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
         allowed_executables: vec![executable.to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }],
         approved_artifacts: vec![ApprovedArtifact {
             ecosystem: artifact.ecosystem.clone(),
