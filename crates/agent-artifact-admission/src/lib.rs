@@ -11,6 +11,7 @@ mod http;
 mod oci_transport;
 mod policy;
 mod pypi_cache_directory_authority;
+mod pypi_constraint_authority;
 mod pypi_hash_mode;
 mod pypi_install_mutation_authority;
 mod pypi_install_report_authority;
@@ -92,6 +93,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::AlternateInstallRoot)
         {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_constraint_authority::requests_unapproved_pypi_constraint_authority(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::ArtifactNotApproved)
+        {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
