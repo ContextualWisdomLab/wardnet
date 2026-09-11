@@ -5,7 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 STATE_FILE="$TMP_DIR/state.json"
 LOG_FILE="$TMP_DIR/server.log"
-ADMIN_TOKEN_VALUE="dev-secret"
+ADMIN_TOKEN_VALUE="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+)"
 PORT="$(python3 - <<'PY'
 import socket
 s = socket.socket()
@@ -27,10 +31,14 @@ cleanup() {
 trap cleanup EXIT
 
 start_server() {
+  # Compile before the health wait so rustc time is not counted as a hang.
+  cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml"
   (
     cd "$ROOT_DIR"
     BIND_ADDR="127.0.0.1:$PORT" \
       ADMIN_TOKEN="$ADMIN_TOKEN_VALUE" \
+      ADMIN_TOKENS= \
+      WAF_IDS_CREDENTIALS_PATH= \
       WAF_IDS_STATE_PATH="$STATE_FILE" \
       DNSBL_ORIGIN="dnsbl.test" \
       EVENT_LIMIT="5" \
@@ -77,6 +85,8 @@ assert_json_field "$health" 'data["status"] == "ok"'
 assert_json_field "$health" 'data["persistence"] == "file"'
 assert_json_field "$health" 'data["dnsbl_origin"] == "dnsbl.test"'
 assert_json_field "$health" 'data["event_limit"] == 5'
+assert_json_field "$health" 'data["admin_auth_configured"] is True'
+assert_json_field "$health" 'data["auth_mode"] == "production"'
 
 curl -fsS "$BASE_URL/admin" | grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway"
 
@@ -187,7 +197,7 @@ assert_json_field "$support_bundle" 'data["kpis"]["fresh_threat_feed_count"] == 
 assert_json_field "$support_bundle" 'data["audit_log_count"] >= 3'
 assert_json_field "$support_bundle" 'data["threat_feed_freshness"][0]["stale"] is False'
 
-audit_logs="$(curl -fsS "$BASE_URL/api/audit-logs")"
+audit_logs="$(curl -fsS -H "x-admin-token: $ADMIN_TOKEN_VALUE" "$BASE_URL/api/audit-logs")"
 assert_json_field "$audit_logs" 'any(log["action"] == "upsert_route" and log["resource_id"] == "block" for log in data)'
 assert_json_field "$audit_logs" 'any(log["action"] == "update_commercial_license" and log["resource_id"] == "cwlab-enterprise" for log in data)'
 assert_json_field "$audit_logs" 'any(log["action"] == "import_threat_feed" and log["resource_id"] == "misp-seoul" for log in data)'
@@ -212,7 +222,7 @@ license="$(curl -fsS "$BASE_URL/api/commercial/license")"
 assert_json_field "$license" 'data["license_status"] == "active"'
 feeds="$(curl -fsS "$BASE_URL/api/threat-feeds")"
 assert_json_field "$feeds" 'len(data) == 1'
-audit_logs="$(curl -fsS "$BASE_URL/api/audit-logs")"
+audit_logs="$(curl -fsS -H "x-admin-token: $ADMIN_TOKEN_VALUE" "$BASE_URL/api/audit-logs")"
 assert_json_field "$audit_logs" 'len(data) >= 3'
 
 echo "smoke ok: $BASE_URL with state $STATE_FILE"
