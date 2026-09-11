@@ -319,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    /// Blank state-path bootstrap input must preserve protected-main's in-memory semantics.
+    fn runtime_configuration_ignores_blank_state_path() {
+        for raw in ["", "   ", "\t"] {
+            let config = runtime_from_pairs(&[("WAF_IDS_STATE_PATH", raw)]).unwrap();
+            assert_eq!(config.state_path, None, "blank state path {raw:?} must be ignored");
+        }
+    }
+
+    #[test]
     /// Runtime bootstrap must not request the secret credentials-path selector.
     fn runtime_configuration_never_reads_secret_bootstrap_locator() {
         let config = RuntimeConfiguration::from_lookup(|name| {
