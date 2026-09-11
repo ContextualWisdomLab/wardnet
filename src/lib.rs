@@ -77,6 +77,12 @@ pub struct AppState {
     // override it to point at a loopback mock server.
     #[cfg(test)]
     kev_catalog_url: Option<String>,
+    // Non-test runtime always fetches the built-in Phishing.Database URLs.
+    // Tests can override them to point at loopback mock servers.
+    #[cfg(test)]
+    phishing_database_domain_url: Option<String>,
+    #[cfg(test)]
+    phishing_database_ip_url: Option<String>,
 }
 
 /// Configuration for the optional LLM-backed SOC analysis. Points at an
@@ -143,6 +149,10 @@ impl AppState {
             soc_llm: None,
             #[cfg(test)]
             kev_catalog_url: None,
+            #[cfg(test)]
+            phishing_database_domain_url: None,
+            #[cfg(test)]
+            phishing_database_ip_url: None,
         }
     }
 
@@ -164,6 +174,46 @@ impl AppState {
     #[cfg(not(test))]
     fn kev_catalog_url(&self) -> &str {
         KEV_DEFAULT_URL
+    }
+
+    /// Override the Phishing.Database domain/IP feed URLs (default: the real
+    /// upstream raw.githubusercontent.com files). Deployment-time config only,
+    /// for pointing at a local mock server in tests -- see
+    /// `validate_phishing_database_source_url`, which restricts the fetch to
+    /// the sanctioned Phishing.Database hosts (or loopback). Builder-style.
+    #[cfg(test)]
+    pub fn with_phishing_database_urls(
+        mut self,
+        domain_url: impl Into<String>,
+        ip_url: impl Into<String>,
+    ) -> Self {
+        self.phishing_database_domain_url = Some(domain_url.into());
+        self.phishing_database_ip_url = Some(ip_url.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn phishing_database_domain_url(&self) -> &str {
+        self.phishing_database_domain_url
+            .as_deref()
+            .unwrap_or(PHISHING_DATABASE_DEFAULT_DOMAIN_URL)
+    }
+
+    #[cfg(not(test))]
+    fn phishing_database_domain_url(&self) -> &str {
+        PHISHING_DATABASE_DEFAULT_DOMAIN_URL
+    }
+
+    #[cfg(test)]
+    fn phishing_database_ip_url(&self) -> &str {
+        self.phishing_database_ip_url
+            .as_deref()
+            .unwrap_or(PHISHING_DATABASE_DEFAULT_IP_URL)
+    }
+
+    #[cfg(not(test))]
+    fn phishing_database_ip_url(&self) -> &str {
+        PHISHING_DATABASE_DEFAULT_IP_URL
     }
 
     /// Set the maximum accepted request body size in bytes; larger requests are
@@ -426,14 +476,6 @@ fn phishing_database_default_feed_id() -> String {
 
 fn phishing_database_default_source() -> String {
     PHISHING_DATABASE_DEFAULT_SOURCE.to_string()
-}
-
-fn phishing_database_default_domain_url() -> String {
-    PHISHING_DATABASE_DEFAULT_DOMAIN_URL.to_string()
-}
-
-fn phishing_database_default_ip_url() -> String {
-    PHISHING_DATABASE_DEFAULT_IP_URL.to_string()
 }
 
 fn phishing_database_default_ttl_seconds() -> u64 {
@@ -757,10 +799,6 @@ struct PhishingDatabaseImportRequest {
     feed_id: String,
     #[serde(default = "phishing_database_default_source")]
     source: String,
-    #[serde(default = "phishing_database_default_domain_url")]
-    domain_url: String,
-    #[serde(default = "phishing_database_default_ip_url")]
-    ip_url: String,
     #[serde(default = "phishing_database_default_ttl_seconds")]
     ttl_seconds: u64,
     #[serde(default = "phishing_database_default_domain_limit")]
@@ -773,8 +811,6 @@ struct PhishingDatabaseImportRequest {
     import_domains: bool,
     #[serde(default = "default_true")]
     import_ips: bool,
-    #[serde(default)]
-    allow_non_default_hosts: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1546,7 +1582,7 @@ async fn poll_taxii_collection(
         Ok(url) => url,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    if let Err(message) = validate_http_url(&base_url, /* allow_non_default_hosts */ true) {
+    if let Err(message) = validate_http_url(&base_url) {
         return error(
             StatusCode::BAD_REQUEST,
             format!("invalid TAXII objects URL: {message}"),
@@ -1988,19 +2024,23 @@ async fn import_phishing_database_feed(
 
     let (domains_text, ips_text) = match (request.import_domains, request.import_ips) {
         (true, true) => {
+            let domain_url = state.phishing_database_domain_url();
+            let ip_url = state.phishing_database_ip_url();
             match tokio::try_join!(
-                fetch_text_feed(&state, &request.domain_url),
-                fetch_text_feed(&state, &request.ip_url)
+                fetch_text_feed(&state, domain_url),
+                fetch_text_feed(&state, ip_url)
             ) {
                 Ok((domains, ips)) => (domains, ips),
                 Err(message) => return error(StatusCode::BAD_GATEWAY, message),
             }
         }
-        (true, false) => match fetch_text_feed(&state, &request.domain_url).await {
-            Ok(domains) => (domains, String::new()),
-            Err(message) => return error(StatusCode::BAD_GATEWAY, message),
-        },
-        (false, true) => match fetch_text_feed(&state, &request.ip_url).await {
+        (true, false) => {
+            match fetch_text_feed(&state, state.phishing_database_domain_url()).await {
+                Ok(domains) => (domains, String::new()),
+                Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+            }
+        }
+        (false, true) => match fetch_text_feed(&state, state.phishing_database_ip_url()).await {
             Ok(ips) => (String::new(), ips),
             Err(message) => return error(StatusCode::BAD_GATEWAY, message),
         },
@@ -2073,17 +2113,11 @@ fn validate_phishing_database_import_request(
     if !request.import_domains && !request.import_ips {
         return Err("at least one of import_domains or import_ips must be true");
     }
-    if request.import_domains {
-        if request.domain_limit == 0 {
-            return Err("domain_limit must be greater than zero when import_domains is enabled");
-        }
-        validate_http_url(&request.domain_url, request.allow_non_default_hosts)?;
+    if request.import_domains && request.domain_limit == 0 {
+        return Err("domain_limit must be greater than zero when import_domains is enabled");
     }
-    if request.import_ips {
-        if request.ip_limit == 0 {
-            return Err("ip_limit must be greater than zero when import_ips is enabled");
-        }
-        validate_http_url(&request.ip_url, request.allow_non_default_hosts)?;
+    if request.import_ips && request.ip_limit == 0 {
+        return Err("ip_limit must be greater than zero when import_ips is enabled");
     }
     Ok(())
 }
@@ -2121,11 +2155,11 @@ async fn import_kev_feed(
 
     // Always fetches the deployment-configured CISA KEV URL (default: the
     // real CISA feed; overridable only via server-side config, never by the
-    // request body) -- there is no request-controlled URL construction here
-    // at all, unlike the operator-URL adapters (phishing-database, TAXII).
+    // request body) -- there is no request-controlled URL construction in
+    // this handler at all.
     // Uses its own fetch_kev_catalog rather than the shared fetch_text_feed
-    // so this config-only path never shares a function with (and can't be
-    // conflated by static analysis with) phishing-database's request-URL fetch.
+    // so this config-only path never shares a function with phishing-database's
+    // fetch.
     let body_text = match fetch_kev_catalog(&state).await {
         Ok(text) => text,
         Err(message) => return error(StatusCode::BAD_GATEWAY, message),
@@ -2175,7 +2209,7 @@ async fn import_kev_feed(
     }
 }
 
-fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &'static str> {
+fn validate_http_url(value: &str) -> Result<(), &'static str> {
     let parsed = reqwest::Url::parse(value).map_err(|_| "feed URL must be an absolute URL")?;
     let host = parsed.host_str().ok_or("feed URL host is required")?;
     match parsed.scheme() {
@@ -2184,23 +2218,15 @@ fn validate_http_url(value: &str, allow_non_default_hosts: bool) -> Result<(), &
         "http" => return Err("feed URL scheme must be https unless host is loopback"),
         _ => return Err("feed URL scheme must be http or https"),
     }
-    if !allow_non_default_hosts
-        && !PHISHING_DATABASE_ALLOWED_HOSTS
-            .iter()
-            .any(|allowed| host.eq_ignore_ascii_case(allowed))
-    {
-        return Err("feed URL host is not allowed");
-    }
     Ok(())
 }
 
-// Deliberately separate from `fetch_text_feed`: that helper's `url` argument is
-// fed by operator-supplied request URLs for phishing-database imports. KEV does
-// not support a runtime URL override, so this fetch path stays structurally
-// independent and fixed to the built-in CISA host; loopback is allowed only for
-// tests that inject a local mock via `with_kev_catalog_url`.
+// Deliberately separate from `fetch_text_feed`: KEV does not support a runtime
+// URL override, so this fetch path stays structurally independent and fixed to
+// the built-in CISA host; loopback is allowed only for tests that inject a
+// local mock via `with_kev_catalog_url`.
 fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
-    validate_http_url(url, /* allow_non_default_hosts */ true)
+    validate_http_url(url)
         .map_err(|message| format!("invalid KEV catalog URL {url}: {message}"))?;
     let parsed = reqwest::Url::parse(url).map_err(|_| format!("invalid KEV catalog URL {url}"))?;
     let host = parsed
@@ -2213,6 +2239,30 @@ fn validate_kev_catalog_url(url: &str) -> Result<(), String> {
     {
         return Err(format!(
             "KEV catalog URL {url} host is not on the CISA KEV allowlist"
+        ));
+    }
+    Ok(())
+}
+
+// Defense-in-depth for the Phishing.Database fetch: the URL is resolved from
+// server-side state, never the request body, but it must still land on a
+// sanctioned Phishing.Database host (or loopback for tests). Mirrors
+// `validate_kev_catalog_url`; the runtime override exists only under `cfg(test)`.
+fn validate_phishing_database_source_url(url: &str) -> Result<(), String> {
+    validate_http_url(url)
+        .map_err(|message| format!("invalid phishing-database feed URL {url}: {message}"))?;
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| format!("invalid phishing-database feed URL {url}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("invalid phishing-database feed URL {url}: host is required"))?;
+    if !PHISHING_DATABASE_ALLOWED_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        && !is_loopback_host(host)
+    {
+        return Err(format!(
+            "phishing-database feed URL {url} host is not on the Phishing.Database allowlist"
         ));
     }
     Ok(())
@@ -2777,8 +2827,7 @@ async fn apply_threat_feed_import(
 async fn fetch_text_feed(state: &AppState, url: &str) -> Result<String, String> {
     use futures_util::StreamExt;
 
-    validate_http_url(url, /* allow_non_default_hosts */ true)
-        .map_err(|message| format!("invalid feed URL {url}: {message}"))?;
+    validate_phishing_database_source_url(url)?;
     let response = state
         .feed_http
         .get(url)
@@ -3572,19 +3621,16 @@ mod tests {
         }
     }
 
-    fn phishing_database_import_request(base_url: &str) -> PhishingDatabaseImportRequest {
+    fn phishing_database_import_request() -> PhishingDatabaseImportRequest {
         PhishingDatabaseImportRequest {
             feed_id: "phishing-db-seoul".to_string(),
             source: "https://github.com/Phishing-Database/Phishing.Database".to_string(),
-            domain_url: format!("{base_url}/domains"),
-            ip_url: format!("{base_url}/ips"),
             ttl_seconds: 900,
             domain_limit: 10,
             ip_limit: 10,
             severity: Severity::Critical,
             import_domains: true,
             import_ips: true,
-            allow_non_default_hosts: true,
         }
     }
 
@@ -4841,8 +4887,13 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, feed_mock).into_future());
 
-        let app = build_app(AppState::seeded(Some("secret".to_string())));
-        let payload = phishing_database_import_request(&format!("http://{addr}"));
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string())).with_phishing_database_urls(
+                format!("http://{addr}/domains"),
+                format!("http://{addr}/ips"),
+            ),
+        );
+        let payload = phishing_database_import_request();
 
         let unauthorized = app_request(
             &app,
@@ -4858,7 +4909,6 @@ mod tests {
 
         let invalid_request = PhishingDatabaseImportRequest {
             ttl_seconds: 0,
-            domain_url: "file:///tmp/not-allowed".to_string(),
             ..payload.clone()
         };
         let invalid = app_request(
@@ -4990,8 +5040,13 @@ mod tests {
         let redirect_addr = redirect_listener.local_addr().unwrap();
         tokio::spawn(axum::serve(redirect_listener, redirect_feed).into_future());
 
-        let app = build_app(AppState::seeded(Some("secret".to_string())));
-        let payload = phishing_database_import_request(&format!("http://{redirect_addr}"));
+        let app = build_app(
+            AppState::seeded(Some("secret".to_string())).with_phishing_database_urls(
+                format!("http://{redirect_addr}/domains"),
+                format!("http://{redirect_addr}/ips"),
+            ),
+        );
+        let payload = phishing_database_import_request();
 
         let response = app_request(
             &app,
@@ -5253,6 +5308,24 @@ mod tests {
             ..kev_import_request()
         };
         assert!(validate_kev_import_request(&zero_ttl).is_err());
+    }
+
+    #[test]
+    fn validate_phishing_database_source_url_restricts_hosts() {
+        // The sanctioned upstream hosts and loopback test mocks are allowed.
+        assert!(
+            validate_phishing_database_source_url(PHISHING_DATABASE_DEFAULT_DOMAIN_URL).is_ok()
+        );
+        assert!(validate_phishing_database_source_url(PHISHING_DATABASE_DEFAULT_IP_URL).is_ok());
+        assert!(validate_phishing_database_source_url("http://127.0.0.1:9/domains").is_ok());
+        assert!(validate_phishing_database_source_url("http://localhost:9/ips").is_ok());
+
+        // An arbitrary attacker-chosen host is rejected even over https, so a
+        // request body can never redirect the fetch at cloud metadata or an
+        // internal service. Non-http(s) schemes are rejected too.
+        assert!(validate_phishing_database_source_url("https://evil.example/domains").is_err());
+        assert!(validate_phishing_database_source_url("https://169.254.169.254/latest").is_err());
+        assert!(validate_phishing_database_source_url("file:///tmp/not-allowed").is_err());
     }
 
     #[tokio::test]
