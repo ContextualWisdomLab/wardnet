@@ -35,9 +35,7 @@ fn separate_uv_subprocess_provider_carries_credential_authority_reason() {
 #[test]
 fn unknown_non_disabled_uv_keyring_provider_fails_closed() {
     let (policy, mut hostile) = approved_uv_install();
-    hostile
-        .argv
-        .push("--keyring-provider=import".to_string());
+    hostile.argv.push("--keyring-provider=import".to_string());
 
     assert_alternate_trust_root_block(&policy, &hostile);
 }
