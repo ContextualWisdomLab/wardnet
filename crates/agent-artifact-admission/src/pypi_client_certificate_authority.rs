@@ -29,8 +29,7 @@ fn matches_pip_client_certificate_option(argument: &str) -> bool {
         .split_once('=')
         .map_or(argument, |(option, _)| option);
 
-    option.len() >= SHORTEST_UNAMBIGUOUS_PREFIX.len()
-        && PIP_CLIENT_CERT_OPTION.starts_with(option)
+    option.len() >= SHORTEST_UNAMBIGUOUS_PREFIX.len() && PIP_CLIENT_CERT_OPTION.starts_with(option)
 }
 
 #[cfg(test)]
