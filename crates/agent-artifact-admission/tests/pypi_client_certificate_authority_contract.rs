@@ -33,6 +33,31 @@ fn pip_client_certificate_override_cannot_inherit_artifact_approval() {
 }
 
 #[test]
+fn pip_client_certificate_unambiguous_prefix_cannot_inherit_artifact_approval() {
+    for executable in ["pip", "pip3"] {
+        let (policy, mut intent) = approved_pip_install(executable);
+        intent
+            .argv
+            .push("--cl=/tmp/attacker-client.pem".to_string());
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{executable} must classify pip's unambiguous --client-cert prefix before execution"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "pip's accepted --cl client-certificate prefix must remain explicit trust-authority evidence: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
+#[test]
 fn pip_separate_client_certificate_value_is_explicitly_classified_as_trust_authority() {
     for executable in ["pip", "pip3"] {
         let (policy, mut intent) = approved_pip_install(executable);
