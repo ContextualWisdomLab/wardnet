@@ -1,7 +1,7 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, AdmissionServiceConfig, ApprovedArtifact, ApprovedManifest,
     ArtifactCoordinate, DecisionKind, InstallIntent, InstructionSource, InstructionSourceKind,
-    admission_decision, validate_service_config,
+    ReasonCode, admission_decision, validate_service_config,
 };
 
 const MANIFEST_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -33,6 +33,53 @@ fn pypi_requirement_cannot_replace_reviewed_index_coordinate() {
                 .iter()
                 .any(|reason| reason.as_str() == "artifact_not_approved"),
             "coordinate/requirement disagreement must report artifact_not_approved"
+        );
+    }
+}
+
+#[test]
+fn pypi_install_cannot_disable_reviewed_registry_index() {
+    let artifact_argument = format!("{PACKAGE_NAME}=={PACKAGE_VERSION}");
+
+    for executable in ["pip", "uv"] {
+        let mut policy = approved_pypi_policy(&artifact_argument);
+        policy.allowed_executables = vec![executable.to_string()];
+        let mut intent = approved_pypi_intent(&artifact_argument);
+        intent.argv = match executable {
+            "pip" => vec![
+                "pip".to_string(),
+                "install".to_string(),
+                artifact_argument.clone(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                "--no-input".to_string(),
+                "--no-index".to_string(),
+            ],
+            "uv" => vec![
+                "uv".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                artifact_argument.clone(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                "--no-index".to_string(),
+            ],
+            _ => unreachable!("test executable set is closed"),
+        };
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "{executable} must not disable the reviewed registry and inherit an alternate package-source authority"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "disabling the reviewed registry must be classified as alternate trust/source authority: {:?}",
+            decision.reason_codes
         );
     }
 }
