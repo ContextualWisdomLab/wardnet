@@ -97,8 +97,15 @@ pub fn misp_material_from_value(
             .or_else(|| event.get("id").and_then(|i| i.as_str()))
             .unwrap_or("misp-event");
 
-        for attr in collect_event_attributes(event) {
-            match materialize_attribute(attr, source, ttl_seconds, severity.clone(), event_label) {
+        for (attr, parent_active) in collect_event_attributes(event) {
+            match materialize_attribute(
+                attr,
+                source,
+                ttl_seconds,
+                severity.clone(),
+                event_label,
+                parent_active,
+            ) {
                 AttributeOutcome::Mapped {
                     threats: t,
                     dnsbl: d,
@@ -112,7 +119,7 @@ pub fn misp_material_from_value(
     }
 
     for (attr, severity) in loose_attributes {
-        match materialize_attribute(attr, source, ttl_seconds, severity, "misp-attribute") {
+        match materialize_attribute(attr, source, ttl_seconds, severity, "misp-attribute", true) {
             AttributeOutcome::Mapped {
                 threats: t,
                 dnsbl: d,
@@ -190,15 +197,27 @@ fn severity_from_event(event: &serde_json::Value) -> Severity {
     }
 }
 
-fn collect_event_attributes(event: &serde_json::Value) -> Vec<&serde_json::Value> {
+fn active_by_deleted_marker(deleted: Option<&serde_json::Value>) -> bool {
+    deleted
+        .map(|value| match value {
+            serde_json::Value::Bool(is_deleted) => !*is_deleted,
+            serde_json::Value::String(value) => value == "0" || value.eq_ignore_ascii_case("false"),
+            serde_json::Value::Number(value) => value.as_u64() == Some(0),
+            _ => false,
+        })
+        .unwrap_or(true)
+}
+
+fn collect_event_attributes(event: &serde_json::Value) -> Vec<(&serde_json::Value, bool)> {
     let mut out = Vec::new();
     if let Some(attrs) = event.get("Attribute").and_then(|a| a.as_array()) {
-        out.extend(attrs.iter());
+        out.extend(attrs.iter().map(|attr| (attr, true)));
     }
     if let Some(objects) = event.get("Object").and_then(|o| o.as_array()) {
         for object in objects {
+            let parent_active = active_by_deleted_marker(object.get("deleted"));
             if let Some(attrs) = object.get("Attribute").and_then(|a| a.as_array()) {
-                out.extend(attrs.iter());
+                out.extend(attrs.iter().map(|attr| (attr, parent_active)));
             }
         }
     }
@@ -211,18 +230,26 @@ fn materialize_attribute(
     ttl_seconds: u64,
     severity: Severity,
     event_label: &str,
+    parent_active: bool,
 ) -> AttributeOutcome {
-    // Skip non-IDS attributes when to_ids is explicitly false (MISP convention).
+    // MISP's `to_ids` contract is affirmative evidence. Preserve the previously supported
+    // scalar true spellings, but absent or malformed values cannot authorize enforcement.
+    // See docs/doctoring/misp-to-ids-admission.md.
     let to_ids = attr
         .get("to_ids")
         .map(|v| match v {
             serde_json::Value::Bool(b) => *b,
             serde_json::Value::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
             serde_json::Value::Number(n) => n.as_u64() == Some(1),
-            _ => true,
+            _ => false,
         })
-        .unwrap_or(true);
-    if !to_ids {
+        .unwrap_or(false);
+
+    // MISP publishes deletion state independently at both object and attribute scope. A
+    // nested attribute cannot override a withdrawn parent object. Omission remains active
+    // for compatibility; any present unrecognized deletion state fails closed.
+    let active = active_by_deleted_marker(attr.get("deleted"));
+    if !parent_active || !to_ids || !active {
         return AttributeOutcome::Skipped;
     }
 
