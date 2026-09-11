@@ -11,6 +11,7 @@ mod http;
 mod oci_transport;
 mod policy;
 mod pypi_cache_directory_authority;
+mod pypi_certificate_store_authority;
 mod pypi_client_certificate_authority;
 mod pypi_constraint_authority;
 mod pypi_dependency_group_authority;
@@ -95,6 +96,17 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::AlternateInstallRoot)
         {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_certificate_store_authority::requests_unapproved_pypi_certificate_store_abbreviation(
+        intent,
+    ) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
