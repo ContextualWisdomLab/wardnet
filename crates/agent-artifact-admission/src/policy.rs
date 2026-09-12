@@ -642,6 +642,101 @@ fn uv_active_command_index(arguments: &[String]) -> Option<usize> {
     None
 }
 
+/// Return the exclusive end of argv that is still owned by `uv run` before the
+/// delegated child command/script begins. The reviewed value-option set mirrors
+/// current uv-run CLI grammar needed to avoid treating option values as child
+/// commands. Unknown flag spellings remain unsupported and are treated only as
+/// flag tokens; the first positional token still establishes the delegation
+/// boundary. An explicit `--` ends uv-owned argv immediately.
+fn uv_run_owned_argument_end(arguments: &[String], run_index: usize) -> usize {
+    const VALUE_OPTIONS: &[&str] = &[
+        "--allow-insecure-host",
+        "--trusted-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--config-setting",
+        "--config-settings",
+        "-C",
+        "--config-settings-package",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "-f",
+        "--fork-strategy",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "-i",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-editable-package",
+        "--no-extra",
+        "--no-group",
+        "--no-sources-package",
+        "--only-group",
+        "--package",
+        "--prerelease",
+        "--prerelease-package",
+        "--project",
+        "--python",
+        "-p",
+        "--python-platform",
+        "--refresh-package",
+        "--resolution",
+        "--torch-backend",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+    ];
+
+    let mut index = run_index + 1;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if argument == "--" || !argument.starts_with('-') {
+            return index;
+        }
+
+        if VALUE_OPTIONS.contains(&argument) {
+            let Some(value) = arguments.get(index + 1) else {
+                return index + 1;
+            };
+            if value.is_empty() || value.starts_with('-') {
+                return index + 1;
+            }
+            index += 2;
+            continue;
+        }
+
+        if VALUE_OPTIONS.iter().any(|option| {
+            let Some(suffix) = argument.strip_prefix(option) else {
+                return false;
+            };
+            if is_short_cli_flag(option) {
+                !suffix.is_empty()
+            } else {
+                suffix.starts_with('=') && suffix.len() > 1
+            }
+        }) {
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    arguments.len()
+}
+
 fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool {
     const FORBIDDEN_FLAGS: &[&str] = &[
         "--extra-index-url",
@@ -668,7 +763,9 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
 
     let trust_arguments = if executable == "uv" {
         match uv_active_command_index(arguments) {
-            Some(run_index) if arguments[run_index] == "run" => &arguments[..run_index],
+            Some(run_index) if arguments[run_index] == "run" => {
+                &arguments[..uv_run_owned_argument_end(arguments, run_index)]
+            }
             _ => arguments,
         }
     } else {
