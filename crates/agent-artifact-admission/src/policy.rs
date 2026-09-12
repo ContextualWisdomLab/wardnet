@@ -595,6 +595,53 @@ fn requests_inline_eval(executable: &str, arguments: &[String]) -> bool {
         .any(|argument| matches!(argument.as_str(), "-c" | "-e" | "--eval" | "--execute"))
 }
 
+/// Locate the active top-level uv command without mistaking a reviewed global
+/// option's separate value for a command token. Unknown option grammar remains
+/// unsupported by the install policy; this helper only establishes the `run`
+/// delegation boundary used for trust-evidence attribution.
+fn uv_active_command_index(arguments: &[String]) -> Option<usize> {
+    const VALUE_OPTIONS: &[&str] = &[
+        "--allow-insecure-host",
+        "--trusted-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--directory",
+        "--keyring-provider",
+        "--project",
+    ];
+
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if !argument.starts_with('-') {
+            return Some(index);
+        }
+
+        if VALUE_OPTIONS.contains(&argument) {
+            let value = arguments.get(index + 1)?;
+            if value.is_empty() || value.starts_with('-') {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+
+        if VALUE_OPTIONS.iter().any(|option| {
+            argument
+                .strip_prefix(option)
+                .is_some_and(|suffix| suffix.starts_with('=') && suffix.len() > 1)
+        }) {
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
 fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool {
     const FORBIDDEN_FLAGS: &[&str] = &[
         "--extra-index-url",
@@ -618,7 +665,17 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         "-i",
         "-f",
     ];
-    arguments.iter().any(|argument| {
+
+    let trust_arguments = if executable == "uv" {
+        match uv_active_command_index(arguments) {
+            Some(run_index) if arguments[run_index] == "run" => &arguments[..run_index],
+            _ => arguments,
+        }
+    } else {
+        arguments
+    };
+
+    trust_arguments.iter().any(|argument| {
         FORBIDDEN_FLAGS
             .iter()
             .any(|flag| matches_cli_flag(argument, flag))
@@ -631,7 +688,7 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
                 .iter()
                 .any(|argument| argument.starts_with("--config.")))
         || (executable == "uv"
-            && arguments
+            && trust_arguments
                 .iter()
                 .any(|argument| matches_cli_flag(argument, "--system-certs")))
 }
