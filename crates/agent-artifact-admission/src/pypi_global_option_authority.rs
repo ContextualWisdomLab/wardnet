@@ -110,7 +110,10 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
                 reviewed_global_arguments.push(arguments[index].clone());
                 index += 1;
             } else {
-                push_separate_value_argument(
+                // The client-certificate path is consumed option grammar, not an
+                // artifact operand. Attach it only in the internal policy copy;
+                // admission_decision restores audit identity from submitted argv.
+                push_attached_normalized_value_argument(
                     arguments,
                     &mut reviewed_global_arguments,
                     &mut index,
