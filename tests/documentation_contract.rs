@@ -60,3 +60,25 @@ fn canonical_commercial_architecture_documents_are_present_and_owner_bounded() {
         ],
     );
 }
+
+#[test]
+fn material_ui_and_slow_work_boundaries_remain_explicit() {
+    assert_markers(
+        "PRD",
+        PRD,
+        &[
+            "Figma/Storybook evidence",
+            "normal, loading, empty, error, permission-denied, responsive, and keyboard/accessibility states",
+            "KO/EN/JA/ZH/VI/ES/DE/FR",
+        ],
+    );
+    assert_markers(
+        "TRD",
+        TRD,
+        &[
+            "Figma/Storybook evidence",
+            "KO/EN/JA/ZH/VI/ES/DE/FR",
+            "must not hold explicit database locks or long-lived transactions while performing LLM calls, external I/O, sandbox execution, or long-running computation",
+        ],
+    );
+}
