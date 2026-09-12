@@ -107,7 +107,11 @@ fn pip_global_certificate_prefixes_are_explicit_trust_authority() {
 
             let decision = admission_decision(&policy, &intent);
 
-            assert_eq!(decision.decision, DecisionKind::Block, "{executable} {selector}");
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {selector}"
+            );
             assert!(
                 decision
                     .reason_codes
@@ -138,7 +142,11 @@ fn pip_global_attached_certificate_prefixes_are_explicit_trust_authority() {
 
             let decision = admission_decision(&policy, &intent);
 
-            assert_eq!(decision.decision, DecisionKind::Block, "{executable} {selector}");
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} {selector}"
+            );
             assert!(
                 decision
                     .reason_codes
