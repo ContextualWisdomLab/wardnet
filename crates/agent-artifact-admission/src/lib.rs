@@ -29,6 +29,7 @@ mod pypi_python_interpreter_authority;
 mod pypi_registry_authority;
 mod pypi_requires_python_authority;
 mod pypi_system_package_authority;
+mod uv_bytecode_compilation_authority;
 mod uv_configuration_authority;
 mod uv_link_mode_authority;
 
@@ -287,6 +288,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         decision.decision = DecisionKind::Block;
     }
     if uv_link_mode_authority::requests_unapproved_uv_symlink_link_mode(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::ArtifactNotApproved)
+        {
+            decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if uv_bytecode_compilation_authority::requests_unapproved_uv_bytecode_compilation(intent) {
         if !decision
             .reason_codes
             .contains(&ReasonCode::ArtifactNotApproved)
