@@ -29,9 +29,10 @@ fn uv_no_build_isolation_cannot_inherit_artifact_approval() {
 #[test]
 fn uv_package_scoped_no_build_isolation_cannot_inherit_artifact_approval() {
     let (policy, mut intent) = approved_uv_install();
-    intent
-        .argv
-        .extend(["--no-build-isolation-package".to_string(), "cwl-example".to_string()]);
+    intent.argv.extend([
+        "--no-build-isolation-package".to_string(),
+        "cwl-example".to_string(),
+    ]);
 
     assert_build_isolation_override_is_blocked(&policy, &intent);
 }
