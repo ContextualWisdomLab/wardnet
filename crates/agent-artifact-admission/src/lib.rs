@@ -29,7 +29,6 @@ mod pypi_python_interpreter_authority;
 mod pypi_registry_authority;
 mod pypi_requires_python_authority;
 mod pypi_system_package_authority;
-mod uv_build_isolation_authority;
 mod uv_bytecode_compilation_authority;
 mod uv_configuration_authority;
 mod uv_link_mode_authority;
@@ -67,275 +66,167 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     let intent = certificate_store_normalized_intent
         .as_ref()
         .unwrap_or(intent);
-    let build_isolation_normalized_intent =
-        uv_build_isolation_authority::normalize_uv_build_isolation_package_selector(intent);
-    let intent = build_isolation_normalized_intent.as_ref().unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if artifact_variant::requests_unapproved_artifact_variant(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if cargo_install_authority::requests_unapproved_cargo_install_mutation(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if dependency_cardinality::misses_exact_dependency_set_guard(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
     if dependency_cardinality::npm_family_dependency_closure_is_unverified(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_build_directory_retention_authority::requests_unapproved_pypi_build_directory_retention(
-        intent,
-    ) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateInstallRoot)
-        {
+    if pypi_build_directory_retention_authority::requests_unapproved_pypi_build_directory_retention(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateInstallRoot) {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_cache_directory_authority::requests_unapproved_pypi_cache_directory_authority(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateInstallRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateInstallRoot) {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_certificate_store_authority::requests_unapproved_pypi_certificate_store_abbreviation(
-        intent,
-    ) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+    if pypi_certificate_store_authority::requests_unapproved_pypi_certificate_store_abbreviation(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_client_certificate_authority::requests_unapproved_pypi_client_certificate_authority(
-        intent,
-    ) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+    if pypi_client_certificate_authority::requests_unapproved_pypi_client_certificate_authority(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_constraint_authority::requests_unapproved_pypi_constraint_authority(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_dependency_group_authority::requests_unapproved_pip_dependency_group(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_hash_mode::requests_disabled_hash_requirement(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_install_mutation_authority::requests_unapproved_pypi_install_mutation(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_install_report_authority::requests_unapproved_pypi_report_authority(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateInstallRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateInstallRoot) {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_install_root_abbreviation_authority::requests_unapproved_pypi_target_abbreviation(
-        intent,
-    ) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateInstallRoot)
-        {
+    if pypi_install_root_abbreviation_authority::requests_unapproved_pypi_target_abbreviation(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateInstallRoot) {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_keyring_provider_authority::requests_unapproved_pypi_keyring_provider_authority(intent)
-    {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+    if pypi_keyring_provider_authority::requests_unapproved_pypi_keyring_provider_authority(intent) {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_log_output_authority::requests_unapproved_pypi_log_output_authority(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateInstallRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateInstallRoot) {
             decision.reason_codes.push(ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_noninteractive_authority::misses_required_noninteractive_mode(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_proxy_authority::requests_unapproved_pypi_proxy_authority(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
-    if pypi_python_interpreter_authority::requests_unapproved_pypi_python_interpreter_authority(
-        intent,
-    ) || pypi_python_interpreter_authority::requests_unapproved_uv_python_provider_authority(
-        intent,
-    ) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateInstallRoot)
-        {
-            decision
-                .reason_codes
-                .insert(0, ReasonCode::AlternateInstallRoot);
+    if pypi_python_interpreter_authority::requests_unapproved_pypi_python_interpreter_authority(intent)
+        || pypi_python_interpreter_authority::requests_unapproved_uv_python_provider_authority(intent)
+    {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateInstallRoot) {
+            decision.reason_codes.insert(0, ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_registry_authority::disables_reviewed_registry(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_requires_python_authority::requests_pypi_requires_python_override(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
     if pypi_system_package_authority::requests_pypi_system_package_override(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag)
-        {
-            decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
-        }
-        decision.decision = DecisionKind::Block;
-    }
-    if uv_build_isolation_authority::requests_unapproved_uv_build_isolation_override(
-        submitted_intent,
-    ) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag) {
             decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
         }
         decision.decision = DecisionKind::Block;
     }
     if uv_link_mode_authority::requests_unapproved_uv_symlink_link_mode(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if uv_bytecode_compilation_authority::requests_unapproved_uv_bytecode_compilation(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved) {
             decision.reason_codes.push(ReasonCode::ArtifactNotApproved);
         }
         decision.decision = DecisionKind::Block;
     }
     if uv_configuration_authority::requests_unapproved_uv_configuration_authority(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
     }
     if oci_transport::requests_unapproved_oci_transport_trust(intent) {
-        if !decision
-            .reason_codes
-            .contains(&ReasonCode::AlternateTrustRoot)
-        {
+        if !decision.reason_codes.contains(&ReasonCode::AlternateTrustRoot) {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
         }
         decision.decision = DecisionKind::Block;
