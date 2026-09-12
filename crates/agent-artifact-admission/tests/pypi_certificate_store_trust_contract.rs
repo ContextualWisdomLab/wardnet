@@ -85,6 +85,11 @@ fn pip_separate_certificate_prefix_value_is_explicit_trust_authority() {
             "pip's separate-value --ce prefix must be classified as trust authority independently of operand validation: {:?}",
             decision.reason_codes
         );
+        assert!(
+            !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved),
+            "the certificate-store value is authority metadata, not a package operand: {:?}",
+            decision.reason_codes
+        );
     }
 }
 
@@ -117,6 +122,11 @@ fn pip_global_certificate_prefixes_are_explicit_trust_authority() {
                     .reason_codes
                     .contains(&ReasonCode::AlternateTrustRoot),
                 "parser-valid global {selector} must be classified as certificate-store trust authority: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                !decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved),
+                "the global certificate-store value is authority metadata, not a package operand: {:?}",
                 decision.reason_codes
             );
             assert_eq!(decision.command_sha256, expected_command_sha256);
