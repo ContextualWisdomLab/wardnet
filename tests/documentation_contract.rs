@@ -25,7 +25,7 @@ fn canonical_commercial_architecture_documents_are_present_and_owner_bounded() {
         &[
             "Gateway and SOC Control Plane",
             "Agent Artifact Admission",
-            "security evidence and policy",
+            "Security evidence and policy",
             "quarantine-sandbox-runtime",
             "EgressWeave",
             "contextual-orchestrator",
