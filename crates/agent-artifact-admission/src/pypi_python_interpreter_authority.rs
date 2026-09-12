@@ -126,9 +126,9 @@ pub(crate) fn requests_unapproved_uv_python_provider_authority(intent: &InstallI
     let run_index = arguments.iter().position(|argument| argument == "run");
     let pip_index = arguments.iter().position(|argument| argument == "pip");
 
-    if let Some(run_index) = run_index.filter(|run_index| {
-        pip_index.is_none_or(|pip_index| pip_index > *run_index)
-    }) {
+    if let Some(run_index) =
+        run_index.filter(|run_index| pip_index.is_none_or(|pip_index| pip_index > *run_index))
+    {
         let child_index = arguments
             .iter()
             .enumerate()
