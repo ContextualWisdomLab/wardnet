@@ -135,6 +135,47 @@ fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
     }
 }
 
+#[test]
+fn uv_run_value_options_do_not_hide_uv_owned_python_provider_authority() {
+    for option in ["--managed-python", "--no-managed-python"] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = vec![
+            "uv".to_string(),
+            "run".to_string(),
+            "--python".to_string(),
+            "3.12".to_string(),
+            option.to_string(),
+            "python".to_string(),
+        ];
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "uv run remains outside Wardnet's supported artifact-install grammar"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
+            "unsupported uv run must remain fail closed"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateInstallRoot),
+            "uv-owned provider option {option} after the value-taking --python option must retain causal authority evidence; got {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+            "audit identity must remain bound to exact submitted argv"
+        );
+    }
+}
+
 fn assert_python_provider_selection_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
