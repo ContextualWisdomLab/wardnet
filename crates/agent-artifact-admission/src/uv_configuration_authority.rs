@@ -11,10 +11,12 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
     }
 
     let arguments = &intent.argv[1..];
-    if arguments
-        .iter()
-        .any(|argument| argument == "--directory" || argument.starts_with("--directory="))
-    {
+    if arguments.iter().any(|argument| {
+        argument == "--directory"
+            || argument.starts_with("--directory=")
+            || argument == "--config-file"
+            || argument.starts_with("--config-file=")
+    }) {
         return true;
     }
 
@@ -26,10 +28,8 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
         return false;
     }
 
-    arguments.iter().skip(2).any(|argument| {
-        argument == "--config-file"
-            || argument.starts_with("--config-file=")
-            || argument == "--torch-backend"
-            || argument.starts_with("--torch-backend=")
-    })
+    arguments
+        .iter()
+        .skip(2)
+        .any(|argument| argument == "--torch-backend" || argument.starts_with("--torch-backend="))
 }
