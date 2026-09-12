@@ -19,22 +19,22 @@ fn approved_uv_install_with_default_build_isolation_remains_admissible() {
 }
 
 #[test]
-fn uv_no_build_isolation_cannot_inherit_artifact_approval() {
+fn uv_no_build_isolation_is_bound_as_unapproved_build_variant() {
     let (policy, mut intent) = approved_uv_install();
     intent.argv.push("--no-build-isolation".to_string());
 
-    assert_build_isolation_override_is_blocked(&policy, &intent);
+    assert_build_variant_is_blocked(&policy, &intent);
 }
 
 #[test]
-fn uv_package_scoped_no_build_isolation_cannot_inherit_artifact_approval() {
+fn uv_package_scoped_no_build_isolation_is_bound_as_unapproved_build_variant() {
     let (policy, mut intent) = approved_uv_install();
     intent.argv.extend([
         "--no-build-isolation-package".to_string(),
         "cwl-example".to_string(),
     ]);
 
-    assert_build_isolation_override_is_blocked(&policy, &intent);
+    assert_build_variant_is_blocked(&policy, &intent);
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn uv_nearby_long_option_spelling_does_not_inherit_build_isolation_semantics() {
     assert!(decision.reason_codes.is_empty());
 }
 
-fn assert_build_isolation_override_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
+fn assert_build_variant_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
     assert_eq!(
@@ -58,8 +58,8 @@ fn assert_build_isolation_override_is_blocked(policy: &AdmissionPolicy, intent: 
     );
     assert_eq!(
         decision.reason_codes,
-        vec![ReasonCode::MissingSafetyFlag],
-        "disabling uv build isolation must fail causally as a package-manager hardening override"
+        vec![ReasonCode::ArtifactNotApproved],
+        "uv build-isolation selection is already canonical artifact/build-variant authority"
     );
     assert_eq!(
         decision.command_sha256,
