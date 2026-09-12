@@ -84,7 +84,7 @@ flowchart LR
 ## Security Boundaries
 
 - Default bind address is localhost.
-- Remote management requires `ADMIN_TOKEN` plus external TLS and identity controls.
+- Remote/public management write authority requires `CredentialRegistry` to contain at least one write-capable administrator secret that can be presented through `X-Admin-Token`; the authority may come from `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH`. A non-loopback bind fails closed before `TcpListener::bind` when no such principal exists. TLS and identity controls remain mandatory deployment controls, but they do not replace Wardnet's write authorization; read-only principals never satisfy the startup write-authority prerequisite.
 - Runtime configuration is loaded once at bootstrap and handed inward as an immutable snapshot; application code does not read operational env vars directly.
 - `WAF_IDS_STATE_PATH` enables JSON state persistence only when its bootstrap value is non-empty after trimming. Absent, empty, or whitespace-only input preserves the seeded in-memory state mode.
 - File-backed writes use temporary sibling files followed by atomic rename. Management API mutations roll back in memory if the state file cannot be replaced.
