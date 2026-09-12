@@ -1,6 +1,7 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -42,6 +43,7 @@ fn pip_global_proxy_before_install_fails_closed_without_artifact_pollution() {
             let install_arguments = intent.argv.split_off(1);
             intent.argv.extend(proxy_arguments.clone());
             intent.argv.extend(install_arguments);
+            let submitted_command_sha256 = sha256_hex(intent.argv.join("\u{1f}").as_bytes());
 
             let decision = admission_decision(&policy, &intent);
 
@@ -57,7 +59,76 @@ fn pip_global_proxy_before_install_fails_closed_without_artifact_pollution() {
                 "global proxy authority must produce only its causal trust-authority evidence: {:?}",
                 decision.reason_codes
             );
+            assert_eq!(
+                decision.command_sha256, submitted_command_sha256,
+                "policy normalization must not rewrite submitted-command evidence"
+            );
         }
+    }
+}
+
+#[test]
+fn pip_global_proxy_value_does_not_hide_a_genuine_extra_artifact() {
+    for executable in ["pip", "pip3"] {
+        for proxy_option in ["--proxy", "--prox"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            let install_arguments = intent.argv.split_off(1);
+            intent.argv.push(proxy_option.to_string());
+            intent.argv.push("http://attacker.invalid:8080".to_string());
+            intent.argv.extend(install_arguments);
+            intent.argv.push("attacker-package==9.9.9".to_string());
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(decision.decision, DecisionKind::Block);
+            assert_eq!(
+                decision.reason_codes.len(),
+                2,
+                "global proxy normalization must consume only the reviewed proxy value: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "global {proxy_option:?} must retain proxy/trust-authority evidence: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::ArtifactNotApproved),
+                "a real undeclared package must remain visible after global proxy normalization: {:?}",
+                decision.reason_codes
+            );
+        }
+    }
+}
+
+#[test]
+fn unreviewed_pip_global_option_is_not_hidden_by_proxy_normalization() {
+    for executable in ["pip", "pip3"] {
+        let (policy, mut intent) = approved_pip_install(executable);
+        let install_arguments = intent.argv.split_off(1);
+        intent.argv.extend([
+            "--timeout".to_string(),
+            "1".to_string(),
+        ]);
+        intent.argv.extend(install_arguments);
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            "unreviewed global option grammar must remain outside the supported command path: {:?}",
+            decision.reason_codes
+        );
+        assert!(
+            decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved),
+            "an arbitrary global option value must not be silently consumed as proxy syntax: {:?}",
+            decision.reason_codes
+        );
     }
 }
 

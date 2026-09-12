@@ -47,6 +47,9 @@ pub use policy::{is_sha256_hex, sha256_hex, validate_install_intent};
 
 /// Compute a deterministic fail-closed admission decision for one install intent.
 pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> AdmissionDecision {
+    let submitted_intent = intent;
+    let normalized_intent = pypi_proxy_authority::normalize_direct_pip_global_proxy_intent(intent);
+    let intent = normalized_intent.as_ref().unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
         if !decision
@@ -282,5 +285,6 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         }
         decision.decision = DecisionKind::Block;
     }
+    decision.command_sha256 = sha256_hex(submitted_intent.argv.join("\u{1f}").as_bytes());
     decision
 }
