@@ -25,6 +25,7 @@ mod pypi_keyring_provider_authority;
 mod pypi_log_output_authority;
 mod pypi_noninteractive_authority;
 mod pypi_proxy_authority;
+mod pypi_python_interpreter_authority;
 mod pypi_registry_authority;
 mod pypi_requires_python_authority;
 mod pypi_system_package_authority;
@@ -235,6 +236,19 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
             .contains(&ReasonCode::AlternateTrustRoot)
         {
             decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if pypi_python_interpreter_authority::requests_unapproved_pypi_python_interpreter_authority(
+        intent,
+    ) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateInstallRoot)
+        {
+            decision
+                .reason_codes
+                .insert(0, ReasonCode::AlternateInstallRoot);
         }
         decision.decision = DecisionKind::Block;
     }
