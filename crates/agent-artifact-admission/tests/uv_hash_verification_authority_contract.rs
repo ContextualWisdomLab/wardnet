@@ -31,7 +31,9 @@ fn uv_no_verify_hashes_cannot_disable_reviewed_hash_verification() {
         "uv must not accept an explicit hash-verification disable selector alongside the reviewed --require-hashes guard"
     );
     assert!(
-        decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag),
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
         "uv --no-verify-hashes must retain stable missing_safety_flag evidence"
     );
     assert_eq!(
