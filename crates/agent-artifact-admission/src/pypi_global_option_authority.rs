@@ -4,6 +4,9 @@ use crate::pypi_client_certificate_authority::matches_pip_client_certificate_opt
 use crate::pypi_proxy_authority::{
     is_attached_direct_pip_proxy_selector, is_direct_pip_proxy_value_selector,
 };
+use crate::pypi_registry_authority::{
+    is_reviewed_pip_no_index_selector, is_reviewed_pip_registry_value_selector,
+};
 
 /// Canonicalize only reviewed direct-pip General Options for policy evaluation.
 ///
@@ -54,6 +57,29 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
         }
 
         if is_attached_direct_pip_proxy_selector(argument) {
+            reviewed_global_arguments.push(arguments[index].clone());
+            index += 1;
+            continue;
+        }
+
+        if is_reviewed_pip_registry_value_selector(argument) {
+            if let Some((_, value)) = argument.split_once('=') {
+                if value.is_empty() {
+                    return None;
+                }
+                reviewed_global_arguments.push(arguments[index].clone());
+                index += 1;
+            } else {
+                push_separate_value_argument(
+                    arguments,
+                    &mut reviewed_global_arguments,
+                    &mut index,
+                )?;
+            }
+            continue;
+        }
+
+        if is_reviewed_pip_no_index_selector(argument) {
             reviewed_global_arguments.push(arguments[index].clone());
             index += 1;
             continue;
