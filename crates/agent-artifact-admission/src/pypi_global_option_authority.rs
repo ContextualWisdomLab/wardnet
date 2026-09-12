@@ -124,23 +124,28 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
         }
 
         if matches_pip_python_interpreter_option(argument) {
-            if let Some((_, value)) = argument.split_once('=') {
+            let value = if let Some((_, value)) = argument.split_once('=') {
                 if value.is_empty() {
                     return None;
                 }
-                reviewed_global_arguments.push(arguments[index].clone());
                 index += 1;
+                value.to_string()
             } else {
-                // The interpreter path is consumed General Option grammar, not a
-                // package operand. Keep it attached only in the internal policy
-                // copy so artifact cardinality remains exact; the wrapper restores
-                // the caller-submitted argv hash before returning the decision.
-                push_attached_normalized_value_argument(
-                    arguments,
-                    &mut reviewed_global_arguments,
-                    &mut index,
-                )?;
-            }
+                let value = arguments.get(index + 1)?;
+                if value == "install" || value.starts_with('-') || value.is_empty() {
+                    return None;
+                }
+                index += 2;
+                value.clone()
+            };
+
+            // A verified pre-command abbreviation is General Option grammar, but
+            // the same spelling can be ambiguous in `pip install` grammar because
+            // that parser also defines `--python-version`. Canonicalize only the
+            // internal policy copy to exact `--python=VALUE` so the pre-command
+            // meaning survives phase normalization without widening post-command
+            // authority. The submitted argv remains the audit/hash authority.
+            reviewed_global_arguments.push(format!("--python={value}"));
             continue;
         }
 
