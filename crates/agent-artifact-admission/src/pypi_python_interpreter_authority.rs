@@ -107,36 +107,31 @@ pub(crate) fn requests_unapproved_pypi_python_interpreter_authority(
     false
 }
 
-/// Detect caller-selected uv Python-provider authority for exact `uv pip install` intents.
+/// Detect caller-selected uv Python-provider authority in uv option grammar.
 ///
-/// uv's `--managed-python` and `--no-managed-python` flags determine whether the
-/// interpreter search is constrained to uv-managed Python installations or to
-/// system Python. Wardnet binds that caller-selected provider policy as admission
-/// authority only; it does not discover, download, launch, inspect, or mutate an
-/// interpreter or environment. uv spellings are matched exactly rather than
-/// inheriting direct-pip `optparse` abbreviation semantics, and `--` terminates
-/// option classification.
+/// uv documents `--managed-python` and `--no-managed-python` as global options,
+/// while also accepting them in the `uv pip install` option stream. Either form
+/// changes which Python provider may satisfy the install, so Wardnet records that
+/// causal install-root authority even when the surrounding command is otherwise
+/// rejected. This classifier never widens Wardnet's supported install-command
+/// grammar and never discovers, downloads, launches, inspects, or mutates Python.
+/// Exact spellings are required, and `--` terminates option classification.
 pub(crate) fn requests_unapproved_uv_python_provider_authority(intent: &InstallIntent) -> bool {
-    if intent.argv.first().map(String::as_str) != Some("uv")
-        || intent.argv.get(1).map(String::as_str) != Some("pip")
-        || intent.argv.get(2).map(String::as_str) != Some("install")
-    {
+    if intent.argv.first().map(String::as_str) != Some("uv") {
         return false;
     }
 
-    for argument in intent.argv.iter().skip(3) {
-        if argument == "--" {
-            break;
-        }
-        if matches!(
-            argument.as_str(),
-            "--managed-python" | "--no-managed-python"
-        ) {
-            return true;
-        }
-    }
-
-    false
+    intent
+        .argv
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| {
+            matches!(
+                argument.as_str(),
+                "--managed-python" | "--no-managed-python"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -249,9 +244,24 @@ mod tests {
 
     #[test]
     fn uv_python_provider_authority_is_exact_and_stops_at_option_terminator() {
-        for option in ["--managed-python", "--no-managed-python"] {
+        for argv in [
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--managed-python",
+            ],
+            vec![
+                "uv",
+                "--no-managed-python",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+            ],
+        ] {
             assert!(requests_unapproved_uv_python_provider_authority(
-                &test_intent(vec!["uv", "pip", "install", "cwl-example==1.2.3", option,])
+                &test_intent(argv)
             ));
         }
 
