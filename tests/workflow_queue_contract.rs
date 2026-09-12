@@ -63,5 +63,6 @@ fn local_scorecard_preserves_non_pr_security_evidence() {
     assert!(workflow.contains("schedule:"));
     assert!(workflow.contains("push:"));
     assert!(!workflow.contains("pull_request:"));
+    assert!(workflow.contains("security-events: write"));
     assert!(workflow.contains("# v2.4.4"));
 }
