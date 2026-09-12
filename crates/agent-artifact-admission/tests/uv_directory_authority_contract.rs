@@ -69,6 +69,94 @@ fn uv_separate_directory_value_is_classified_as_configuration_authority() {
 }
 
 #[test]
+fn uv_global_separate_directory_retains_configuration_authority_reason() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "--directory".to_string(),
+        "/tmp/attacker-project".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "cwl-example==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "uv global --directory must preserve the causal alternate_trust_root evidence even when the command grammar remains unsupported: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+    );
+}
+
+#[test]
+fn uv_global_attached_directory_retains_configuration_authority_reason() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "--directory=/tmp/attacker-project".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "cwl-example==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "uv global --directory=<path> must preserve the causal alternate_trust_root evidence: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+    );
+}
+
+#[test]
+fn uv_global_nearby_directory_spelling_does_not_inherit_configuration_semantics() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "--directoryx=/tmp/attacker-project".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "cwl-example==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "Wardnet must not invent uv global-option semantics for nearby spellings: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+    );
+}
+
+#[test]
 fn uv_nearby_directory_option_spelling_does_not_inherit_configuration_semantics() {
     let (policy, mut intent) = approved_uv_install();
     intent
