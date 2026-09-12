@@ -25,8 +25,8 @@ fn reviewed_pip_baseline_remains_allowed() {
 fn global_pip_registry_and_trust_selectors_are_causal_trust_evidence() {
     for executable in ["pip", "pip3"] {
         for option in [
-            format!("--trusted-host=attacker.invalid"),
-            format!("--tr=attacker.invalid"),
+            "--trusted-host=attacker.invalid".to_string(),
+            "--tr=attacker.invalid".to_string(),
             format!("--index-url={HOSTILE_INDEX}"),
             format!("--in={HOSTILE_INDEX}"),
             format!("--extra-index-url={HOSTILE_INDEX}"),
