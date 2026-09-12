@@ -115,7 +115,9 @@ fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
             "uv run remains outside Wardnet's supported artifact-install grammar"
         );
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
             "unsupported uv run must remain fail closed"
         );
         assert!(
