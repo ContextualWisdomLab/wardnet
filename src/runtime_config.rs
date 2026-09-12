@@ -182,51 +182,281 @@ pub fn parse_u64_env(
 }
 
 #[cfg(test)]
-/// Detect syntax that imports or directly calls the process-environment API.
-///
-/// Importing `std::env` or aliasing the `std` root outside the two bootstrap
-/// adapters is itself forbidden: otherwise aliases can hide later `var`/`var_os`
-/// calls from a literal-call scan. Whitespace and an optional leading `::` on
-/// `use` paths are normalized, grouped `self as ...` root aliases are rejected,
-/// and `extern crate std as ...` is treated as the same forbidden authority.
-fn source_uses_runtime_env(source: &str) -> bool {
-    let compact = source
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    let compact = compact.replace("use::std", "usestd");
+/// Tokenize the Rust syntax needed by the architecture fitness rule while
+/// discarding comments and literal bodies so documentation or fixture strings
+/// cannot be mistaken for executable environment access.
+fn rust_syntax_tokens(source: &str) -> Vec<String> {
+    fn raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut cursor = start;
+        if bytes.get(cursor) == Some(&b'b') {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'r') {
+            return None;
+        }
+        cursor += 1;
+        let hash_start = cursor;
+        while bytes.get(cursor) == Some(&b'#') {
+            cursor += 1;
+        }
+        let hash_count = cursor - hash_start;
+        if bytes.get(cursor) != Some(&b'"') {
+            return None;
+        }
+        cursor += 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'"'
+                && bytes
+                    .get(cursor + 1..cursor + 1 + hash_count)
+                    .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+            {
+                return Some(cursor + 1 + hash_count);
+            }
+            cursor += 1;
+        }
+        Some(bytes.len())
+    }
 
-    if compact.contains("std::env::var(")
-        || compact.contains("std::env::var_os(")
-        || compact.contains("usestd::env;")
-        || compact.contains("usestd::envas")
-        || compact.contains("usestd::env::")
-        || compact.contains("usestdas")
-        || compact.contains("externcratestdas")
-    {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
+            cursor += 2;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                cursor += 1;
+            }
+            continue;
+        }
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
+            cursor += 2;
+            let mut depth = 1usize;
+            while cursor < bytes.len() && depth > 0 {
+                if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes[cursor] == b'*' && bytes.get(cursor + 1) == Some(&b'/') {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            continue;
+        }
+        if (bytes[cursor] == b'r'
+            || (bytes[cursor] == b'b' && bytes.get(cursor + 1) == Some(&b'r')))
+            && let Some(end) = raw_string_end(bytes, cursor)
+        {
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            cursor += 1;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'\\' => cursor = (cursor + 2).min(bytes.len()),
+                    b'"' => {
+                        cursor += 1;
+                        break;
+                    }
+                    _ => cursor += 1,
+                }
+            }
+            continue;
+        }
+        if bytes[cursor] == b'\'' {
+            let line_end = source[cursor + 1..]
+                .find('\n')
+                .map(|offset| cursor + 1 + offset)
+                .unwrap_or(bytes.len());
+            if let Some(relative_end) = source[cursor + 1..line_end].find('\'') {
+                cursor += relative_end + 2;
+            } else {
+                cursor += 1;
+            }
+            continue;
+        }
+        if bytes[cursor].is_ascii_alphabetic() || bytes[cursor] == b'_' {
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+            {
+                cursor += 1;
+            }
+            tokens.push(source[start..cursor].to_string());
+            continue;
+        }
+        if bytes[cursor] == b':' && bytes.get(cursor + 1) == Some(&b':') {
+            tokens.push("::".to_string());
+            cursor += 2;
+            continue;
+        }
+        tokens.push((bytes[cursor] as char).to_string());
+        cursor += 1;
+    }
+    tokens
+}
+
+#[cfg(test)]
+/// Return whether one parsed `use` statement imports `std::env` or creates an
+/// alias for the `std` root that could hide a later environment read.
+fn use_statement_exposes_runtime_env(statement: &[String]) -> bool {
+    let mut cursor = usize::from(statement.first().is_some_and(|token| token == "::"));
+    if statement.get(cursor).map(String::as_str) != Some("std") {
+        return false;
+    }
+    cursor += 1;
+    if statement.get(cursor).map(String::as_str) == Some("as") {
         return true;
     }
+    if statement.get(cursor).map(String::as_str) != Some("::") {
+        return false;
+    }
+    cursor += 1;
+    match statement.get(cursor).map(String::as_str) {
+        Some("env") => true,
+        Some("{") => {
+            cursor += 1;
+            let mut depth = 0usize;
+            let mut entry = Vec::new();
+            while let Some(token) = statement.get(cursor) {
+                match token.as_str() {
+                    "{" | "(" | "[" => {
+                        depth += 1;
+                        entry.push(token.as_str());
+                    }
+                    "}" if depth == 0 => {
+                        if use_group_entry_exposes_runtime_env(&entry) {
+                            return true;
+                        }
+                        break;
+                    }
+                    "}" | ")" | "]" => {
+                        depth = depth.saturating_sub(1);
+                        entry.push(token.as_str());
+                    }
+                    "," if depth == 0 => {
+                        if use_group_entry_exposes_runtime_env(&entry) {
+                            return true;
+                        }
+                        entry.clear();
+                    }
+                    _ => entry.push(token.as_str()),
+                }
+                cursor += 1;
+            }
+            false
+        }
+        _ => false,
+    }
+}
 
-    let mut remaining = compact.as_str();
-    const GROUP_PREFIX: &str = "usestd::{";
-    while let Some(start) = remaining.find(GROUP_PREFIX) {
-        let group = &remaining[start + GROUP_PREFIX.len()..];
-        let Some(end) = group.find("};") else {
-            break;
-        };
-        if group[..end].split(',').any(|entry| {
-            let entry = entry.trim_matches(['{', '}']);
-            entry == "env"
-                || entry.starts_with("envas")
-                || entry.starts_with("env::")
-                || entry.starts_with("selfas")
-        }) {
+#[cfg(test)]
+/// Evaluate one top-level `std::{...}` use-tree entry for the two forbidden
+/// roots: `env` itself or `self as <alias>` for a hidden `std` root.
+fn use_group_entry_exposes_runtime_env(entry: &[&str]) -> bool {
+    matches!(entry.first().copied(), Some("env"))
+        || matches!(entry, ["self", "as", alias, ..] if !alias.is_empty())
+}
+
+#[cfg(test)]
+/// Detect executable Rust syntax that reads process environment outside the
+/// approved bootstrap adapters.
+///
+/// The parser deliberately operates on tokens rather than substrings: comments,
+/// normal/raw string literals, and character literals are discarded; `use`
+/// trees and simple function-item aliases are then evaluated structurally.
+fn source_uses_runtime_env(source: &str) -> bool {
+    let tokens = rust_syntax_tokens(source);
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "use" {
+            let end = tokens[index + 1..]
+                .iter()
+                .position(|candidate| candidate == ";")
+                .map(|offset| index + 1 + offset)
+                .unwrap_or(tokens.len());
+            if use_statement_exposes_runtime_env(&tokens[index + 1..end]) {
+                return true;
+            }
+        }
+        if token == "extern"
+            && tokens.get(index + 1).map(String::as_str) == Some("crate")
+            && tokens.get(index + 2).map(String::as_str) == Some("std")
+            && tokens.get(index + 3).map(String::as_str) == Some("as")
+        {
             return true;
         }
-        remaining = &group[end + 2..];
+        if tokens.get(index).map(String::as_str) == Some("std")
+            && tokens.get(index + 1).map(String::as_str) == Some("::")
+            && tokens.get(index + 2).map(String::as_str) == Some("env")
+            && tokens.get(index + 3).map(String::as_str) == Some("::")
+            && matches!(
+                tokens.get(index + 4).map(String::as_str),
+                Some("var" | "var_os")
+            )
+            && tokens.get(index + 5).map(String::as_str) == Some("(")
+        {
+            return true;
+        }
     }
 
-    false
+    let mut function_aliases = std::collections::HashSet::new();
+    for index in 0..tokens.len() {
+        if tokens[index] != "let" {
+            continue;
+        }
+        let mut binding = index + 1;
+        if tokens.get(binding).map(String::as_str) == Some("mut") {
+            binding += 1;
+        }
+        let Some(alias) = tokens.get(binding).filter(|name| {
+            name.as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        }) else {
+            continue;
+        };
+        let statement_end = tokens[binding + 1..]
+            .iter()
+            .position(|token| token == ";")
+            .map(|offset| binding + 1 + offset)
+            .unwrap_or(tokens.len());
+        let Some(equals) = tokens[binding + 1..statement_end]
+            .iter()
+            .position(|token| token == "=")
+            .map(|offset| binding + 1 + offset)
+        else {
+            continue;
+        };
+        let rhs = equals + 1;
+        let aliases_env_function = tokens.get(rhs).map(String::as_str) == Some("std")
+            && tokens.get(rhs + 1).map(String::as_str) == Some("::")
+            && tokens.get(rhs + 2).map(String::as_str) == Some("env")
+            && tokens.get(rhs + 3).map(String::as_str) == Some("::")
+            && matches!(
+                tokens.get(rhs + 4).map(String::as_str),
+                Some("var" | "var_os")
+            )
+            && tokens.get(rhs + 5).is_some_and(|token| token == ";");
+        let aliases_existing_function = tokens
+            .get(rhs)
+            .is_some_and(|candidate| function_aliases.contains(candidate))
+            && tokens.get(rhs + 1).is_some_and(|token| token == ";");
+        if aliases_env_function || aliases_existing_function {
+            function_aliases.insert(alias.clone());
+        }
+    }
+
+    tokens.windows(2).any(|window| {
+        function_aliases.contains(&window[0]) && window[1] == "("
+    })
 }
 
 #[cfg(test)]
@@ -394,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    /// The detector rejects direct calls and direct, grouped, or root aliases.
+    /// The syntax detector rejects direct calls, use aliases, and function-item aliases.
     fn runtime_env_syntax_detector_covers_alias_forms() {
         assert!(source_uses_runtime_env(
             "fn bypass() { let _ = std::env::var_os(\"BIND_ADDR\"); }"
@@ -417,7 +647,26 @@ mod tests {
         assert!(source_uses_runtime_env(
             "extern crate std as standard; fn bypass() { let _ = standard::env::var(\"BIND_ADDR\"); }"
         ));
+        assert!(source_uses_runtime_env(
+            "fn bypass() { let read = std::env::var; let _ = read(\"BIND_ADDR\"); }"
+        ));
+        assert!(source_uses_runtime_env(
+            "fn bypass() { let read = std::env::var_os; let read_again = read; let _ = read_again(\"BIND_ADDR\"); }"
+        ));
         assert!(!source_uses_runtime_env("use std::fmt; fn harmless() {}"));
+    }
+
+    #[test]
+    /// Comments and literal text that mention env APIs are not executable access.
+    fn runtime_env_syntax_detector_ignores_comments_and_literals() {
+        let source = r###"
+            // let read = std::env::var;
+            /* use std::env as process_env; */
+            const NORMAL: &str = "std::env::var(\"BIND_ADDR\")";
+            const RAW: &str = r#"use std::env; std::env::var_os(\"X\")"#;
+            fn harmless() { let value = 'x'; let _ = (NORMAL, RAW, value); }
+        "###;
+        assert!(!source_uses_runtime_env(source));
     }
 
     #[test]
