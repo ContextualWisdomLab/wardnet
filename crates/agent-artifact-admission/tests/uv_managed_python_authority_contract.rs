@@ -34,6 +34,68 @@ fn uv_system_python_search_mode_cannot_inherit_artifact_approval() {
     assert_python_provider_selection_is_blocked(&policy, &intent);
 }
 
+#[test]
+fn uv_global_python_provider_modes_preserve_causal_install_root_evidence() {
+    for option in ["--managed-python", "--no-managed-python"] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = vec![
+            "uv".to_string(),
+            option.to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "cwl-example==1.2.3".to_string(),
+            "--require-hashes".to_string(),
+            "--no-deps".to_string(),
+        ];
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(
+            decision.decision,
+            DecisionKind::Block,
+            "global uv Python-provider authority must remain fail closed"
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateInstallRoot),
+            "documented global {option} must preserve causal interpreter/install-root evidence; got {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+            "audit identity must remain bound to exact submitted argv"
+        );
+    }
+}
+
+#[test]
+fn uv_global_python_provider_near_spellings_do_not_inherit_authority_semantics() {
+    for option in ["--managed-pytho", "--no-managed-pytho"] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = vec![
+            "uv".to_string(),
+            option.to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "cwl-example==1.2.3".to_string(),
+            "--require-hashes".to_string(),
+            "--no-deps".to_string(),
+        ];
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            !decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateInstallRoot),
+            "unreviewed near spelling {option} must not inherit uv Python-provider semantics"
+        );
+    }
+}
+
 fn assert_python_provider_selection_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
