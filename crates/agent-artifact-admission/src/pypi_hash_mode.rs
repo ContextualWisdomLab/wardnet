@@ -21,8 +21,13 @@ pub(crate) fn requests_disabled_hash_requirement(intent: &InstallIntent) -> bool
         _ => false,
     };
 
-    is_supported_install
+    let disables_required_hashes = arguments
+        .iter()
+        .any(|argument| argument == "--no-require-hashes");
+    let disables_uv_hash_verification = executable == "uv"
         && arguments
             .iter()
-            .any(|argument| argument == "--no-require-hashes")
+            .any(|argument| argument == "--no-verify-hashes");
+
+    is_supported_install && (disables_required_hashes || disables_uv_hash_verification)
 }
