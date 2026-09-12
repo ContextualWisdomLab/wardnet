@@ -28,7 +28,10 @@ fn pre_command_verified_python_abbreviation_retains_interpreter_authority() {
         let decision = admission_decision(&policy, &intent);
 
         assert_eq!(decision.decision, DecisionKind::Block);
-        assert_eq!(decision.reason_codes, vec![ReasonCode::AlternateInstallRoot]);
+        assert_eq!(
+            decision.reason_codes,
+            vec![ReasonCode::AlternateInstallRoot]
+        );
         assert_eq!(
             decision.command_sha256,
             sha256_hex(submitted_argv.join("\u{1f}").as_bytes())
