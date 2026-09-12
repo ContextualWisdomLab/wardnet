@@ -1,6 +1,7 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
-    InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision, sha256_hex,
+    InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 #[test]
