@@ -155,8 +155,8 @@ mod tests {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
             operation: "install".to_string(),
             argv: argv.into_iter().map(str::to_string).collect(),
-            manifest_sha256:
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             source: InstructionSource {
                 kind: InstructionSourceKind::ReviewedConfig,
                 uri: None,
@@ -168,9 +168,8 @@ mod tests {
                 version: "1.2.3".to_string(),
                 registry_url: "https://pypi.org/simple".to_string(),
                 owner: "ContextualWisdomLab".to_string(),
-                sha256:
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                        .to_string(),
+                sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .to_string(),
                 artifact_argument: "cwl-example==1.2.3".to_string(),
             }],
         }
