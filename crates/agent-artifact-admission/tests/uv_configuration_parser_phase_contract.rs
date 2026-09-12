@@ -8,15 +8,22 @@ fn unsupported_uv_run_child_argv_does_not_inherit_install_configuration_authorit
     let (policy, mut intent) = approved_uv_install();
 
     for argv in [
+        vec!["uv", "run", "python", "--config-file=/tmp/attacker-uv.toml"],
         vec![
             "uv",
             "run",
             "python",
-            "--config-file=/tmp/attacker-uv.toml",
+            "--config-file",
+            "/tmp/attacker-uv.toml",
         ],
-        vec!["uv", "run", "python", "--config-file", "/tmp/attacker-uv.toml"],
         vec!["uv", "run", "python", "--directory=/tmp/attacker-project"],
-        vec!["uv", "run", "python", "--directory", "/tmp/attacker-project"],
+        vec![
+            "uv",
+            "run",
+            "python",
+            "--directory",
+            "/tmp/attacker-project",
+        ],
     ] {
         intent.argv = argv.into_iter().map(str::to_string).collect();
 
@@ -24,7 +31,9 @@ fn unsupported_uv_run_child_argv_does_not_inherit_install_configuration_authorit
 
         assert_eq!(decision.decision, DecisionKind::Block);
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
             "unsupported uv run must remain fail-closed at the command boundary: {:?}",
             decision.reason_codes
         );
