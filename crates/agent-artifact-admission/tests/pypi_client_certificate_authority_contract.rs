@@ -86,7 +86,10 @@ fn pip_separate_client_certificate_value_is_explicitly_classified_as_trust_autho
 #[test]
 fn pip_global_client_certificate_authority_before_install_is_explicitly_classified() {
     for executable in ["pip", "pip3"] {
-        for option in ["--client-cert=/tmp/attacker-client.pem", "--cl=/tmp/attacker-client.pem"] {
+        for option in [
+            "--client-cert=/tmp/attacker-client.pem",
+            "--cl=/tmp/attacker-client.pem",
+        ] {
             let (policy, mut intent) = approved_pip_install(executable);
             intent.argv = vec![
                 executable.to_string(),
