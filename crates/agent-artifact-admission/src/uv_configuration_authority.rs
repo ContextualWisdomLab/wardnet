@@ -22,6 +22,8 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
     arguments.iter().skip(2).any(|argument| {
         argument == "--config-file"
             || argument.starts_with("--config-file=")
+            || argument == "--directory"
+            || argument.starts_with("--directory=")
             || argument == "--torch-backend"
             || argument.starts_with("--torch-backend=")
     })
