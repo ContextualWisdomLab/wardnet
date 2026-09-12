@@ -1,11 +1,24 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
+
+#[test]
+fn reviewed_pip_install_without_client_certificate_override_remains_admissible() {
+    for executable in ["pip", "pip3"] {
+        let (policy, intent) = approved_pip_install(executable);
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Allow);
+        assert!(decision.reason_codes.is_empty());
+    }
+}
 
 #[test]
 fn pip_client_certificate_override_cannot_inherit_artifact_approval() {
@@ -134,6 +147,7 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                 "--no-deps".to_string(),
                 "--no-input".to_string(),
             ];
+            let submitted_argv = intent.argv.clone();
 
             let decision = admission_decision(&policy, &intent);
 
@@ -162,6 +176,11 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                     .contains(&ReasonCode::MissingSafetyFlag),
                 "{executable} reviewed safety flags must remain visible after global client-certificate normalization: {:?}",
                 decision.reason_codes
+            );
+            assert_eq!(
+                decision.command_sha256,
+                sha256_hex(submitted_argv.join("\u{1f}").as_bytes()),
+                "internal normalization must preserve the exact caller-submitted argv audit identity"
             );
         }
     }
