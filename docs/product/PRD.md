@@ -62,7 +62,7 @@ All LLM use is through a released `contextual-orchestrator` API contract. Reposi
 
 ### Operator UI
 
-The `/admin` surface is an operations console, not a marketing landing page. Material UI work must use reusable design/tokens/components and retain evidence of the implemented design system or Storybook/Figma artifacts where applicable. Buyer-critical flows must cover normal, loading, empty, error, permission-denied, responsive, and keyboard/accessibility states.
+The `/admin` surface is an operations console, not a marketing landing page. Material UI work must use reusable design/tokens/components and retain Figma/Storybook evidence for the implemented design system and buyer-critical surfaces. Buyer-critical flows must cover normal, loading, empty, error, permission-denied, responsive, and keyboard/accessibility states.
 
 Text-bearing material UI must remain robust for KO/EN/JA/ZH/VI/ES/DE/FR content expansion and wrapping even when a locale is not yet shipped as a complete translation. UI claims about security, performance, readiness, or release state must come from product evidence, not decorative copy.
 
