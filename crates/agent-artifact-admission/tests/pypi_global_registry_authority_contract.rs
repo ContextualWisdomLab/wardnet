@@ -154,13 +154,25 @@ fn ambiguous_global_long_prefix_is_not_promoted_to_trusted_host() {
     }
 }
 
-fn global_install_argv(executable: &str, global_arguments: &[&str], extra_packages: &[&str]) -> Vec<String> {
+fn global_install_argv(
+    executable: &str,
+    global_arguments: &[&str],
+    extra_packages: &[&str],
+) -> Vec<String> {
     let mut argv = Vec::with_capacity(6 + global_arguments.len() + extra_packages.len());
     argv.push(executable.to_string());
-    argv.extend(global_arguments.iter().map(|argument| (*argument).to_string()));
+    argv.extend(
+        global_arguments
+            .iter()
+            .map(|argument| (*argument).to_string()),
+    );
     argv.push("install".to_string());
     argv.push(ARTIFACT_ARGUMENT.to_string());
-    argv.extend(extra_packages.iter().map(|argument| (*argument).to_string()));
+    argv.extend(
+        extra_packages
+            .iter()
+            .map(|argument| (*argument).to_string()),
+    );
     argv.push("--require-hashes".to_string());
     argv.push("--no-deps".to_string());
     argv.push("--no-input".to_string());
