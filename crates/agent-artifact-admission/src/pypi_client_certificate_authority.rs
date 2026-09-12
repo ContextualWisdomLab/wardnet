@@ -5,26 +5,35 @@ const SHORTEST_UNAMBIGUOUS_PREFIX: &str = "--cl";
 
 /// Return whether a direct pip install selects caller-controlled TLS client
 /// credentials through pip's optparse-compatible long-option grammar.
+///
+/// pip parses General Options both before command selection and again on the
+/// selected command's argv. Wardnet therefore classifies the reviewed
+/// `--client-cert` language on either side of the `install` token instead of
+/// treating pre-command placement as unrelated command syntax.
 pub(crate) fn requests_unapproved_pypi_client_certificate_authority(
     intent: &InstallIntent,
 ) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
     };
-    let arguments = &intent.argv[1..];
+    if !matches!(executable, "pip" | "pip3") {
+        return false;
+    }
 
-    matches!(executable, "pip" | "pip3")
-        && arguments
-            .first()
-            .is_some_and(|argument| argument == "install")
-        && arguments
-            .iter()
-            .any(|argument| matches_pip_client_certificate_option(argument))
+    let arguments = &intent.argv[1..];
+    let Some(install_index) = arguments.iter().position(|argument| argument == "install") else {
+        return false;
+    };
+
+    arguments[..install_index]
+        .iter()
+        .chain(arguments[install_index + 1..].iter())
+        .any(|argument| matches_pip_client_certificate_option(argument))
 }
 
 /// Match only the pinned pip parser language for `--client-cert`: the exact
 /// option and its verified unambiguous prefixes beginning at `--cl`.
-fn matches_pip_client_certificate_option(argument: &str) -> bool {
+pub(crate) fn matches_pip_client_certificate_option(argument: &str) -> bool {
     let option = argument
         .split_once('=')
         .map_or(argument, |(option, _)| option);

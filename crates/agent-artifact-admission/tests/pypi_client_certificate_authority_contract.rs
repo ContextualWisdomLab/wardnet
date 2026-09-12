@@ -83,6 +83,74 @@ fn pip_separate_client_certificate_value_is_explicitly_classified_as_trust_autho
     }
 }
 
+#[test]
+fn pip_global_client_certificate_authority_before_install_is_explicitly_classified() {
+    for executable in ["pip", "pip3"] {
+        for option in [
+            "--client-cert=/tmp/attacker-client.pem",
+            "--cl=/tmp/attacker-client.pem",
+        ] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv = vec![
+                executable.to_string(),
+                option.to_string(),
+                "install".to_string(),
+                ARTIFACT_ARGUMENT.to_string(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+            ];
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} global {option} syntax must fail closed"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "{executable} global {option} must be classified as caller-selected TLS credential authority: {:?}",
+                decision.reason_codes
+            );
+        }
+    }
+}
+
+#[test]
+fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
+    for executable in ["pip", "pip3"] {
+        for option in ["--client-cert", "--cl"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv = vec![
+                executable.to_string(),
+                option.to_string(),
+                "/tmp/attacker-client.pem".to_string(),
+                "install".to_string(),
+                ARTIFACT_ARGUMENT.to_string(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+            ];
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} global separate {option} syntax must fail closed"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "{executable} global separate {option} must be classified explicitly rather than relying on command or operand rejection: {:?}",
+                decision.reason_codes
+            );
+        }
+    }
+}
+
 fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     let artifact = ArtifactCoordinate {
         ecosystem: "pypi".to_string(),
