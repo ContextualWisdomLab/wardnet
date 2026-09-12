@@ -4,6 +4,9 @@ use crate::pypi_client_certificate_authority::matches_pip_client_certificate_opt
 use crate::pypi_proxy_authority::{
     is_attached_direct_pip_proxy_selector, is_direct_pip_proxy_value_selector,
 };
+use crate::pypi_registry_authority::{
+    is_reviewed_pip_no_index_selector, is_reviewed_pip_registry_value_selector,
+};
 
 /// Canonicalize only reviewed direct-pip General Options for policy evaluation.
 ///
@@ -59,6 +62,29 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
             continue;
         }
 
+        if is_reviewed_pip_registry_value_selector(argument) {
+            if let Some((_, value)) = argument.split_once('=') {
+                if value.is_empty() {
+                    return None;
+                }
+                reviewed_global_arguments.push(arguments[index].clone());
+                index += 1;
+            } else {
+                push_attached_normalized_value_argument(
+                    arguments,
+                    &mut reviewed_global_arguments,
+                    &mut index,
+                )?;
+            }
+            continue;
+        }
+
+        if is_reviewed_pip_no_index_selector(argument) {
+            reviewed_global_arguments.push(arguments[index].clone());
+            index += 1;
+            continue;
+        }
+
         if matches_pip_certificate_store_abbreviation(argument) {
             if let Some((_, value)) = argument.split_once('=') {
                 if value.is_empty() {
@@ -97,6 +123,21 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
     }
 
     None
+}
+
+fn push_attached_normalized_value_argument(
+    arguments: &[String],
+    reviewed_global_arguments: &mut Vec<String>,
+    index: &mut usize,
+) -> Option<()> {
+    let value = arguments.get(*index + 1)?;
+    if value == "install" || value.starts_with('-') || value.is_empty() {
+        return None;
+    }
+
+    reviewed_global_arguments.push(format!("{}={value}", arguments[*index]));
+    *index += 2;
+    Some(())
 }
 
 fn push_separate_value_argument(
