@@ -16,12 +16,7 @@ fn unsupported_uv_run_child_argv_does_not_inherit_install_trust_authority() {
             "--index-url",
             "https://attacker.invalid/simple",
         ],
-        vec![
-            "uv",
-            "run",
-            "python",
-            "--trusted-host=attacker.invalid",
-        ],
+        vec!["uv", "run", "python", "--trusted-host=attacker.invalid"],
     ] {
         intent.argv = argv.into_iter().map(str::to_string).collect();
 
