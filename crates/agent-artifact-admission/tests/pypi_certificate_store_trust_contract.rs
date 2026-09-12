@@ -1,6 +1,7 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -84,6 +85,69 @@ fn pip_separate_certificate_prefix_value_is_explicit_trust_authority() {
             "pip's separate-value --ce prefix must be classified as trust authority independently of operand validation: {:?}",
             decision.reason_codes
         );
+    }
+}
+
+#[test]
+fn pip_global_certificate_prefixes_are_explicit_trust_authority() {
+    for executable in ["pip", "pip3"] {
+        for selector in ["--ce", "--cer"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv = vec![
+                executable.to_string(),
+                selector.to_string(),
+                "/tmp/attacker-ca.pem".to_string(),
+                "install".to_string(),
+                ARTIFACT_ARGUMENT.to_string(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                "--no-input".to_string(),
+            ];
+            let expected_command_sha256 = sha256_hex(intent.argv.join("\u{1f}").as_bytes());
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(decision.decision, DecisionKind::Block, "{executable} {selector}");
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "parser-valid global {selector} must be classified as certificate-store trust authority: {:?}",
+                decision.reason_codes
+            );
+            assert_eq!(decision.command_sha256, expected_command_sha256);
+        }
+    }
+}
+
+#[test]
+fn pip_global_attached_certificate_prefixes_are_explicit_trust_authority() {
+    for executable in ["pip", "pip3"] {
+        for selector in ["--ce", "--cer"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv = vec![
+                executable.to_string(),
+                format!("{selector}=/tmp/attacker-ca.pem"),
+                "install".to_string(),
+                ARTIFACT_ARGUMENT.to_string(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                "--no-input".to_string(),
+            ];
+            let expected_command_sha256 = sha256_hex(intent.argv.join("\u{1f}").as_bytes());
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(decision.decision, DecisionKind::Block, "{executable} {selector}");
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "parser-valid attached global {selector} must be classified as certificate-store trust authority: {:?}",
+                decision.reason_codes
+            );
+            assert_eq!(decision.command_sha256, expected_command_sha256);
+        }
     }
 }
 
