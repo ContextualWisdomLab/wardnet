@@ -11,9 +11,10 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
     }
 
     let arguments = &intent.argv[1..];
-    if arguments.iter().any(|argument| {
-        argument == "--directory" || argument.starts_with("--directory=")
-    }) {
+    if arguments
+        .iter()
+        .any(|argument| argument == "--directory" || argument.starts_with("--directory="))
+    {
         return true;
     }
 
