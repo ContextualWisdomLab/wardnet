@@ -12,6 +12,21 @@ const PIP_TRUSTED_HOST_SHORTEST_ACCEPTED_PREFIX: &str = "--tr";
 
 /// Return whether a direct Python package install disables or replaces the exact
 /// reviewed registry/source authority or relaxes its reviewed transport trust.
+///
+/// Security traceability:
+/// - pip documents `--index-url`, `--extra-index-url`, `--no-index`,
+///   `--find-links`, and `--trusted-host` as global install controls, so these
+///   tokens change source or trust authority rather than artifact identity:
+///   <https://pip.pypa.io/en/latest/reference/requirements-file-format/>.
+/// - PEP 503 defines the Simple Repository API around a repository base URL;
+///   selecting a different base therefore changes package-source authority:
+///   <https://peps.python.org/pep-0503/>.
+/// - PEP 493 records the HTTPS certificate-verification boundary for Python
+///   clients; treating `--trusted-host` as alternate trust evidence preserves
+///   that transport-authentication distinction: <https://peps.python.org/pep-0493/>.
+/// - NIST SSDF PW.8 requires software components to be verified before use;
+///   preserving registry/trust selection as explicit admission evidence keeps
+///   that verification decision auditable: <https://doi.org/10.6028/NIST.SP.800-218>.
 pub(crate) fn disables_reviewed_registry(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
@@ -44,6 +59,10 @@ pub(crate) fn disables_reviewed_registry(intent: &InstallIntent) -> bool {
 /// Return whether `argument` is a reviewed direct-pip registry/source selector
 /// that consumes one value. This is the shared language for both post-command
 /// policy evaluation and the bounded pre-command General Option normalizer.
+/// pip's global-option contract is documented at
+/// <https://pip.pypa.io/en/latest/reference/requirements-file-format/> and the
+/// repository-base authority it selects is standardized by PEP 503
+/// (<https://peps.python.org/pep-0503/>).
 pub(crate) fn is_reviewed_pip_registry_value_selector(argument: &str) -> bool {
     let option = option_name(argument);
 
@@ -62,7 +81,9 @@ pub(crate) fn is_reviewed_pip_registry_value_selector(argument: &str) -> bool {
 }
 
 /// Return whether `argument` is the reviewed value-less `--no-index` selector
-/// or one of pip's verified unambiguous long-option prefixes for it.
+/// or one of pip's verified unambiguous long-option prefixes for it. pip
+/// documents `--no-index` as a global source-selection control at
+/// <https://pip.pypa.io/en/latest/reference/requirements-file-format/>.
 pub(crate) fn is_reviewed_pip_no_index_selector(argument: &str) -> bool {
     if argument.contains('=') {
         return false;
@@ -100,6 +121,8 @@ fn requests_pip_source_selector_abbreviation(argument: &str) -> bool {
 /// the shortest verified prefix while `--t` remains ambiguous with other pip
 /// options. Classify only the accepted direct-pip abbreviation language here;
 /// canonical `--trusted-host` remains covered by the generic exact-option guard.
+/// PEP 493 documents why server-certificate verification is a transport trust
+/// boundary rather than package identity: <https://peps.python.org/pep-0493/>.
 fn requests_pip_trusted_host_abbreviation(argument: &str) -> bool {
     is_unambiguous_long_option_prefix(
         option_name(argument),
