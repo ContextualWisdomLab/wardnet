@@ -107,24 +107,49 @@ pub(crate) fn requests_unapproved_pypi_python_interpreter_authority(
     false
 }
 
-/// Detect caller-selected uv Python-provider authority in uv option grammar.
+/// Detect caller-selected uv Python-provider authority in uv-owned option grammar.
 ///
 /// uv documents `--managed-python` and `--no-managed-python` as global options,
-/// while also accepting them in the `uv pip install` option stream. Either form
-/// changes which Python provider may satisfy the install, so Wardnet records that
-/// causal install-root authority even when the surrounding command is otherwise
-/// rejected. This classifier never widens Wardnet's supported install-command
-/// grammar and never discovers, downloads, launches, inspects, or mutates Python.
-/// Exact spellings are required, and `--` terminates option classification.
+/// while also accepting them in the `uv pip install` option stream. `uv run` is
+/// different: once its child command starts, remaining arguments belong to that
+/// child and are not uv options. Wardnet therefore records provider authority only
+/// before a `uv run` child command (or elsewhere in uv-owned option grammar). This
+/// classifier never widens Wardnet's supported install-command grammar and never
+/// discovers, downloads, launches, inspects, or mutates Python. Exact spellings
+/// are required, and `--` terminates option classification.
 pub(crate) fn requests_unapproved_uv_python_provider_authority(intent: &InstallIntent) -> bool {
     if intent.argv.first().map(String::as_str) != Some("uv") {
         return false;
     }
 
-    intent
-        .argv
+    let arguments = &intent.argv[1..];
+    let run_index = arguments.iter().position(|argument| argument == "run");
+    let pip_index = arguments.iter().position(|argument| argument == "pip");
+
+    if let Some(run_index) = run_index.filter(|run_index| {
+        pip_index.is_none_or(|pip_index| pip_index > *run_index)
+    }) {
+        let child_index = arguments
+            .iter()
+            .enumerate()
+            .skip(run_index + 1)
+            .find_map(|(index, argument)| (!argument.starts_with('-')).then_some(index))
+            .unwrap_or(arguments.len());
+
+        return arguments[..run_index]
+            .iter()
+            .chain(arguments[run_index + 1..child_index].iter())
+            .take_while(|argument| argument.as_str() != "--")
+            .any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "--managed-python" | "--no-managed-python"
+                )
+            });
+    }
+
+    arguments
         .iter()
-        .skip(1)
         .take_while(|argument| argument.as_str() != "--")
         .any(|argument| {
             matches!(
@@ -286,6 +311,16 @@ mod tests {
                 "--managed-python",
                 "cwl-example==1.2.3",
             ])
+        ));
+    }
+
+    #[test]
+    fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
+        assert!(requests_unapproved_uv_python_provider_authority(
+            &test_intent(vec!["uv", "run", "--managed-python", "python"])
+        ));
+        assert!(!requests_unapproved_uv_python_provider_authority(
+            &test_intent(vec!["uv", "run", "python", "--managed-python"])
         ));
     }
 
