@@ -16,6 +16,7 @@ mod pypi_certificate_store_authority;
 mod pypi_client_certificate_authority;
 mod pypi_constraint_authority;
 mod pypi_dependency_group_authority;
+mod pypi_global_option_authority;
 mod pypi_hash_mode;
 mod pypi_install_mutation_authority;
 mod pypi_install_report_authority;
@@ -48,7 +49,8 @@ pub use policy::{is_sha256_hex, sha256_hex, validate_install_intent};
 /// Compute a deterministic fail-closed admission decision for one install intent.
 pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> AdmissionDecision {
     let submitted_intent = intent;
-    let normalized_intent = pypi_proxy_authority::normalize_direct_pip_global_proxy_intent(intent);
+    let normalized_intent =
+        pypi_global_option_authority::normalize_reviewed_direct_pip_global_options(intent);
     let intent = normalized_intent.as_ref().unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
