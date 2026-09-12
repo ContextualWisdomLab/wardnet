@@ -128,7 +128,10 @@ pub(crate) fn requests_unapproved_uv_python_provider_authority(intent: &InstallI
         if argument == "--" {
             break;
         }
-        if matches!(argument.as_str(), "--managed-python" | "--no-managed-python") {
+        if matches!(
+            argument.as_str(),
+            "--managed-python" | "--no-managed-python"
+        ) {
             return true;
         }
     }
@@ -248,13 +251,7 @@ mod tests {
     fn uv_python_provider_authority_is_exact_and_stops_at_option_terminator() {
         for option in ["--managed-python", "--no-managed-python"] {
             assert!(requests_unapproved_uv_python_provider_authority(
-                &test_intent(vec![
-                    "uv",
-                    "pip",
-                    "install",
-                    "cwl-example==1.2.3",
-                    option,
-                ])
+                &test_intent(vec!["uv", "pip", "install", "cwl-example==1.2.3", option,])
             ));
         }
 
