@@ -24,6 +24,44 @@ fn approved_pip_install_without_proxy_override_remains_allowed() {
 }
 
 #[test]
+fn pip_global_proxy_before_install_fails_closed_without_artifact_pollution() {
+    for executable in ["pip", "pip3"] {
+        for proxy_arguments in [
+            vec![
+                "--proxy".to_string(),
+                "http://attacker.invalid:8080".to_string(),
+            ],
+            vec![
+                "--prox".to_string(),
+                "http://attacker.invalid:8080".to_string(),
+            ],
+            vec!["--proxy=http://attacker.invalid:8080".to_string()],
+            vec!["--prox=http://attacker.invalid:8080".to_string()],
+        ] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            let install_arguments = intent.argv.split_off(1);
+            intent.argv.extend(proxy_arguments.clone());
+            intent.argv.extend(install_arguments);
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "{executable} must reject parser-valid global proxy authority before install: {:?}",
+                proxy_arguments
+            );
+            assert_eq!(
+                decision.reason_codes,
+                vec![ReasonCode::AlternateTrustRoot],
+                "global proxy authority must produce only its causal trust-authority evidence: {:?}",
+                decision.reason_codes
+            );
+        }
+    }
+}
+
+#[test]
 fn pip_proxy_override_cannot_inherit_artifact_approval() {
     for executable in ["pip", "pip3"] {
         for proxy_option in [
