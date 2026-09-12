@@ -1,11 +1,24 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const MANIFEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ARTIFACT_ARGUMENT: &str = "cwl-example==1.2.3";
+
+#[test]
+fn reviewed_pip_install_without_client_certificate_override_remains_admissible() {
+    for executable in ["pip", "pip3"] {
+        let (policy, intent) = approved_pip_install(executable);
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Allow);
+        assert!(decision.reason_codes.is_empty());
+    }
+}
 
 #[test]
 fn pip_client_certificate_override_cannot_inherit_artifact_approval() {
@@ -98,6 +111,7 @@ fn pip_global_client_certificate_authority_before_install_is_explicitly_classifi
                 ARTIFACT_ARGUMENT.to_string(),
                 "--require-hashes".to_string(),
                 "--no-deps".to_string(),
+                "--no-input".to_string(),
             ];
 
             let decision = admission_decision(&policy, &intent);
@@ -131,7 +145,9 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                 ARTIFACT_ARGUMENT.to_string(),
                 "--require-hashes".to_string(),
                 "--no-deps".to_string(),
+                "--no-input".to_string(),
             ];
+            let submitted_argv = intent.argv.clone();
 
             let decision = admission_decision(&policy, &intent);
 
@@ -145,6 +161,63 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                     .reason_codes
                     .contains(&ReasonCode::AlternateTrustRoot),
                 "{executable} global separate {option} must be classified explicitly rather than relying on command or operand rejection: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                !decision
+                    .reason_codes
+                    .contains(&ReasonCode::ArtifactNotApproved),
+                "{executable} global separate {option} must consume its client-certificate value as option grammar rather than manufacture an undeclared package finding: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                !decision
+                    .reason_codes
+                    .contains(&ReasonCode::MissingSafetyFlag),
+                "{executable} reviewed safety flags must remain visible after global client-certificate normalization: {:?}",
+                decision.reason_codes
+            );
+            assert_eq!(
+                decision.command_sha256,
+                sha256_hex(submitted_argv.join("\u{1f}").as_bytes()),
+                "internal normalization must preserve the exact caller-submitted argv audit identity"
+            );
+        }
+    }
+}
+
+#[test]
+fn pip_global_separate_client_certificate_still_exposes_a_real_extra_artifact() {
+    for executable in ["pip", "pip3"] {
+        for option in ["--client-cert", "--cl"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv = vec![
+                executable.to_string(),
+                option.to_string(),
+                "/tmp/attacker-client.pem".to_string(),
+                "install".to_string(),
+                ARTIFACT_ARGUMENT.to_string(),
+                "unapproved-extra==9.9.9".to_string(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+                "--no-input".to_string(),
+            ];
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(decision.decision, DecisionKind::Block);
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "{executable} global separate {option} must retain the explicit client-certificate trust finding: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::ArtifactNotApproved),
+                "{executable} global separate {option} must not hide a genuine extra package operand: {:?}",
                 decision.reason_codes
             );
         }
@@ -190,6 +263,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
             ARTIFACT_ARGUMENT.to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
+            "--no-input".to_string(),
         ],
         manifest_sha256: MANIFEST_DIGEST.to_string(),
         source: InstructionSource {
