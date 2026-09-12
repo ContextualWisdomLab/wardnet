@@ -98,6 +98,7 @@ fn pip_global_client_certificate_authority_before_install_is_explicitly_classifi
                 ARTIFACT_ARGUMENT.to_string(),
                 "--require-hashes".to_string(),
                 "--no-deps".to_string(),
+                "--no-input".to_string(),
             ];
 
             let decision = admission_decision(&policy, &intent);
@@ -131,6 +132,7 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                 ARTIFACT_ARGUMENT.to_string(),
                 "--require-hashes".to_string(),
                 "--no-deps".to_string(),
+                "--no-input".to_string(),
             ];
 
             let decision = admission_decision(&policy, &intent);
@@ -154,6 +156,13 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                 "{executable} global separate {option} must consume its client-certificate value as option grammar rather than manufacture an undeclared package finding: {:?}",
                 decision.reason_codes
             );
+            assert!(
+                !decision
+                    .reason_codes
+                    .contains(&ReasonCode::MissingSafetyFlag),
+                "{executable} reviewed safety flags must remain visible after global client-certificate normalization: {:?}",
+                decision.reason_codes
+            );
         }
     }
 }
@@ -172,6 +181,7 @@ fn pip_global_separate_client_certificate_still_exposes_a_real_extra_artifact() 
                 "unapproved-extra==9.9.9".to_string(),
                 "--require-hashes".to_string(),
                 "--no-deps".to_string(),
+                "--no-input".to_string(),
             ];
 
             let decision = admission_decision(&policy, &intent);
@@ -234,6 +244,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
             ARTIFACT_ARGUMENT.to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
+            "--no-input".to_string(),
         ],
         manifest_sha256: MANIFEST_DIGEST.to_string(),
         source: InstructionSource {
