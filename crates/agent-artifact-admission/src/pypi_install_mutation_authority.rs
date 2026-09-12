@@ -42,7 +42,7 @@ fn requests_uv_pip_mutation(arguments: &[String]) -> bool {
     arguments
         .iter()
         .skip(2)
-        .any(|argument| matches_uv_reinstall_option(argument))
+        .any(|argument| matches_uv_install_mutation_option(argument))
 }
 
 fn matches_ignore_installed_option(argument: &str) -> bool {
@@ -75,17 +75,17 @@ fn matches_pip_no_value_short_cluster(argument: &str, required_flag: u8) -> bool
         && bytes.contains(&required_flag)
 }
 
-fn matches_uv_reinstall_option(argument: &str) -> bool {
+fn matches_uv_install_mutation_option(argument: &str) -> bool {
     matches!(
         argument,
-        "--reinstall" | "--force-reinstall" | "--reinstall-package"
+        "--exact" | "--reinstall" | "--force-reinstall" | "--reinstall-package"
     ) || argument.starts_with("--reinstall-package=")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        matches_ignore_installed_option, matches_upgrade_option, matches_uv_reinstall_option,
+        matches_ignore_installed_option, matches_upgrade_option, matches_uv_install_mutation_option,
     };
 
     #[test]
@@ -162,20 +162,22 @@ mod tests {
     }
 
     #[test]
-    fn uv_reinstall_matcher_accepts_only_documented_mutation_selectors() {
+    fn uv_install_mutation_matcher_accepts_only_documented_mutation_selectors() {
         for argument in [
+            "--exact",
             "--reinstall",
             "--force-reinstall",
             "--reinstall-package",
             "--reinstall-package=cwl-example",
         ] {
             assert!(
-                matches_uv_reinstall_option(argument),
-                "documented uv reinstall selector must be classified: {argument}"
+                matches_uv_install_mutation_option(argument),
+                "documented uv install-mutation selector must be classified: {argument}"
             );
         }
 
         for argument in [
+            "--exact=true",
             "--reinstall-packagex",
             "--reinstallx",
             "--force-reinstallx",
@@ -183,8 +185,8 @@ mod tests {
             "cwl-example==1.2.3",
         ] {
             assert!(
-                !matches_uv_reinstall_option(argument),
-                "unrelated or prefix-only argv must not gain reinstall semantics: {argument}"
+                !matches_uv_install_mutation_option(argument),
+                "unrelated or unsupported argv must not gain install-mutation semantics: {argument}"
             );
         }
     }
