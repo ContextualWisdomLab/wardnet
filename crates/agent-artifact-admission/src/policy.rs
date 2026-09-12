@@ -618,7 +618,20 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         "-i",
         "-f",
     ];
-    arguments.iter().any(|argument| {
+
+    let trust_arguments = if executable == "uv" {
+        let run_index = arguments.iter().position(|argument| argument == "run");
+        let pip_index = arguments.iter().position(|argument| argument == "pip");
+        match (run_index, pip_index) {
+            (Some(run_index), Some(pip_index)) if run_index < pip_index => &arguments[..run_index],
+            (Some(run_index), None) => &arguments[..run_index],
+            _ => arguments,
+        }
+    } else {
+        arguments
+    };
+
+    trust_arguments.iter().any(|argument| {
         FORBIDDEN_FLAGS
             .iter()
             .any(|flag| matches_cli_flag(argument, flag))
@@ -631,7 +644,7 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
                 .iter()
                 .any(|argument| argument.starts_with("--config.")))
         || (executable == "uv"
-            && arguments
+            && trust_arguments
                 .iter()
                 .any(|argument| matches_cli_flag(argument, "--system-certs")))
 }
