@@ -45,6 +45,39 @@ fn unsupported_uv_run_child_argv_does_not_inherit_install_trust_authority() {
     }
 }
 
+#[test]
+fn uv_global_trust_authority_before_run_remains_visible() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "--system-certs".to_string(),
+        "run".to_string(),
+        "python".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
+        "unsupported uv run must remain fail-closed: {:?}",
+        decision.reason_codes
+    );
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "uv-owned global trust authority before the run command boundary must remain visible: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+    );
+}
+
 fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
     let mut intent = InstallIntent::unowned_llms_package_for_test();
     intent.argv = vec![
