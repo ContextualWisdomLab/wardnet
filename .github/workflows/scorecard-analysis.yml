@@ -2,6 +2,8 @@ name: Scorecard
 
 on:
   branch_protection_rule:
+  pull_request:
+    branches: [main]
   schedule:
     - cron: '31 9 * * 2'
   push:
@@ -12,6 +14,7 @@ permissions:
 
 jobs:
   analysis:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Scorecard Analysis
     runs-on: ubuntu-24.04
     permissions:
