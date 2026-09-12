@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::pypi_certificate_store_authority::matches_pip_certificate_store_abbreviation;
 use crate::pypi_client_certificate_authority::matches_pip_client_certificate_option;
 use crate::pypi_proxy_authority::{
     is_attached_direct_pip_proxy_selector, is_direct_pip_proxy_value_selector,
@@ -55,6 +56,23 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
         if is_attached_direct_pip_proxy_selector(argument) {
             reviewed_global_arguments.push(arguments[index].clone());
             index += 1;
+            continue;
+        }
+
+        if matches_pip_certificate_store_abbreviation(argument) {
+            if let Some((_, value)) = argument.split_once('=') {
+                if value.is_empty() {
+                    return None;
+                }
+                reviewed_global_arguments.push(arguments[index].clone());
+                index += 1;
+            } else {
+                push_separate_value_argument(
+                    arguments,
+                    &mut reviewed_global_arguments,
+                    &mut index,
+                )?;
+            }
             continue;
         }
 
