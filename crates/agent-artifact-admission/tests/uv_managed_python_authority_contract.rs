@@ -110,7 +110,11 @@ fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
         let decision = admission_decision(&policy, &intent);
 
         assert_eq!(decision.decision, DecisionKind::Block);
-        assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand)
+        );
         assert!(
             !decision
                 .reason_codes
@@ -141,7 +145,11 @@ fn uv_run_value_options_do_not_hide_uv_owned_python_provider_authority() {
         let decision = admission_decision(&policy, &intent);
 
         assert_eq!(decision.decision, DecisionKind::Block);
-        assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand)
+        );
         assert!(
             decision
                 .reason_codes
@@ -160,7 +168,10 @@ fn assert_python_provider_selection_is_blocked(policy: &AdmissionPolicy, intent:
     let decision = admission_decision(policy, intent);
 
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert_eq!(decision.reason_codes, vec![ReasonCode::AlternateInstallRoot]);
+    assert_eq!(
+        decision.reason_codes,
+        vec![ReasonCode::AlternateInstallRoot]
+    );
     assert_eq!(
         decision.command_sha256,
         sha256_hex(intent.argv.join("\u{1f}").as_bytes())
