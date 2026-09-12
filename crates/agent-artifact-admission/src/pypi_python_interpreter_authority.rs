@@ -107,12 +107,42 @@ pub(crate) fn requests_unapproved_pypi_python_interpreter_authority(
     false
 }
 
+/// Detect caller-selected uv Python-provider authority for exact `uv pip install` intents.
+///
+/// uv's `--managed-python` and `--no-managed-python` flags determine whether the
+/// interpreter search is constrained to uv-managed Python installations or to
+/// system Python. Wardnet binds that caller-selected provider policy as admission
+/// authority only; it does not discover, download, launch, inspect, or mutate an
+/// interpreter or environment. uv spellings are matched exactly rather than
+/// inheriting direct-pip `optparse` abbreviation semantics, and `--` terminates
+/// option classification.
+pub(crate) fn requests_unapproved_uv_python_provider_authority(intent: &InstallIntent) -> bool {
+    if intent.argv.first().map(String::as_str) != Some("uv")
+        || intent.argv.get(1).map(String::as_str) != Some("pip")
+        || intent.argv.get(2).map(String::as_str) != Some("install")
+    {
+        return false;
+    }
+
+    for argument in intent.argv.iter().skip(3) {
+        if argument == "--" {
+            break;
+        }
+        if matches!(argument.as_str(), "--managed-python" | "--no-managed-python") {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         matches_pip_python_interpreter_option,
         normalize_reviewed_post_command_pip_python_interpreter_value,
         requests_unapproved_pypi_python_interpreter_authority,
+        requests_unapproved_uv_python_provider_authority,
     };
     use crate::{ArtifactCoordinate, InstallIntent, InstructionSource, InstructionSourceKind};
 
@@ -212,6 +242,44 @@ mod tests {
             "cwl-example==1.2.3",
         ]);
         assert!(normalize_reviewed_post_command_pip_python_interpreter_value(&intent).is_none());
+    }
+
+    #[test]
+    fn uv_python_provider_authority_is_exact_and_stops_at_option_terminator() {
+        for option in ["--managed-python", "--no-managed-python"] {
+            assert!(requests_unapproved_uv_python_provider_authority(
+                &test_intent(vec![
+                    "uv",
+                    "pip",
+                    "install",
+                    "cwl-example==1.2.3",
+                    option,
+                ])
+            ));
+        }
+
+        for unreviewed in ["--managed-pytho", "--no-managed-pytho", "--python"] {
+            assert!(!requests_unapproved_uv_python_provider_authority(
+                &test_intent(vec![
+                    "uv",
+                    "pip",
+                    "install",
+                    "cwl-example==1.2.3",
+                    unreviewed,
+                ])
+            ));
+        }
+
+        assert!(!requests_unapproved_uv_python_provider_authority(
+            &test_intent(vec![
+                "uv",
+                "pip",
+                "install",
+                "--",
+                "--managed-python",
+                "cwl-example==1.2.3",
+            ])
+        ));
     }
 
     fn test_intent(argv: Vec<&str>) -> InstallIntent {
