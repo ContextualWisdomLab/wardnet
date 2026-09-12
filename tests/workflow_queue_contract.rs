@@ -57,15 +57,12 @@ fn central_required_workflows_are_not_copied_locally() {
 }
 
 #[test]
-fn local_scorecard_preserves_default_branch_evidence_and_bounds_pr_analysis_to_same_repo() {
+fn local_scorecard_preserves_non_pr_security_evidence() {
     let workflow = workflow_text("scorecard-analysis.yml");
     assert!(workflow.contains("branch_protection_rule:"));
     assert!(workflow.contains("schedule:"));
     assert!(workflow.contains("push:"));
-    assert!(workflow.contains("pull_request:"));
-    assert!(workflow.contains(
-        "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
-    ));
+    assert!(!workflow.contains("pull_request:"));
     assert!(workflow.contains("security-events: write"));
     assert!(workflow.contains("# v2.4.4"));
 }
