@@ -6,8 +6,8 @@ use crate::InstallIntent;
 /// with the selected interpreter. Python `optparse` accepts unambiguous long-option
 /// prefixes; in the pinned pip General Options set, `--p` is ambiguous with
 /// `--proxy`, while `--py` through `--python` uniquely select `--python`.
-/// This matcher is intentionally scoped to pip and is not shared with uv or any
-/// other package-manager grammar.
+/// This matcher is intentionally scoped to pip's pre-command General Options and
+/// is not shared with post-command or other package-manager grammar.
 pub(crate) fn matches_pip_python_interpreter_option(argument: &str) -> bool {
     let option = argument
         .split_once('=')
@@ -72,6 +72,10 @@ pub(crate) fn normalize_reviewed_post_command_pip_python_interpreter_value(
 
 /// Detect caller-selected Python-interpreter authority after direct-pip global
 /// option normalization has produced the ordinary `pip install` policy shape.
+///
+/// At this parser phase only exact `--python` is authoritative: abbreviated
+/// `--py...` forms are ambiguous with `--python-version`. Tokens after `--` are
+/// positional grammar and are never classified as interpreter authority.
 pub(crate) fn requests_unapproved_pypi_python_interpreter_authority(
     intent: &InstallIntent,
 ) -> bool {
@@ -87,11 +91,20 @@ pub(crate) fn requests_unapproved_pypi_python_interpreter_authority(
         return false;
     }
 
-    intent
-        .argv
-        .iter()
-        .skip(2)
-        .any(|argument| matches_pip_python_interpreter_option(argument))
+    for argument in intent.argv.iter().skip(2) {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--python"
+            || argument
+                .split_once('=')
+                .is_some_and(|(option, value)| option == "--python" && !value.is_empty())
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -99,11 +112,12 @@ mod tests {
     use super::{
         matches_pip_python_interpreter_option,
         normalize_reviewed_post_command_pip_python_interpreter_value,
+        requests_unapproved_pypi_python_interpreter_authority,
     };
     use crate::{ArtifactCoordinate, InstallIntent, InstructionSource, InstructionSourceKind};
 
     #[test]
-    fn pip_python_prefix_matcher_is_bounded_to_verified_unambiguous_language() {
+    fn pip_python_prefix_matcher_is_bounded_to_verified_unambiguous_global_language() {
         for accepted in ["--py", "--pyt", "--pyth", "--pytho", "--python"] {
             assert!(matches_pip_python_interpreter_option(accepted));
             assert!(matches_pip_python_interpreter_option(&format!(
@@ -150,6 +164,41 @@ mod tests {
                 "post-command {unreviewed} must not inherit exact --python grammar"
             );
         }
+    }
+
+    #[test]
+    fn post_command_authority_is_exact_and_stops_at_option_terminator() {
+        assert!(requests_unapproved_pypi_python_interpreter_authority(
+            &test_intent(vec![
+                "pip",
+                "install",
+                "--python=/tmp/python",
+                "cwl-example==1.2.3",
+            ])
+        ));
+
+        for unreviewed in ["--py", "--pyt", "--pyth", "--pytho"] {
+            assert!(!requests_unapproved_pypi_python_interpreter_authority(
+                &test_intent(vec![
+                    "pip",
+                    "install",
+                    unreviewed,
+                    "/tmp/python",
+                    "cwl-example==1.2.3",
+                ])
+            ));
+        }
+
+        assert!(!requests_unapproved_pypi_python_interpreter_authority(
+            &test_intent(vec![
+                "pip",
+                "install",
+                "--",
+                "--python",
+                "/tmp/python",
+                "cwl-example==1.2.3",
+            ])
+        ));
     }
 
     #[test]
