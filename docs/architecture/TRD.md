@@ -90,7 +90,7 @@ Threat-feed and adapter acquisition must validate destination/transport expectat
 
 ## UI and accessibility requirements
 
-Material operator UI work must have reusable design/token/component evidence and automated buyer-flow acceptance for normal, loading, empty, error, permission, responsive, keyboard, and accessibility states. The console must remain usable at mobile, intermediate, and desktop widths without clipping or undersized critical targets.
+Material operator UI work must retain reusable design/token/component evidence plus Figma/Storybook evidence and automated buyer-flow acceptance for normal, loading, empty, error, permission, responsive, keyboard, and accessibility states. The console must remain usable at mobile, intermediate, and desktop widths without clipping or undersized critical targets.
 
 Text layout must tolerate KO/EN/JA/ZH/VI/ES/DE/FR content characteristics. A locale robustness test is not a claim that all translations are shipped. Security/performance/readiness copy must be evidence-backed.
 
