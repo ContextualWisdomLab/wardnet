@@ -110,22 +110,25 @@ fn unreviewed_pip_global_option_is_not_hidden_by_proxy_normalization() {
     for executable in ["pip", "pip3"] {
         let (policy, mut intent) = approved_pip_install(executable);
         let install_arguments = intent.argv.split_off(1);
-        intent.argv.extend([
-            "--timeout".to_string(),
-            "1".to_string(),
-        ]);
+        intent
+            .argv
+            .extend(["--timeout".to_string(), "1".to_string()]);
         intent.argv.extend(install_arguments);
 
         let decision = admission_decision(&policy, &intent);
 
         assert_eq!(decision.decision, DecisionKind::Block);
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
             "unreviewed global option grammar must remain outside the supported command path: {:?}",
             decision.reason_codes
         );
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ArtifactNotApproved),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ArtifactNotApproved),
             "an arbitrary global option value must not be silently consumed as proxy syntax: {:?}",
             decision.reason_codes
         );

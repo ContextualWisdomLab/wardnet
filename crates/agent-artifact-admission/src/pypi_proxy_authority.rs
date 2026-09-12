@@ -29,7 +29,10 @@ pub(crate) fn normalize_direct_pip_global_proxy_intent(
     }
 
     let arguments = &intent.argv[1..];
-    if arguments.first().is_some_and(|argument| argument == "install") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "install")
+    {
         return None;
     }
 
