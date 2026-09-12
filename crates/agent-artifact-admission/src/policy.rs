@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use crate::pypi_proxy_authority::is_direct_pip_proxy_value_selector;
 use crate::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSourceKind, ReasonCode,
@@ -267,6 +268,7 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
         .filter(|(index, argument)| {
             !argument.starts_with('-')
                 && !is_install_root_selector_value(executable, arguments, *index)
+                && !is_direct_pip_proxy_selector_value(executable, arguments, *index)
         })
         .map(|(_, argument)| argument.as_str())
         .collect();
@@ -284,6 +286,33 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
     {
         push_reason(reason_codes, ReasonCode::ArtifactNotApproved);
     }
+}
+
+/// Return whether `arguments[index]` is the separate-token value consumed by a
+/// reviewed direct-pip proxy selector. Proxy routing remains a denied authority;
+/// this helper only prevents the consumed value from masquerading as a package.
+fn is_direct_pip_proxy_selector_value(
+    executable: &str,
+    arguments: &[String],
+    index: usize,
+) -> bool {
+    if !matches!(executable, "pip" | "pip3")
+        || !arguments
+            .first()
+            .is_some_and(|argument| argument == "install")
+    {
+        return false;
+    }
+
+    let Some(previous) = index
+        .checked_sub(1)
+        .and_then(|previous| arguments.get(previous))
+        .map(String::as_str)
+    else {
+        return false;
+    };
+
+    is_direct_pip_proxy_value_selector(previous)
 }
 
 /// Return whether `arguments[index]` is the separate-token value consumed by a
