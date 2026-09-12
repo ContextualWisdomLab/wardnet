@@ -40,19 +40,17 @@ fn pip_proxy_override_cannot_inherit_artifact_approval() {
                 DecisionKind::Block,
                 "{executable} must not let accepted proxy selector {proxy_option:?} inherit approved artifact authority"
             );
-            assert!(
-                decision
-                    .reason_codes
-                    .contains(&ReasonCode::AlternateTrustRoot),
-                "proxy routing authority {proxy_option:?} must be classified explicitly: {:?}",
-                decision.reason_codes
+            assert_eq!(
+                decision.reason_codes,
+                vec![ReasonCode::AlternateTrustRoot],
+                "attached proxy routing authority {proxy_option:?} must produce only its causal trust-authority evidence"
             );
         }
     }
 }
 
 #[test]
-fn pip_separate_proxy_value_is_explicitly_classified_as_trust_authority() {
+fn pip_separate_proxy_value_is_not_misclassified_as_an_artifact() {
     for executable in ["pip", "pip3"] {
         for proxy_option in ["--proxy", "--prox"] {
             let (policy, mut intent) = approved_pip_install(executable);
@@ -66,12 +64,34 @@ fn pip_separate_proxy_value_is_explicitly_classified_as_trust_authority() {
                 DecisionKind::Block,
                 "{executable} separate proxy syntax {proxy_option:?} must fail closed"
             );
-            assert!(
-                decision
-                    .reason_codes
-                    .contains(&ReasonCode::AlternateTrustRoot),
-                "separate proxy syntax {proxy_option:?} must be classified as trust authority rather than relying only on positional-operand rejection: {:?}",
-                decision.reason_codes
+            assert_eq!(
+                decision.reason_codes,
+                vec![ReasonCode::AlternateTrustRoot],
+                "the value consumed by {proxy_option:?} is proxy authority, not a second package artifact"
+            );
+        }
+    }
+}
+
+#[test]
+fn genuine_extra_artifact_remains_visible_beside_separate_proxy_authority() {
+    for executable in ["pip", "pip3"] {
+        for proxy_option in ["--proxy", "--prox"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv.push(proxy_option.to_string());
+            intent.argv.push("http://attacker.invalid:8080".to_string());
+            intent.argv.push("attacker-package==9.9.9".to_string());
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(decision.decision, DecisionKind::Block);
+            assert_eq!(
+                decision.reason_codes,
+                vec![
+                    ReasonCode::AlternateTrustRoot,
+                    ReasonCode::ArtifactNotApproved,
+                ],
+                "a consumed proxy value must be ignored for artifact cardinality while a real extra package remains visible"
             );
         }
     }
@@ -112,7 +132,7 @@ fn approved_pip_install(executable: &str) -> (AdmissionPolicy, InstallIntent) {
     };
     let policy = AdmissionPolicy {
         policy_id: "pypi-proxy-authority".to_string(),
-        policy_revision: "2026-09-11.1".to_string(),
+        policy_revision: "2026-09-12.1".to_string(),
         allowed_executables: vec![executable.to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
