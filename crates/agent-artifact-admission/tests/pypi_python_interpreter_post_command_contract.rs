@@ -59,7 +59,10 @@ fn post_command_attached_pip_python_keeps_the_reviewed_package_operand_visible()
         let decision = admission_decision(&policy, &intent);
 
         assert_eq!(decision.decision, DecisionKind::Block);
-        assert_eq!(decision.reason_codes, vec![ReasonCode::AlternateInstallRoot]);
+        assert_eq!(
+            decision.reason_codes,
+            vec![ReasonCode::AlternateInstallRoot]
+        );
         assert_eq!(
             decision.command_sha256,
             sha256_hex(submitted_argv.join("\u{1f}").as_bytes())
