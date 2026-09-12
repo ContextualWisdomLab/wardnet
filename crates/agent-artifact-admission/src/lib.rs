@@ -53,6 +53,13 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     let global_normalized_intent =
         pypi_global_option_authority::normalize_reviewed_direct_pip_global_options(intent);
     let intent = global_normalized_intent.as_ref().unwrap_or(intent);
+    let post_command_python_normalized_intent =
+        pypi_python_interpreter_authority::normalize_reviewed_post_command_pip_python_interpreter_value(
+            intent,
+        );
+    let intent = post_command_python_normalized_intent
+        .as_ref()
+        .unwrap_or(intent);
     let certificate_store_normalized_intent =
         pypi_certificate_store_authority::normalize_reviewed_pypi_certificate_store_values(intent);
     let intent = certificate_store_normalized_intent
