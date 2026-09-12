@@ -97,70 +97,42 @@ fn uv_global_python_provider_near_spellings_do_not_inherit_authority_semantics()
 }
 
 #[test]
-fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
+fn unsupported_uv_run_never_inherits_install_authority_semantics() {
     for option in ["--managed-python", "--no-managed-python"] {
-        let (policy, mut intent) = approved_uv_install();
-        intent.argv = vec![
-            "uv".to_string(),
-            "run".to_string(),
-            "python".to_string(),
-            option.to_string(),
-        ];
+        for argv in [
+            vec!["uv", "run", option, "python"],
+            vec!["uv", "run", "python", option],
+            vec!["uv", "--color", "auto", "run", option, "python"],
+            vec!["uv", option, "run", "python"],
+        ] {
+            let (policy, mut intent) = approved_uv_install();
+            intent.argv = argv.into_iter().map(str::to_string).collect();
 
-        let decision = admission_decision(&policy, &intent);
+            let decision = admission_decision(&policy, &intent);
 
-        assert_eq!(decision.decision, DecisionKind::Block);
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::ForbiddenCommand)
-        );
-        assert!(
-            !decision
-                .reason_codes
-                .contains(&ReasonCode::AlternateInstallRoot),
-            "child-program argument {option} must not be misclassified as uv Python-provider authority; got {:?}",
-            decision.reason_codes
-        );
-        assert_eq!(
-            decision.command_sha256,
-            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
-        );
-    }
-}
-
-#[test]
-fn uv_run_value_options_do_not_hide_uv_owned_python_provider_authority() {
-    for option in ["--managed-python", "--no-managed-python"] {
-        let (policy, mut intent) = approved_uv_install();
-        intent.argv = vec![
-            "uv".to_string(),
-            "run".to_string(),
-            "--color".to_string(),
-            "auto".to_string(),
-            option.to_string(),
-            "python".to_string(),
-        ];
-
-        let decision = admission_decision(&policy, &intent);
-
-        assert_eq!(decision.decision, DecisionKind::Block);
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::ForbiddenCommand)
-        );
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::AlternateInstallRoot),
-            "uv-owned provider option {option} after the value-taking --color option must retain causal authority evidence; got {:?}",
-            decision.reason_codes
-        );
-        assert_eq!(
-            decision.command_sha256,
-            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
-        );
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "uv run remains outside Wardnet's artifact-install grammar"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::ForbiddenCommand)
+            );
+            assert!(
+                !decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateInstallRoot),
+                "unsupported uv run must not be parsed by the install-authority classifier for {option}; got {:?}",
+                decision.reason_codes
+            );
+            assert_eq!(
+                decision.command_sha256,
+                sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+                "audit identity must remain bound to exact submitted argv"
+            );
+        }
     }
 }
 
