@@ -29,6 +29,7 @@ mod pypi_python_interpreter_authority;
 mod pypi_registry_authority;
 mod pypi_requires_python_authority;
 mod pypi_system_package_authority;
+mod uv_build_isolation_authority;
 mod uv_bytecode_compilation_authority;
 mod uv_configuration_authority;
 mod uv_link_mode_authority;
@@ -66,6 +67,9 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     let intent = certificate_store_normalized_intent
         .as_ref()
         .unwrap_or(intent);
+    let build_isolation_normalized_intent =
+        uv_build_isolation_authority::normalize_uv_build_isolation_package_selector(intent);
+    let intent = build_isolation_normalized_intent.as_ref().unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
         if !decision
@@ -281,6 +285,17 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         decision.decision = DecisionKind::Block;
     }
     if pypi_system_package_authority::requests_pypi_system_package_override(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag)
+        {
+            decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if uv_build_isolation_authority::requests_unapproved_uv_build_isolation_override(
+        submitted_intent,
+    ) {
         if !decision
             .reason_codes
             .contains(&ReasonCode::MissingSafetyFlag)
