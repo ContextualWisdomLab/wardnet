@@ -78,6 +78,57 @@ fn uv_global_trust_authority_before_run_remains_visible() {
     );
 }
 
+#[test]
+fn uv_global_option_values_named_like_commands_do_not_shift_trust_phase() {
+    let (policy, mut intent) = approved_uv_install();
+
+    intent.argv = vec![
+        "uv".to_string(),
+        "--cache-dir".to_string(),
+        "pip".to_string(),
+        "run".to_string(),
+        "python".to_string(),
+        "--index-url".to_string(),
+        "https://attacker.invalid/simple".to_string(),
+    ];
+    let child_decision = admission_decision(&policy, &intent);
+    assert_eq!(child_decision.decision, DecisionKind::Block);
+    assert!(
+        child_decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
+    assert!(
+        !child_decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "a global option value named `pip` must not make uv run child argv look like uv-owned trust authority: {:?}",
+        child_decision.reason_codes
+    );
+
+    intent.argv = vec![
+        "uv".to_string(),
+        "--cache-dir".to_string(),
+        "run".to_string(),
+        "--trusted-host".to_string(),
+        "attacker.invalid".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "example-package==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+    ];
+    let install_decision = admission_decision(&policy, &intent);
+    assert_eq!(install_decision.decision, DecisionKind::Block);
+    assert!(
+        install_decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "a global option value named `run` must not hide a later uv-owned trust override before the real pip command: {:?}",
+        install_decision.reason_codes
+    );
+}
+
 fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
     let mut intent = InstallIntent::unowned_llms_package_for_test();
     intent.argv = vec![
