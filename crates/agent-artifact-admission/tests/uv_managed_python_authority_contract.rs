@@ -109,17 +109,8 @@ fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
 
         let decision = admission_decision(&policy, &intent);
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "uv run remains outside Wardnet's supported artifact-install grammar"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::ForbiddenCommand),
-            "unsupported uv run must remain fail closed"
-        );
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
         assert!(
             !decision
                 .reason_codes
@@ -129,8 +120,7 @@ fn uv_run_child_arguments_do_not_inherit_python_provider_authority() {
         );
         assert_eq!(
             decision.command_sha256,
-            sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
-            "audit identity must remain bound to exact submitted argv"
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
         );
     }
 }
@@ -142,36 +132,26 @@ fn uv_run_value_options_do_not_hide_uv_owned_python_provider_authority() {
         intent.argv = vec![
             "uv".to_string(),
             "run".to_string(),
-            "--python".to_string(),
-            "3.12".to_string(),
+            "--color".to_string(),
+            "auto".to_string(),
             option.to_string(),
             "python".to_string(),
         ];
 
         let decision = admission_decision(&policy, &intent);
 
-        assert_eq!(
-            decision.decision,
-            DecisionKind::Block,
-            "uv run remains outside Wardnet's supported artifact-install grammar"
-        );
-        assert!(
-            decision
-                .reason_codes
-                .contains(&ReasonCode::ForbiddenCommand),
-            "unsupported uv run must remain fail closed"
-        );
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
         assert!(
             decision
                 .reason_codes
                 .contains(&ReasonCode::AlternateInstallRoot),
-            "uv-owned provider option {option} after the value-taking --python option must retain causal authority evidence; got {:?}",
+            "uv-owned provider option {option} after the value-taking --color option must retain causal authority evidence; got {:?}",
             decision.reason_codes
         );
         assert_eq!(
             decision.command_sha256,
-            sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
-            "audit identity must remain bound to exact submitted argv"
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
         );
     }
 }
@@ -179,20 +159,11 @@ fn uv_run_value_options_do_not_hide_uv_owned_python_provider_authority() {
 fn assert_python_provider_selection_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
-    assert_eq!(
-        decision.decision,
-        DecisionKind::Block,
-        "caller-selected uv Python-provider authority must not inherit reviewed artifact approval"
-    );
-    assert_eq!(
-        decision.reason_codes,
-        vec![ReasonCode::AlternateInstallRoot],
-        "uv Python-provider selection must fail causally as caller-selected interpreter/install-root authority"
-    );
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert_eq!(decision.reason_codes, vec![ReasonCode::AlternateInstallRoot]);
     assert_eq!(
         decision.command_sha256,
-        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
-        "audit identity must remain bound to exact submitted argv"
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
     );
 }
 
