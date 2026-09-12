@@ -13,9 +13,9 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
     let arguments = &intent.argv[1..];
     let run_position = arguments.iter().position(|argument| argument == "run");
     let pip_position = arguments.iter().position(|argument| argument == "pip");
-    if run_position.is_some_and(|run_index| {
-        pip_position.is_none_or(|pip_index| run_index < pip_index)
-    }) {
+    if run_position
+        .is_some_and(|run_index| pip_position.is_none_or(|pip_index| run_index < pip_index))
+    {
         return false;
     }
 
