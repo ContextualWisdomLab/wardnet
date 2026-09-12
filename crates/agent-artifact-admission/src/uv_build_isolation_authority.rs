@@ -84,11 +84,11 @@ mod tests {
         assert_eq!(
             normalized.argv,
             vec![
-                "uv",
-                "pip",
-                "install",
-                "cwl-example==1.2.3",
-                "--no-build-isolation-package",
+                "uv".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                "cwl-example==1.2.3".to_string(),
+                "--no-build-isolation-package".to_string(),
             ]
         );
         assert!(requests_unapproved_uv_build_isolation_override(&intent));
