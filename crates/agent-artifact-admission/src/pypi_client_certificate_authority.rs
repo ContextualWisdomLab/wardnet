@@ -33,7 +33,7 @@ pub(crate) fn requests_unapproved_pypi_client_certificate_authority(
 
 /// Match only the pinned pip parser language for `--client-cert`: the exact
 /// option and its verified unambiguous prefixes beginning at `--cl`.
-fn matches_pip_client_certificate_option(argument: &str) -> bool {
+pub(crate) fn matches_pip_client_certificate_option(argument: &str) -> bool {
     let option = argument
         .split_once('=')
         .map_or(argument, |(option, _)| option);
