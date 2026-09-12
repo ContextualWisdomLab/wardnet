@@ -54,7 +54,9 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     let intent = global_normalized_intent.as_ref().unwrap_or(intent);
     let certificate_store_normalized_intent =
         pypi_certificate_store_authority::normalize_reviewed_pypi_certificate_store_values(intent);
-    let intent = certificate_store_normalized_intent.as_ref().unwrap_or(intent);
+    let intent = certificate_store_normalized_intent
+        .as_ref()
+        .unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
         if !decision
