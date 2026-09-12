@@ -25,7 +25,10 @@ mod tests {
     use super::requests_bytecode_compilation;
 
     fn argv(arguments: &[&str]) -> Vec<String> {
-        arguments.iter().map(|argument| (*argument).to_string()).collect()
+        arguments
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect()
     }
 
     #[test]
