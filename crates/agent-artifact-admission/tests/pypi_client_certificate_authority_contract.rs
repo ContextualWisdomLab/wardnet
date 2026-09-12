@@ -147,6 +147,50 @@ fn pip_global_separate_client_certificate_value_is_explicitly_classified() {
                 "{executable} global separate {option} must be classified explicitly rather than relying on command or operand rejection: {:?}",
                 decision.reason_codes
             );
+            assert!(
+                !decision
+                    .reason_codes
+                    .contains(&ReasonCode::ArtifactNotApproved),
+                "{executable} global separate {option} must consume its client-certificate value as option grammar rather than manufacture an undeclared package finding: {:?}",
+                decision.reason_codes
+            );
+        }
+    }
+}
+
+#[test]
+fn pip_global_separate_client_certificate_still_exposes_a_real_extra_artifact() {
+    for executable in ["pip", "pip3"] {
+        for option in ["--client-cert", "--cl"] {
+            let (policy, mut intent) = approved_pip_install(executable);
+            intent.argv = vec![
+                executable.to_string(),
+                option.to_string(),
+                "/tmp/attacker-client.pem".to_string(),
+                "install".to_string(),
+                ARTIFACT_ARGUMENT.to_string(),
+                "unapproved-extra==9.9.9".to_string(),
+                "--require-hashes".to_string(),
+                "--no-deps".to_string(),
+            ];
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(decision.decision, DecisionKind::Block);
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "{executable} global separate {option} must retain the explicit client-certificate trust finding: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::ArtifactNotApproved),
+                "{executable} global separate {option} must not hide a genuine extra package operand: {:?}",
+                decision.reason_codes
+            );
         }
     }
 }
