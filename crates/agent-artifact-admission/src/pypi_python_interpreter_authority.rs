@@ -12,10 +12,7 @@ pub(crate) fn matches_pip_python_interpreter_option(argument: &str) -> bool {
     let option = argument
         .split_once('=')
         .map_or(argument, |(option, _)| option);
-    matches!(
-        option,
-        "--py" | "--pyt" | "--pyth" | "--pytho" | "--python"
-    )
+    matches!(option, "--py" | "--pyt" | "--pyth" | "--pytho" | "--python")
 }
 
 /// Normalize an exact post-command `pip install --python VALUE` selector only in
