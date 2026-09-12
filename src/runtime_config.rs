@@ -183,8 +183,10 @@ pub fn parse_u64_env(
 
 #[cfg(test)]
 /// Tokenize the Rust syntax needed by the architecture fitness rule while
-/// discarding comments and literal bodies so documentation or fixture strings
-/// cannot be mistaken for executable environment access.
+/// discarding comments and string literal bodies so documentation or fixture
+/// strings cannot be mistaken for executable environment access. Apostrophes
+/// remain punctuation: treating a lifetime like `'a` as a character literal
+/// can otherwise hide executable tokens until a later apostrophe on the line.
 fn rust_syntax_tokens(source: &str) -> Vec<String> {
     fn raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
         let mut cursor = start;
@@ -266,18 +268,6 @@ fn rust_syntax_tokens(source: &str) -> Vec<String> {
                     }
                     _ => cursor += 1,
                 }
-            }
-            continue;
-        }
-        if bytes[cursor] == b'\'' {
-            let line_end = source[cursor + 1..]
-                .find('\n')
-                .map(|offset| cursor + 1 + offset)
-                .unwrap_or(bytes.len());
-            if let Some(relative_end) = source[cursor + 1..line_end].find('\'') {
-                cursor += relative_end + 2;
-            } else {
-                cursor += 1;
             }
             continue;
         }
@@ -369,9 +359,9 @@ fn use_group_entry_exposes_runtime_env(entry: &[&str]) -> bool {
 /// Detect executable Rust syntax that reads process environment outside the
 /// approved bootstrap adapters.
 ///
-/// The parser deliberately operates on tokens rather than substrings: comments,
-/// normal/raw string literals, and character literals are discarded; `use`
-/// trees and simple function-item aliases are then evaluated structurally.
+/// The parser deliberately operates on tokens rather than substrings: comments
+/// and normal/raw string literals are discarded; `use` trees and simple
+/// function-item aliases are then evaluated structurally.
 fn source_uses_runtime_env(source: &str) -> bool {
     let tokens = rust_syntax_tokens(source);
 
@@ -555,7 +545,11 @@ mod tests {
     fn runtime_configuration_ignores_blank_state_path() {
         for raw in ["", "   ", "\t"] {
             let config = runtime_from_pairs(&[("WAF_IDS_STATE_PATH", raw)]).unwrap();
-            assert_eq!(config.state_path, None, "blank state path {raw:?} must be ignored");
+            assert_eq!(
+                config.state_path,
+                None,
+                "blank state path {raw:?} must be ignored"
+            );
         }
     }
 
@@ -654,6 +648,14 @@ mod tests {
             "fn bypass() { let read = std::env::var_os; let read_again = read; let _ = read_again(\"BIND_ADDR\"); }"
         ));
         assert!(!source_uses_runtime_env("use std::fmt; fn harmless() {}"));
+    }
+
+    #[test]
+    /// Lifetimes must not be consumed as if they were character literals.
+    fn runtime_env_syntax_detector_keeps_lifetime_delimiters_visible() {
+        assert!(source_uses_runtime_env(
+            "fn bypass<'a>() { let _ = std::env::var(\"BIND_ADDR\"); let _: &'a str = \"\"; }"
+        ));
     }
 
     #[test]
