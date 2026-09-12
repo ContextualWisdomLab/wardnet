@@ -22,8 +22,9 @@ pub(crate) fn matches_pip_python_interpreter_option(argument: &str) -> bool {
 /// `--py...` spellings are intentionally not accepted in this post-command seam.
 /// Attaching the consumed value prevents the selected interpreter path from being
 /// mistaken for a package operand while the public decision wrapper preserves the
-/// exact caller-submitted argv as audit identity. This performs no interpreter
-/// discovery, execution, environment mutation, or filesystem access.
+/// exact caller-submitted argv as audit identity. The `--` option terminator ends
+/// this grammar. This performs no interpreter discovery, execution, environment
+/// mutation, or filesystem access.
 pub(crate) fn normalize_reviewed_post_command_pip_python_interpreter_value(
     intent: &InstallIntent,
 ) -> Option<InstallIntent> {
@@ -41,6 +42,9 @@ pub(crate) fn normalize_reviewed_post_command_pip_python_interpreter_value(
     let mut index = 2;
     let mut changed = false;
     while index < argv.len() {
+        if argv[index] == "--" {
+            break;
+        }
         if argv[index] != "--python" {
             index += 1;
             continue;
@@ -146,6 +150,19 @@ mod tests {
                 "post-command {unreviewed} must not inherit exact --python grammar"
             );
         }
+    }
+
+    #[test]
+    fn post_command_normalizer_respects_option_termination() {
+        let intent = test_intent(vec![
+            "pip",
+            "install",
+            "--",
+            "--python",
+            "/tmp/python",
+            "cwl-example==1.2.3",
+        ]);
+        assert!(normalize_reviewed_post_command_pip_python_interpreter_value(&intent).is_none());
     }
 
     fn test_intent(argv: Vec<&str>) -> InstallIntent {
