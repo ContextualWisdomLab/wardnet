@@ -4,6 +4,7 @@ use crate::pypi_client_certificate_authority::matches_pip_client_certificate_opt
 use crate::pypi_proxy_authority::{
     is_attached_direct_pip_proxy_selector, is_direct_pip_proxy_value_selector,
 };
+use crate::pypi_python_interpreter_authority::matches_pip_python_interpreter_option;
 use crate::pypi_registry_authority::{
     is_reviewed_pip_no_index_selector, is_reviewed_pip_registry_value_selector,
 };
@@ -113,6 +114,27 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
                 // The client-certificate path is consumed option grammar, not an
                 // artifact operand. Attach it only in the internal policy copy;
                 // admission_decision restores audit identity from submitted argv.
+                push_attached_normalized_value_argument(
+                    arguments,
+                    &mut reviewed_global_arguments,
+                    &mut index,
+                )?;
+            }
+            continue;
+        }
+
+        if matches_pip_python_interpreter_option(argument) {
+            if let Some((_, value)) = argument.split_once('=') {
+                if value.is_empty() {
+                    return None;
+                }
+                reviewed_global_arguments.push(arguments[index].clone());
+                index += 1;
+            } else {
+                // The interpreter path is consumed General Option grammar, not a
+                // package operand. Keep it attached only in the internal policy
+                // copy so artifact cardinality remains exact; the wrapper restores
+                // the caller-submitted argv hash before returning the decision.
                 push_attached_normalized_value_argument(
                     arguments,
                     &mut reviewed_global_arguments,
