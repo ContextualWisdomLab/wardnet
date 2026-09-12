@@ -249,7 +249,8 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     }
     if pypi_python_interpreter_authority::requests_unapproved_pypi_python_interpreter_authority(
         intent,
-    ) {
+    ) || pypi_python_interpreter_authority::requests_unapproved_uv_python_provider_authority(intent)
+    {
         if !decision
             .reason_codes
             .contains(&ReasonCode::AlternateInstallRoot)
