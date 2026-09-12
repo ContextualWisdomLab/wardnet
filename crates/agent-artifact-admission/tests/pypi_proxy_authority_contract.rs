@@ -86,12 +86,24 @@ fn genuine_extra_artifact_remains_visible_beside_separate_proxy_authority() {
 
             assert_eq!(decision.decision, DecisionKind::Block);
             assert_eq!(
-                decision.reason_codes,
-                vec![
-                    ReasonCode::AlternateTrustRoot,
-                    ReasonCode::ArtifactNotApproved,
-                ],
-                "a consumed proxy value must be ignored for artifact cardinality while a real extra package remains visible"
+                decision.reason_codes.len(),
+                2,
+                "a consumed proxy value must add no spurious reason while a real extra package remains visible: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateTrustRoot),
+                "separate {proxy_option:?} must retain its causal proxy/trust-authority reason: {:?}",
+                decision.reason_codes
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::ArtifactNotApproved),
+                "a genuine undeclared package must remain visible independently of the consumed proxy value: {:?}",
+                decision.reason_codes
             );
         }
     }
