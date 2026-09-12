@@ -70,7 +70,7 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
                 reviewed_global_arguments.push(arguments[index].clone());
                 index += 1;
             } else {
-                push_separate_value_argument(
+                push_attached_normalized_value_argument(
                     arguments,
                     &mut reviewed_global_arguments,
                     &mut index,
@@ -123,6 +123,21 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
     }
 
     None
+}
+
+fn push_attached_normalized_value_argument(
+    arguments: &[String],
+    reviewed_global_arguments: &mut Vec<String>,
+    index: &mut usize,
+) -> Option<()> {
+    let value = arguments.get(*index + 1)?;
+    if value == "install" || value.starts_with('-') || value.is_empty() {
+        return None;
+    }
+
+    reviewed_global_arguments.push(format!("{}={value}", arguments[*index]));
+    *index += 2;
+    Some(())
 }
 
 fn push_separate_value_argument(
