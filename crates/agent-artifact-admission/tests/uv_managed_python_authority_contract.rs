@@ -96,23 +96,57 @@ fn uv_global_python_provider_near_spellings_do_not_inherit_authority_semantics()
     }
 }
 
+#[test]
+fn unsupported_uv_run_never_inherits_install_authority_semantics() {
+    for option in ["--managed-python", "--no-managed-python"] {
+        for argv in [
+            vec!["uv", "run", option, "python"],
+            vec!["uv", "run", "python", option],
+            vec!["uv", "--color", "auto", "run", option, "python"],
+            vec!["uv", option, "run", "python"],
+        ] {
+            let (policy, mut intent) = approved_uv_install();
+            intent.argv = argv.into_iter().map(str::to_string).collect();
+
+            let decision = admission_decision(&policy, &intent);
+
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "uv run remains outside Wardnet's artifact-install grammar"
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .contains(&ReasonCode::ForbiddenCommand)
+            );
+            assert!(
+                !decision
+                    .reason_codes
+                    .contains(&ReasonCode::AlternateInstallRoot),
+                "unsupported uv run must not be parsed by the install-authority classifier for {option}; got {:?}",
+                decision.reason_codes
+            );
+            assert_eq!(
+                decision.command_sha256,
+                sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+                "audit identity must remain bound to exact submitted argv"
+            );
+        }
+    }
+}
+
 fn assert_python_provider_selection_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
-    assert_eq!(
-        decision.decision,
-        DecisionKind::Block,
-        "caller-selected uv Python-provider authority must not inherit reviewed artifact approval"
-    );
+    assert_eq!(decision.decision, DecisionKind::Block);
     assert_eq!(
         decision.reason_codes,
-        vec![ReasonCode::AlternateInstallRoot],
-        "uv Python-provider selection must fail causally as caller-selected interpreter/install-root authority"
+        vec![ReasonCode::AlternateInstallRoot]
     );
     assert_eq!(
         decision.command_sha256,
-        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
-        "audit identity must remain bound to exact submitted argv"
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
     );
 }
 
