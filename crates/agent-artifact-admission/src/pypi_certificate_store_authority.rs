@@ -26,7 +26,7 @@ pub(crate) fn requests_unapproved_pypi_certificate_store_abbreviation(
 /// pip's optparse-compatible parser accepts `--ce` and `--cer` for `--cert`.
 /// `--c` remains ambiguous on the reviewed option surface, while the full
 /// `--cert` spelling stays owned by the generic exact-option trust guard.
-fn matches_pip_certificate_store_abbreviation(argument: &str) -> bool {
+pub(crate) fn matches_pip_certificate_store_abbreviation(argument: &str) -> bool {
     let option = argument
         .split_once('=')
         .map_or(argument, |(option, _)| option);
