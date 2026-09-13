@@ -290,7 +290,9 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         }
         decision.decision = DecisionKind::Block;
     }
-    if uv_python_download_safety::misses_required_uv_python_download_guard(intent) {
+    if decision.decision == DecisionKind::Allow
+        && uv_python_download_safety::misses_required_uv_python_download_guard(intent)
+    {
         if !decision
             .reason_codes
             .contains(&ReasonCode::MissingSafetyFlag)
