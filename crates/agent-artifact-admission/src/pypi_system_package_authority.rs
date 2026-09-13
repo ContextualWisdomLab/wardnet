@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
 /// Return whether a pip-compatible install asks to override the
 /// externally-managed-environment protection required by the reviewed intent.
@@ -19,14 +20,21 @@ pub(crate) fn requests_pypi_system_package_override(intent: &InstallIntent) -> b
                 .skip(1)
                 .any(|argument| matches_break_system_packages_option(argument))
         }
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
-        {
+        "uv" => {
+            let Some(pip_index) = uv_active_command_index(arguments) else {
+                return false;
+            };
+            if arguments[pip_index] != "pip"
+                || !arguments
+                    .get(pip_index + 1)
+                    .is_some_and(|argument| argument == "install")
+            {
+                return false;
+            }
+
             arguments
                 .iter()
-                .skip(2)
+                .skip(pip_index + 2)
                 .any(|argument| matches_uv_break_system_packages_option(argument))
         }
         _ => false,
