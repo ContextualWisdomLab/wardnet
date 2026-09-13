@@ -8,13 +8,7 @@ fn uv_run_project_root_is_configuration_authority() {
     let (policy, mut intent) = approved_uv_install();
 
     for argv in [
-        vec![
-            "uv",
-            "run",
-            "--project",
-            "/tmp/attacker-project",
-            "python",
-        ],
+        vec!["uv", "run", "--project", "/tmp/attacker-project", "python"],
         vec!["uv", "run", "--project=/tmp/attacker-project", "python"],
     ] {
         intent.argv = argv.into_iter().map(str::to_string).collect();
