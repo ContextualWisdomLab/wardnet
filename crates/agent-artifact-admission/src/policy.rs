@@ -857,13 +857,21 @@ fn requests_alternate_install_root(executable: &str, arguments: &[String]) -> bo
         }
         "pip" | "pip3" => contains_flag(&["--user", "--target", "-t", "--root", "--prefix"]),
         "uv" => {
-            arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install")
-                && contains_flag(&[
+            let Some(pip_index) = uv_active_command_index(arguments) else {
+                return false;
+            };
+            if arguments.get(pip_index).map(String::as_str) != Some("pip")
+                || arguments.get(pip_index + 1).map(String::as_str) != Some("install")
+            {
+                return false;
+            }
+            arguments[pip_index + 2..].iter().any(|argument| {
+                [
                     "--user", "--target", "-t", "--root", "--prefix", "--system", "--python", "-p",
-                ])
+                ]
+                .iter()
+                .any(|flag| matches_cli_flag(argument, flag))
+            })
         }
         "cargo" => contains_flag(&["--root", "--config", "--target-dir"]),
         _ => false,
