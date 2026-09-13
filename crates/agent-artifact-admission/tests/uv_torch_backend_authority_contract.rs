@@ -50,6 +50,49 @@ fn uv_torch_backend_separate_value_reports_alternate_trust_root() {
     );
 }
 
+#[test]
+fn uv_global_option_preserves_attached_torch_backend_source_evidence() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv.splice(
+        1..1,
+        ["--color".to_string(), "never".to_string()],
+    );
+    intent.argv.push("--torch-backend=cpu".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "a reviewed uv global option must not hide the pip-install torch-backend source authority: {:?}",
+        decision.reason_codes
+    );
+}
+
+#[test]
+fn uv_global_option_preserves_separate_torch_backend_source_evidence() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv.splice(
+        1..1,
+        ["--color".to_string(), "never".to_string()],
+    );
+    intent.argv.push("--torch-backend".to_string());
+    intent.argv.push("cpu".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "separate-value torch-backend authority must remain visible after uv global options: {:?}",
+        decision.reason_codes
+    );
+}
+
 fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
     let artifact = ArtifactCoordinate {
         ecosystem: "pypi".to_string(),
