@@ -25,12 +25,16 @@ fn uv_global_options_preserve_missing_hash_safety_evidence() {
     let decision = admission_decision(&policy, &hostile);
     assert_eq!(decision.decision, DecisionKind::Block);
     assert!(
-        decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
         "reviewed uv global-option grammar must remain outside the deliberately narrow supported install command: {:?}",
         decision.reason_codes
     );
     assert!(
-        decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag),
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
         "parser-valid uv global options must not erase causal missing --require-hashes evidence: {:?}",
         decision.reason_codes
     );
@@ -60,7 +64,9 @@ fn uv_global_options_with_require_hashes_do_not_fabricate_missing_safety_evidenc
     assert_eq!(decision.decision, DecisionKind::Block);
     assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
     assert!(
-        !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag),
+        !decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
         "exact --require-hashes must satisfy the hash-safety evidence contract: {:?}",
         decision.reason_codes
     );
@@ -81,7 +87,9 @@ fn uv_global_non_install_command_does_not_gain_hash_safety_evidence() {
     let decision = admission_decision(&policy, &intent);
     assert_eq!(decision.decision, DecisionKind::Block);
     assert!(
-        !decision.reason_codes.contains(&ReasonCode::MissingSafetyFlag),
+        !decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
         "non-install uv grammar must not inherit pip-install hash-safety evidence: {:?}",
         decision.reason_codes
     );
