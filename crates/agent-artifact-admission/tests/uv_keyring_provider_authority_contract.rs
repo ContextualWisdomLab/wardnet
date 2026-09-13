@@ -1,6 +1,7 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
-    InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
+    InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 #[test]
@@ -50,6 +51,91 @@ fn explicit_disabled_uv_keyring_provider_preserves_reviewed_baseline() {
         DecisionKind::Allow,
         "explicitly retaining uv's disabled keyring baseline must not expand credential authority"
     );
+}
+
+#[test]
+fn uv_global_options_preserve_keyring_provider_causal_evidence() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "cwl-example==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+        "--no-python-downloads".to_string(),
+        "--keyring-provider=subprocess".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
+        "global-option uv grammar must remain outside the deliberately narrow supported install command: {:?}",
+        decision.reason_codes
+    );
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "parser-valid uv global options must not erase credential-provider trust evidence: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+        "audit identity must remain bound to the exact submitted argv"
+    );
+}
+
+#[test]
+fn uv_global_parser_controls_do_not_fabricate_keyring_provider_authority() {
+    for argv in [
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "--no-deps",
+            "--no-python-downloads",
+            "--keyring-provider=disabled",
+        ],
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "sync",
+            "requirements.txt",
+            "--keyring-provider=subprocess",
+        ],
+    ] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = argv.into_iter().map(str::to_string).collect();
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            !decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "disabled provider or non-install uv grammar must not inherit install-scope credential-provider authority: {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+        );
+    }
 }
 
 fn assert_alternate_trust_root_block(policy: &AdmissionPolicy, intent: &InstallIntent) {
