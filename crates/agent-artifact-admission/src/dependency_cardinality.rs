@@ -1,4 +1,4 @@
-use crate::{policy::uv_active_command_index, InstallIntent};
+use crate::{InstallIntent, policy::uv_active_command_index};
 
 /// Return whether a supported PyPI install can resolve dependencies that are
 /// absent from the reviewed artifact set.
