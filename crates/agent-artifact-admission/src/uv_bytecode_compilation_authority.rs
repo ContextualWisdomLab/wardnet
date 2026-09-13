@@ -26,7 +26,7 @@ fn requests_bytecode_compilation(argv: &[String]) -> bool {
         return arguments[2..]
             .iter()
             .take_while(|argument| argument.as_str() != "--")
-            .any(is_compile_selector);
+            .any(|argument| is_compile_selector(argument));
     }
 
     let Some(run_index) = uv_active_command_index(arguments) else {
@@ -38,11 +38,11 @@ fn requests_bytecode_compilation(argv: &[String]) -> bool {
 
     arguments[..uv_run_owned_argument_end(arguments, run_index)]
         .iter()
-        .any(is_compile_selector)
+        .any(|argument| is_compile_selector(argument))
 }
 
-fn is_compile_selector(argument: &String) -> bool {
-    matches!(argument.as_str(), "--compile-bytecode" | "--compile")
+fn is_compile_selector(argument: &str) -> bool {
+    matches!(argument, "--compile-bytecode" | "--compile")
 }
 
 #[cfg(test)]
