@@ -130,6 +130,96 @@ fn nearby_uv_run_compile_spelling_does_not_inherit_uv_semantics() {
     );
 }
 
+#[test]
+fn uv_global_options_preserve_pip_install_bytecode_authority_evidence() {
+    for compile_flag in ["--compile-bytecode", "--compile"] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = vec![
+            "uv".to_string(),
+            "--color".to_string(),
+            "never".to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "cwl-example==1.2.3".to_string(),
+            "--require-hashes".to_string(),
+            "--no-deps".to_string(),
+            compile_flag.to_string(),
+        ];
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
+            "global-option uv grammar remains outside the supported install command: {:?}",
+            decision.reason_codes
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ArtifactNotApproved),
+            "uv pip install bytecode authority must survive reviewed global options: {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+            "audit identity must remain bound to the exact submitted argv"
+        );
+    }
+}
+
+#[test]
+fn uv_global_option_controls_do_not_fabricate_pip_install_bytecode_authority() {
+    for argv in [
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "--no-deps",
+            "--compile-bytecodex",
+        ],
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "sync",
+            "cwl-example==1.2.3",
+            "--compile-bytecode",
+        ],
+    ] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = argv.into_iter().map(str::to_string).collect();
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand)
+        );
+        assert!(
+            !decision
+                .reason_codes
+                .contains(&ReasonCode::ArtifactNotApproved),
+            "nearby spelling or non-install pip command must not inherit bytecode authority: {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+        );
+    }
+}
+
 fn assert_bytecode_compilation_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 

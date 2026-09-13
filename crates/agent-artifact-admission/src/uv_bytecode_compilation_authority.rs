@@ -21,25 +21,26 @@ fn requests_bytecode_compilation(argv: &[String]) -> bool {
     }
 
     let arguments = &argv[1..];
-    if arguments.first().is_some_and(|argument| argument == "pip")
+    let Some(command_index) = uv_active_command_index(arguments) else {
+        return false;
+    };
+
+    if arguments[command_index] == "pip"
         && arguments
-            .get(1)
+            .get(command_index + 1)
             .is_some_and(|argument| argument == "install")
     {
-        return arguments[2..]
+        return arguments[command_index + 2..]
             .iter()
             .take_while(|argument| argument.as_str() != "--")
             .any(|argument| is_compile_selector(argument));
     }
 
-    let Some(run_index) = uv_active_command_index(arguments) else {
-        return false;
-    };
-    if arguments[run_index] != "run" {
+    if arguments[command_index] != "run" {
         return false;
     }
 
-    arguments[..uv_run_owned_argument_end(arguments, run_index)]
+    arguments[..uv_run_owned_argument_end(arguments, command_index)]
         .iter()
         .any(|argument| is_compile_selector(argument))
 }
@@ -66,6 +67,15 @@ mod tests {
         for arguments in [
             vec!["uv", "pip", "install", "pkg==1", "--compile-bytecode"],
             vec!["uv", "pip", "install", "--compile", "pkg==1"],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "install",
+                "pkg==1",
+                "--compile-bytecode",
+            ],
         ] {
             assert!(requests_bytecode_compilation(&argv(&arguments)));
         }
@@ -77,6 +87,15 @@ mod tests {
             vec!["uv", "pip", "sync", "--compile"],
             vec!["uv", "pip", "install", "pkg==1"],
             vec!["uv", "pip", "install", "pkg==1", "--", "--compile"],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "sync",
+                "pkg==1",
+                "--compile-bytecode",
+            ],
         ] {
             assert!(
                 !requests_bytecode_compilation(&argv(&arguments)),
