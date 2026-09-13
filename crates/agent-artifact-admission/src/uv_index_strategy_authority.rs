@@ -13,15 +13,25 @@ pub(crate) fn requests_unsafe_uv_index_strategy(intent: &InstallIntent) -> bool 
         return false;
     };
 
-    arguments.iter().enumerate().any(|(index, argument)| {
-        if let Some(value) = argument.strip_prefix("--index-strategy=") {
-            return is_unsafe_strategy(value);
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument == "--" {
+            break;
         }
-        argument == UV_INDEX_STRATEGY
+        if let Some(value) = argument.strip_prefix("--index-strategy=") {
+            if is_unsafe_strategy(value) {
+                return true;
+            }
+            continue;
+        }
+        if argument == UV_INDEX_STRATEGY
             && arguments
                 .get(index + 1)
                 .is_some_and(|value| is_unsafe_strategy(value))
-    })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Normalize only documented separate-value `uv pip install --index-strategy`
@@ -34,6 +44,9 @@ pub(crate) fn normalize_reviewed_uv_index_strategy_value(
     let mut value_indexes = Vec::new();
 
     for (index, argument) in arguments.iter().enumerate() {
+        if argument == "--" {
+            break;
+        }
         if argument != UV_INDEX_STRATEGY {
             continue;
         }
@@ -102,6 +115,7 @@ mod tests {
             vec!["uv", "pip", "install", "pkg", "--index-strategy=first-index"],
             vec!["uv", "pip", "install", "pkg", "--index-strateg=unsafe-best-match"],
             vec!["uv", "run", "python", "--index-strategy=unsafe-best-match"],
+            vec!["uv", "pip", "install", "pkg", "--", "--index-strategy=unsafe-best-match"],
         ] {
             assert!(!requests_unsafe_uv_index_strategy(&intent(&argv)));
         }
@@ -124,16 +138,11 @@ mod tests {
             vec!["uv", "pip", "install", "pkg", "--index-strategy"]
         );
 
-        assert!(
-            normalize_reviewed_uv_index_strategy_value(&intent(&[
-                "uv",
-                "pip",
-                "install",
-                "pkg",
-                "--index-strategy",
-                "future-mode",
-            ]))
-            .is_none()
-        );
+        for argv in [
+            vec!["uv", "pip", "install", "pkg", "--index-strategy", "future-mode"],
+            vec!["uv", "pip", "install", "pkg", "--", "--index-strategy", "first-index"],
+        ] {
+            assert!(normalize_reviewed_uv_index_strategy_value(&intent(&argv)).is_none());
+        }
     }
 }
