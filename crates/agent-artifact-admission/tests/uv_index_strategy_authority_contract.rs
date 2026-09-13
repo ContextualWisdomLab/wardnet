@@ -15,15 +15,20 @@ fn reviewed_uv_install_with_default_index_strategy_remains_admissible() {
 
 #[test]
 fn explicit_safe_first_index_strategy_remains_admissible() {
-    let (policy, mut intent) = approved_uv_install();
-    intent
-        .argv
-        .insert(3, "--index-strategy=first-index".to_string());
+    for selector in [
+        vec!["--index-strategy=first-index".to_string()],
+        vec!["--index-strategy".to_string(), "first-index".to_string()],
+    ] {
+        let (policy, mut intent) = approved_uv_install();
+        for (offset, token) in selector.into_iter().enumerate() {
+            intent.argv.insert(3 + offset, token);
+        }
 
-    let decision = admission_decision(&policy, &intent);
+        let decision = admission_decision(&policy, &intent);
 
-    assert_eq!(decision.decision, DecisionKind::Allow);
-    assert!(decision.reason_codes.is_empty());
+        assert_eq!(decision.decision, DecisionKind::Allow);
+        assert!(decision.reason_codes.is_empty());
+    }
 }
 
 #[test]
