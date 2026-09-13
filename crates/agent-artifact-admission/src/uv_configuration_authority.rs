@@ -28,9 +28,12 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
         return true;
     }
 
-    if !arguments.first().is_some_and(|argument| argument == "pip")
+    let Some(pip_index) = uv_active_command_index(arguments) else {
+        return false;
+    };
+    if arguments[pip_index] != "pip"
         || !arguments
-            .get(1)
+            .get(pip_index + 1)
             .is_some_and(|argument| argument == "install")
     {
         return false;
@@ -38,6 +41,6 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
 
     arguments
         .iter()
-        .skip(2)
+        .skip(pip_index + 2)
         .any(|argument| argument == "--torch-backend" || argument.starts_with("--torch-backend="))
 }
