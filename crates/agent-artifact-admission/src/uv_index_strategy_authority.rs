@@ -1,15 +1,18 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
 const UV_INDEX_STRATEGY: &str = "--index-strategy";
 const FIRST_INDEX: &str = "first-index";
 const UNSAFE_FIRST_MATCH: &str = "unsafe-first-match";
 const UNSAFE_BEST_MATCH: &str = "unsafe-best-match";
 
-/// Return whether a supported `uv pip install` asks uv to search across index
-/// trust boundaries instead of retaining uv's dependency-confusion-safe
-/// `first-index` selection rule.
+/// Return whether submitted `uv pip install` argv asks uv to search across
+/// index trust boundaries instead of retaining uv's dependency-confusion-safe
+/// `first-index` selection rule. Reviewed top-level uv options remain visible
+/// to causal evidence attribution even though they do not widen the supported
+/// install-command grammar.
 pub(crate) fn requests_unsafe_uv_index_strategy(intent: &InstallIntent) -> bool {
-    let Some(arguments) = supported_uv_pip_install_arguments(intent) else {
+    let Some(arguments) = uv_pip_install_arguments_for_evidence(intent) else {
         return false;
     };
 
@@ -37,6 +40,8 @@ pub(crate) fn requests_unsafe_uv_index_strategy(intent: &InstallIntent) -> bool 
 /// Normalize only documented separate-value `uv pip install --index-strategy`
 /// grammar so the strategy token is not mistaken for a package operand. The
 /// selector itself remains in argv for ordinary command-policy validation.
+/// This deliberately stays narrower than evidence attribution: top-level uv
+/// options are still unsupported install grammar and must remain forbidden.
 pub(crate) fn normalize_reviewed_uv_index_strategy_value(
     intent: &InstallIntent,
 ) -> Option<InstallIntent> {
@@ -71,6 +76,22 @@ pub(crate) fn normalize_reviewed_uv_index_strategy_value(
     Some(normalized)
 }
 
+fn uv_pip_install_arguments_for_evidence(intent: &InstallIntent) -> Option<&[String]> {
+    if intent.argv.first().map(String::as_str) != Some("uv") {
+        return None;
+    }
+
+    let arguments = &intent.argv[1..];
+    let command_index = uv_active_command_index(arguments)?;
+    if arguments.get(command_index).map(String::as_str) != Some("pip")
+        || arguments.get(command_index + 1).map(String::as_str) != Some("install")
+    {
+        return None;
+    }
+
+    Some(&arguments[command_index + 2..])
+}
+
 fn supported_uv_pip_install_arguments(intent: &InstallIntent) -> Option<&[String]> {
     if intent.argv.first().map(String::as_str) != Some("uv")
         || intent.argv.get(1).map(String::as_str) != Some("pip")
@@ -101,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn matcher_is_exact_and_bounded_to_supported_uv_pip_install() {
+    fn matcher_is_exact_and_bounded_to_uv_pip_install_evidence() {
         for argv in [
             vec![
                 "uv",
@@ -117,6 +138,15 @@ mod tests {
                 "pkg",
                 "--index-strategy",
                 "unsafe-first-match",
+            ],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "install",
+                "pkg",
+                "--index-strategy=unsafe-best-match",
             ],
         ] {
             assert!(requests_unsafe_uv_index_strategy(&intent(&argv)));
@@ -138,6 +168,15 @@ mod tests {
                 "--index-strateg=unsafe-best-match",
             ],
             vec!["uv", "run", "python", "--index-strategy=unsafe-best-match"],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "sync",
+                "pkg",
+                "--index-strategy=unsafe-best-match",
+            ],
             vec![
                 "uv",
                 "pip",
@@ -183,6 +222,16 @@ mod tests {
                 "install",
                 "pkg",
                 "--",
+                "--index-strategy",
+                "first-index",
+            ],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "install",
+                "pkg",
                 "--index-strategy",
                 "first-index",
             ],
