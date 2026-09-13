@@ -58,9 +58,7 @@ fn uv_python_download_disable_near_spelling_does_not_satisfy_safety_contract() {
 #[test]
 fn uv_python_download_disable_assignment_does_not_satisfy_exact_boolean_contract() {
     let (policy, mut intent) = approved_uv_install();
-    intent
-        .argv
-        .push("--no-python-downloads=false".to_string());
+    intent.argv.push("--no-python-downloads=false".to_string());
 
     let decision = admission_decision(&policy, &intent);
 
