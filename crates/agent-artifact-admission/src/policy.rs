@@ -757,6 +757,7 @@ fn requests_alternate_trust_root(executable: &str, arguments: &[String]) -> bool
         "--strict-ssl",
         "--git",
         "--path",
+        "--config-file",
         "-i",
         "-f",
     ];
