@@ -210,15 +210,17 @@ fn validate_safety_flags(intent: &InstallIntent, reason_codes: &mut Vec<ReasonCo
         {
             !arguments.iter().any(|argument| argument == "--locked")
         }
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
-        {
-            !arguments
-                .iter()
-                .any(|argument| argument == "--require-hashes")
-        }
+        "uv" => match uv_active_command_index(arguments) {
+            Some(pip_index)
+                if arguments.get(pip_index).map(String::as_str) == Some("pip")
+                    && arguments.get(pip_index + 1).map(String::as_str) == Some("install") =>
+            {
+                !arguments[pip_index + 2..]
+                    .iter()
+                    .any(|argument| argument == "--require-hashes")
+            }
+            _ => false,
+        },
         "docker" | "podman" if arguments.first().is_some_and(|argument| argument == "pull") => {
             intent.artifacts.is_empty()
                 || intent.artifacts.iter().any(|artifact| {
