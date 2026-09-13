@@ -43,7 +43,7 @@ A child merge into #129 is not protected-product completion. #264 and #389 remai
 ## Traceability
 
 - CWE-15 describes the weakness class in which externally controlled input changes system or configuration settings that affect behavior. The uv configuration and package-source selectors are treated here as admission authority changes rather than ordinary argument detail.
-- NIST SSDF PW.4 requires reusable security controls and secure coding practices to prevent common vulnerabilities; Wardnet's fail-closed, parser-bounded classifier is a narrow preventive control at the command-admission boundary. The repository already carries the redistributable NIST SP 800-218 source PDF under `docs/papers/`; no duplicate copy is needed for this change.
+- NIST SSDF PW.4 directs software producers to reuse existing, well-secured software when feasible instead of duplicating functionality, with particular importance for security functionality. Reusing Wardnet's already-reviewed bounded `uv_active_command_index` parser rather than adding a second uv parser aligns with that practice and reduces divergent security interpretation. The repository already carries the redistributable NIST SP 800-218 source PDF under `docs/papers/`; no duplicate copy is needed for this change.
 - Astral's current CLI reference is authoritative for the top-level `uv [OPTIONS] <COMMAND>` grammar and global `--color` option. This is why evidence classification cannot assume that `pip` is always the first token after the executable.
 - Astral's settings reference states that `torch-backend` changes package fetching for the PyTorch ecosystem, ignores configured index URLs for those packages, and is respected only by `uv pip` commands. This establishes `--torch-backend` as package-source authority rather than a presentation or performance flag.
 - Astral's PyTorch integration guide documents current command-line forms such as `uv pip install torch --torch-backend=auto` and specific backend selection. These vendor pages are linked rather than copied into `docs/papers/`: this change does not assert a redistribution license for snapshots of the Astral documentation.
@@ -60,4 +60,4 @@ Astral Software, Inc. (2026). *Configuration files*. https://docs.astral.sh/uv/c
 
 MITRE. (2026). *CWE-15: External control of system or configuration setting*. https://cwe.mitre.org/data/definitions/15.html
 
-National Institute of Standards and Technology. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities (NIST SP 800-218).* https://doi.org/10.6028/NIST.SP.800-218
+Souppaya, M., Scarfone, K., & Dodson, D. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities (NIST SP 800-218).* National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218
