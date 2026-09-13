@@ -38,18 +38,27 @@ fn uv_break_system_packages_cannot_inherit_artifact_approval() {
 #[test]
 fn uv_global_options_preserve_break_system_packages_causal_evidence() {
     let (policy, mut intent) = approved_uv_install();
-    intent
-        .argv
-        .splice(1..1, ["--color".to_string(), "never".to_string()]);
-    intent.argv.push("--break-system-packages".to_string());
+    intent.argv = vec![
+        "uv".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "cwl-example==1.2.3".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+        "--no-python-downloads".to_string(),
+        "--break-system-packages".to_string(),
+    ];
 
-    let expected_command_sha256 = sha256_hex(intent.argv.join("\u{1f}").as_bytes());
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Block);
     assert!(
-        decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
-        "the deliberately narrow supported-command grammar must remain fail-closed: {:?}",
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
+        "global-option uv grammar must remain outside the deliberately narrow supported install command: {:?}",
         decision.reason_codes
     );
     assert!(
@@ -60,49 +69,55 @@ fn uv_global_options_preserve_break_system_packages_causal_evidence() {
         decision.reason_codes
     );
     assert_eq!(
-        decision.command_sha256, expected_command_sha256,
-        "normalization or causal classification must not replace exact submitted argv audit identity"
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+        "audit identity must remain bound to the exact submitted argv"
     );
 }
 
 #[test]
 fn uv_global_parser_controls_do_not_fabricate_system_package_authority() {
-    let (policy, mut near_spelling) = approved_uv_install();
-    near_spelling
-        .argv
-        .splice(1..1, ["--color".to_string(), "never".to_string()]);
-    near_spelling
-        .argv
-        .push("--break-system-package".to_string());
+    for argv in [
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "install",
+            "cwl-example==1.2.3",
+            "--require-hashes",
+            "--no-deps",
+            "--no-python-downloads",
+            "--break-system-package",
+        ],
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "sync",
+            "requirements.txt",
+            "--break-system-packages",
+        ],
+    ] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv = argv.into_iter().map(str::to_string).collect();
 
-    let near_spelling_decision = admission_decision(&policy, &near_spelling);
-    assert!(
-        !near_spelling_decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag),
-        "uv uses exact long-option matching for this authority boundary: {:?}",
-        near_spelling_decision.reason_codes
-    );
+        let decision = admission_decision(&policy, &intent);
 
-    let (policy, mut non_install) = approved_uv_install();
-    non_install.argv = vec![
-        "uv".to_string(),
-        "--color".to_string(),
-        "never".to_string(),
-        "pip".to_string(),
-        "sync".to_string(),
-        "requirements.txt".to_string(),
-        "--break-system-packages".to_string(),
-    ];
-
-    let non_install_decision = admission_decision(&policy, &non_install);
-    assert!(
-        !non_install_decision
-            .reason_codes
-            .contains(&ReasonCode::MissingSafetyFlag),
-        "non-install uv grammar must not fabricate install-scope system-package authority: {:?}",
-        non_install_decision.reason_codes
-    );
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            !decision
+                .reason_codes
+                .contains(&ReasonCode::MissingSafetyFlag),
+            "nearby spelling or non-install uv grammar must not inherit install-scope system-package authority: {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+        );
+    }
 }
 
 fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
