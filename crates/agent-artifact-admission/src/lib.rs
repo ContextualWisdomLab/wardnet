@@ -32,6 +32,7 @@ mod pypi_system_package_authority;
 mod uv_bytecode_compilation_authority;
 mod uv_configuration_authority;
 mod uv_link_mode_authority;
+mod uv_python_download_safety;
 
 pub use admission::{
     AdmissionDecision, AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate,
@@ -281,6 +282,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         decision.decision = DecisionKind::Block;
     }
     if pypi_system_package_authority::requests_pypi_system_package_override(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag)
+        {
+            decision.reason_codes.push(ReasonCode::MissingSafetyFlag);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if uv_python_download_safety::misses_required_uv_python_download_guard(intent) {
         if !decision
             .reason_codes
             .contains(&ReasonCode::MissingSafetyFlag)
