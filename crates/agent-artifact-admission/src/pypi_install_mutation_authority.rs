@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
 /// Return whether a PyPI install asks for mutation authority over an existing
 /// installation that is not represented by the reviewed artifact.
@@ -31,9 +32,12 @@ fn requests_direct_pip_mutation(arguments: &[String]) -> bool {
 }
 
 fn requests_uv_pip_mutation(arguments: &[String]) -> bool {
-    if !arguments.first().is_some_and(|argument| argument == "pip")
+    let Some(pip_index) = uv_active_command_index(arguments) else {
+        return false;
+    };
+    if arguments[pip_index] != "pip"
         || !arguments
-            .get(1)
+            .get(pip_index + 1)
             .is_some_and(|argument| argument == "install")
     {
         return false;
@@ -41,7 +45,7 @@ fn requests_uv_pip_mutation(arguments: &[String]) -> bool {
 
     arguments
         .iter()
-        .skip(2)
+        .skip(pip_index + 2)
         .any(|argument| matches_uv_install_mutation_option(argument))
 }
 
