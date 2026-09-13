@@ -1,6 +1,6 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
-    InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
+    InstallIntent, InstructionSource, InstructionSourceKind, admission_decision, sha256_hex,
 };
 
 const DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -90,6 +90,40 @@ fn uv_pip_target_platform_and_build_backend_controls_are_not_preapproved() {
             "uv pip selector {selector} must stay in the artifact-identity reason domain"
         );
     }
+}
+
+#[test]
+fn uv_global_options_do_not_hide_build_backend_artifact_authority() {
+    let (policy, mut intent) = approved_uv_pypi_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        format!("{PACKAGE_NAME}=={PACKAGE_VERSION}"),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+        "--config-setting".to_string(),
+        "backend-mode=unsafe".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason.as_str() == "artifact_not_approved"),
+        "a uv global option must not hide caller-selected build-backend authority: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+        "audit identity must remain bound to the exact submitted argv"
+    );
 }
 
 #[test]
