@@ -70,7 +70,9 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         .unwrap_or(intent);
     let uv_index_strategy_normalized_intent =
         uv_index_strategy_authority::normalize_reviewed_uv_index_strategy_value(intent);
-    let intent = uv_index_strategy_normalized_intent.as_ref().unwrap_or(intent);
+    let intent = uv_index_strategy_normalized_intent
+        .as_ref()
+        .unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
         if !decision
