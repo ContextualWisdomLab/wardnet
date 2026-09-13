@@ -96,6 +96,42 @@ fn unsafe_first_match_is_explicit_trust_authority() {
 }
 
 #[test]
+fn reviewed_uv_global_options_do_not_hide_unsafe_index_strategy_authority() {
+    for selector in [
+        vec!["--index-strategy=unsafe-best-match".to_string()],
+        vec![
+            "--index-strategy".to_string(),
+            "unsafe-first-match".to_string(),
+        ],
+    ] {
+        let (policy, mut intent) = approved_uv_install();
+        intent.argv.splice(
+            1..1,
+            ["--color".to_string(), "never".to_string()],
+        );
+        for (offset, token) in selector.into_iter().enumerate() {
+            intent.argv.insert(5 + offset, token);
+        }
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            "global-option grammar remains outside the supported install command: {:?}",
+            decision.reason_codes
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::AlternateTrustRoot),
+            "reviewed uv global options must not hide unsafe index-strategy authority: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
+#[test]
 fn near_spelling_does_not_fabricate_trust_authority() {
     let (policy, mut intent) = approved_uv_install();
     intent
