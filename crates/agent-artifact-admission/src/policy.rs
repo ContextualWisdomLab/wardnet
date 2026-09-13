@@ -599,7 +599,7 @@ fn requests_inline_eval(executable: &str, arguments: &[String]) -> bool {
 /// option's separate value for a command token. Unknown option grammar remains
 /// unsupported by the install policy; this helper only establishes the `run`
 /// delegation boundary used for trust-evidence attribution.
-fn uv_active_command_index(arguments: &[String]) -> Option<usize> {
+pub(crate) fn uv_active_command_index(arguments: &[String]) -> Option<usize> {
     const VALUE_OPTIONS: &[&str] = &[
         "--allow-insecure-host",
         "--trusted-host",
@@ -648,7 +648,7 @@ fn uv_active_command_index(arguments: &[String]) -> Option<usize> {
 /// commands. Unknown flag spellings remain unsupported and are treated only as
 /// flag tokens; the first positional token still establishes the delegation
 /// boundary. An explicit `--` ends uv-owned argv immediately.
-fn uv_run_owned_argument_end(arguments: &[String], run_index: usize) -> usize {
+pub(crate) fn uv_run_owned_argument_end(arguments: &[String], run_index: usize) -> usize {
     const VALUE_OPTIONS: &[&str] = &[
         "--allow-insecure-host",
         "--trusted-host",

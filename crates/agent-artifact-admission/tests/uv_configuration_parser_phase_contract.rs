@@ -52,6 +52,41 @@ fn unsupported_uv_run_child_argv_does_not_inherit_install_configuration_authorit
     }
 }
 
+#[test]
+fn uv_run_owned_configuration_authority_before_child_remains_visible() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv = vec![
+        "uv".to_string(),
+        "run".to_string(),
+        "--config-file".to_string(),
+        "/tmp/attacker-uv.toml".to_string(),
+        "python".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
+        "unsupported uv run must remain fail-closed: {:?}",
+        decision.reason_codes
+    );
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot),
+        "uv run configuration selectors before the child are consumed by uv and must remain Wardnet configuration-authority evidence: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+        "audit identity must remain bound to the exact submitted argv"
+    );
+}
+
 fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
     let mut intent = InstallIntent::unowned_llms_package_for_test();
     intent.argv = vec![
