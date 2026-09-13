@@ -31,6 +31,61 @@ fn uv_separate_symlink_link_mode_cannot_inherit_artifact_approval() {
     assert_symlink_link_mode_is_blocked(&policy, &intent);
 }
 
+#[test]
+fn uv_global_options_preserve_pip_install_symlink_link_mode_authority_evidence() {
+    for link_mode in [vec!["--link-mode=symlink"], vec!["--link-mode", "symlink"]] {
+        let (policy, mut intent) = approved_uv_install();
+        intent
+            .argv
+            .splice(1..1, ["--color".to_string(), "never".to_string()]);
+        intent
+            .argv
+            .extend(link_mode.into_iter().map(str::to_string));
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
+            "top-level uv options remain outside the supported install grammar: {:?}",
+            decision.reason_codes
+        );
+        assert!(
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ArtifactNotApproved),
+            "caller-selected symlink materialization must remain explicit causal evidence through reviewed uv global options: {:?}",
+            decision.reason_codes
+        );
+    }
+}
+
+#[test]
+fn uv_global_link_mode_lookalike_does_not_fabricate_symlink_authority() {
+    let (policy, mut lookalike) = approved_uv_install();
+    lookalike
+        .argv
+        .splice(1..1, ["--color".to_string(), "never".to_string()]);
+    lookalike.argv.push("--link-modex=symlink".to_string());
+
+    let decision = admission_decision(&policy, &lookalike);
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
+    assert!(
+        !decision
+            .reason_codes
+            .contains(&ReasonCode::ArtifactNotApproved),
+        "near spelling must not inherit uv link-mode semantics: {:?}",
+        decision.reason_codes
+    );
+}
+
 fn assert_symlink_link_mode_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
     let decision = admission_decision(policy, intent);
 
