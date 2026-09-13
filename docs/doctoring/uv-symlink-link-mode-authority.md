@@ -24,10 +24,10 @@ As of 2026-09-13, NIST lists SP 800-218 as the final SSDF Version 1.1 publicatio
 
 ## APA 7 references
 
-Astral Software, Inc. (2026). *Commands: uv documentation.* https://docs.astral.sh/uv/reference/cli/
+Astral Software, Inc. (n.d.). *Commands: uv documentation.* Retrieved September 13, 2026, from https://docs.astral.sh/uv/reference/cli/
 
-Astral Software, Inc. (2026). *Settings: uv documentation.* https://docs.astral.sh/uv/reference/settings/
+Astral Software, Inc. (n.d.). *Settings: uv documentation.* Retrieved September 13, 2026, from https://docs.astral.sh/uv/reference/settings/
 
-Scarfone, K., Souppaya, M., & Dodson, D. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities (NIST SP 800-218).* National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218
+Souppaya, M., Scarfone, K., & Dodson, D. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities (NIST SP 800-218).* National Institute of Standards and Technology. https://doi.org/10.6028/NIST.SP.800-218
 
-National Institute of Standards and Technology. (2026). *Secure Software Development Framework: Publications.* https://csrc.nist.gov/projects/ssdf/publications
+National Institute of Standards and Technology. (n.d.). *Secure Software Development Framework: Publications.* Retrieved September 13, 2026, from https://csrc.nist.gov/projects/ssdf/publications
