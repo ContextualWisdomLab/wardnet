@@ -1,10 +1,11 @@
-# ADR 0007: Localhost default bind; remote management requires token plus external TLS/identity
+# ADR 0007: Localhost default bind; remote management requires write-capable auth plus external TLS/identity
 
 - Status: Accepted
 - Date: 2026-08-25
-- Recorded from: current `main` (`README.md` bind default and
-  hardening note; `docs/architecture.md` security boundaries;
-  `docs/security/threat-model.md` trust boundaries)
+- Reconciled: 2026-09-13 against protected `main@f8260f1e03836039ff9463dd99fa982e4e270c4b`
+- Recorded from: `README.md` bind default and hardening note;
+  `docs/architecture.md` security boundaries;
+  `docs/security/threat-model.md` trust boundaries; protected #155
 
 ## Context
 
@@ -17,38 +18,51 @@ RFC 6890, Best Current Practice; Internet Assigned Numbers
 Authority, n.d.). A default listen address of `127.0.0.1:8080`
 keeps the process on that block unless an operator sets `BIND_ADDR`.
 
-Block mode must not flip the whole process into global enforcement
-from one mistaken write.
+A remote listener also needs a credential that can actually authorize
+management writes. Merely configuring a credential registry is not
+sufficient if it is empty, header-ambiguous, or contains only read-only
+principals. Block mode must not flip the whole process into global
+enforcement from one mistaken write.
 
 ## Decision
 
 1. Default `BIND_ADDR` is **`127.0.0.1:8080`** (localhost).
-2. **Remote management** is accepted only with a configured
-   **`ADMIN_TOKEN`** (or `ADMIN_TOKENS` / credential-registry
-   equivalent) **and** external TLS plus identity controls in front of
-   the process. This binary does not terminate public TLS or SSO by
-   itself.
-3. **Block mode is route-scoped.** A route's `mode` applies to that
+2. A non-loopback bind **fails closed before serving** unless Wardnet
+   has at least one valid, presentable, write-capable administrator
+   credential from `ADMIN_TOKEN`, `ADMIN_TOKENS`, or the supported
+   credential-registry equivalent. Empty, unusable, ambiguous, or
+   read-only-only credential configurations do not satisfy this gate.
+3. Remote management additionally requires external TLS and
+   identity-aware access controls in front of the process. Wardnet does
+   not treat its bearer credential as a substitute for public TLS, SSO,
+   mTLS, upstream allowlists, or operator identity governance.
+4. **Block mode is route-scoped.** A route's `mode` applies to that
    route's path prefix only.
-4. Public clients enter through `/gateway/{path}`. Management writes
-   use `X-Admin-Token` and remain upserts.
+5. Public clients enter through `/gateway/{path}`. Management writes
+   use the supported administrator-authentication contract and remain
+   upserts; authentication and authorization semantics must remain
+   consistent across health/management paths and smoke/runtime evidence.
 
 ## Consequences
 
 - `cargo run` without extra config is a local lab listener, not an
   internet-facing deployment.
-- Current `main` does **not** yet fail closed when an operator binds to
-  a non-loopback address without admin credentials: the fallback
-  `admin_authorized` path still treats missing credentials as auth
-  disabled. That insecure configuration is therefore outside this
-  accepted deployment boundary and remains an implementation gap rather
-  than accepted evidence of safe remote management.
-- Operators who bind to a non-loopback address must supply TLS,
-  identity-aware access, upstream allowlists, and rollback procedures
-  before production traffic (`README.md` completion baseline).
-- Unauthorized management writes remain the primary control-plane
-  threat; token gates and audit logs are the current control, not a
-  substitute for SSO or mTLS (`docs/security/threat-model.md`).
+- Protected #155 removed the predecessor fail-open state: current
+  protected `main` rejects public bind when no usable write-capable
+  administrator can be presented and rejects unusable or
+  header-ambiguous bootstrap credentials. This is implementation
+  evidence for the bind/auth gate, not evidence that TLS or enterprise
+  identity is provided by Wardnet.
+- Operators who bind to a non-loopback address still must supply TLS,
+  identity-aware access, upstream allowlists, secret lifecycle, and
+  rollback procedures before production traffic (`README.md` completion
+  baseline).
+- Unauthorized management writes remain a primary control-plane threat;
+  credential gates, RBAC, and audit logs are controls, not substitutes
+  for SSO or mTLS (`docs/security/threat-model.md`).
+- A read-only principal is intentionally insufficient to make a public
+  management listener release-ready because it cannot authorize the
+  control-plane recovery/change path that the listener exposes.
 - RFC 6890 is a Best Current Practice for special-purpose address
   registries; it is not a WAF protocol.
 
