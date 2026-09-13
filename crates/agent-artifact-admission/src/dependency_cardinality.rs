@@ -1,4 +1,4 @@
-use crate::InstallIntent;
+use crate::{policy::uv_active_command_index, InstallIntent};
 
 /// Return whether a supported PyPI install can resolve dependencies that are
 /// absent from the reviewed artifact set.
@@ -8,20 +8,25 @@ pub(crate) fn misses_exact_dependency_set_guard(intent: &InstallIntent) -> bool 
     };
     let arguments = &intent.argv[1..];
 
-    let is_pypi_install = match executable {
-        "pip" | "pip3" => arguments
-            .first()
-            .is_some_and(|argument| argument == "install"),
+    match executable {
+        "pip" | "pip3" => {
+            arguments
+                .first()
+                .is_some_and(|argument| argument == "install")
+                && !arguments.iter().any(|argument| argument == "--no-deps")
+        }
         "uv" => {
-            arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install")
+            let Some(pip_index) = uv_active_command_index(arguments) else {
+                return false;
+            };
+            arguments.get(pip_index).map(String::as_str) == Some("pip")
+                && arguments.get(pip_index + 1).map(String::as_str) == Some("install")
+                && !arguments[pip_index + 2..]
+                    .iter()
+                    .any(|argument| argument == "--no-deps")
         }
         _ => false,
-    };
-
-    is_pypi_install && !arguments.iter().any(|argument| argument == "--no-deps")
+    }
 }
 
 /// Return whether the currently supported npm-family direct-install grammar can
