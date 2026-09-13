@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::policy::{uv_active_command_index, uv_run_owned_argument_end};
 
 /// Return whether an approved uv install delegates package-source or trust
 /// authority to caller-selected uv configuration.
@@ -11,15 +12,14 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
     }
 
     let arguments = &intent.argv[1..];
-    let run_position = arguments.iter().position(|argument| argument == "run");
-    let pip_position = arguments.iter().position(|argument| argument == "pip");
-    if run_position
-        .is_some_and(|run_index| pip_position.is_none_or(|pip_index| run_index < pip_index))
-    {
-        return false;
-    }
+    let configuration_arguments = match uv_active_command_index(arguments) {
+        Some(run_index) if arguments[run_index] == "run" => {
+            &arguments[..uv_run_owned_argument_end(arguments, run_index)]
+        }
+        _ => arguments,
+    };
 
-    if arguments.iter().any(|argument| {
+    if configuration_arguments.iter().any(|argument| {
         argument == "--directory"
             || argument.starts_with("--directory=")
             || argument == "--config-file"
