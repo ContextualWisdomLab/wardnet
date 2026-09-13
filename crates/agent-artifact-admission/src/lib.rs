@@ -31,6 +31,7 @@ mod pypi_requires_python_authority;
 mod pypi_system_package_authority;
 mod uv_bytecode_compilation_authority;
 mod uv_configuration_authority;
+mod uv_index_strategy_authority;
 mod uv_link_mode_authority;
 mod uv_python_download_safety;
 
@@ -67,6 +68,9 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
     let intent = certificate_store_normalized_intent
         .as_ref()
         .unwrap_or(intent);
+    let uv_index_strategy_normalized_intent =
+        uv_index_strategy_authority::normalize_reviewed_uv_index_strategy_value(intent);
+    let intent = uv_index_strategy_normalized_intent.as_ref().unwrap_or(intent);
     let mut decision = policy::admission_decision(policy, intent);
     if artifact_source_identity::requests_unapproved_artifact_source(intent) {
         if !decision
@@ -320,6 +324,15 @@ pub fn admission_decision(policy: &AdmissionPolicy, intent: &InstallIntent) -> A
         decision.decision = DecisionKind::Block;
     }
     if uv_configuration_authority::requests_unapproved_uv_configuration_authority(intent) {
+        if !decision
+            .reason_codes
+            .contains(&ReasonCode::AlternateTrustRoot)
+        {
+            decision.reason_codes.push(ReasonCode::AlternateTrustRoot);
+        }
+        decision.decision = DecisionKind::Block;
+    }
+    if uv_index_strategy_authority::requests_unsafe_uv_index_strategy(submitted_intent) {
         if !decision
             .reason_codes
             .contains(&ReasonCode::AlternateTrustRoot)
