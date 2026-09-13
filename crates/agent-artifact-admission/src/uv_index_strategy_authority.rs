@@ -41,8 +41,9 @@ pub(crate) fn normalize_reviewed_uv_index_strategy_value(
             continue;
         };
         if is_documented_strategy(value) {
-            // `arguments` starts after the executable, so map back into argv.
-            value_indexes.push(index + 2);
+            // `arguments` starts at argv[3], so its following value maps to
+            // argv[index + 4].
+            value_indexes.push(index + 4);
         }
     }
 
