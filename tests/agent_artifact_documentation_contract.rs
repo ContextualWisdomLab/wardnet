@@ -36,6 +36,10 @@ fn agent_artifact_admission_stays_in_code_current_operator_and_architecture_docs
         !claude.contains("Root Cargo workspace with two members"),
         "workspace guidance must not claim two members after Agent Artifact Admission is present"
     );
+    assert!(
+        !claude.contains("Both workspace crates use `edition = \"2024\"`"),
+        "toolchain guidance must not retain the pre-admission two-crate statement"
+    );
 
     let agents = read_repo_file("AGENTS.md");
     assert!(
