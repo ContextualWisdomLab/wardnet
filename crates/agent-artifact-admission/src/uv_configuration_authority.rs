@@ -12,7 +12,8 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
     }
 
     let arguments = &intent.argv[1..];
-    let configuration_arguments = match uv_active_command_index(arguments) {
+    let active_command_index = uv_active_command_index(arguments);
+    let configuration_arguments = match active_command_index {
         Some(run_index) if arguments[run_index] == "run" => {
             &arguments[..uv_run_owned_argument_end(arguments, run_index)]
         }
@@ -28,7 +29,15 @@ pub(crate) fn requests_unapproved_uv_configuration_authority(intent: &InstallInt
         return true;
     }
 
-    let Some(pip_index) = uv_active_command_index(arguments) else {
+    if active_command_index.is_some_and(|index| arguments[index] == "run")
+        && configuration_arguments
+            .iter()
+            .any(|argument| argument == "--project" || argument.starts_with("--project="))
+    {
+        return true;
+    }
+
+    let Some(pip_index) = active_command_index else {
         return false;
     };
     if arguments[pip_index] != "pip"
