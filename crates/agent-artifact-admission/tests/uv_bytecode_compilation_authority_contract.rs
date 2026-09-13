@@ -38,7 +38,7 @@ fn uv_run_bytecode_compilation_preserves_generated_artifact_evidence() {
             "uv".to_string(),
             "run".to_string(),
             compile_flag.to_string(),
-            "python".to_string(),
+            "cwl-example==1.2.3".to_string(),
         ];
 
         let decision = admission_decision(&policy, &intent);
@@ -73,7 +73,7 @@ fn delegated_uv_run_child_compile_flags_are_not_reinterpreted_as_uv_authority() 
         intent.argv = vec![
             "uv".to_string(),
             "run".to_string(),
-            "python".to_string(),
+            "cwl-example==1.2.3".to_string(),
             compile_flag.to_string(),
         ];
 
@@ -106,7 +106,7 @@ fn nearby_uv_run_compile_spelling_does_not_inherit_uv_semantics() {
         "uv".to_string(),
         "run".to_string(),
         "--compile-bytecodex".to_string(),
-        "python".to_string(),
+        "cwl-example==1.2.3".to_string(),
     ];
 
     let decision = admission_decision(&policy, &intent);
