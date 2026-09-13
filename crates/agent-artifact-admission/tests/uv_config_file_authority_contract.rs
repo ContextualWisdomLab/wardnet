@@ -148,6 +148,7 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
         "example-package==1.2.3".to_string(),
         "--require-hashes".to_string(),
         "--no-deps".to_string(),
+        "--no-python-downloads".to_string(),
     ];
     let artifact = intent
         .artifacts
