@@ -40,7 +40,7 @@ cargo +nightly fuzz run fuzz_score_request -- -max_total_time=60
 
 ## Toolchain
 
-`rust-toolchain.toml` pins the `stable` channel with `llvm-tools-preview` (needed by `cargo llvm-cov`), `rustfmt`, and `clippy`. Both workspace crates use `edition = "2024"`. Fuzzing is the one exception that needs nightly.
+`rust-toolchain.toml` pins the `stable` channel with `llvm-tools-preview` (needed by `cargo llvm-cov`), `rustfmt`, and `clippy`. All three root-workspace crates use `edition = "2024"`. Fuzzing is the one exception that needs nightly.
 
 ## Workspace Layout
 
