@@ -1,7 +1,10 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
-/// Return whether an approved uv install explicitly selects symlink
-/// materialization from uv's shared cache.
+/// Return whether submitted `uv pip install` argv explicitly selects symlink
+/// materialization from uv's shared cache. Reviewed top-level uv options remain
+/// visible to causal evidence attribution even though they do not widen the
+/// supported install-command grammar.
 pub(crate) fn requests_unapproved_uv_symlink_link_mode(intent: &InstallIntent) -> bool {
     let Some(executable) = intent.argv.first().map(String::as_str) else {
         return false;
@@ -11,15 +14,16 @@ pub(crate) fn requests_unapproved_uv_symlink_link_mode(intent: &InstallIntent) -
     }
 
     let arguments = &intent.argv[1..];
-    if !arguments.first().is_some_and(|argument| argument == "pip")
-        || !arguments
-            .get(1)
-            .is_some_and(|argument| argument == "install")
+    let Some(command_index) = uv_active_command_index(arguments) else {
+        return false;
+    };
+    if arguments.get(command_index).map(String::as_str) != Some("pip")
+        || arguments.get(command_index + 1).map(String::as_str) != Some("install")
     {
         return false;
     }
 
-    let install_arguments = &arguments[2..];
+    let install_arguments = &arguments[command_index + 2..];
     install_arguments
         .iter()
         .enumerate()
@@ -66,33 +70,69 @@ mod tests {
 
     #[test]
     fn uv_symlink_matcher_accepts_only_explicit_symlink_materialization() {
-        assert!(requests_unapproved_uv_symlink_link_mode(&intent(&[
-            "uv",
-            "pip",
-            "install",
-            "cwl-example==1.2.3",
-            "--link-mode=symlink",
-        ])));
-        assert!(requests_unapproved_uv_symlink_link_mode(&intent(&[
-            "uv",
-            "pip",
-            "install",
-            "cwl-example==1.2.3",
-            "--link-mode",
-            "symlink",
-        ])));
-        assert!(!requests_unapproved_uv_symlink_link_mode(&intent(&[
-            "uv",
-            "pip",
-            "install",
-            "cwl-example==1.2.3",
-            "--link-mode=copy",
-        ])));
-        assert!(!requests_unapproved_uv_symlink_link_mode(&intent(&[
-            "pip",
-            "install",
-            "cwl-example==1.2.3",
-            "--link-mode=symlink",
-        ])));
+        for argv in [
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--link-mode=symlink",
+            ],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--link-mode",
+                "symlink",
+            ],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--link-mode=symlink",
+            ],
+        ] {
+            assert!(requests_unapproved_uv_symlink_link_mode(&intent(&argv)));
+        }
+
+        for argv in [
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--link-mode=copy",
+            ],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "sync",
+                "requirements.txt",
+                "--link-mode=symlink",
+            ],
+            vec![
+                "uv",
+                "--color",
+                "never",
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--link-modex=symlink",
+            ],
+            vec![
+                "pip",
+                "install",
+                "cwl-example==1.2.3",
+                "--link-mode=symlink",
+            ],
+        ] {
+            assert!(!requests_unapproved_uv_symlink_link_mode(&intent(&argv)));
+        }
     }
 }
