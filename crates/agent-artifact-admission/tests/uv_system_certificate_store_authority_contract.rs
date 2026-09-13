@@ -74,6 +74,7 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
             "cwl-example==1.2.3".to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
+            "--no-python-downloads".to_string(),
         ],
         manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),

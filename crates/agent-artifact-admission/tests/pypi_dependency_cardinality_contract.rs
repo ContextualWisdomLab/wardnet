@@ -78,6 +78,7 @@ fn approved_pypi_install(
             "uv".to_string(),
             "pip".to_string(),
             "install".to_string(),
+            "--no-python-downloads".to_string(),
             ARTIFACT_ARGUMENT.to_string(),
         ],
         _ => vec![

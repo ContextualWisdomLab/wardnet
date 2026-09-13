@@ -1,48 +1,73 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
     InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 #[test]
-fn approved_uv_install_without_link_mode_override_remains_admissible() {
+fn uv_install_without_python_download_disable_fails_closed() {
     let (policy, intent) = approved_uv_install();
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
+        "uv may install an undeclared Python distribution unless automatic downloads are disabled; got {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+    );
+}
+
+#[test]
+fn uv_install_with_exact_no_python_downloads_remains_admissible() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv.push("--no-python-downloads".to_string());
 
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Allow);
     assert!(decision.reason_codes.is_empty());
-}
-
-#[test]
-fn uv_symlink_link_mode_cannot_inherit_artifact_approval() {
-    let (policy, mut intent) = approved_uv_install();
-    intent.argv.push("--link-mode=symlink".to_string());
-
-    assert_symlink_link_mode_is_blocked(&policy, &intent);
-}
-
-#[test]
-fn uv_separate_symlink_link_mode_cannot_inherit_artifact_approval() {
-    let (policy, mut intent) = approved_uv_install();
-    intent
-        .argv
-        .extend(["--link-mode".to_string(), "symlink".to_string()]);
-
-    assert_symlink_link_mode_is_blocked(&policy, &intent);
-}
-
-fn assert_symlink_link_mode_is_blocked(policy: &AdmissionPolicy, intent: &InstallIntent) {
-    let decision = admission_decision(policy, intent);
-
     assert_eq!(
-        decision.decision,
-        DecisionKind::Block,
-        "caller-selected symlink materialization must not inherit reviewed artifact approval"
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes())
     );
-    assert_eq!(
-        decision.reason_codes,
-        vec![ReasonCode::ArtifactNotApproved],
-        "symlink link mode must fail causally as unreviewed installation/materialization authority"
+}
+
+#[test]
+fn uv_python_download_disable_near_spelling_does_not_satisfy_safety_contract() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv.push("--no-python-download".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
+        "an unreviewed near spelling must not disable implicit Python acquisition"
+    );
+}
+
+#[test]
+fn uv_python_download_disable_assignment_does_not_satisfy_exact_boolean_contract() {
+    let (policy, mut intent) = approved_uv_install();
+    intent.argv.push("--no-python-downloads=false".to_string());
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::MissingSafetyFlag),
+        "assigned Boolean syntax must not be mistaken for the exact disabling flag"
     );
 }
 
@@ -57,8 +82,8 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
         artifact_argument: "cwl-example==1.2.3".to_string(),
     };
     let policy = AdmissionPolicy {
-        policy_id: "uv-symlink-link-mode-authority".to_string(),
-        policy_revision: "2026-09-11.1".to_string(),
+        policy_id: "uv-python-download-safety".to_string(),
+        policy_revision: "2026-09-13.1".to_string(),
         allowed_executables: vec!["uv".to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
@@ -75,7 +100,7 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
         }],
     };
     let intent = InstallIntent {
-        request_id: "req-uv-symlink-link-mode-authority".to_string(),
+        request_id: "req-uv-python-download-safety".to_string(),
         actor_id: "agent:wardnet:admission".to_string(),
         workspace_id: "ContextualWisdomLab/wardnet".to_string(),
         operation: "install".to_string(),
@@ -86,7 +111,6 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
             "cwl-example==1.2.3".to_string(),
             "--require-hashes".to_string(),
             "--no-deps".to_string(),
-            "--no-python-downloads".to_string(),
         ],
         manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),
