@@ -105,10 +105,9 @@ fn reviewed_uv_global_options_do_not_hide_unsafe_index_strategy_authority() {
         ],
     ] {
         let (policy, mut intent) = approved_uv_install();
-        intent.argv.splice(
-            1..1,
-            ["--color".to_string(), "never".to_string()],
-        );
+        intent
+            .argv
+            .splice(1..1, ["--color".to_string(), "never".to_string()]);
         for (offset, token) in selector.into_iter().enumerate() {
             intent.argv.insert(5 + offset, token);
         }
@@ -117,7 +116,9 @@ fn reviewed_uv_global_options_do_not_hide_unsafe_index_strategy_authority() {
 
         assert_eq!(decision.decision, DecisionKind::Block);
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
             "global-option grammar remains outside the supported install command: {:?}",
             decision.reason_codes
         );
