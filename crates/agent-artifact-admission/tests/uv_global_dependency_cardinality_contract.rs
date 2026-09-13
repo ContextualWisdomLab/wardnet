@@ -99,10 +99,7 @@ fn uv_global_options_on_pip_sync_do_not_acquire_install_dependency_set_evidence(
     assert_eq!(decision.command_sha256, submitted_command_sha256(&intent));
 }
 
-fn has_reason(
-    reasons: &[wardnet_agent_artifact_admission::ReasonCode],
-    expected: &str,
-) -> bool {
+fn has_reason(reasons: &[wardnet_agent_artifact_admission::ReasonCode], expected: &str) -> bool {
     reasons.iter().any(|reason| reason.as_str() == expected)
 }
 
