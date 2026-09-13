@@ -44,9 +44,10 @@ cargo +nightly fuzz run fuzz_score_request -- -max_total_time=60
 
 ## Workspace Layout
 
-Root Cargo workspace with two members (resolver 3):
+Root Cargo workspace with three members (resolver 3):
 
 - `crates/waf-ids-core` — pure domain crate, no async/HTTP deps (only `serde` + `percent-encoding`): models, validation, upserts, request scoring, DNSBL zone formatting, event retention, threat-feed freshness, KPI snapshots, commercial readiness, buyer evidence manifests.
+- `crates/agent-artifact-admission` — Wardnet-owned pre-execution admission boundary for immutable agent artifact/evidence facts, policy evaluation, and auditable allow/deny receipts. It validates released evidence/contracts from canonical sibling owners; it does not execute hostile workloads or reimplement sandbox, egress, orchestration, or guardrail policy engines.
 - Root crate `waf-ids-ai-soc` (`src/lib.rs`) — Axum management API, embedded admin console, optional JSON state persistence, upstream proxying, NDJSON event export, support bundle assembly, plus the in-crate HTTP tests. Depends on `waf-ids-core`.
 - `src/main.rs` — deliberately thin shim over `waf_ids_ai_soc::run_from_env` so all config/serve logic is unit-testable; covered end-to-end by `tests/binary.rs` (SIGTERM graceful shutdown).
 - `fuzz/` — a **separate** cargo workspace (empty `[workspace]` table in `fuzz/Cargo.toml` — do not remove) so root `cargo test --workspace` never builds fuzz targets. Seed corpora live in `fuzz/corpus/<target>/`.
@@ -67,6 +68,7 @@ Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `
 ## Key Conventions
 
 - Management writes require `X-Admin-Token` and are **upserts**: routes keyed by `id`, threat indicators by `indicator_type` + `value` + `source`, DNSBL entries by `address`. DNSBL response codes must be in `127.0.0.0/8`.
+- Agent Artifact Admission owns Wardnet's artifact/evidence binding, admission policy decision, and Wardnet receipt. `quarantine-sandbox-runtime`, `EgressWeave`, `contextual-orchestrator`, and `appguardrail` remain external canonical owners; consume only released contracts/evidence and never copy their implementation logic into Wardnet.
 - State persistence uses write-to-temp-sibling + atomic rename; management API mutations roll back in memory if the state file cannot be replaced.
 - Audit logs must never leak admin tokens (`scripts/smoke.sh` asserts this).
 - Untrusted-input surfaces (request scorer, state deserializer, admin-token parser, DNSBL zone export) are fuzzed; if you change one, keep its libFuzzer target and proptest mirror in sync (`docs/fuzzing.md` lists the invariants per target).
