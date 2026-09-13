@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
 /// Return whether an install asks the package client to expand or select
 /// artifact/build identity that is not represented by the approved coordinates.
@@ -95,14 +96,21 @@ fn requests_unapproved_pypi_artifact_variant(intent: &InstallIntent) -> bool {
                 .skip(1)
                 .any(requests_unapproved_pip_variant)
         }
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
-        {
+        "uv" => {
+            let Some(pip_index) = uv_active_command_index(arguments) else {
+                return false;
+            };
+            if arguments[pip_index] != "pip"
+                || !arguments
+                    .get(pip_index + 1)
+                    .is_some_and(|argument| argument == "install")
+            {
+                return false;
+            }
+
             arguments
                 .iter()
-                .skip(2)
+                .skip(pip_index + 2)
                 .any(requests_unapproved_uv_pip_variant)
         }
         _ => false,
