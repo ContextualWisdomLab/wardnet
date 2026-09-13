@@ -1,6 +1,6 @@
 # Product and technical gap baseline
 
-Snapshot date: 2026-09-12. Re-read live refs, PRs, review threads, exact-head checks, rulesets, security evidence, owner contracts and releases before merge, release, restack or handoff. This is Wardnet's sole commercial/product-technical current-state ledger. Draft/feature heads are provisional evidence; predecessor GREEN never transfers after a head or base moves.
+Snapshot date: 2026-09-13. Re-read live refs, PRs, review threads, exact-head checks, rulesets, security evidence, owner contracts and releases before merge, release, restack or handoff. This is Wardnet's sole commercial/product-technical current-state ledger. Draft/feature heads are provisional evidence; predecessor GREEN never transfers after a head or base moves.
 
 ## Authority boundary
 
@@ -28,29 +28,29 @@ Draft #162 owns the naming/authority repair separating the 2B KRW customer-contr
 
 ## Agent Artifact Admission
 
-Issue #128 / Draft #129 remains Wardnet's canonical package-install admission lane. Current exact #129 is `e618f37dcff24b8dae4416eacac9a2456a8f8a93` on protected `main@f8260f1e03836039ff9463dd99fa982e4e270c4b`, produced by ordinary expected-head/non-force integration of serialized hostile RED→GREEN children through #360. No force update, destructive rebase, self/model approval, gate weakening, mutable foreign dependency or routine bypass was used.
+Issue #128 / Draft #129 remains Wardnet's canonical package-install admission lane. Current exact #129 is `81c35ec36d1289446b54d2b937e42f8fc9df2751` on protected `main@f8260f1e03836039ff9463dd99fa982e4e270c4b`, produced by ordinary non-force integration of serialized hostile RED→GREEN children through #390. No force update, destructive rebase, self/model approval, gate weakening, mutable foreign dependency or routine bypass was used.
 
 The candidate preserves deny-by-default structured-argv admission; reviewed workspace-manifest SHA-256; exact artifact ecosystem/name/version/HTTPS registry/owner/SHA-256 binding; package-manager source, trust, destination, configuration, lifecycle, mutation, dependency/build/platform/cardinality controls; audit-before-allow; and bounded remote-instruction provenance. An `allow` receipt is admission authority only. It is not proof of retrieved-byte integrity, effective runtime configuration, transport authorization, installation, isolation or activation.
 
-The newest causal lineage #355 → #356 → #357 → #358 → #359 → #360 partitions direct-pip Python-interpreter authority by parser phase. Pinned pip `pypa/pip@2b28a816d043826f2ba10ff1d22ec3d94d2ed7c5` exposes General Option `--python` before command selection, while `pip install` additionally exposes `--python-version`; consequently an abbreviation can be uniquely interpreter authority pre-command but ambiguous post-command. The repair keeps broad verified abbreviation handling only in the pre-command General Option normalizer, canonicalizes that reviewed selector only in Wardnet's internal policy copy to exact `--python=VALUE`, accepts exact `--python` / `--python=...` only after `install`, stops at the `--` option terminator, and preserves the public `command_sha256` from exact submitted argv. Wardnet still does not execute pip, discover/launch interpreters, resolve packages, inspect/mutate runtime state or filesystem, or perform DNS/TLS/network I/O.
+The newest causal lineage #389 → #390 closes a parser-phase security-evidence defect in `uv --torch-backend` attribution. Astral's documented `uv [OPTIONS] <COMMAND>` grammar permits reviewed global options before the active command, while `--torch-backend` remains `uv pip` package-source authority. Pre-repair fixed-position logic could therefore block `uv --color never pip install ... --torch-backend=cpu` as an unsupported command while losing the causal `AlternateTrustRoot` reason. Test-only exact `68835aca70757f9e17ae53c8f37d7729a2ff1cc5` kept production source byte-identical to its #129 parent and reached semantic Test failure after checkout/toolchain/format in CI `34729809606`, rust job `103650392270`.
 
-#360's hostile path reached the semantic admission assertion after checkout/toolchain/format; formatter/bootstrap noise was not accepted as RED. Minimum repair exact `e01f2860e2700b7f817c461afb44558c2036d69c` passed CI `34680208950` and Fuzz `34680208983`, with zero valid unresolved review threads, before ordinary expected-head merge produced current #129 `e618f37dcff24b8dae4416eacac9a2456a8f8a93`.
+The minimum repair reuses Wardnet's existing reviewed `uv_active_command_index` parser instead of creating a second uv grammar. After global-option parsing, only exact active `pip` followed by exact `install` is considered, and only that pip-install argument slice is scanned for exact `--torch-backend` / `--torch-backend=...`. Supported executable grammar is not widened, delegated `uv run` child argv remains outside uv package-source authority, and public `command_sha256` still binds exact submitted argv. The existing canonical doctoring now traces the decision to current Astral CLI/settings/PyTorch documentation, CWE-15 and NIST SP 800-218 PW.4. Final child exact `0c188b5ada37e2b2faed128c8be9def3370ac674` passed CI `34730449838` and Fuzz `34730449856` before ordinary integration into #129.
 
-Fresh root evidence on unchanged exact #129 `e618f37dcff24b8dae4416eacac9a2456a8f8a93`:
+Fresh root evidence on unchanged exact #129 `81c35ec36d1289446b54d2b937e42f8fc9df2751`:
 
-- CI `34680577824` — **SUCCESS**;
-- Fuzz `34680577806` — **SUCCESS**;
-- Security Scan `34680577838` — **SUCCESS**;
-- SAST Semgrep `34680577841` — **SUCCESS**;
-- Devin Review and CodeRabbit commit statuses — **SUCCESS**;
+- CI `34730739634` — **SUCCESS**;
+- Fuzz `34730739592` — **SUCCESS**;
+- Security Scan `34730739623` — **SUCCESS**;
+- SAST Semgrep `34730739603` — **SUCCESS**;
 - current valid unresolved inline review threads — **0**;
-- required CodeQL PR `34680577821` — **FAILURE at delegated terminal settlement**.
+- independent approving review — **none**;
+- required CodeQL PR `34730739681` — **FAILURE at delegated terminal settlement**.
 
-CodeQL detect job `103518360694` checked out the exact head and succeeded. Compatibility job `103518381883` successfully read the current-head dispatch verdict and then failed `Release runner or enforce current-head CodeQL verdict`. Downstream dispatch job `103518645286` subsequently succeeded on the same unchanged head, but a later dispatch cannot retroactively satisfy the already-failed required workflow. Fresh consumer evidence plus RED→GREEN acceptance is handed to central `.github#1929` in comment `5644494204`. This is not a Wardnet source/test RED and is not a guarded-bypass case.
+CodeQL detect job `103652933210` checked out/classified the exact head and succeeded. Compatibility job `103652954310` successfully read live PR/base/head state, observed `VERDICT_STATE=pending`, and failed only at `Release runner or enforce current-head CodeQL verdict`; downstream dispatch job `103653306996` subsequently succeeded on the same unchanged head. A later dispatch cannot retroactively satisfy the already-failed required workflow. Fresh consumer evidence and RED→GREEN acceptance are already handed to central `.github#1929` in comment `5649985809`; active repair remains the central owner successor chain rather than a Wardnet workflow copy. This is not a Wardnet source/test RED and is not a guarded-bypass case.
 
-Earlier registry/trust, proxy, certificate, dependency-group, install-root, mutation, output/cache/system-package, OCI, npm-family and uv controls remain inherited. Their predecessor/child receipts are historical after root movement and do not transfer to the current root. Open predecessor findings remain open until their effective deltas reach protected main or a verified complete successor preserves every valid code/test/fixture/contract/traceability/evidence delta.
+Earlier registry/trust, proxy, certificate, dependency-group, install-root, mutation, output/cache/system-package, OCI, npm-family and uv controls remain inherited. Their predecessor/child receipts are historical after root movement and do not transfer to the current root. Open predecessor findings, including #389, remain open until their effective deltas reach protected main or a verified complete successor preserves every valid code/test/fixture/contract/traceability/evidence delta.
 
-Issue #128 is refreshed to this exact root and remains open because #129 is Draft/unprotected and no immutable Wardnet release exists.
+Issue #128 remains open because #129 is Draft/unprotected and no immutable Wardnet release exists.
 
 ## Phishing.Database SSRF repair
 
@@ -88,7 +88,7 @@ Draft #127 owns server-rendered admin-console browser acceptance: loading/normal
 
 Draft #245 owns test-first Unix SIGINT graceful shutdown. Draft #134 owns support-bundle count and secret-redaction regression. Their repository/security lanes are implementation evidence only until exact-current protected-base/governance/release gates are satisfied.
 
-Material UI work must continue to preserve reusable design/token/Storybook/Figma evidence where applicable plus normal/loading/empty/error/permission/responsive/a11y E2E and KO/EN/JA/ZH/VI/ES/DE/FR robustness; visible behavior without functioning interactions or resilient states is not completion.
+Material UI work must preserve reusable design tokens/components, mandatory Figma/Storybook evidence, normal/loading/empty/error/permission/responsive/keyboard/a11y E2E acceptance and KO/EN/JA/ZH/VI/ES/DE/FR text-layout robustness; visible behavior without functioning interactions or resilient states is not completion.
 
 ## Rust reproducibility and release evidence
 
@@ -100,7 +100,7 @@ A release-ready protected head must bind one exact source/artifact identity acro
 
 Protected `AGENTS.md` still contains stale CodeGraph guidance despite `.codegraph/` existing on protected main. Draft #333 is the sole bounded repair lane and already carries hostile evidence; do not create a competing docs writer or duplicate the fix elsewhere.
 
-`CLAUDE.md`, architecture/security/ops/test/release docs, PRD/TRD-equivalent product/technical specifications and ADRs are evidence-bearing architecture inputs, not substitutes for executable acceptance. Any material source or ownership change must update the relevant documents and diagrams without copying foreign-owner logic.
+Draft #361 is the canonical PRD/TRD/UML lane on exact `c6d3fd45eba1aceef074cc8b9934937f67b1d41a`; it binds Wardnet's gateway/SOC and Agent Artifact Admission ownership, released-contract-only dependencies, the no-long-lived-database-transaction-across-slow-work rule, Rust-first hot paths, owned buyer-path p95 ≤20 ms, mandatory Material UI Figma/Storybook/state/locale acceptance, and release/SBOM/provenance/rollback requirements. Draft #111 remains the accepted-ADR consolidation lane; #130 remains the sole product-gap-ledger writer. `CLAUDE.md`, architecture/security/ops/test/release docs, canonical PRD/TRD/UML and ADRs are evidence-bearing architecture inputs, not substitutes for executable acceptance. Any material source or ownership change must update the relevant documents and diagrams without copying foreign-owner logic.
 
 ## Research and standards grounding
 
