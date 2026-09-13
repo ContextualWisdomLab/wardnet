@@ -128,6 +128,7 @@ fn approved_uv_pypi_install() -> (AdmissionPolicy, InstallIntent) {
         "uv".to_string(),
         "pip".to_string(),
         "install".to_string(),
+        "--no-python-downloads".to_string(),
         format!("{PACKAGE_NAME}=={PACKAGE_VERSION}"),
         "--require-hashes".to_string(),
         "--no-deps".to_string(),
