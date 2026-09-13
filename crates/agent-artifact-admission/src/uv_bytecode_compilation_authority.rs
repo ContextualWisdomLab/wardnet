@@ -9,6 +9,9 @@ pub(crate) fn requests_unapproved_uv_bytecode_compilation(intent: &InstallIntent
     requests_bytecode_compilation(&intent.argv)
 }
 
+/// Classify exact uv-owned compile selectors without reinterpreting delegated
+/// child argv. The caller remains responsible for the separate allow/deny command
+/// decision; this function only supplies causal generated-artifact evidence.
 fn requests_bytecode_compilation(argv: &[String]) -> bool {
     let Some(executable) = argv.first().map(String::as_str) else {
         return false;
@@ -41,6 +44,8 @@ fn requests_bytecode_compilation(argv: &[String]) -> bool {
         .any(|argument| is_compile_selector(argument))
 }
 
+/// Match only Astral's documented eager bytecode selectors; nearby spellings are
+/// intentionally not normalized into policy authority.
 fn is_compile_selector(argument: &str) -> bool {
     matches!(argument, "--compile-bytecode" | "--compile")
 }
