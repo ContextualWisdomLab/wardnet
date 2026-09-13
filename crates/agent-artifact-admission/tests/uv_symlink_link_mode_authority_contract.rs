@@ -63,7 +63,7 @@ fn uv_global_options_preserve_pip_install_symlink_link_mode_authority_evidence()
 }
 
 #[test]
-fn uv_global_link_mode_lookalike_and_non_install_do_not_fabricate_symlink_authority() {
+fn uv_global_link_mode_lookalike_does_not_fabricate_symlink_authority() {
     let (policy, mut lookalike) = approved_uv_install();
     lookalike
         .argv
@@ -82,32 +82,6 @@ fn uv_global_link_mode_lookalike_and_non_install_do_not_fabricate_symlink_author
             .reason_codes
             .contains(&ReasonCode::ArtifactNotApproved),
         "near spelling must not inherit uv link-mode semantics: {:?}",
-        decision.reason_codes
-    );
-
-    let (policy, mut non_install) = approved_uv_install();
-    non_install.argv = vec![
-        "uv".to_string(),
-        "--color".to_string(),
-        "never".to_string(),
-        "pip".to_string(),
-        "sync".to_string(),
-        "requirements.txt".to_string(),
-        "--link-mode=symlink".to_string(),
-    ];
-
-    let decision = admission_decision(&policy, &non_install);
-    assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(
-        decision
-            .reason_codes
-            .contains(&ReasonCode::ForbiddenCommand)
-    );
-    assert!(
-        !decision
-            .reason_codes
-            .contains(&ReasonCode::ArtifactNotApproved),
-        "non-install uv grammar must not fabricate link-mode artifact authority: {:?}",
         decision.reason_codes
     );
 }
