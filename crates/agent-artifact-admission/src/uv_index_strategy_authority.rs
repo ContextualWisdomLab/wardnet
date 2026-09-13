@@ -91,9 +91,7 @@ fn is_unsafe_strategy(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_reviewed_uv_index_strategy_value, requests_unsafe_uv_index_strategy,
-    };
+    use super::{normalize_reviewed_uv_index_strategy_value, requests_unsafe_uv_index_strategy};
     use crate::InstallIntent;
 
     fn intent(arguments: &[&str]) -> InstallIntent {
@@ -105,17 +103,49 @@ mod tests {
     #[test]
     fn matcher_is_exact_and_bounded_to_supported_uv_pip_install() {
         for argv in [
-            vec!["uv", "pip", "install", "pkg", "--index-strategy=unsafe-best-match"],
-            vec!["uv", "pip", "install", "pkg", "--index-strategy", "unsafe-first-match"],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--index-strategy=unsafe-best-match",
+            ],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--index-strategy",
+                "unsafe-first-match",
+            ],
         ] {
             assert!(requests_unsafe_uv_index_strategy(&intent(&argv)));
         }
 
         for argv in [
-            vec!["uv", "pip", "install", "pkg", "--index-strategy=first-index"],
-            vec!["uv", "pip", "install", "pkg", "--index-strateg=unsafe-best-match"],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--index-strategy=first-index",
+            ],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--index-strateg=unsafe-best-match",
+            ],
             vec!["uv", "run", "python", "--index-strategy=unsafe-best-match"],
-            vec!["uv", "pip", "install", "pkg", "--", "--index-strategy=unsafe-best-match"],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--",
+                "--index-strategy=unsafe-best-match",
+            ],
         ] {
             assert!(!requests_unsafe_uv_index_strategy(&intent(&argv)));
         }
@@ -139,8 +169,23 @@ mod tests {
         );
 
         for argv in [
-            vec!["uv", "pip", "install", "pkg", "--index-strategy", "future-mode"],
-            vec!["uv", "pip", "install", "pkg", "--", "--index-strategy", "first-index"],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--index-strategy",
+                "future-mode",
+            ],
+            vec![
+                "uv",
+                "pip",
+                "install",
+                "pkg",
+                "--",
+                "--index-strategy",
+                "first-index",
+            ],
         ] {
             assert!(normalize_reviewed_uv_index_strategy_value(&intent(&argv)).is_none());
         }
