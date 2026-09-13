@@ -20,18 +20,14 @@ fn uv_global_cache_directory_preserves_causal_install_root_evidence() {
     ] {
         let mut hostile = baseline.clone();
         hostile.argv = prefix.into_iter().map(str::to_string).collect();
-        hostile.argv.extend(
-            baseline
-                .argv
-                .iter()
-                .skip(1)
-                .cloned(),
-        );
+        hostile.argv.extend(baseline.argv.iter().skip(1).cloned());
 
         let decision = admission_decision(&policy, &hostile);
         assert_eq!(decision.decision, DecisionKind::Block);
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
             "uv global-option grammar must remain outside the deliberately narrow supported install command: {:?}",
             decision.reason_codes
         );
