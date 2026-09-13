@@ -33,15 +33,11 @@ fn uv_separate_symlink_link_mode_cannot_inherit_artifact_approval() {
 
 #[test]
 fn uv_global_options_preserve_pip_install_symlink_link_mode_authority_evidence() {
-    for link_mode in [
-        vec!["--link-mode=symlink"],
-        vec!["--link-mode", "symlink"],
-    ] {
+    for link_mode in [vec!["--link-mode=symlink"], vec!["--link-mode", "symlink"]] {
         let (policy, mut intent) = approved_uv_install();
-        intent.argv.splice(
-            1..1,
-            ["--color".to_string(), "never".to_string()],
-        );
+        intent
+            .argv
+            .splice(1..1, ["--color".to_string(), "never".to_string()]);
         intent
             .argv
             .extend(link_mode.into_iter().map(str::to_string));
@@ -50,7 +46,9 @@ fn uv_global_options_preserve_pip_install_symlink_link_mode_authority_evidence()
 
         assert_eq!(decision.decision, DecisionKind::Block);
         assert!(
-            decision.reason_codes.contains(&ReasonCode::ForbiddenCommand),
+            decision
+                .reason_codes
+                .contains(&ReasonCode::ForbiddenCommand),
             "top-level uv options remain outside the supported install grammar: {:?}",
             decision.reason_codes
         );
@@ -67,15 +65,18 @@ fn uv_global_options_preserve_pip_install_symlink_link_mode_authority_evidence()
 #[test]
 fn uv_global_link_mode_lookalike_and_non_install_do_not_fabricate_symlink_authority() {
     let (policy, mut lookalike) = approved_uv_install();
-    lookalike.argv.splice(
-        1..1,
-        ["--color".to_string(), "never".to_string()],
-    );
+    lookalike
+        .argv
+        .splice(1..1, ["--color".to_string(), "never".to_string()]);
     lookalike.argv.push("--link-modex=symlink".to_string());
 
     let decision = admission_decision(&policy, &lookalike);
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         !decision
             .reason_codes
@@ -97,7 +98,11 @@ fn uv_global_link_mode_lookalike_and_non_install_do_not_fabricate_symlink_author
 
     let decision = admission_decision(&policy, &non_install);
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         !decision
             .reason_codes
