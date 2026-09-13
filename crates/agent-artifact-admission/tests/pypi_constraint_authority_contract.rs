@@ -1,6 +1,7 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
-    InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
+    InstallIntent, InstructionSource, InstructionSourceKind, ReasonCode, admission_decision,
+    sha256_hex,
 };
 
 const ARTIFACT_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -66,6 +67,91 @@ fn direct_exact_pypi_install_without_constraint_authority_remains_allowed() {
 
         assert_eq!(decision.decision, DecisionKind::Allow, "{executable}");
         assert!(decision.reason_codes.is_empty(), "{executable}");
+    }
+}
+
+#[test]
+fn uv_global_options_preserve_constraint_causal_evidence() {
+    let (policy, mut intent) = approved_pypi_install("uv");
+    intent.argv = vec![
+        "uv".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        ARTIFACT_ARGUMENT.to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+        "--no-python-downloads".to_string(),
+        "--constraint=https://x.invalid/c.txt".to_string(),
+    ];
+
+    let decision = admission_decision(&policy, &intent);
+
+    assert_eq!(decision.decision, DecisionKind::Block);
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand),
+        "global-option uv grammar must remain outside the deliberately narrow supported install command: {:?}",
+        decision.reason_codes
+    );
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ArtifactNotApproved),
+        "parser-valid uv global options must not erase external constraint authority evidence: {:?}",
+        decision.reason_codes
+    );
+    assert_eq!(
+        decision.command_sha256,
+        sha256_hex(intent.argv.join("\u{1f}").as_bytes()),
+        "audit identity must remain bound to the exact submitted argv"
+    );
+}
+
+#[test]
+fn uv_global_parser_controls_do_not_fabricate_constraint_authority() {
+    for argv in [
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "install",
+            ARTIFACT_ARGUMENT,
+            "--require-hashes",
+            "--no-deps",
+            "--no-python-downloads",
+            "--constrain=https://x.invalid/c.txt",
+        ],
+        vec![
+            "uv",
+            "--color",
+            "never",
+            "pip",
+            "sync",
+            ARTIFACT_ARGUMENT,
+            "--constraint=https://x.invalid/c.txt",
+        ],
+    ] {
+        let (policy, mut intent) = approved_pypi_install("uv");
+        intent.argv = argv.into_iter().map(str::to_string).collect();
+
+        let decision = admission_decision(&policy, &intent);
+
+        assert_eq!(decision.decision, DecisionKind::Block);
+        assert!(
+            !decision
+                .reason_codes
+                .contains(&ReasonCode::ArtifactNotApproved),
+            "nearby spelling or non-install uv grammar must not inherit install-constraint authority: {:?}",
+            decision.reason_codes
+        );
+        assert_eq!(
+            decision.command_sha256,
+            sha256_hex(intent.argv.join("\u{1f}").as_bytes())
+        );
     }
 }
 

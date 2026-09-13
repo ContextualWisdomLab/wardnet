@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
 /// Return whether a direct pip-compatible install imports dependency or build
 /// selection from a constraint document that is not represented by the
@@ -21,12 +22,19 @@ pub(crate) fn requests_unapproved_pypi_constraint_authority(intent: &InstallInte
                     || matches_pip_long_value_option(argument, "--build-constraint", "--build-c")
             })
         }
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
-        {
-            arguments.iter().any(|argument| {
+        "uv" => {
+            let Some(pip_index) = uv_active_command_index(arguments) else {
+                return false;
+            };
+            if arguments[pip_index] != "pip"
+                || !arguments
+                    .get(pip_index + 1)
+                    .is_some_and(|argument| argument == "install")
+            {
+                return false;
+            }
+
+            arguments.iter().skip(pip_index + 2).any(|argument| {
                 matches_short_value_option(argument, "-c")
                     || matches_long_value_option(argument, "--constraint")
                     || matches_long_value_option(argument, "--constraints")
@@ -98,7 +106,7 @@ mod tests {
             assert!(
                 !matches_pip_long_value_option(argument, "--constraint", "--cons")
                     && !matches_pip_long_value_option(argument, "--build-constraint", "--build-c"),
-                "ambiguous or unrelated pip option must not be classified: {argument}"
+                "ambiguous or unrelated pip option must not be classified as a constraint: {argument}"
             );
         }
     }
