@@ -62,7 +62,11 @@ fn uv_global_options_with_require_hashes_do_not_fabricate_missing_safety_evidenc
 
     let decision = admission_decision(&policy, &intent);
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         !decision
             .reason_codes
