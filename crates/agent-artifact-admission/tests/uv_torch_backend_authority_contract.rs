@@ -53,10 +53,9 @@ fn uv_torch_backend_separate_value_reports_alternate_trust_root() {
 #[test]
 fn uv_global_option_preserves_attached_torch_backend_source_evidence() {
     let (policy, mut intent) = approved_uv_install();
-    intent.argv.splice(
-        1..1,
-        ["--color".to_string(), "never".to_string()],
-    );
+    intent
+        .argv
+        .splice(1..1, ["--color".to_string(), "never".to_string()]);
     intent.argv.push("--torch-backend=cpu".to_string());
 
     let decision = admission_decision(&policy, &intent);
@@ -74,10 +73,9 @@ fn uv_global_option_preserves_attached_torch_backend_source_evidence() {
 #[test]
 fn uv_global_option_preserves_separate_torch_backend_source_evidence() {
     let (policy, mut intent) = approved_uv_install();
-    intent.argv.splice(
-        1..1,
-        ["--color".to_string(), "never".to_string()],
-    );
+    intent
+        .argv
+        .splice(1..1, ["--color".to_string(), "never".to_string()]);
     intent.argv.push("--torch-backend".to_string());
     intent.argv.push("cpu".to_string());
 
