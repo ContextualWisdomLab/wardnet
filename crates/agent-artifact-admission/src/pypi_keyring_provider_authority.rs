@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::policy::uv_active_command_index;
 
 /// Return whether a supported PyPI installer delegates credential lookup to a caller-selected provider.
 pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &InstallIntent) -> bool {
@@ -16,12 +17,18 @@ pub(crate) fn requests_unapproved_pypi_keyring_provider_authority(intent: &Insta
             {
                 (&arguments[1..], true, false)
             }
-            "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-                && arguments
-                    .get(1)
-                    .is_some_and(|argument| argument == "install") =>
-            {
-                (&arguments[2..], false, true)
+            "uv" => {
+                let Some(pip_index) = uv_active_command_index(arguments) else {
+                    return false;
+                };
+                if arguments[pip_index] != "pip"
+                    || !arguments
+                        .get(pip_index + 1)
+                        .is_some_and(|argument| argument == "install")
+                {
+                    return false;
+                }
+                (&arguments[pip_index + 2..], false, true)
             }
             _ => return false,
         };
