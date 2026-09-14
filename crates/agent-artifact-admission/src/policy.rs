@@ -372,11 +372,10 @@ fn is_install_root_selector_value(executable: &str, arguments: &[String], index:
         {
             &["--target", "-t", "--root", "--prefix"]
         }
-        "uv"
-            if uv_active_command_index(arguments).is_some_and(|pip_index| {
-                arguments.get(pip_index).map(String::as_str) == Some("pip")
-                    && arguments.get(pip_index + 1).map(String::as_str) == Some("install")
-            }) =>
+        "uv" if uv_active_command_index(arguments).is_some_and(|pip_index| {
+            arguments.get(pip_index).map(String::as_str) == Some("pip")
+                && arguments.get(pip_index + 1).map(String::as_str) == Some("install")
+        }) =>
         {
             &["--target", "-t", "--root", "--prefix", "--python", "-p"]
         }
