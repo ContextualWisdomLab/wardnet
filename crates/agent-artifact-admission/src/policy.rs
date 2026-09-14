@@ -247,13 +247,15 @@ fn validate_artifact_operands(intent: &InstallIntent, reason_codes: &mut Vec<Rea
     };
     let arguments = &intent.argv[1..];
     let command_prefix_len = match executable {
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
-        {
-            2
-        }
+        "uv" => match uv_active_command_index(arguments) {
+            Some(pip_index)
+                if arguments.get(pip_index).map(String::as_str) == Some("pip")
+                    && arguments.get(pip_index + 1).map(String::as_str) == Some("install") =>
+            {
+                pip_index + 2
+            }
+            _ => return,
+        },
         "npm" | "pnpm" | "yarn" | "bun" | "pip" | "pip3" | "cargo" | "docker" | "podman" => 1,
         _ => return,
     };
@@ -370,10 +372,11 @@ fn is_install_root_selector_value(executable: &str, arguments: &[String], index:
         {
             &["--target", "-t", "--root", "--prefix"]
         }
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
+        "uv"
+            if uv_active_command_index(arguments).is_some_and(|pip_index| {
+                arguments.get(pip_index).map(String::as_str) == Some("pip")
+                    && arguments.get(pip_index + 1).map(String::as_str) == Some("install")
+            }) =>
         {
             &["--target", "-t", "--root", "--prefix", "--python", "-p"]
         }
