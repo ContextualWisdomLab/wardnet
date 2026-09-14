@@ -74,7 +74,11 @@ fn uv_global_install_root_value_is_not_fabricated_as_an_artifact_operand() {
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         decision
             .reason_codes
@@ -105,7 +109,11 @@ fn non_install_uv_grammar_does_not_inherit_artifact_operand_semantics() {
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         !decision
             .reason_codes
