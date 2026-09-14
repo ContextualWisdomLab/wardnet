@@ -102,6 +102,7 @@ fn non_install_uv_grammar_does_not_inherit_artifact_operand_semantics() {
         "never".to_string(),
         "pip".to_string(),
         "sync".to_string(),
+        "cwl-example==1.2.3".to_string(),
         "undeclared-example==9.9.9".to_string(),
         "--no-python-downloads".to_string(),
     ];
