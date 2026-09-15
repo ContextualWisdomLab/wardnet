@@ -22,7 +22,7 @@ Wardnet's immutable GitHub Release inventory remains empty. Protected source tru
 
 ## Architecture, product and documentation authority
 
-Protected `AGENTS.md`, `CLAUDE.md`, `docs/architecture.md` and accepted ADR-0012 preserve Wardnet's Rust-first ownership and foreign-owner boundaries. Draft #361 remains the canonical PRD/TRD/UML lane at exact `c6d3fd45eba1aceef074cc8b9934937f67b1d41a`; it records released-contract-only dependencies, realistic asynchronous Wardnet-owned buyer-path p95 <= 20 ms, release/SBOM/provenance requirements, mandatory Material UI Figma/Storybook/state/locale evidence, and the no-long-lived-database-transaction-across-slow-work rule. Draft #111 remains the accepted-ADR consolidation lane. Draft #333 remains the sole CodeGraph guidance repair. These lanes are disjoint from this ledger and must not be duplicated here.
+Protected `AGENTS.md`, `CLAUDE.md` and `docs/architecture.md` preserve Wardnet's Rust-first baseline. Draft #111 remains the accepted-ADR consolidation lane; its accepted ADR text is provisional until that Draft reaches protected `main` and must not be described as protected-main authority. Draft #361 remains the canonical PRD/TRD/UML lane at exact `c6d3fd45eba1aceef074cc8b9934937f67b1d41a`; it records released-contract-only dependencies, realistic asynchronous Wardnet-owned buyer-path p95 <= 20 ms, release/SBOM/provenance requirements, mandatory Material UI Figma/Storybook/state/locale evidence, and the no-long-lived-database-transaction-across-slow-work rule. Draft #333 remains the sole CodeGraph guidance repair. These lanes are disjoint from this ledger and must not be duplicated here.
 
 Material UI work remains incomplete unless reusable design/tokens/components plus Figma/Storybook evidence exist and buyer-critical flows cover normal, loading, empty, error, permission-denied, responsive, keyboard/accessibility states and KO/EN/JA/ZH/VI/ES/DE/FR text-layout robustness. Visible mock behavior or decorative controls are not completion.
 
@@ -30,7 +30,7 @@ Material UI work remains incomplete unless reusable design/tokens/components plu
 
 Fresh read-only inventory keeps CGC protected/default `develop@99cb5468ba3c15c5e79688f53dee74724fae2d13` and EA protected/default `develop@dd71e40a86385fb7861b0f1be19891a3f3e29ece`. Both immutable GitHub Release inventories remain empty. Wardnet writes neither repository while the Context Fabric writer owns them and does not bind production behavior to those mutable default branches.
 
-The same released-contract rule applies to `quarantine-sandbox-runtime`, EgressWeave, `contextual-orchestrator` and `appguardrail`: missing immutable owner releases/contracts are capability gaps, not permission to duplicate their canonical implementation inside Wardnet.
+Foreign-owner protected/default refs currently inventory as `quarantine-sandbox-runtime develop@60a85c7633e03b425b67159ec6822c8178cf87ea`, `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`, `contextual-orchestrator main@767e67fbc6b881a452761f32abb69b9971b9b03b`, and `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Their immutable GitHub Release inventories remain empty. These mutable refs are inventory evidence only; missing immutable owner releases/contracts are capability gaps, not permission to duplicate canonical implementation inside Wardnet.
 
 ## Agent Artifact Admission
 
