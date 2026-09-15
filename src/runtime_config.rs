@@ -444,9 +444,9 @@ fn source_uses_runtime_env(source: &str) -> bool {
         }
     }
 
-    tokens.windows(2).any(|window| {
-        function_aliases.contains(&window[0]) && window[1] == "("
-    })
+    tokens
+        .windows(2)
+        .any(|window| function_aliases.contains(&window[0]) && window[1] == "(")
 }
 
 #[cfg(test)]
@@ -546,8 +546,7 @@ mod tests {
         for raw in ["", "   ", "\t"] {
             let config = runtime_from_pairs(&[("WAF_IDS_STATE_PATH", raw)]).unwrap();
             assert_eq!(
-                config.state_path,
-                None,
+                config.state_path, None,
                 "blank state path {raw:?} must be ignored"
             );
         }
