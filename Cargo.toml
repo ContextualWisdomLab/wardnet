@@ -6,7 +6,7 @@ description = "Rust-first WAF/IDS/AI SOC gateway with DNSBL and commercial readi
 license = "MIT"
 
 [workspace]
-members = [".", "crates/waf-ids-core"]
+members = [".", "crates/waf-ids-core", "crates/agent-artifact-admission"]
 resolver = "3"
 
 [dependencies]
@@ -23,3 +23,4 @@ tower = { version = "0.5", features = ["util"] }
 # Property-based testing (MIT OR Apache-2.0); mirrors the cargo-fuzz target for
 # parse_admin_tokens so its invariants stay green in primary CI.
 proptest = "1"
+wardnet-agent-artifact-admission = { path = "crates/agent-artifact-admission" }

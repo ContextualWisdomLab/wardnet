@@ -1,6 +1,7 @@
 # Agent Instructions
 
 - Keep the project Rust-first for gateway, DNSBL, and high-throughput control-plane code.
+- Preserve Wardnet ownership of Agent Artifact Admission, gateway/SOC control-plane policy, and security evidence. Treat `quarantine-sandbox-runtime`, `EgressWeave`, `contextual-orchestrator`, and `appguardrail` as external canonical owners whose released contracts/evidence Wardnet validates rather than reimplements.
 - Prefer proven security engines over fake in-house detections. Integrate OWASP CRS/Coraza, Suricata, STIX/TAXII, MISP, or OpenCTI before inventing equivalent engines.
 - Do not use Figma Code Connect for this project unless explicitly requested later.
 - Keep MVP work narrow: web management, gateway decisions, event/KPI visibility, and DNSBL publishing before broader SIEM/SOAR scope.

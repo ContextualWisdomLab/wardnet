@@ -8,6 +8,8 @@ flowchart LR
   admin --> api["Management API"]
   api --> app["App Crate"]
   app --> core["waf-ids-core"]
+  api --> admission["Agent Artifact Admission"]
+  admission --> admissionCore["crates/agent-artifact-admission"]
   core --> state["Runtime State"]
   state --> file["Optional JSON State File"]
   client["HTTP Client"] --> gateway["Rust Gateway"]
@@ -23,6 +25,10 @@ flowchart LR
   api --> feeds["Threat Feed Import"]
   feeds --> freshness["Feed Freshness"]
   commercial --> bundle["Support Bundle"]
+  sandbox["quarantine-sandbox-runtime\nexternal released evidence"] -.-> admission
+  egress["EgressWeave\nexternal released evidence"] -.-> admission
+  orchestrator["contextual-orchestrator\nexternal released API/evidence"] -.-> admission
+  guardrail["appguardrail\nexternal released evidence"] -.-> admission
 ```
 
 ## Components
@@ -30,6 +36,7 @@ flowchart LR
 - `src/main.rs`: process startup and operator configuration from `BIND_ADDR`, `ADMIN_TOKEN`, `WAF_IDS_STATE_PATH`, `DNSBL_ORIGIN`, and `EVENT_LIMIT`.
 - `src/lib.rs`: Axum app, routing, management APIs, optional JSON persistence, gateway handler, upstream proxying, admin console, support bundle assembly, NDJSON event export, and in-crate HTTP tests.
 - `crates/waf-ids-core`: reusable domain models plus validation, upsert, scoring, DNSBL zone export, event retention, threat-feed freshness, KPI snapshot, and commercial readiness logic.
+- `crates/agent-artifact-admission`: Wardnet-owned Agent Artifact Admission domain/application boundary. It binds immutable artifact identity and evidence, evaluates Wardnet admission policy, and emits auditable Wardnet allow/deny receipts; it does not execute hostile workloads or copy sibling-owner sandbox, egress, orchestration, or guardrail logic.
 - `/admin`: embedded web console.
 - `/gateway/{path}`: route selection, request scoring, monitor/block decision, optional upstream proxying.
 - `/dnsbl/zone`: DNSBL zone text using the configured origin, suitable for publication through an authoritative DNS server.
@@ -65,6 +72,19 @@ flowchart LR
 - JSON persistence is a baseline durability mechanism, not a substitute for a production database, backup plan, or audited change workflow.
 - Commercial readiness is a runtime evidence model for buyer pilots, not a legal revenue recognition or compliance certification system.
 - The reusable core remains in-repo as a workspace crate. A git submodule is intentionally deferred until an independently versioned engine, SDK, or adapter needs a separate release lifecycle.
+
+### Agent Artifact Admission ownership boundary
+
+Wardnet owns Agent Artifact Admission policy semantics, immutable artifact/evidence binding, and the admission receipt consumed by its gateway/SOC control plane. Missing or malformed mandatory evidence fails closed according to Wardnet policy; availability of a foreign owner never converts absent evidence into success.
+
+The following systems remain external canonical owners. Wardnet may validate their released contracts or cryptographically bound evidence, but it must not copy their implementation logic, query their private persistence directly, or bind production behavior to mutable branch/PR state:
+
+- `quarantine-sandbox-runtime`: hostile-workload isolation, execution profiles, resource/syscall/filesystem controls, ephemeral workspaces, cleanup/recovery, and dynamic artifact-analysis execution.
+- `EgressWeave`: outbound destination, transport, and egress authorization/control semantics.
+- `contextual-orchestrator`: production LLM/model/tool orchestration and its released API. Wardnet owns the security question and deterministic policy around any advisory result, not provider/model routing.
+- `appguardrail`: application/agent guardrail enforcement and its released security evidence contracts.
+
+This boundary is intentionally contract-first: no source copy, no cross-service SQL, and no mutable sibling dependency. A sibling capability that lacks an immutable released contract remains unavailable to production Wardnet admission rather than being reimplemented locally.
 
 ## Product Architecture Evidence
 
