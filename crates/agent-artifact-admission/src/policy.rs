@@ -403,34 +403,44 @@ fn artifact_ecosystem_matches_executable(executable: &str, ecosystem: &str) -> b
 }
 
 fn requests_indirect_artifact_source(executable: &str, arguments: &[String]) -> bool {
-    let contains_flag = |flags: &[&str]| {
+    let contains_flag = |arguments: &[String], flags: &[&str]| {
         arguments
             .iter()
             .any(|argument| flags.iter().any(|flag| matches_cli_flag(argument, flag)))
     };
 
     match executable {
-        "pip" | "pip3" => contains_flag(&[
-            "-r",
-            "--requirement",
-            "-e",
-            "--editable",
-            "--requirements-from-script",
-        ]),
-        "uv" if arguments.first().is_some_and(|argument| argument == "pip")
-            && arguments
-                .get(1)
-                .is_some_and(|argument| argument == "install") =>
-        {
-            contains_flag(&[
+        "pip" | "pip3" => contains_flag(
+            arguments,
+            &[
                 "-r",
                 "--requirement",
-                "--requirements",
                 "-e",
                 "--editable",
-                "--group",
-                "--project",
-            ])
+                "--requirements-from-script",
+            ],
+        ),
+        "uv" => {
+            let Some(pip_index) = uv_active_command_index(arguments) else {
+                return false;
+            };
+            if arguments.get(pip_index).map(String::as_str) != Some("pip")
+                || arguments.get(pip_index + 1).map(String::as_str) != Some("install")
+            {
+                return false;
+            }
+            contains_flag(
+                &arguments[pip_index + 2..],
+                &[
+                    "-r",
+                    "--requirement",
+                    "--requirements",
+                    "-e",
+                    "--editable",
+                    "--group",
+                    "--project",
+                ],
+            )
         }
         _ => false,
     }
