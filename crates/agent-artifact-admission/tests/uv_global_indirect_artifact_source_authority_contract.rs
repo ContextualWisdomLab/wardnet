@@ -72,7 +72,11 @@ fn attached_uv_global_option_preserves_indirect_artifact_evidence() {
     let decision = admission_decision(&policy, &hostile);
 
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         decision
             .reason_codes
@@ -99,7 +103,11 @@ fn non_install_uv_grammar_does_not_inherit_indirect_install_source_semantics() {
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         !decision
             .reason_codes
@@ -132,7 +140,11 @@ fn consumed_install_root_value_cannot_masquerade_as_the_reviewed_artifact() {
     let decision = admission_decision(&policy, &intent);
 
     assert_eq!(decision.decision, DecisionKind::Block);
-    assert!(decision.reason_codes.contains(&ReasonCode::ForbiddenCommand));
+    assert!(
+        decision
+            .reason_codes
+            .contains(&ReasonCode::ForbiddenCommand)
+    );
     assert!(
         decision
             .reason_codes
