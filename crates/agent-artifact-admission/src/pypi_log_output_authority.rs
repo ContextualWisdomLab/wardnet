@@ -27,7 +27,7 @@ pub(crate) fn requests_unapproved_pypi_log_output_authority(intent: &InstallInte
 /// pip uses Python optparse, which accepts unambiguous long-option prefixes.
 /// Keep this accepted-language set explicit so an ambiguous prefix such as
 /// `--lo` is not reinterpreted by Wardnet as valid caller authority.
-fn matches_pip_log_option(argument: &str) -> bool {
+pub(crate) fn matches_pip_log_option(argument: &str) -> bool {
     let option = argument.split_once('=').map_or(argument, |(name, _)| name);
     matches!(
         option,
