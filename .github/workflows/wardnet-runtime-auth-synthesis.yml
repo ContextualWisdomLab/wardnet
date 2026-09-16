@@ -1,0 +1,142 @@
+name: Wardnet runtime auth synthesis repair
+
+on:
+  push:
+    branches:
+      - codex/runtime-config-auth-synthesis
+    paths:
+      - .github/workflows/wardnet-runtime-auth-synthesis.yml
+
+permissions:
+  contents: write
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Guard repair input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "783f5a5c679e957083de7a9aeb224fb6902aa6c0"
+          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".github/workflows/wardnet-runtime-auth-synthesis.yml"
+          test "$(git rev-parse origin/main)" = "f8260f1e03836039ff9463dd99fa982e4e270c4b"
+          git cat-file -e f8260f1e03836039ff9463dd99fa982e4e270c4b^{commit}
+
+      - name: Synthesize protected authentication with Runtime Configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show f8260f1e03836039ff9463dd99fa982e4e270c4b:src/lib.rs > /tmp/protected-lib.rs
+          python3 - <<'PY'
+          from pathlib import Path
+
+          protected = Path('/tmp/protected-lib.rs').read_text()
+
+          old = "mod opencti_import;\nmod stix_import;"
+          new = "mod opencti_import;\nmod runtime_config;\nmod stix_import;"
+          assert protected.count(old) == 1, protected.count(old)
+          protected = protected.replace(old, new, 1)
+
+          old = (
+              "pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};\n"
+              "pub use credentials::{listen_is_loopback_only, require_write_auth_for_bind};\n"
+          )
+          new = old + "pub use runtime_config::{RuntimeConfiguration, parse_event_limit, parse_u32_env, parse_u64_env};\n"
+          assert protected.count(old) == 1, protected.count(old)
+          protected = protected.replace(old, new, 1)
+
+          parse_start_marker = "/// Parse the `EVENT_LIMIT` value"
+          run_doc_marker = "/// Read gateway configuration from the process environment, bind the listener,"
+          parse_start = protected.index(parse_start_marker)
+          run_doc_start = protected.index(run_doc_marker, parse_start)
+          protected = protected[:parse_start] + protected[run_doc_start:]
+
+          run_start = protected.index("pub async fn run_from_env(")
+          tests_start = protected.index("\n#[cfg(test)]\nmod tests {", run_start)
+          synthesized_run = r'''pub async fn run_from_env(
+    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = RuntimeConfiguration::from_env()?;
+    let listen_loopback = listen_is_loopback_only(&runtime.bind_addr);
+    let (credentials, _) = CredentialRegistry::bootstrap_from_env()?;
+    let config = runtime.app_config(&credentials);
+    let admin_tokens = match credentials.get_credential(CRED_ADMIN_TOKENS) {
+        Some(raw) if !raw.trim().is_empty() => parse_admin_tokens_strict(raw)?,
+        _ => HashMap::new(),
+    };
+    let has_write_capable_admin = if !admin_tokens.is_empty() {
+        admin_tokens.iter().any(|(token, principal)| {
+            principal.can_write && admin_secret_supports_header_auth(token)
+        })
+    } else {
+        credentials
+            .get_credential(CRED_ADMIN_TOKEN)
+            .is_some_and(admin_secret_supports_header_auth)
+    };
+    require_write_auth_for_bind(&runtime.bind_addr, has_write_capable_admin)?;
+    let listener = tokio::net::TcpListener::bind(&runtime.bind_addr).await?;
+    let local_addr = listener.local_addr()?;
+    let auth_mode = if listen_loopback && !has_write_capable_admin {
+        "development"
+    } else {
+        "production"
+    };
+    let state = AppState::load(config)
+        .await
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+        .with_rate_limit(runtime.rate_limit, runtime.rate_limit_window)
+        .with_admin_tokens(admin_tokens)
+        .with_credentials_source(credentials.source())
+        .with_listen_loopback(listen_loopback)
+        .with_max_body_size(runtime.max_body_bytes);
+    println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let served = axum::serve(listener, build_app(state))
+        .with_graceful_shutdown(shutdown)
+        .await;
+    served?;
+    Ok(())
+}
+'''
+          protected = protected[:run_start] + synthesized_run + protected[tests_start:]
+
+          assert protected.count("RuntimeConfiguration::from_env()?") == 1
+          assert protected.count("CredentialRegistry::bootstrap_from_env()?") == 1
+          assert protected.count("require_write_auth_for_bind(&runtime.bind_addr, has_write_capable_admin)?;") == 1
+          assert "pub fn parse_admin_tokens_strict" in protected
+          assert "credentials::constant_time_eq" in protected
+          assert "fn reject_management_write" in protected
+          assert "with_listen_loopback(listen_loopback)" in protected
+          assert 'auth_mode={auth_mode}' in protected
+          assert "std::env::var(\"BIND_ADDR\")" not in protected[:protected.index("#[cfg(test)]\nmod tests")]
+
+          Path('src/lib.rs').write_text(protected)
+          PY
+          cargo fmt --all
+          git diff --check
+
+      - name: Prove hostile synthesis locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --test runtime_configuration_auth_synthesis
+          cargo test --locked --lib
+
+      - name: Commit causal source repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git diff --name-only)" = "src/lib.rs"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lib.rs
+          git commit -m "fix(config): synthesize protected auth into runtime snapshot"
+          git push origin HEAD:codex/runtime-config-auth-synthesis
