@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "783f5a5c679e957083de7a9aeb224fb6902aa6c0"
+          test "$(git rev-parse HEAD^)" = "835f779ee288fe03893406ca435647bf964fd72b"
           test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".github/workflows/wardnet-runtime-auth-synthesis.yml"
           test "$(git rev-parse origin/main)" = "f8260f1e03836039ff9463dd99fa982e4e270c4b"
           git cat-file -e f8260f1e03836039ff9463dd99fa982e4e270c4b^{commit}
@@ -60,52 +60,52 @@ jobs:
           run_start = protected.index("pub async fn run_from_env(")
           tests_start = protected.index("\n#[cfg(test)]\nmod tests {", run_start)
           synthesized_run = r'''pub async fn run_from_env(
-    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = RuntimeConfiguration::from_env()?;
-    let listen_loopback = listen_is_loopback_only(&runtime.bind_addr);
-    let (credentials, _) = CredentialRegistry::bootstrap_from_env()?;
-    let config = runtime.app_config(&credentials);
-    let admin_tokens = match credentials.get_credential(CRED_ADMIN_TOKENS) {
-        Some(raw) if !raw.trim().is_empty() => parse_admin_tokens_strict(raw)?,
-        _ => HashMap::new(),
-    };
-    let has_write_capable_admin = if !admin_tokens.is_empty() {
-        admin_tokens.iter().any(|(token, principal)| {
-            principal.can_write && admin_secret_supports_header_auth(token)
-        })
-    } else {
-        credentials
-            .get_credential(CRED_ADMIN_TOKEN)
-            .is_some_and(admin_secret_supports_header_auth)
-    };
-    require_write_auth_for_bind(&runtime.bind_addr, has_write_capable_admin)?;
-    let listener = tokio::net::TcpListener::bind(&runtime.bind_addr).await?;
-    let local_addr = listener.local_addr()?;
-    let auth_mode = if listen_loopback && !has_write_capable_admin {
-        "development"
-    } else {
-        "production"
-    };
-    let state = AppState::load(config)
-        .await
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
-        .with_rate_limit(runtime.rate_limit, runtime.rate_limit_window)
-        .with_admin_tokens(admin_tokens)
-        .with_credentials_source(credentials.source())
-        .with_listen_loopback(listen_loopback)
-        .with_max_body_size(runtime.max_body_bytes);
-    println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
-    // Flush so a supervising parent process (the e2e test) sees the readiness
-    // line immediately even though stdout is block-buffered when piped.
-    std::io::Write::flush(&mut std::io::stdout())?;
-    let served = axum::serve(listener, build_app(state))
-        .with_graceful_shutdown(shutdown)
-        .await;
-    served?;
-    Ok(())
-}
-'''
+              shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+          ) -> Result<(), Box<dyn std::error::Error>> {
+              let runtime = RuntimeConfiguration::from_env()?;
+              let listen_loopback = listen_is_loopback_only(&runtime.bind_addr);
+              let (credentials, _) = CredentialRegistry::bootstrap_from_env()?;
+              let config = runtime.app_config(&credentials);
+              let admin_tokens = match credentials.get_credential(CRED_ADMIN_TOKENS) {
+                  Some(raw) if !raw.trim().is_empty() => parse_admin_tokens_strict(raw)?,
+                  _ => HashMap::new(),
+              };
+              let has_write_capable_admin = if !admin_tokens.is_empty() {
+                  admin_tokens.iter().any(|(token, principal)| {
+                      principal.can_write && admin_secret_supports_header_auth(token)
+                  })
+              } else {
+                  credentials
+                      .get_credential(CRED_ADMIN_TOKEN)
+                      .is_some_and(admin_secret_supports_header_auth)
+              };
+              require_write_auth_for_bind(&runtime.bind_addr, has_write_capable_admin)?;
+              let listener = tokio::net::TcpListener::bind(&runtime.bind_addr).await?;
+              let local_addr = listener.local_addr()?;
+              let auth_mode = if listen_loopback && !has_write_capable_admin {
+                  "development"
+              } else {
+                  "production"
+              };
+              let state = AppState::load(config)
+                  .await
+                  .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
+                  .with_rate_limit(runtime.rate_limit, runtime.rate_limit_window)
+                  .with_admin_tokens(admin_tokens)
+                  .with_credentials_source(credentials.source())
+                  .with_listen_loopback(listen_loopback)
+                  .with_max_body_size(runtime.max_body_bytes);
+              println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
+              // Flush so a supervising parent process (the e2e test) sees the readiness
+              // line immediately even though stdout is block-buffered when piped.
+              std::io::Write::flush(&mut std::io::stdout())?;
+              let served = axum::serve(listener, build_app(state))
+                  .with_graceful_shutdown(shutdown)
+                  .await;
+              served?;
+              Ok(())
+          }
+          '''
           protected = protected[:run_start] + synthesized_run + protected[tests_start:]
 
           assert protected.count("RuntimeConfiguration::from_env()?") == 1
