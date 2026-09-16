@@ -1,4 +1,5 @@
 use crate::InstallIntent;
+use crate::pypi_cache_directory_authority::matches_canonical_pip_cache_directory_option;
 use crate::pypi_certificate_store_authority::matches_pip_certificate_store_abbreviation;
 use crate::pypi_client_certificate_authority::matches_pip_client_certificate_option;
 use crate::pypi_log_output_authority::matches_pip_log_option;
@@ -115,6 +116,26 @@ pub(crate) fn normalize_reviewed_direct_pip_global_options(
                 // The client-certificate path is consumed option grammar, not an
                 // artifact operand. Attach it only in the internal policy copy;
                 // admission_decision restores audit identity from submitted argv.
+                push_attached_normalized_value_argument(
+                    arguments,
+                    &mut reviewed_global_arguments,
+                    &mut index,
+                )?;
+            }
+            continue;
+        }
+
+        if matches_canonical_pip_cache_directory_option(argument) {
+            if let Some((_, value)) = argument.split_once('=') {
+                if value.is_empty() {
+                    return None;
+                }
+                reviewed_global_arguments.push(arguments[index].clone());
+                index += 1;
+            } else {
+                // A separate cache path is consumed General Option grammar. Attach
+                // it only in the internal policy copy so it cannot masquerade as
+                // an artifact operand; the submitted argv/hash stay authoritative.
                 push_attached_normalized_value_argument(
                     arguments,
                     &mut reviewed_global_arguments,
