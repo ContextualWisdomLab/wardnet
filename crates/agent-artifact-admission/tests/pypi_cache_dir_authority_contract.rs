@@ -1,6 +1,6 @@
 use wardnet_agent_artifact_admission::{
     AdmissionPolicy, ApprovedArtifact, ApprovedManifest, ArtifactCoordinate, DecisionKind,
-    InstallIntent, InstructionSource, InstructionSourceKind, admission_decision,
+    InstallIntent, InstructionSource, InstructionSourceKind, admission_decision, sha256_hex,
 };
 
 #[test]
@@ -41,6 +41,60 @@ fn approved_pip_install_cannot_gain_caller_selected_cache_directory_authority() 
                     .any(|reason| reason.as_str() == "alternate_install_root"),
                 "{executable} {} must include the stable alternate_install_root reason",
                 cache_arguments.join(" ")
+            );
+        }
+    }
+}
+
+#[test]
+fn valid_global_pip_cache_directory_options_remain_causal_write_authority_evidence() {
+    for executable in ["pip", "pip3"] {
+        let (policy, control_intent) = approved_pip_install(executable);
+
+        for global_cache_arguments in [
+            vec!["--cache-dir=/tmp/wardnet-pip-cache"],
+            vec!["--cache-dir", "/tmp/wardnet-pip-cache"],
+        ] {
+            let mut intent = control_intent.clone();
+            let mut argv = Vec::with_capacity(intent.argv.len() + global_cache_arguments.len());
+            argv.push(executable.to_string());
+            argv.extend(
+                global_cache_arguments
+                    .iter()
+                    .map(|argument| (*argument).to_string()),
+            );
+            argv.extend(control_intent.argv.iter().skip(1).cloned());
+            intent.argv = argv;
+            let submitted_argv = intent.argv.clone();
+
+            let decision = admission_decision(&policy, &intent);
+            assert_eq!(
+                decision.decision,
+                DecisionKind::Block,
+                "parser-valid global {executable} {} must fail closed",
+                global_cache_arguments.join(" ")
+            );
+            assert!(
+                decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "alternate_install_root"),
+                "parser-valid global {executable} {} must retain causal cache-directory evidence: {:?}",
+                global_cache_arguments.join(" "),
+                decision.reason_codes
+            );
+            assert!(
+                !decision
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason.as_str() == "artifact_not_approved"),
+                "the cache path consumed by pip General Options must not masquerade as an artifact operand: {:?}",
+                decision.reason_codes
+            );
+            assert_eq!(
+                decision.command_sha256,
+                sha256_hex(submitted_argv.join("\u{1f}").as_bytes()),
+                "policy normalization must preserve the exact submitted argv audit identity"
             );
         }
     }
