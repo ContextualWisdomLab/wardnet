@@ -40,10 +40,7 @@ pub(crate) fn requests_unapproved_pypi_cache_directory_authority(intent: &Instal
 /// normalization intentionally does not inherit install-parser abbreviations
 /// without separate upstream evidence for that parser phase.
 pub(crate) fn matches_canonical_pip_cache_directory_option(argument: &str) -> bool {
-    argument
-        .split_once('=')
-        .map_or(argument, |(name, _)| name)
-        == "--cache-dir"
+    argument.split_once('=').map_or(argument, |(name, _)| name) == "--cache-dir"
 }
 
 /// pip uses Python optparse, which accepts an unambiguous long-option prefix.
