@@ -22,20 +22,21 @@ jobs:
       - name: Checkout exact helper head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 10
+          fetch-depth: 12
 
       - name: Guard reviewed source and helper-only commits
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "560bbaae92817816da7430f28620655f539c1476"
-          test "$(git rev-parse HEAD^^)" = "0345907181a171cf1bb6da86fb064ca7b0384224"
-          test "$(git rev-parse HEAD^^^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
-          test "$(git rev-parse HEAD^^^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
-          test "$(git rev-parse HEAD^^^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
-          test "$(git rev-parse HEAD^^^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
-          test "$(git rev-parse HEAD^^^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
-          test "$(git rev-parse HEAD^^^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
+          test "$(git rev-parse HEAD^)" = "cfcf4811e0cc06a72f6bd757992badcdb83ed388"
+          test "$(git rev-parse HEAD^^)" = "560bbaae92817816da7430f28620655f539c1476"
+          test "$(git rev-parse HEAD^^^)" = "0345907181a171cf1bb6da86fb064ca7b0384224"
+          test "$(git rev-parse HEAD^^^^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
+          test "$(git rev-parse HEAD^^^^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
+          test "$(git rev-parse HEAD^^^^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
+          test "$(git rev-parse HEAD^^^^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
+          test "$(git rev-parse HEAD^^^^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
+          test "$(git rev-parse HEAD^^^^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -139,6 +140,62 @@ jobs:
           if text.count(caller) != 1:
               raise SystemExit("expected exactly one staged caller NotConfigured seam")
           text = text.replace(caller, '        proven_engine::ProvenEngineOutcome::Clean => {}', 1)
+
+          # Hostile contract: a CRS rule message is detection evidence, not
+          # engine block authority when the transaction explicitly completed
+          # without interruption. The current staged adapter is expected to RED
+          # here because the audit parser maps severity 2 to a block-grade hit.
+          hit_branch = '''    if uri == "/header-red" || uri == "/header-monitor" {'''
+          hit_branch_with_detection = '''    if uri == "/detect-only" {
+        return Json(serde_json::json!({
+            "transaction": {
+                "client_ip": "203.0.113.44",
+                "is_interrupted": false,
+                "request": {"method": method, "uri": uri},
+                "response": {"http_code": 200}
+            },
+            "messages": [{
+                "message": "Protocol Attack Detected",
+                "data": {"id": 921110, "severity": 2}
+            }],
+            "engine": {"name":"coraza", "ruleset":"owasp-crs-test-fixture"}
+        }));
+    }
+    if uri == "/header-red" || uri == "/header-monitor" {'''
+          if text.count(hit_branch) != 1:
+              raise SystemExit("expected exactly one staged Coraza hit fixture seam")
+          text = text.replace(hit_branch, hit_branch_with_detection, 1)
+
+          monitor_test = '''#[tokio::test]
+async fn monitor_route_records_coraza_hit_without_enforcement() {'''
+          detection_test = '''#[tokio::test]
+async fn block_route_does_not_escalate_non_disruptive_coraza_detection_to_block() {
+    let (url, _calls, task) = spawn_coraza_sidecar().await;
+    let app = app_with_route("coraza-detect-only", "/detect-only", "block", &url).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/detect-only")
+                .header("user-agent", "wardnet-detection-probe/1.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a non-interrupted HTTP 200 Coraza transaction with a CRS message is SOC detection evidence, not explicit engine block authority"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn monitor_route_records_coraza_hit_without_enforcement() {'''
+          if text.count(monitor_test) != 1:
+              raise SystemExit("expected exactly one staged monitor-mode test seam")
+          text = text.replace(monitor_test, detection_test, 1)
 
           path.write_text(text)
           PY
