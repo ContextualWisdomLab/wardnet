@@ -122,12 +122,28 @@ Changes that alter product behavior, bounded-context ownership, API/evidence con
 
 ## Standards traceability
 
-The following authoritative references apply together with narrower references already recorded in `docs/security/`, `docs/doctoring/`, ADRs, and feature-specific design records.
+The following authoritative references apply together with narrower references already recorded in `docs/security/`, `docs/doctoring/`, ADRs, and feature-specific design records. Research rationale is not implementation or release evidence.
 
+### Academic requirement mapping
+
+| Requirement | Research or decision record | Technical boundary supported |
+| --- | --- | --- |
+| bot-risk detection, **bot-risk evidence calibration and ownership boundary** | [`docs/adr/2026-09-05-anti-bot-acquisition-boundary.md`](../adr/2026-09-05-anti-bot-acquisition-boundary.md) | Applies only to inbound bot-risk/security evidence, calibration/provenance, and responsibility separation. It explicitly does not authorize browser challenge handling, outbound anti-bot acquisition, a particular detection algorithm, or mutable foreign-owner coupling. |
+| load balancing | Eisenbud et al. (2016), *Maglev: A Fast and Reliable Software Network Load Balancer* — https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud | Supports software load-balancer architecture that spreads traffic across endpoints, retains connection-consistent mapping, and handles backend/reconfiguration churn. Wardnet does not claim Maglev's exact algorithm or Google-scale performance. |
+| rate limiting | Parekh and Gallager (1993), *A generalized processor sharing approach to flow control in integrated services networks: The single-node case* — https://doi.org/10.1109/90.234856 | Supports explicit rate-based admission/fairness and bounded delay/rate reasoning. The concrete Wardnet limiter remains defined by API/domain tests and must not claim GPS/PGPS semantics unless implemented and measured. |
+| high-throughput control plane | Curtis et al. (2011), *DevoFlow: Scaling Flow Management for High-Performance Networks* — https://doi.org/10.1145/2043164.2018466 | Supports minimizing avoidable controller interactions and keeping common-case processing near the fast path while retaining sufficient operational visibility. It does not make Wardnet an OpenFlow/DevoFlow implementation or override Wardnet's security evidence requirements. |
+
+Research rationale is not implementation or release evidence. These sources constrain design choices; exact source, hostile tests, k6/E2E measurements, protected-base compatibility, required security/review gates, and immutable release artifacts remain the acceptance authority.
+
+### References
+
+- Curtis, A. R., Mogul, J. C., Tourrilhes, J., Yalagandula, P., Sharma, P., & Banerjee, S. (2011). DevoFlow: Scaling flow management for high-performance networks. *ACM SIGCOMM Computer Communication Review, 41*(4), 254–265. https://doi.org/10.1145/2043164.2018466
+- Eisenbud, D. E., Yi, C., Contavalli, C., Smith, C., Kononov, R., Mann-Hielscher, E., Cilingiroglu, A., Cheyney, B., Shang, W., & Hosein, J. D. (2016). Maglev: A fast and reliable software network load balancer. In *13th USENIX Symposium on Networked Systems Design and Implementation (NSDI 16)* (pp. 523–535). USENIX Association. https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud
 - Levine, J., & Vixie, P. (2010). *DNS blacklists and whitelists* (RFC 5782). Internet Engineering Task Force. https://doi.org/10.17487/RFC5782
 - National Institute of Standards and Technology. (2020). *Zero trust architecture* (NIST SP 800-207). https://doi.org/10.6028/NIST.SP.800-207
 - National Institute of Standards and Technology. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities* (NIST SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
 - OWASP Foundation. (2025). *OWASP Application Security Verification Standard 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/
+- Parekh, A. K., & Gallager, R. G. (1993). A generalized processor sharing approach to flow control in integrated services networks: The single-node case. *IEEE/ACM Transactions on Networking, 1*(3), 344–357. https://doi.org/10.1109/90.234856
 - World Wide Web Consortium. (2023). *Web Content Accessibility Guidelines (WCAG) 2.2*. https://www.w3.org/TR/WCAG22/
 
-If implementation evidence conflicts with prose, fix the prose or implementation causally; do not preserve an outdated requirement merely because it is written here.
+No new third-party paper PDF is committed by this documentation lane because repository redistribution permission for the cited versions has not been independently established. Where redistribution is not established, this TRD retains the citation, stable locator, and scoped summary instead. If implementation evidence conflicts with prose, fix the prose or implementation causally; do not preserve an outdated requirement merely because it is written here.
