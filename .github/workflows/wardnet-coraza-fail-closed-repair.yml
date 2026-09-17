@@ -22,12 +22,13 @@ jobs:
       - name: Checkout exact helper head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          fetch-depth: 3
       - name: Guard reviewed predecessor
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "3c97011161dbb63fb87797fcb61e8c97cc2c64e7"
+          test "$(git rev-parse HEAD^)" = "f1dd9b34859dc47b2f88e7f9408b708bffdfeb68"
+          test "$(git rev-parse HEAD^^)" = "3c97011161dbb63fb87797fcb61e8c97cc2c64e7"
           test "$(git status --porcelain)" = ""
       - name: Apply minimum fail-closed gateway repair
         shell: python
@@ -36,52 +37,56 @@ jobs:
 
           path = Path("src/lib.rs")
           text = path.read_text()
-          needle = '''    record_event(
-              &state,
-              client_ip,
-              Some(route.id.clone()),
-              "monitored",
-              scored.reason.clone(),
-              scored.score,
-              gateway_path,
-          )
-          .await;
-          '''
-          replacement = '''    if route.mode == EnforcementMode::Block {
-              let reason = "proven Coraza/OWASP CRS live evaluation is unavailable";
-              record_event(
-                  &state,
-                  client_ip,
-                  Some(route.id.clone()),
-                  "waf_unavailable",
-                  reason.to_string(),
-                  scored.score,
-                  gateway_path,
-              )
-              .await;
-              return (
-                  StatusCode::SERVICE_UNAVAILABLE,
-                  Json(serde_json::json!({
-                      "action": "waf_unavailable",
-                      "route_id": route.id,
-                      "score": scored.score,
-                      "reason": reason
-                  })),
-              )
-                  .into_response();
-          }
-
-          record_event(
-              &state,
-              client_ip,
-              Some(route.id.clone()),
-              "monitored",
-              scored.reason.clone(),
-              scored.score,
-              gateway_path,
-          )
-          .await;
-          '''
+          needle = "\n".join([
+              "    record_event(",
+              "        &state,",
+              "        client_ip,",
+              "        Some(route.id.clone()),",
+              "        \"monitored\",",
+              "        scored.reason.clone(),",
+              "        scored.score,",
+              "        gateway_path,",
+              "    )",
+              "    .await;",
+              "",
+          ])
+          replacement = "\n".join([
+              "    if route.mode == EnforcementMode::Block {",
+              "        let reason = \"proven Coraza/OWASP CRS live evaluation is unavailable\";",
+              "        record_event(",
+              "            &state,",
+              "            client_ip,",
+              "            Some(route.id.clone()),",
+              "            \"waf_unavailable\",",
+              "            reason.to_string(),",
+              "            scored.score,",
+              "            gateway_path,",
+              "        )",
+              "        .await;",
+              "        return (",
+              "            StatusCode::SERVICE_UNAVAILABLE,",
+              "            Json(serde_json::json!({",
+              "                \"action\": \"waf_unavailable\",",
+              "                \"route_id\": route.id,",
+              "                \"score\": scored.score,",
+              "                \"reason\": reason",
+              "            })),",
+              "        )",
+              "            .into_response();",
+              "    }",
+              "",
+              "    record_event(",
+              "        &state,",
+              "        client_ip,",
+              "        Some(route.id.clone()),",
+              "        \"monitored\",",
+              "        scored.reason.clone(),",
+              "        scored.score,",
+              "        gateway_path,",
+              "    )",
+              "    .await;",
+              "",
+          ])
           if text.count(needle) != 1:
               raise SystemExit(f"expected exactly one gateway monitored seam, found {text.count(needle)}")
           path.write_text(text.replace(needle, replacement, 1))
