@@ -82,3 +82,44 @@ fn material_ui_and_slow_work_boundaries_remain_explicit() {
         ],
     );
 }
+
+#[test]
+fn substantive_requirements_remain_academically_grounded_without_overclaiming() {
+    let anti_bot_adr = "docs/adr/2026-09-05-anti-bot-acquisition-boundary.md";
+    let maglev = "https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud";
+    let rate_control = "https://doi.org/10.1109/90.234856";
+    let devoflow = "https://doi.org/10.1145/2043164.2018466";
+
+    assert_markers(
+        "PRD",
+        PRD,
+        &[
+            "Academic requirement mapping",
+            anti_bot_adr,
+            "bot-risk evidence calibration and ownership boundary",
+            "load balancing",
+            "rate limiting",
+            "high-throughput control plane",
+            maglev,
+            rate_control,
+            devoflow,
+            "Research rationale is not implementation or release evidence",
+        ],
+    );
+    assert_markers(
+        "TRD",
+        TRD,
+        &[
+            "Academic requirement mapping",
+            anti_bot_adr,
+            "bot-risk evidence calibration and ownership boundary",
+            "load balancing",
+            "rate limiting",
+            "high-throughput control plane",
+            maglev,
+            rate_control,
+            devoflow,
+            "Research rationale is not implementation or release evidence",
+        ],
+    );
+}
