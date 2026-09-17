@@ -10,3 +10,17 @@
 ### Operations
 
 - Documented administrator credential provisioning, rotation, rollout verification, rollback, evidence handling, and the boundary with the separate runtime-authentication fail-closed work tracked in issue #78.
+- Clarified the public `RuntimeConfiguration` bootstrap contract after the
+  September 2026 removal of `credentials_path`: external callers now keep
+  credential-file selection in `CredentialRegistry` and use
+  `RuntimeConfiguration` only for non-secret runtime settings. This separation
+  follows least privilege and fail-safe bootstrap boundaries rather than
+  treating process env as long-lived application authority; see Saltzer and
+  Schroeder (1975), NIST SP 800-57 Part 1 Rev. 5, and the repository copy at
+  `docs/papers/nist-sp-800-57-part-1-rev-5.pdf`.
+- Preserved protected startup semantics for `WAF_IDS_STATE_PATH`: absent,
+  empty, and whitespace-only bootstrap values all keep seeded in-memory state;
+  only a non-empty trimmed value enables JSON file persistence. The Runtime
+  Configuration adapter now enforces the same invariant before constructing a
+  `PathBuf`, with a hostile regression covering empty, space-only, and tab-only
+  inputs.
