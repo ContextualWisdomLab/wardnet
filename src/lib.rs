@@ -21,17 +21,17 @@ use tokio::{
 };
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
-    enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
-    replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
-    threat_indicator_key, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
-    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
-    validate_threat_feed_import,
+    dnsbl_entry_key, enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step,
+    record_audit_log, replace_threat_feed_dnsbl_ownership, replace_threat_feed_ownership,
+    select_route, signature_catalog, threat_feed_freshness_snapshot, threat_indicator_key,
+    upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed, validate_commercial_profile,
+    validate_dnsbl, validate_route, validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
-    CommercialProfile, CommercialReadiness, DnsblEntry, EnforcementMode, LicenseStatus,
-    NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
-    SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
+    CommercialProfile, CommercialReadiness, DnsblEntry, DnsblEntryKey, EnforcementMode,
+    LicenseStatus, NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig,
+    ScoredRequest, SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
     ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus,
     ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
 };
@@ -1015,6 +1015,7 @@ async fn create_dnsbl(
     match state
         .mutate_and_persist(|data| {
             let saved = upsert_dnsbl(&mut data.dnsbl, entry.clone());
+            mark_operator_dnsbl_key(data, &saved);
             record_successful_audit_log(
                 data,
                 actor,
@@ -2800,6 +2801,13 @@ fn mark_operator_threat_key(data: &mut AppData, indicator: &ThreatIndicator) {
     }
 }
 
+fn mark_operator_dnsbl_key(data: &mut AppData, entry: &DnsblEntry) {
+    let key = dnsbl_entry_key(entry);
+    if !data.operator_dnsbl_keys.contains(&key) {
+        data.operator_dnsbl_keys.push(key);
+    }
+}
+
 async fn apply_threat_feed_import(
     state: &AppState,
     actor: String,
@@ -2810,11 +2818,21 @@ async fn apply_threat_feed_import(
     state
         .mutate_and_persist(|data| {
             let operator_owned: HashSet<_> = data.operator_threat_keys.iter().cloned().collect();
+            let operator_dnsbl_owned: HashSet<_> =
+                data.operator_dnsbl_keys.iter().copied().collect();
             let threat_keys: Vec<_> = feed.threats.iter().map(threat_indicator_key).collect();
             let previous_keys: HashSet<_> = replace_threat_feed_ownership(
                 &mut data.threat_feed_ownership,
                 feed.feed_id.clone(),
                 threat_keys,
+            )
+            .into_iter()
+            .collect();
+            let dnsbl_keys: Vec<_> = feed.dnsbl.iter().map(dnsbl_entry_key).collect();
+            let previous_dnsbl_keys: HashSet<_> = replace_threat_feed_dnsbl_ownership(
+                &mut data.threat_feed_ownership,
+                feed.feed_id.clone(),
+                dnsbl_keys,
             )
             .into_iter()
             .collect();
@@ -2838,6 +2856,20 @@ async fn apply_threat_feed_import(
                         || operator_owned.contains(&key)
                 });
             }
+            if !previous_dnsbl_keys.is_empty() {
+                let still_dnsbl_owned: HashSet<_> = data
+                    .threat_feed_ownership
+                    .iter()
+                    .filter(|ownership| ownership.feed_id != feed.feed_id)
+                    .flat_map(|ownership| ownership.dnsbl_keys.iter().copied())
+                    .collect();
+                data.dnsbl.retain(|entry| {
+                    let key = dnsbl_entry_key(entry);
+                    !previous_dnsbl_keys.contains(&key)
+                        || still_dnsbl_owned.contains(&key)
+                        || operator_dnsbl_owned.contains(&key)
+                });
+            }
             let mut upserted_threats = 0usize;
             for threat in feed.threats.iter().cloned() {
                 if operator_owned.contains(&threat_indicator_key(&threat)) {
@@ -2846,8 +2878,13 @@ async fn apply_threat_feed_import(
                 upsert_threat(&mut data.threats, threat);
                 upserted_threats += 1;
             }
+            let mut upserted_dnsbl = 0usize;
             for entry in feed.dnsbl.iter().cloned() {
+                if operator_dnsbl_owned.contains(&dnsbl_entry_key(&entry)) {
+                    continue;
+                }
                 upsert_dnsbl(&mut data.dnsbl, entry);
+                upserted_dnsbl += 1;
             }
             upsert_threat_feed(
                 &mut data.threat_feeds,
@@ -2863,7 +2900,7 @@ async fn apply_threat_feed_import(
             let result = ThreatFeedImportResult {
                 feed_id: feed.feed_id.clone(),
                 upserted_threats,
-                upserted_dnsbl: feed.dnsbl.len(),
+                upserted_dnsbl,
                 last_updated_unix: imported_at,
             };
             record_successful_audit_log(data, actor, action, "threat_feed", result.feed_id.clone());
@@ -6708,6 +6745,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn operator_dnsbl_key_marking_is_idempotent() {
+        let mut data = AppData::seeded();
+        let entry = DnsblEntry {
+            address: "203.0.113.245".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: "operator".to_string(),
+            source: "operator".to_string(),
+            ttl_seconds: 300,
+            prefix_len: None,
+        };
+
+        mark_operator_dnsbl_key(&mut data, &entry);
+        mark_operator_dnsbl_key(&mut data, &entry);
+        assert_eq!(data.operator_dnsbl_keys, vec![dnsbl_entry_key(&entry)]);
+    }
+
     #[tokio::test]
     async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
         let upstream_app = Router::new().route(
@@ -6771,6 +6825,7 @@ mod tests {
                 ],
                 threats: Vec::new(),
                 operator_threat_keys: Vec::new(),
+                operator_dnsbl_keys: Vec::new(),
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
@@ -7648,6 +7703,7 @@ mod tests {
                 }],
                 threats: Vec::new(),
                 operator_threat_keys: Vec::new(),
+                operator_dnsbl_keys: Vec::new(),
                 dnsbl: Vec::new(),
                 events: Vec::new(),
                 next_event_id: 1,
