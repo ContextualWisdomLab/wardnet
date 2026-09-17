@@ -22,21 +22,22 @@ jobs:
       - name: Checkout exact helper head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 7
+          fetch-depth: 8
       - name: Guard reviewed source and helper-only commits
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
-          test "$(git rev-parse HEAD^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
-          test "$(git rev-parse HEAD^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
-          test "$(git rev-parse HEAD^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
-          test "$(git rev-parse HEAD^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
-          test "$(git rev-parse HEAD^^^^^^)" = "6107f0b7b028269dcecc661d01536d73caab265f"
-          test "$(git diff --name-only HEAD^^^^^ HEAD^^^^)" = "scripts/wardnet-coraza-bounded-repair.sh"
+          test "$(git rev-parse HEAD^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
+          test "$(git rev-parse HEAD^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
+          test "$(git rev-parse HEAD^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
+          test "$(git rev-parse HEAD^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
+          test "$(git rev-parse HEAD^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
+          test "$(git rev-parse HEAD^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
+          test "$(git rev-parse HEAD^^^^^^^)" = "6107f0b7b028269dcecc661d01536d73caab265f"
+          test "$(git diff --name-only HEAD^^^^^^ HEAD^^^^^)" = "scripts/wardnet-coraza-bounded-repair.sh"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
-      - name: Withhold untrusted forwarding metadata from the staged WAF envelope
+      - name: Harden staged Coraza evidence and request metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -45,6 +46,7 @@ jobs:
 
           path = Path("scripts/wardnet-coraza-bounded-repair.sh")
           text = path.read_text()
+
           allow = '        "x-requested-with",\n        "x-forwarded-for",\n        "x-real-ip",\n'
           if text.count(allow) != 1:
               raise SystemExit("expected exactly one staged forwarding-header allowlist seam")
@@ -55,6 +57,46 @@ jobs:
           if text.count(forbidden) != 1:
               raise SystemExit("expected exactly one staged forbidden-header assertion seam")
           text = text.replace(forbidden, hardened, 1)
+
+          implicit_clean = '''    let interrupted = tx
+              .get("is_interrupted")
+              .and_then(|value| value.as_bool())
+              .unwrap_or(false);'''
+          explicit_clean = '''    let explicitly_not_interrupted = tx
+              .get("is_interrupted")
+              .and_then(|value| value.as_bool())
+              == Some(false);'''
+          if text.count(implicit_clean) != 1:
+              raise SystemExit("expected exactly one staged implicit clean-evidence seam")
+          text = text.replace(implicit_clean, explicit_clean, 1)
+
+          clean_predicate = '''    !interrupted
+              && status.is_some_and(|code| code < 400)'''
+          hardened_predicate = '''    explicitly_not_interrupted
+              && status.is_some_and(|code| code < 400)'''
+          if text.count(clean_predicate) != 1:
+              raise SystemExit("expected exactly one staged clean predicate seam")
+          text = text.replace(clean_predicate, hardened_predicate, 1)
+
+          unit_fixture = '''          "transaction": {
+            "request": {"method":"GET","uri":"/ok"},'''
+          unit_fixture_hardened = '''          "transaction": {
+            "is_interrupted": false,
+            "request": {"method":"GET","uri":"/ok"},'''
+          if text.count(unit_fixture) != 1:
+              raise SystemExit("expected exactly one staged unit clean-evidence fixture seam")
+          text = text.replace(unit_fixture, unit_fixture_hardened, 1)
+
+          integration_fixture = '''        "transaction": {
+            "request": {"method": method, "uri": uri},
+            "response": {"http_code": 200}'''
+          integration_fixture_hardened = '''        "transaction": {
+            "is_interrupted": false,
+            "request": {"method": method, "uri": uri},
+            "response": {"http_code": 200}'''
+          if text.count(integration_fixture) != 1:
+              raise SystemExit("expected exactly one staged integration clean-evidence fixture seam")
+          text = text.replace(integration_fixture, integration_fixture_hardened, 1)
 
           docs = '`Authorization`, `Cookie`, `Proxy-Authorization`, and `X-Admin-Token` are never forwarded.'
           docs_hardened = docs + ' Raw `X-Forwarded-For` and `X-Real-IP` are also withheld until Wardnet\'s trusted-proxy attribution owner reaches protected truth; the sidecar receives the transport-derived `client_ip` separately.'
