@@ -22,17 +22,18 @@ jobs:
       - name: Checkout exact helper head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 6
+          fetch-depth: 7
       - name: Guard reviewed source and helper-only commits
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
-          test "$(git rev-parse HEAD^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
-          test "$(git rev-parse HEAD^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
-          test "$(git rev-parse HEAD^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
-          test "$(git rev-parse HEAD^^^^^)" = "6107f0b7b028269dcecc661d01536d73caab265f"
-          test "$(git diff --name-only HEAD^^^^ HEAD^^^)" = "scripts/wardnet-coraza-bounded-repair.sh"
+          test "$(git rev-parse HEAD^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
+          test "$(git rev-parse HEAD^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
+          test "$(git rev-parse HEAD^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
+          test "$(git rev-parse HEAD^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
+          test "$(git rev-parse HEAD^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
+          test "$(git rev-parse HEAD^^^^^^)" = "6107f0b7b028269dcecc661d01536d73caab265f"
+          test "$(git diff --name-only HEAD^^^^^ HEAD^^^^)" = "scripts/wardnet-coraza-bounded-repair.sh"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
       - name: Withhold untrusted forwarding metadata from the staged WAF envelope
@@ -73,10 +74,13 @@ jobs:
           cargo test --locked --test coraza_live_enforcement
           cargo test --locked --workspace
           cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Commit verified repair
+      - name: Commit verified repair and retire one-shot helper
         shell: bash
         run: |
           set -euo pipefail
+          source_head="$(git rev-parse HEAD)"
+          git fetch origin codex/coraza-header-enforcement-red-20260917
+          test "$(git rev-parse origin/codex/coraza-header-enforcement-red-20260917)" = "$source_head"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
@@ -87,5 +91,8 @@ jobs:
             docs/doctoring/in-path-coraza-adapter.md \
             docs/runbooks/operations.md \
             docs/security/threat-model.md
+          git rm \
+            .github/workflows/wardnet-coraza-fail-closed-repair.yml \
+            scripts/wardnet-coraza-bounded-repair.sh
           git commit -m "fix(security): consult Coraza on live gateway requests"
           git push origin HEAD:codex/coraza-header-enforcement-red-20260917
