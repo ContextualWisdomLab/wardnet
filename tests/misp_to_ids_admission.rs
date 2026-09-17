@@ -25,34 +25,28 @@ fn deleted_misp_attributes_cannot_authorize_enforcement() {
     let raw = r#"[
       {"type":"domain","value":"deleted-bool.example","to_ids":true,"deleted":true},
       {"type":"domain","value":"deleted-string.example","to_ids":true,"deleted":"1"},
+      {"type":"domain","value":"deleted-number.example","to_ids":true,"deleted":1},
       {"type":"domain","value":"malformed-deleted.example","to_ids":true,"deleted":{"unexpected":false}},
       {"type":"domain","value":"active-bool.example","to_ids":true,"deleted":false},
       {"type":"domain","value":"active-string.example","to_ids":true,"deleted":"0"},
+      {"type":"domain","value":"active-uppercase-string.example","to_ids":true,"deleted":"FALSE"},
+      {"type":"domain","value":"active-number.example","to_ids":true,"deleted":0},
       {"type":"domain","value":"active-omitted.example","to_ids":true}
     ]"#;
 
     let material = misp_import::parse_misp_document(raw, "misp:test", 60).unwrap();
 
-    assert_eq!(material.threats.len(), 3);
-    assert!(
-        material
-            .threats
-            .iter()
-            .any(|threat| threat.value == "active-bool.example")
-    );
-    assert!(
-        material
-            .threats
-            .iter()
-            .any(|threat| threat.value == "active-string.example")
-    );
-    assert!(
-        material
-            .threats
-            .iter()
-            .any(|threat| threat.value == "active-omitted.example")
-    );
-    assert_eq!(material.skipped_attributes, 3);
+    assert_eq!(material.threats.len(), 5);
+    for value in [
+        "active-bool.example",
+        "active-string.example",
+        "active-uppercase-string.example",
+        "active-number.example",
+        "active-omitted.example",
+    ] {
+        assert!(material.threats.iter().any(|threat| threat.value == value));
+    }
+    assert_eq!(material.skipped_attributes, 4);
 }
 
 #[test]
