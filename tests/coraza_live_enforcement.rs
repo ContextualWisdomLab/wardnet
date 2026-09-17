@@ -5,6 +5,10 @@
 //! silently forwarded by a block-mode route when Coraza/OWASP CRS is absent.
 //! The minimum acceptable behavior before a proven engine evaluates the request
 //! is fail-closed; the successor implementation will add the real engine port.
+//!
+//! The paired benign-header test is intentionally part of the same contract:
+//! the repair must not turn every block-mode request into a blanket 503. A real
+//! Coraza/CRS adapter must distinguish an attack from ordinary header traffic.
 
 use axum::{
     body::Body,
@@ -13,14 +17,12 @@ use axum::{
 use tower::ServiceExt;
 use waf_ids_ai_soc::{AppState, build_app};
 
-#[tokio::test]
-async fn block_route_fails_closed_for_header_only_attack_without_proven_waf() {
+async fn app_with_block_route(route_id: &str, path_prefix: &str) -> axum::Router {
     let app = build_app(AppState::seeded(Some("secret".to_string())));
-
     let route = serde_json::json!({
-        "id": "coraza-header-red",
-        "path_prefix": "/header-red",
-        "upstream": "mock://header-red",
+        "id": route_id,
+        "path_prefix": path_prefix,
+        "upstream": format!("mock://{route_id}"),
         "mode": "block",
         "enabled": true,
         "block_threshold": null
@@ -41,6 +43,12 @@ async fn block_route_fails_closed_for_header_only_attack_without_proven_waf() {
         .await
         .expect("router must answer route write");
     assert_eq!(created.status(), StatusCode::CREATED);
+    app
+}
+
+#[tokio::test]
+async fn block_route_fails_closed_for_header_only_attack_without_proven_waf() {
+    let app = app_with_block_route("coraza-header-red", "/header-red").await;
 
     // CRS detects Shellshock-style command injection in request headers. The
     // path/query/body are intentionally benign so Wardnet's local scorer cannot
@@ -64,5 +72,29 @@ async fn block_route_fails_closed_for_header_only_attack_without_proven_waf() {
         ),
         "block-mode traffic must fail closed until a proven Coraza/CRS authority evaluates header-borne attacks; got {}",
         response.status()
+    );
+}
+
+#[tokio::test]
+async fn block_route_does_not_blanket_fail_closed_for_benign_headers() {
+    let app = app_with_block_route("coraza-header-benign", "/header-benign").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/header-benign")
+                .header("user-agent", "wardnet-buyer-probe/1.0")
+                .header("accept", "application/json")
+                .body(Body::empty())
+                .expect("valid benign request"),
+        )
+        .await
+        .expect("gateway must answer benign request");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a repair may not make every block-mode request unavailable; benign headers must pass once evaluated by the live WAF path"
     );
 }
