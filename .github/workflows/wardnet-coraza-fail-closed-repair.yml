@@ -22,22 +22,23 @@ jobs:
       - name: Checkout exact helper head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 8
+          fetch-depth: 10
+
       - name: Guard reviewed source and helper-only commits
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
-          test "$(git rev-parse HEAD^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
-          test "$(git rev-parse HEAD^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
-          test "$(git rev-parse HEAD^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
-          test "$(git rev-parse HEAD^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
-          test "$(git rev-parse HEAD^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
-          test "$(git rev-parse HEAD^^^^^^^)" = "6107f0b7b028269dcecc661d01536d73caab265f"
-          test "$(git diff --name-only HEAD^^^^^^ HEAD^^^^^)" = "scripts/wardnet-coraza-bounded-repair.sh"
+          test "$(git rev-parse HEAD^)" = "0345907181a171cf1bb6da86fb064ca7b0384224"
+          test "$(git rev-parse HEAD^^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
+          test "$(git rev-parse HEAD^^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
+          test "$(git rev-parse HEAD^^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
+          test "$(git rev-parse HEAD^^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
+          test "$(git rev-parse HEAD^^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
+          test "$(git rev-parse HEAD^^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
-      - name: Harden staged Coraza evidence and request metadata
+
+      - name: Harden staged Coraza boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -103,10 +104,131 @@ jobs:
           if text.count(docs) != 1:
               raise SystemExit("expected exactly one staged header-minimization documentation seam")
           text = text.replace(docs, docs_hardened, 1)
+
+          # Preserve the established hostile RED as an independent contract.
+          # The generated protocol-fixture coverage belongs in a second test so
+          # it cannot make the original no-authority failure disappear.
+          generated_test = "tests/coraza_live_enforcement.rs"
+          if text.count(generated_test) != 2:
+              raise SystemExit(f"expected two staged generated-test path seams, found {text.count(generated_test)}")
+          text = text.replace(generated_test, "tests/coraza_proven_engine_adapter.rs")
+
+          # Absence of a proven engine is not a clean verdict. Mapping it into
+          # the existing Unavailable arm keeps monitor/block policy in Wardnet
+          # while making block mode fail closed without local substitute rules.
+          enum_variant = "    NotConfigured,\n"
+          if text.count(enum_variant) != 1:
+              raise SystemExit("expected exactly one staged NotConfigured enum seam")
+          text = text.replace(enum_variant, "", 1)
+
+          no_engine = '''    let Some(url) = config.sidecar_url() else {
+              return ProvenEngineOutcome::NotConfigured;
+          };'''
+          no_engine_fail_closed = '''    let Some(url) = config.sidecar_url() else {
+              return ProvenEngineOutcome::Unavailable {
+                  reason: "Coraza proven engine is not configured".to_string(),
+              };
+          };'''
+          if text.count(no_engine) != 1:
+              raise SystemExit("expected exactly one staged no-engine outcome seam")
+          text = text.replace(no_engine, no_engine_fail_closed, 1)
+
+          caller = '''        proven_engine::ProvenEngineOutcome::NotConfigured
+              | proven_engine::ProvenEngineOutcome::Clean => {}'''
+          if text.count(caller) != 1:
+              raise SystemExit("expected exactly one staged caller NotConfigured seam")
+          text = text.replace(caller, '        proven_engine::ProvenEngineOutcome::Clean => {}', 1)
+
           path.write_text(text)
           PY
+
       - name: Materialize minimum causal repair
         run: bash scripts/wardnet-coraza-bounded-repair.sh
+
+      - name: Reconcile no-authority contract and operator docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          test = Path("tests/coraza_live_enforcement.rs")
+          text = test.read_text()
+          old = '''#[tokio::test]
+          async fn block_route_does_not_blanket_fail_closed_for_benign_headers() {
+              let app = app_with_block_route("coraza-header-benign", "/header-benign").await;
+
+              let response = app
+                  .oneshot(
+                      Request::builder()
+                          .method(Method::GET)
+                          .uri("/gateway/header-benign")
+                          .header("user-agent", "wardnet-buyer-probe/1.0")
+                          .header("accept", "application/json")
+                          .body(Body::empty())
+                          .expect("valid benign request"),
+                  )
+                  .await
+                  .expect("gateway must answer benign request");
+
+              assert_eq!(
+                  response.status(),
+                  StatusCode::OK,
+                  "a repair may not make every block-mode request unavailable; benign headers must pass once evaluated by the live WAF path"
+              );
+          }'''
+          new = '''#[tokio::test]
+          async fn block_route_fails_closed_for_benign_headers_when_proven_waf_is_unconfigured() {
+              let app = app_with_block_route("coraza-header-benign", "/header-benign").await;
+
+              let response = app
+                  .oneshot(
+                      Request::builder()
+                          .method(Method::GET)
+                          .uri("/gateway/header-benign")
+                          .header("user-agent", "wardnet-buyer-probe/1.0")
+                          .header("accept", "application/json")
+                          .body(Body::empty())
+                          .expect("valid benign request"),
+                  )
+                  .await
+                  .expect("gateway must answer benign request");
+
+              assert_eq!(
+                  response.status(),
+                  StatusCode::SERVICE_UNAVAILABLE,
+                  "block mode must not infer a clean WAF verdict when no proven engine is configured; the adapter contract separately proves benign traffic passes after explicit clean evidence"
+              );
+          }'''
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one stale benign no-authority contract")
+          test.write_text(text.replace(old, new, 1))
+
+          replacements = {
+              Path("docs/architecture.md"): (
+                  "fails block-mode traffic closed on unusable configured-engine evidence",
+                  "fails block-mode traffic closed when the proven engine is unconfigured or its evidence is unusable",
+              ),
+              Path("docs/doctoring/in-path-coraza-adapter.md"): (
+                  "Malformed, oversized, uncorrelated, timed-out, or unreachable evidence is `engine_unavailable`; a block-mode route fails closed with HTTP 503.",
+                  "An unconfigured engine and malformed, oversized, uncorrelated, timed-out, or unreachable evidence are `engine_unavailable`; a block-mode route fails closed with HTTP 503.",
+              ),
+              Path("docs/runbooks/operations.md"): (
+                  "fails block mode closed on unusable configured-engine evidence",
+                  "fails block mode closed when the proven engine is unconfigured or its evidence is unusable",
+              ),
+              Path("docs/security/threat-model.md"): (
+                  "treats malformed, oversized, uncorrelated, timed-out, or unreachable evidence as `engine_unavailable`; block-mode routes fail closed.",
+                  "treats an unconfigured engine and malformed, oversized, uncorrelated, timed-out, or unreachable evidence as `engine_unavailable`; block-mode routes fail closed.",
+              ),
+          }
+          for path, (old, new) in replacements.items():
+              text = path.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one documentation seam in {path}")
+              path.write_text(text.replace(old, new, 1))
+          PY
+
       - name: Verify exact repair candidate
         shell: bash
         run: |
@@ -114,8 +236,10 @@ jobs:
           cargo fmt --check
           git diff --check
           cargo test --locked --test coraza_live_enforcement
+          cargo test --locked --test coraza_proven_engine_adapter
           cargo test --locked --workspace
           cargo clippy --locked --workspace --all-targets -- -D warnings
+
       - name: Commit verified repair and retire one-shot helper
         shell: bash
         run: |
@@ -129,6 +253,7 @@ jobs:
             src/lib.rs \
             src/proven_engine.rs \
             tests/coraza_live_enforcement.rs \
+            tests/coraza_proven_engine_adapter.rs \
             docs/architecture.md \
             docs/doctoring/in-path-coraza-adapter.md \
             docs/runbooks/operations.md \
