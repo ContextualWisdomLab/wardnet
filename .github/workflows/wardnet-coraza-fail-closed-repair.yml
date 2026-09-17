@@ -1,0 +1,110 @@
+name: Wardnet Coraza fail-closed repair
+
+on:
+  push:
+    branches:
+      - codex/coraza-header-enforcement-red-20260917
+    paths:
+      - .github/workflows/wardnet-coraza-fail-closed-repair.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wardnet-coraza-fail-closed-repair-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact helper head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - name: Guard reviewed predecessor
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "3c97011161dbb63fb87797fcb61e8c97cc2c64e7"
+          test "$(git status --porcelain)" = ""
+      - name: Apply minimum fail-closed gateway repair
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/lib.rs")
+          text = path.read_text()
+          needle = '''    record_event(
+              &state,
+              client_ip,
+              Some(route.id.clone()),
+              "monitored",
+              scored.reason.clone(),
+              scored.score,
+              gateway_path,
+          )
+          .await;
+          '''
+          replacement = '''    if route.mode == EnforcementMode::Block {
+              let reason = "proven Coraza/OWASP CRS live evaluation is unavailable";
+              record_event(
+                  &state,
+                  client_ip,
+                  Some(route.id.clone()),
+                  "waf_unavailable",
+                  reason.to_string(),
+                  scored.score,
+                  gateway_path,
+              )
+              .await;
+              return (
+                  StatusCode::SERVICE_UNAVAILABLE,
+                  Json(serde_json::json!({
+                      "action": "waf_unavailable",
+                      "route_id": route.id,
+                      "score": scored.score,
+                      "reason": reason
+                  })),
+              )
+                  .into_response();
+          }
+
+          record_event(
+              &state,
+              client_ip,
+              Some(route.id.clone()),
+              "monitored",
+              scored.reason.clone(),
+              scored.score,
+              gateway_path,
+          )
+          .await;
+          '''
+          if text.count(needle) != 1:
+              raise SystemExit(f"expected exactly one gateway monitored seam, found {text.count(needle)}")
+          path.write_text(text.replace(needle, replacement, 1))
+      - name: Verify hostile RED is repaired without regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          git diff --check
+          cargo test --locked --test coraza_live_enforcement
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          test "$(git diff --name-only)" = "src/lib.rs"
+      - name: Commit causal source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/lib.rs; then
+            echo "no source delta to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lib.rs
+          git commit -m "fix(security): fail closed block mode without live WAF"
+          git push origin HEAD:codex/coraza-header-enforcement-red-20260917
