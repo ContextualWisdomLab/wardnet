@@ -32,7 +32,7 @@ All production LLM use must consume an immutable released `contextual-orchestrat
 
 Fresh read-only inventory keeps CGC protected/default `develop@99cb5468ba3c15c5e79688f53dee74724fae2d13` and EA protected/default `develop@dd71e40a86385fb7861b0f1be19891a3f3e29ece`. Both immutable GitHub Release inventories remain empty. Wardnet writes neither repository while the Context Fabric writer owns them and does not bind production behavior to those mutable default branches.
 
-Foreign-owner protected/default refs currently inventory as `quarantine-sandbox-runtime develop@60a85c7633e03b425b67159ec6822c8178cf87ea`, `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`, `contextual-orchestrator main@2f1a639ca3804cb3b8d86e0bd5a9e300832a19a4`, and `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Their immutable GitHub Release inventories remain empty. These mutable refs are inventory evidence only; missing immutable owner releases/contracts are capability gaps, not permission to duplicate canonical implementation inside Wardnet.
+Foreign-owner protected/default refs currently inventory as `quarantine-sandbox-runtime develop@60a85c7633e03b425b67159ec6822c8178cf87ea`, `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`, `contextual-orchestrator main@2f1a3b74a08f2b321925f4c66dcb8bd55ff1887f`, and `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Their immutable GitHub Release inventories remain empty. These mutable refs are inventory evidence only; missing immutable owner releases/contracts are capability gaps, not permission to duplicate canonical implementation inside Wardnet.
 
 ## Agent Artifact Admission
 
