@@ -86,11 +86,27 @@ The technical requirements are canonicalized in `docs/architecture/TRD.md`; the 
 
 ## Standards and research traceability
 
-These references constrain the product requirements together with the repository's more specific doctoring/security citations.
+These references constrain the product requirements together with the repository's more specific doctoring/security citations. Research rationale is not implementation or release evidence.
 
+### Academic requirement mapping
+
+| Requirement | Research or decision record | Scope of use |
+| --- | --- | --- |
+| bot-risk detection, **bot-risk evidence calibration and ownership boundary** | [`docs/adr/2026-09-05-anti-bot-acquisition-boundary.md`](../adr/2026-09-05-anti-bot-acquisition-boundary.md) | Narrows Wardnet to inbound bot-risk/security evidence and its calibration/provenance/ownership boundary. It does not justify browser challenge handling, outbound anti-bot acquisition, a specific detection algorithm, or shipped runtime behavior. |
+| load balancing | Eisenbud et al. (2016), *Maglev: A Fast and Reliable Software Network Load Balancer* — https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud | Supports the product rationale for a software load balancer that distributes traffic across service endpoints, maintains connection-consistent mapping, and treats failure/reconfiguration as explicit operating concerns. It does not prescribe Wardnet's implementation. |
+| rate limiting | Parekh and Gallager (1993), *A generalized processor sharing approach to flow control in integrated services networks: The single-node case* — https://doi.org/10.1109/90.234856 | Grounds bounded rate-based admission/fairness and explicit delay/rate guarantees. Wardnet's concrete limiter and buyer limits remain executable product contracts, not a claim that GPS/PGPS is implemented. |
+| high-throughput control plane | Curtis et al. (2011), *DevoFlow: Scaling Flow Management for High-Performance Networks* — https://doi.org/10.1145/2043164.2018466 | Supports keeping common-case processing on a bounded fast path and avoiding unnecessary control-plane interactions while retaining sufficient security/operational visibility. It does not make Wardnet an OpenFlow/DevoFlow implementation. |
+
+Research rationale is not implementation or release evidence. Each requirement still needs the repository's exact code, hostile/acceptance tests, performance evidence, protected integration, and immutable release evidence before it can be described as shipped.
+
+### References
+
+- Curtis, A. R., Mogul, J. C., Tourrilhes, J., Yalagandula, P., Sharma, P., & Banerjee, S. (2011). DevoFlow: Scaling flow management for high-performance networks. *ACM SIGCOMM Computer Communication Review, 41*(4), 254–265. https://doi.org/10.1145/2043164.2018466
+- Eisenbud, D. E., Yi, C., Contavalli, C., Smith, C., Kononov, R., Mann-Hielscher, E., Cilingiroglu, A., Cheyney, B., Shang, W., & Hosein, J. D. (2016). Maglev: A fast and reliable software network load balancer. In *13th USENIX Symposium on Networked Systems Design and Implementation (NSDI 16)* (pp. 523–535). USENIX Association. https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud
 - Levine, J., & Vixie, P. (2010). *DNS blacklists and whitelists* (RFC 5782). Internet Engineering Task Force. https://doi.org/10.17487/RFC5782
 - National Institute of Standards and Technology. (2022). *Secure software development framework (SSDF) version 1.1: Recommendations for mitigating the risk of software vulnerabilities* (NIST SP 800-218). https://doi.org/10.6028/NIST.SP.800-218
 - OWASP Foundation. (2025). *OWASP Application Security Verification Standard 5.0.0*. https://owasp.org/www-project-application-security-verification-standard/
+- Parekh, A. K., & Gallager, R. G. (1993). A generalized processor sharing approach to flow control in integrated services networks: The single-node case. *IEEE/ACM Transactions on Networking, 1*(3), 344–357. https://doi.org/10.1109/90.234856
 - World Wide Web Consortium. (2023). *Web Content Accessibility Guidelines (WCAG) 2.2*. https://www.w3.org/TR/WCAG22/
 
-Where a publication cannot legally be redistributed in this repository, retain citation and stable locator rather than copying the PDF. Standards or papers committed as artifacts must have a redistribution basis recorded in the owning documentation/PR.
+No new third-party paper PDF is committed by this documentation lane because repository redistribution permission for the cited versions has not been independently established. Where a publication cannot legally be redistributed in this repository, retain citation and stable locator rather than copying the PDF. Standards or papers committed as artifacts must have a redistribution basis recorded in the owning documentation/PR.
