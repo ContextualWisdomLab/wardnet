@@ -1,4 +1,4 @@
-name: Wardnet Coraza fail-closed repair
+name: Wardnet Coraza hostile-contract validation
 
 on:
   push:
@@ -6,142 +6,38 @@ on:
       - codex/coraza-header-enforcement-red-20260917
     paths:
       - .github/workflows/wardnet-coraza-fail-closed-repair.yml
+      - tests/coraza_live_enforcement.rs
+      - src/lib.rs
+      - src/coraza_audit.rs
+      - Cargo.toml
+      - Cargo.lock
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: wardnet-coraza-fail-closed-repair-${{ github.ref }}
+  group: wardnet-coraza-hostile-contract-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  repair:
+  hostile-contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Checkout exact helper head
+      - name: Checkout exact candidate head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 4
-      - name: Guard reviewed predecessor
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "0870f27bc78c4d40fe224740269b3a760592805f"
-          test "$(git rev-parse HEAD^^)" = "f1dd9b34859dc47b2f88e7f9408b708bffdfeb68"
-          test "$(git rev-parse HEAD^^^)" = "3c97011161dbb63fb87797fcb61e8c97cc2c64e7"
-          test "$(git status --porcelain)" = ""
-      - name: Apply minimum fail-closed gateway repair
-        shell: python
-        run: |
-          from pathlib import Path
-
-          path = Path("src/lib.rs")
-          text = path.read_text()
-          gateway_needle = "\n".join([
-              "    record_event(",
-              "        &state,",
-              "        client_ip,",
-              "        Some(route.id.clone()),",
-              "        \"monitored\",",
-              "        scored.reason.clone(),",
-              "        scored.score,",
-              "        gateway_path,",
-              "    )",
-              "    .await;",
-              "",
-          ])
-          gateway_replacement = "\n".join([
-              "    if route.mode == EnforcementMode::Block {",
-              "        let reason = \"proven Coraza/OWASP CRS live evaluation is unavailable\";",
-              "        record_event(",
-              "            &state,",
-              "            client_ip,",
-              "            Some(route.id.clone()),",
-              "            \"waf_unavailable\",",
-              "            reason.to_string(),",
-              "            scored.score,",
-              "            gateway_path,",
-              "        )",
-              "        .await;",
-              "        return (",
-              "            StatusCode::SERVICE_UNAVAILABLE,",
-              "            Json(serde_json::json!({",
-              "                \"action\": \"waf_unavailable\",",
-              "                \"route_id\": route.id,",
-              "                \"score\": scored.score,",
-              "                \"reason\": reason",
-              "            })),",
-              "        )",
-              "            .into_response();",
-              "    }",
-              "",
-              "    record_event(",
-              "        &state,",
-              "        client_ip,",
-              "        Some(route.id.clone()),",
-              "        \"monitored\",",
-              "        scored.reason.clone(),",
-              "        scored.score,",
-              "        gateway_path,",
-              "    )",
-              "    .await;",
-              "",
-          ])
-          if text.count(gateway_needle) != 1:
-              raise SystemExit(
-                  f"expected exactly one gateway monitored seam, found {text.count(gateway_needle)}"
-              )
-
-          cve_regression_needle = "\n".join([
-              "        let allowed = app_request(",
-              "            &app,",
-              "            empty_request(Method::GET, \"/gateway/cve-lookup?id=CVE-2021-44228\"),",
-              "        )",
-              "        .await;",
-              "        assert_eq!(allowed.status(), StatusCode::OK);",
-          ])
-          cve_regression_replacement = "\n".join([
-              "        let allowed = app_request(",
-              "            &app,",
-              "            empty_request(Method::GET, \"/gateway/cve-lookup?id=CVE-2021-44228\"),",
-              "        )",
-              "        .await;",
-              "        assert_eq!(",
-              "            allowed.status(),",
-              "            StatusCode::SERVICE_UNAVAILABLE,",
-              "            \"block mode must fail closed until a proven WAF authority evaluates the request\"",
-              "        );",
-          ])
-          if text.count(cve_regression_needle) != 1:
-              raise SystemExit(
-                  "expected exactly one KEV/CVE benign block-route regression seam, "
-                  f"found {text.count(cve_regression_needle)}"
-              )
-
-          text = text.replace(gateway_needle, gateway_replacement, 1)
-          text = text.replace(cve_regression_needle, cve_regression_replacement, 1)
-          path.write_text(text)
-      - name: Verify hostile RED is repaired without regressions
+          fetch-depth: 1
+      - name: Verify formatting and Coraza hostile contract
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --check
           git diff --check
           cargo test --locked --test coraza_live_enforcement
-          cargo test --locked --workspace
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          test "$(git diff --name-only)" = "src/lib.rs"
-      - name: Commit causal source and aligned regression contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- src/lib.rs; then
-            echo "no source delta to commit"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/lib.rs
-          git commit -m "fix(security): fail closed block mode without live WAF"
-          git push origin HEAD:codex/coraza-header-enforcement-red-20260917
+
+# This branch previously carried a one-shot workflow that could write an
+# interim blanket 503 repair. That is not a valid completion for #434 because
+# it would make benign block-mode traffic unavailable and would still provide
+# no authoritative Coraza/OWASP CRS decision or evidence. Keep this workflow
+# read-only while the Wardnet-owned live proven-engine boundary is repaired.
