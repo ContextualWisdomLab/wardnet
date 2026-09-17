@@ -1,0 +1,92 @@
+@startuml
+!theme plain
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment left
+
+title Wardnet gateway, SOC, admission, and external-owner boundaries
+
+actor "Security operator" as operator
+actor "Gateway client" as client
+
+rectangle "Wardnet" as wardnet {
+  component "Admin / operations console" as admin
+  component "Gateway and SOC Control Plane" as gateway
+  component "Agent Artifact Admission" as admission
+  component "security evidence and policy" as evidence
+  component "CredentialRegistry\n(secret bootstrap authority)" as credentials
+  component "RuntimeConfiguration\n(non-secret immutable snapshot target)" as runtime
+  database "Wardnet state\nprotected main: memory / JSON" as state
+}
+
+cloud "quarantine-sandbox-runtime\ncanonical hostile-workload runtime owner" as sandbox
+cloud "EgressWeave\ncanonical egress authorization owner" as egress
+cloud "contextual-orchestrator\ncanonical LLM orchestration owner" as orchestrator
+cloud "appguardrail\ncanonical guardrail implementation owner" as appguardrail
+
+rectangle "Context Fabric authorities\nread-only inventory from Wardnet" as context_fabric {
+  component "context-graph-contracts" as cgc
+  component "enterprise-architecture-core" as ea
+}
+
+operator --> admin : operate / inspect
+client --> gateway : gateway request
+admin --> gateway : management API
+admin --> evidence : events / KPI / readiness / support evidence
+
+gateway --> credentials : authenticate / authorize writes
+gateway --> runtime : consume validated settings
+gateway --> state : route / indicator / DNSBL / event state
+admission --> evidence : bind evidence + policy decision
+admission --> state : decision / audit state
+
+evidence ..> sandbox : consume released evidence receipt only
+admission ..> sandbox : request released isolation / analysis contract
+
+gateway ..> egress : consume released outbound policy / receipt only
+admission ..> egress : evaluate released egress evidence when policy requires
+
+evidence ..> appguardrail : consume released guardrail evidence only
+admission ..> appguardrail : evaluate released guardrail receipt
+
+gateway ..> orchestrator : released API only for LLM-assisted SOC work
+evidence ..> orchestrator : advisory model result + provenance
+
+wardnet ..> cgc : released contract only; no mutable-head dependency
+wardnet ..> ea : released projection only; no mutable-head dependency
+
+note right of sandbox
+Wardnet does not copy sandbox runtime logic.
+Execution isolation, resource/syscall/filesystem
+controls, ephemeral workspace, cleanup/recovery,
+and artifact-analysis execution profiles stay here.
+end note
+
+note right of egress
+Wardnet does not implement EgressWeave policy.
+No cross-service SQL or source copy.
+end note
+
+note right of orchestrator
+All LLM model/provider/tool/workflow selection
+stays in contextual-orchestrator.
+Wardnet owns the security question and treatment
+of returned evidence, not model routing.
+end note
+
+note bottom of context_fabric
+At the protected baseline for this diagram,
+CGC and EA have no immutable GitHub release.
+Wardnet therefore inventories them read-only
+and does not bind protected behavior to their
+mutable develop branches.
+end note
+
+legend left
+  Solid arrows: Wardnet-owned runtime/data relationships.
+  Dotted arrows: external released-contract/evidence relationships.
+  This diagram is an ownership/dependency view, not a claim that every
+  optional integration is shipped in protected main.
+endlegend
+
+@enduml
