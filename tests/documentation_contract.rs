@@ -86,7 +86,8 @@ fn material_ui_and_slow_work_boundaries_remain_explicit() {
 #[test]
 fn substantive_requirements_remain_academically_grounded_without_overclaiming() {
     let anti_bot_adr = "docs/adr/2026-09-05-anti-bot-acquisition-boundary.md";
-    let maglev = "https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud";
+    let maglev =
+        "https://www.usenix.org/conference/nsdi16/technical-sessions/presentation/eisenbud";
     let rate_control = "https://doi.org/10.1109/90.234856";
     let devoflow = "https://doi.org/10.1145/2043164.2018466";
 
