@@ -28,13 +28,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "0345907181a171cf1bb6da86fb064ca7b0384224"
-          test "$(git rev-parse HEAD^^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
-          test "$(git rev-parse HEAD^^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
-          test "$(git rev-parse HEAD^^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
-          test "$(git rev-parse HEAD^^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
-          test "$(git rev-parse HEAD^^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
-          test "$(git rev-parse HEAD^^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
+          test "$(git rev-parse HEAD^)" = "560bbaae92817816da7430f28620655f539c1476"
+          test "$(git rev-parse HEAD^^)" = "0345907181a171cf1bb6da86fb064ca7b0384224"
+          test "$(git rev-parse HEAD^^^)" = "ffcf1b75dff27d460c7edf39bf2691b09288b6f0"
+          test "$(git rev-parse HEAD^^^^)" = "662c2123c3852697c7f1e85a63822bd2d2a85016"
+          test "$(git rev-parse HEAD^^^^^)" = "3e6343fb6d5b628427e5031f09151455d4abdda3"
+          test "$(git rev-parse HEAD^^^^^^)" = "4d18f7095f9db9ce2718b29a9fdb9e585a02e92c"
+          test "$(git rev-parse HEAD^^^^^^^)" = "32958d4364bf5bc0aaff5acf21d9733e1f708026"
+          test "$(git rev-parse HEAD^^^^^^^^)" = "ef6e6ff2602c4381a29de2f4e1385a9fd3abe895"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -60,21 +61,21 @@ jobs:
           text = text.replace(forbidden, hardened, 1)
 
           implicit_clean = '''    let interrupted = tx
-              .get("is_interrupted")
-              .and_then(|value| value.as_bool())
-              .unwrap_or(false);'''
+                  .get("is_interrupted")
+                  .and_then(|value| value.as_bool())
+                  .unwrap_or(false);'''
           explicit_clean = '''    let explicitly_not_interrupted = tx
-              .get("is_interrupted")
-              .and_then(|value| value.as_bool())
-              == Some(false);'''
+                  .get("is_interrupted")
+                  .and_then(|value| value.as_bool())
+                  == Some(false);'''
           if text.count(implicit_clean) != 1:
               raise SystemExit("expected exactly one staged implicit clean-evidence seam")
           text = text.replace(implicit_clean, explicit_clean, 1)
 
           clean_predicate = '''    !interrupted
-              && status.is_some_and(|code| code < 400)'''
+                  && status.is_some_and(|code| code < 400)'''
           hardened_predicate = '''    explicitly_not_interrupted
-              && status.is_some_and(|code| code < 400)'''
+                  && status.is_some_and(|code| code < 400)'''
           if text.count(clean_predicate) != 1:
               raise SystemExit("expected exactly one staged clean predicate seam")
           text = text.replace(clean_predicate, hardened_predicate, 1)
@@ -122,19 +123,19 @@ jobs:
           text = text.replace(enum_variant, "", 1)
 
           no_engine = '''    let Some(url) = config.sidecar_url() else {
-              return ProvenEngineOutcome::NotConfigured;
-          };'''
+                  return ProvenEngineOutcome::NotConfigured;
+              };'''
           no_engine_fail_closed = '''    let Some(url) = config.sidecar_url() else {
-              return ProvenEngineOutcome::Unavailable {
-                  reason: "Coraza proven engine is not configured".to_string(),
-              };
-          };'''
+                  return ProvenEngineOutcome::Unavailable {
+                      reason: "Coraza proven engine is not configured".to_string(),
+                  };
+              };'''
           if text.count(no_engine) != 1:
               raise SystemExit("expected exactly one staged no-engine outcome seam")
           text = text.replace(no_engine, no_engine_fail_closed, 1)
 
           caller = '''        proven_engine::ProvenEngineOutcome::NotConfigured
-              | proven_engine::ProvenEngineOutcome::Clean => {}'''
+                  | proven_engine::ProvenEngineOutcome::Clean => {}'''
           if text.count(caller) != 1:
               raise SystemExit("expected exactly one staged caller NotConfigured seam")
           text = text.replace(caller, '        proven_engine::ProvenEngineOutcome::Clean => {}', 1)
