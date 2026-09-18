@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "a219a9eb66a53a7cbbc1cb7540d2d36fd3367673"
+          test "$(git rev-parse HEAD^)" = "d5676058662bd2ebb04f4bd88d70b4704ec20f5d"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -38,10 +38,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cp scripts/wardnet-coraza-authority-repair.py /tmp/wardnet-coraza-authority-repair.py
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("scripts/wardnet-coraza-authority-repair.py")
+          path = Path("/tmp/wardnet-coraza-authority-repair.py")
           text = path.read_text()
           old = 'if text.count("tests/coraza_live_enforcement.rs") != 2:'
           new = 'if text.count("tests/coraza_live_enforcement.rs") != 3:'
@@ -49,7 +50,7 @@ jobs:
               raise SystemExit("expected exactly one stale generated-test seam-count guard")
           path.write_text(text.replace(old, new, 1))
           PY
-          python scripts/wardnet-coraza-authority-repair.py stage
+          python /tmp/wardnet-coraza-authority-repair.py stage
           python - <<'PY'
           from pathlib import Path
 
@@ -89,7 +90,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/wardnet-coraza-authority-repair.py fix
+          python /tmp/wardnet-coraza-authority-repair.py fix
           cargo fmt
           git diff --check
 
