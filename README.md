@@ -158,7 +158,7 @@ Deployment assets live in the repository under `deploy/` (Docker Compose and Kub
 ## Workspace
 
 - `waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and evidence manifests.
-- The Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests live in the binary crate.
+- The Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests live in the root application package.
 - Process configuration and server startup live in the binary entrypoint.
 
 The core is a local workspace crate rather than a git submodule because it does not yet have a separate release cadence or external consumers.
@@ -188,9 +188,10 @@ tests. See [`docs/fuzzing.md`](https://github.com/ContextualWisdomLab/wardnet/bl
 ## Project Status
 
 `wardnet` (WAF IDS AI SOC) is an early Rust gateway and SOC control-plane
-baseline. Releases are verified by `cargo test`, Clippy, and `scripts/smoke.sh`.
-Public documentation describes caller-facing APIs; internal commercial working
-records stay out of the package description.
+baseline. Repository changes are validated by `cargo test`, Clippy, and
+`scripts/smoke.sh`; those checks do not by themselves establish immutable
+release readiness. Public documentation describes caller-facing APIs; internal
+commercial working records stay out of the package description.
 
 - [ADRs](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/adr/README.md)
 - [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/architecture.md)
