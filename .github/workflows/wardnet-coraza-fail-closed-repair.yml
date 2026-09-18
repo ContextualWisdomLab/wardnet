@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "8a0bab714e5189af61b53b1fad4cca266738fe34"
+          test "$(git rev-parse HEAD^)" = "7c7d4ccf6c886c37c82f7b34ec13c4ed9894a3cb"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -39,6 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           cp scripts/wardnet-coraza-authority-repair.py /tmp/wardnet-coraza-authority-repair.py
+          cp scripts/wardnet-coraza-bounded-repair.sh /tmp/wardnet-coraza-bounded-repair.sh
           python - <<'PY'
           from pathlib import Path
 
@@ -50,19 +51,18 @@ jobs:
               raise SystemExit("expected exactly one stale generated-test seam-count guard")
           text = text.replace(old, new, 1)
 
+          old_generator_path = 'path = Path("scripts/wardnet-coraza-bounded-repair.sh")'
+          new_generator_path = 'path = Path("/tmp/wardnet-coraza-bounded-repair.sh")'
+          if text.count(old_generator_path) != 1:
+              raise SystemExit("expected exactly one tracked generator path seam")
+          text = text.replace(old_generator_path, new_generator_path, 1)
+
           old_stage = """def stage() -> None:
               harden_generator()
               subprocess.run(["bash", "scripts/wardnet-coraza-bounded-repair.sh"], check=True)"""
           new_stage = """def stage() -> None:
               harden_generator()
-              generator = Path("scripts/wardnet-coraza-bounded-repair.sh")
-              generated = generator.read_text()
-              old_expected = '  tests/coraza_proven_engine_adapter.rs | sort)"'
-              new_expected = "  tests/coraza_live_enforcement.rs " + chr(92) + chr(10) + '  tests/coraza_proven_engine_adapter.rs | sort)"'
-              if generated.count(old_expected) != 1:
-                  raise SystemExit("expected exactly one staged changed-file oracle")
-              generator.write_text(generated.replace(old_expected, new_expected, 1))
-              subprocess.run(["bash", "scripts/wardnet-coraza-bounded-repair.sh"], check=True)"""
+              subprocess.run(["bash", "/tmp/wardnet-coraza-bounded-repair.sh"], check=True)"""
           if text.count(old_stage) != 1:
               raise SystemExit("expected exactly one stage orchestration seam")
           path.write_text(text.replace(old_stage, new_stage, 1))
