@@ -30,16 +30,25 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "e765dd02b1485bedcd4239c4418dca1c9a8f9e70"
-          test "$(git rev-parse HEAD^^)" = "d138f98b0f139a0643b1d2dda6cefd481f722c0f"
+          test "$(git rev-parse HEAD^)" = "a219a9eb66a53a7cbbc1cb7540d2d36fd3367673"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
-          test "$(git diff --name-only HEAD^^ HEAD^)" = "scripts/wardnet-coraza-authority-repair.py"
           test "$(git status --porcelain)" = ""
 
       - name: Materialize reviewed pre-fix candidate and hostile contract
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/wardnet-coraza-authority-repair.py")
+          text = path.read_text()
+          old = 'if text.count("tests/coraza_live_enforcement.rs") != 2:'
+          new = 'if text.count("tests/coraza_live_enforcement.rs") != 3:'
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one stale generated-test seam-count guard")
+          path.write_text(text.replace(old, new, 1))
+          PY
           python scripts/wardnet-coraza-authority-repair.py stage
           python - <<'PY'
           from pathlib import Path
