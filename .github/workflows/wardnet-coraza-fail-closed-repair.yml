@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "d0c5e8fa5ca9522d61b388bdf98145dd0a8e48b3"
+          test "$(git rev-parse HEAD^)" = "2f31ca83c9cd64fcbb05079a3b46b67d6d006841"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -48,7 +48,25 @@ jobs:
           new = 'if text.count("tests/coraza_live_enforcement.rs") != 3:'
           if text.count(old) != 1:
               raise SystemExit("expected exactly one stale generated-test seam-count guard")
-          path.write_text(text.replace(old, new, 1))
+          text = text.replace(old, new, 1)
+
+          old_stage = '''def stage() -> None:
+              harden_generator()
+              subprocess.run(["bash", "scripts/wardnet-coraza-bounded-repair.sh"], check=True)'''
+          new_stage = '''def stage() -> None:
+              harden_generator()
+              generator = Path("scripts/wardnet-coraza-bounded-repair.sh")
+              generated = generator.read_text()
+              old_expected = '''  tests/coraza_proven_engine_adapter.rs | sort)"'''
+              new_expected = '''  tests/coraza_live_enforcement.rs \\
+            tests/coraza_proven_engine_adapter.rs | sort)"'''
+              if generated.count(old_expected) != 1:
+                  raise SystemExit("expected exactly one staged changed-file oracle")
+              generator.write_text(generated.replace(old_expected, new_expected, 1))
+              subprocess.run(["bash", "scripts/wardnet-coraza-bounded-repair.sh"], check=True)'''
+          if text.count(old_stage) != 1:
+              raise SystemExit("expected exactly one stage orchestration seam")
+          path.write_text(text.replace(old_stage, new_stage, 1))
           PY
           python /tmp/wardnet-coraza-authority-repair.py stage
           python - <<'PY'
