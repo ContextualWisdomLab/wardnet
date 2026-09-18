@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "d5676058662bd2ebb04f4bd88d70b4704ec20f5d"
+          test "$(git rev-parse HEAD^)" = "d0c5e8fa5ca9522d61b388bdf98145dd0a8e48b3"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -94,6 +94,85 @@ jobs:
           cargo fmt
           git diff --check
 
+      - name: Establish hostile raw client-attribution header RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/coraza_live_enforcement.rs")
+          text = path.read_text()
+          old_headers = '''                .header("authorization", "Bearer must-not-forward")
+                          .header("cookie", "session=must-not-forward")
+                          .header("x-admin-token", "must-not-forward")'''
+          new_headers = '''                .header("authorization", "Bearer must-not-forward")
+                          .header("cookie", "session=must-not-forward")
+                          .header("x-admin-token", "must-not-forward")
+                          .header("x-forwarded-for", "198.51.100.66")
+                          .header("x-real-ip", "198.51.100.77")'''
+          if text.count(old_headers) != 1:
+              raise SystemExit("expected exactly one hostile Coraza request-header seam")
+          text = text.replace(old_headers, new_headers, 1)
+
+          old_forbidden = '''    for forbidden in ["authorization", "cookie", "x-admin-token", "proxy-authorization"] {
+                  assert!(headers.iter().all(|header| header["name"] != forbidden));
+              }'''
+          new_forbidden = '''    for forbidden in [
+                  "authorization",
+                  "cookie",
+                  "x-admin-token",
+                  "proxy-authorization",
+                  "x-forwarded-for",
+                  "x-real-ip",
+              ] {
+                  assert!(
+                      headers.iter().all(|header| header["name"] != forbidden),
+                      "raw client-attribution header {forbidden} must not cross the Coraza sidecar boundary"
+                  );
+              }'''
+          if text.count(old_forbidden) != 1:
+              raise SystemExit("expected exactly one forwarded-header denial seam")
+          path.write_text(text.replace(old_forbidden, new_forbidden, 1))
+          PY
+          cargo fmt
+          cargo test --locked --test coraza_live_enforcement --no-run
+          set +e
+          cargo test --locked --test coraza_live_enforcement \
+            block_route_uses_coraza_for_header_only_attack_and_minimizes_credentials \
+            -- --exact --nocapture 2>&1 | tee /tmp/coraza-header-minimization-red.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -F "block_route_uses_coraza_for_header_only_attack_and_minimizes_credentials ... FAILED" \
+            /tmp/coraza-header-minimization-red.log
+          grep -F "raw client-attribution header x-forwarded-for must not cross the Coraza sidecar boundary" \
+            /tmp/coraza-header-minimization-red.log
+
+      - name: Apply minimum client-attribution header fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/proven_engine.rs")
+          text = path.read_text()
+          old = '''        "origin",
+                  "x-requested-with",
+                  "x-forwarded-for",
+                  "x-real-ip",
+              ];'''
+          new = '''        "origin",
+                  "x-requested-with",
+              ];'''
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one raw client-attribution header allowlist seam")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          cargo fmt
+          git diff --check
+
       - name: Verify exact repaired candidate
         shell: bash
         run: |
@@ -133,7 +212,7 @@ jobs:
             scripts/wardnet-coraza-bounded-repair.sh \
             scripts/wardnet-coraza-authority-repair.py
           git diff --cached --check
-          git commit -m "fix(security): separate Coraza detection from disruption authority"
+          git commit -m "fix(security): harden live Coraza authority boundary"
 
           auth="$(printf 'x-access-token:%s' "$GH_PUSH_TOKEN" | base64 | tr -d '\n')"
           git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" \
