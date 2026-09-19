@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "ab263ca119121f9ecf6cf5a79a2e4d2b86f24882"
+          test "$(git rev-parse HEAD^)" = "e1e899e72cacb518f1d1f04624ef32565e599f43"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -117,6 +117,24 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
+
+          # harden_generator() prepares the intended final boundary before the
+          # semantic proof. Restore only the reviewed pre-fix attribution seam
+          # in the ephemeral candidate so this step demonstrates the real
+          # attacker-controlled forwarding defect before the causal removal.
+          source = Path("src/proven_engine.rs")
+          source_text = source.read_text()
+          fixed_allowlist = '''        "origin",
+                  "x-requested-with",
+              ];'''
+          vulnerable_allowlist = '''        "origin",
+                  "x-requested-with",
+                  "x-forwarded-for",
+                  "x-real-ip",
+              ];'''
+          if source_text.count(fixed_allowlist) != 1:
+              raise SystemExit("expected exactly one hardened raw client-attribution allowlist seam")
+          source.write_text(source_text.replace(fixed_allowlist, vulnerable_allowlist, 1))
 
           path = Path("tests/coraza_proven_engine_adapter.rs")
           text = path.read_text()
