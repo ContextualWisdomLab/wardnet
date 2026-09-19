@@ -52,7 +52,7 @@ Open `http://127.0.0.1:8080/admin`.
 Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
-- write-capable admin credential for management writes via `X-Admin-Token`: provide either `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH`. Optional only for numeric loopback binds (`127.0.0.0/8` or `::1`). Required before readiness on any other `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public). See [docs/runbooks/operations.md](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/runbooks/operations.md) and [docs/security/threat-model.md](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/security/threat-model.md).
+- write-capable admin credential for management writes via `X-Admin-Token`: provide either `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH`. Optional only for numeric loopback binds (`127.0.0.0/8` or `::1`). Required before readiness on any other `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public). See [docs/runbooks/operations.md](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/runbooks/operations.md) and [docs/security/threat-model.md](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/security/threat-model.md).
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
@@ -183,7 +183,7 @@ scripts/smoke.sh
 
 Untrusted-input surfaces (request scorer, state deserializer, admin-token and
 DNSBL parsers) are covered by coverage-guided fuzzing plus stable property
-tests. See [`docs/fuzzing.md`](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/fuzzing.md).
+tests. See [`docs/fuzzing.md`](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/fuzzing.md).
 
 ## Project Status
 
@@ -193,7 +193,7 @@ baseline. Repository changes are validated by `cargo test`, Clippy, and
 release readiness. Public documentation describes caller-facing APIs; internal
 commercial working records stay out of the package description.
 
-- [ADRs](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/adr/README.md)
-- [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/main/docs/architecture.md)
-- [Security policy](https://github.com/ContextualWisdomLab/wardnet/blob/main/SECURITY.md)
-- [Changelog](https://github.com/ContextualWisdomLab/wardnet/blob/main/CHANGELOG.md)
+- [ADRs](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/adr/README.md)
+- [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/architecture.md)
+- [Security policy](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/SECURITY.md)
+- [Changelog](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/CHANGELOG.md)
