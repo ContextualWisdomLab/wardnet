@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "7c7d4ccf6c886c37c82f7b34ec13c4ed9894a3cb"
+          test "$(git rev-parse HEAD^)" = "ab263ca119121f9ecf6cf5a79a2e4d2b86f24882"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -118,7 +118,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("tests/coraza_live_enforcement.rs")
+          path = Path("tests/coraza_proven_engine_adapter.rs")
           text = path.read_text()
           old_headers = '''                .header("authorization", "Bearer must-not-forward")
                           .header("cookie", "session=must-not-forward")
@@ -132,7 +132,7 @@ jobs:
               raise SystemExit("expected exactly one hostile Coraza request-header seam")
           text = text.replace(old_headers, new_headers, 1)
 
-          old_forbidden = '''    for forbidden in ["authorization", "cookie", "x-admin-token", "proxy-authorization"] {
+          old_forbidden = '''    for forbidden in ["authorization", "cookie", "x-admin-token", "proxy-authorization", "x-forwarded-for", "x-real-ip"] {
                   assert!(headers.iter().all(|header| header["name"] != forbidden));
               }'''
           new_forbidden = '''    for forbidden in [
@@ -153,9 +153,9 @@ jobs:
           path.write_text(text.replace(old_forbidden, new_forbidden, 1))
           PY
           cargo fmt
-          cargo test --locked --test coraza_live_enforcement --no-run
+          cargo test --locked --test coraza_proven_engine_adapter --no-run
           set +e
-          cargo test --locked --test coraza_live_enforcement \
+          cargo test --locked --test coraza_proven_engine_adapter \
             block_route_uses_coraza_for_header_only_attack_and_minimizes_credentials \
             -- --exact --nocapture 2>&1 | tee /tmp/coraza-header-minimization-red.log
           status=${PIPESTATUS[0]}
