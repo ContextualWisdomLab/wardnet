@@ -1,4 +1,4 @@
-use crate::InstallIntent;
+use crate::{policy::uv_active_command_index, InstallIntent};
 
 /// Return whether a direct-pip General Option token selects the Python interpreter.
 ///
@@ -124,10 +124,9 @@ pub(crate) fn requests_unapproved_uv_python_provider_authority(intent: &InstallI
     }
 
     let arguments = &intent.argv[1..];
-    let run_index = arguments.iter().position(|argument| argument == "run");
-    let pip_index = arguments.iter().position(|argument| argument == "pip");
-
-    if run_index.is_some_and(|run_index| pip_index.is_none_or(|pip_index| run_index < pip_index)) {
+    if uv_active_command_index(arguments)
+        .is_some_and(|command_index| arguments[command_index] == "run")
+    {
         return false;
     }
 
