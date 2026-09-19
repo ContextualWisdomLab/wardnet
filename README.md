@@ -12,7 +12,7 @@ The project starts small on purpose:
 - SOC event and KPI APIs
 - tenant/license-aware commercial readiness APIs
 - threat feed import status for real-time update operations
-- support bundle API for buyer due diligence and support handoff
+- support bundle API for diligence and support handoff
 - threat-feed freshness evidence and SOC event NDJSON export
 - optional JSON state persistence for standalone operation
 - embedded admin console
@@ -25,34 +25,21 @@ The program-complete baseline means the binary can run by itself, keep operator-
 
 It is still not a hardened internet-facing deployment. Use TLS, identity-aware access, upstream allowlists, and route rollback procedures before production traffic.
 
-## Commercial Readiness Baseline
+## Commercial APIs
 
-The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pilot state through API evidence:
+The runtime exposes commercial and operations evidence through HTTP:
 
 - `GET /api/commercial/license` returns tenant, edition, license, support, and annual contract metadata.
 - `POST /api/commercial/license` updates that metadata with `X-Admin-Token`.
 - `POST /api/threat-feeds/import` imports operator-reviewed threat indicators and DNSBL entries.
 - `POST /api/threat-feeds/import/phishing-database` pulls active domains/IPs from `Phishing-Database/Phishing.Database` and converts them into local block signals.
-- `GET /api/commercial/readiness` returns pass/fail checks and blockers against the 2B KRW target.
+- `GET /api/commercial/readiness` returns pass/fail checks and explicit blockers for the configured license and runtime evidence.
 - `GET /api/threat-feeds/freshness` returns fresh/stale feed evidence from TTL and last update time.
 - `GET /api/events.ndjson` exports events as newline-delimited JSON for SOC/SIEM ingestion tests.
-- `GET /api/commercial/evidence-manifest` returns the buyer-verifiable runtime, document, and deployment evidence map.
+- `GET /api/commercial/evidence-manifest` returns the runtime, document, and deployment evidence map.
 - `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
 
-The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
-
-The enterprise product package evidence is tracked in:
-
-- `docs/superpowers/specs/2026-07-02-enterprise-product-package-design.md`
-- `docs/superpowers/plans/2026-07-02-enterprise-product-package.md`
-- `docs/superpowers/specs/2026-07-02-feed-freshness-siem-evidence-design.md`
-- `docs/superpowers/plans/2026-07-02-feed-freshness-siem-evidence.md`
-- `docs/superpowers/specs/2026-07-03-buyer-evidence-manifest-design.md`
-- `docs/superpowers/plans/2026-07-03-buyer-evidence-manifest.md`
-- `docs/figma/enterprise-product-architecture.md`
-- `docs/product-design/enterprise-operator-workflows.md`
-- `docs/analytics/enterprise-value-scorecard.md`
-- `docs/ponytail/2026-07-02-complexity-audit.md`
+These endpoints return process-local evidence for operators. Product quality evidence does not depend on a hard-coded monetary sale target in public documentation.
 
 ## Run
 
@@ -65,7 +52,7 @@ Open `http://127.0.0.1:8080/admin`.
 Useful environment variables:
 
 - `BIND_ADDR`: listen address, default `127.0.0.1:8080`
-- write-capable admin credential for management writes via `X-Admin-Token`: provide either `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH`. Optional only for numeric loopback binds (`127.0.0.0/8` or `::1`). Required before readiness on any other `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public). See [docs/runbooks/operations.md](docs/runbooks/operations.md) and [docs/security/threat-model.md](docs/security/threat-model.md).
+- write-capable admin credential for management writes via `X-Admin-Token`: provide either `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH`. Optional only for numeric loopback binds (`127.0.0.0/8` or `::1`). Required before readiness on any other `BIND_ADDR` (`0.0.0.0`, `::`, LAN, public). See [docs/runbooks/operations.md](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/runbooks/operations.md) and [docs/security/threat-model.md](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/security/threat-model.md).
 - `WAF_IDS_STATE_PATH`: optional JSON state path. When omitted, the service runs with seeded in-memory state.
 - `DNSBL_ORIGIN`: DNSBL zone origin, default `dnsbl.local`
 - `EVENT_LIMIT`: retained event count, default `1000`; must be greater than zero
@@ -166,17 +153,13 @@ curl -X POST http://127.0.0.1:8080/api/threat-feeds/import/phishing-database \
   }'
 ```
 
-Deployment assets:
-
-- `Dockerfile`
-- `deploy/docker-compose.yml`
-- `deploy/kubernetes/waf-ids-ai-soc.yaml`
+Deployment assets live in the repository under `deploy/` (Docker Compose and Kubernetes manifests) and the root `Dockerfile`.
 
 ## Workspace
 
-- `crates/waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and buyer evidence manifests.
-- `src/lib.rs`: Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests.
-- `src/main.rs`: process configuration and server startup.
+- `waf-ids-core`: pure domain models, validation, upserts, scoring, DNSBL zone formatting, event retention, threat-feed freshness classification, KPI snapshots, commercial readiness snapshots, and evidence manifests.
+- The Axum management API, admin console, optional state persistence, upstream proxying, NDJSON event export, evidence manifest/support bundle assembly, and in-crate HTTP tests live in the root application package.
+- Process configuration and server startup live in the binary entrypoint.
 
 The core is a local workspace crate rather than a git submodule because it does not yet have a separate release cadence or external consumers.
 
@@ -187,7 +170,7 @@ The core is a local workspace crate rather than a git submodule because it does 
 3. Live MISP REST pull and live OpenCTI GraphQL pull jobs (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 collection poll already available).
 4. Authoritative DNSBL service mode using Hickory DNS.
 5. AI SOC analyst assist with human approval gates for blocking changes.
-6. Full SIEM adapters after the NDJSON export contract is proven in buyer labs.
+6. Full SIEM adapters after the NDJSON export contract is proven in operator labs.
 
 ## Verification
 
@@ -200,4 +183,17 @@ scripts/smoke.sh
 
 Untrusted-input surfaces (request scorer, state deserializer, admin-token and
 DNSBL parsers) are covered by coverage-guided fuzzing plus stable property
-tests. See [`docs/fuzzing.md`](docs/fuzzing.md).
+tests. See [`docs/fuzzing.md`](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/fuzzing.md).
+
+## Project Status
+
+`wardnet` (WAF IDS AI SOC) is an early Rust gateway and SOC control-plane
+baseline. Repository changes are validated by `cargo test`, Clippy, and
+`scripts/smoke.sh`; those checks do not by themselves establish immutable
+release readiness. Public documentation describes caller-facing APIs; internal
+commercial working records stay out of the package description.
+
+- [ADRs](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/adr/README.md)
+- [Architecture](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/docs/architecture.md)
+- [Security policy](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/SECURITY.md)
+- [Changelog](https://github.com/ContextualWisdomLab/wardnet/blob/f8260f1e03836039ff9463dd99fa982e4e270c4b/CHANGELOG.md)
