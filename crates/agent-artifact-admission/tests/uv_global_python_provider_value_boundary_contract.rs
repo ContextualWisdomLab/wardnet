@@ -123,8 +123,7 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
         version: "1.2.3".to_string(),
         registry_url: "https://pypi.org/simple".to_string(),
         owner: "ContextualWisdomLab".to_string(),
-        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            .to_string(),
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         artifact_argument: "cwl-example==1.2.3".to_string(),
     };
     let policy = AdmissionPolicy {
@@ -133,8 +132,7 @@ fn approved_uv_install() -> (AdmissionPolicy, InstallIntent) {
         allowed_executables: vec!["uv".to_string()],
         approved_manifests: vec![ApprovedManifest {
             workspace_id: "ContextualWisdomLab/wardnet".to_string(),
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_string(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }],
         approved_artifacts: vec![ApprovedArtifact {
             ecosystem: artifact.ecosystem.clone(),
