@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "2c3980ca63f2702c1d30b26d36cbba470cb64ea9"
+          test "$(git rev-parse HEAD^)" = "6e528162328988547973a8a4f4aca9139b3d7761"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-fail-closed-repair.yml"
           test "$(git status --porcelain)" = ""
 
@@ -150,7 +150,14 @@ jobs:
               raise SystemExit("expected exactly one hostile Coraza request-header seam")
           text = text.replace(old_headers, new_headers, 1)
 
-          old_forbidden = '''    for forbidden in ["authorization", "cookie", "x-admin-token", "proxy-authorization", "x-forwarded-for", "x-real-ip"] {
+          old_forbidden = '''    for forbidden in [
+                  "authorization",
+                  "cookie",
+                  "x-admin-token",
+                  "proxy-authorization",
+                  "x-forwarded-for",
+                  "x-real-ip",
+              ] {
                   assert!(headers.iter().all(|header| header["name"] != forbidden));
               }'''
           new_forbidden = '''    for forbidden in [
