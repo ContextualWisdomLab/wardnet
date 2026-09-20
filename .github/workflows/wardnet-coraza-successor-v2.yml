@@ -30,8 +30,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "089540ee7aeb78143d7ebe9f24a2738c8611dc4e"
-          test "$(git rev-parse HEAD^^)" = "37d8c824831e65d63f2da07a0f2c370fa82b6803"
+          test "$(git rev-parse HEAD^)" = "ba923d8b9e990ebb280d1c6c745fe531a48e980f"
+          test "$(git rev-parse HEAD^^)" = "f9e9786042b2d8480618b573b5d512f2bbd7e3bc"
           test "$(git diff --name-only HEAD^^ HEAD^)" = "scripts/wardnet-coraza-successor-v2.py"
           test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/wardnet-coraza-successor-v2.yml"
           test "$(git status --porcelain)" = ""
