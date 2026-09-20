@@ -16,6 +16,8 @@ Before exposing a block-mode route through this boundary, deploy the Coraza eval
 
 Treat `engine_unavailable` events as protection-loss evidence. Do not convert malformed or uncorrelated evidence to `Clean`, and do not add local request signatures to compensate for a missing Coraza engine.
 
+Hosted successor run `35509666499` re-proved the hostile request-context boundaries, passed the focused Coraza suites, the full locked workspace test suite, formatting, and strict Clippy, then promoted the reviewed production candidate as `ede52a7a25efc2f98e47b64802484009a43a8532`. That commit is candidate verification evidence only, not protected-branch or release evidence. Any later PR head must reacquire its own exact-head checks, reviews, and thread state before normal protected integration.
+
 ## Traceability
 
 Coraza. (n.d.). *Coraza Web Application Firewall documentation*. https://coraza.io/docs/
