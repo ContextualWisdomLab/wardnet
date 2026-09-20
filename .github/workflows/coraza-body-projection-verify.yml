@@ -30,3 +30,7 @@ jobs:
         run: cargo fmt --check
       - name: Run non-UTF8 body hostile acceptance
         run: cargo test --locked --test coraza_non_utf8_body
+      - name: Run locked workspace tests
+        run: cargo test --locked --workspace
+      - name: Run strict Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
