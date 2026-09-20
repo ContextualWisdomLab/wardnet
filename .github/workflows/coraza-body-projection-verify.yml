@@ -1,0 +1,32 @@
+name: Coraza Body Projection Verify
+
+on:
+  push:
+    branches:
+      - codex/coraza-header-enforcement-red-20260917
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wardnet-coraza-body-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'ContextualWisdomLab/wardnet'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify exact source head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run non-UTF8 body hostile acceptance
+        run: cargo test --locked --test coraza_non_utf8_body
