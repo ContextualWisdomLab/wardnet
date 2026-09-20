@@ -332,6 +332,17 @@ pub(crate) async fn evaluate_sidecar(
             reason: "Coraza proven engine is not configured".to_string(),
         };
     };
+    // The current gateway converts bytes with `from_utf8_lossy` before this
+    // v1 JSON envelope. A replacement character is therefore ambiguous: it
+    // can be original UTF-8 or evidence that bytes were changed. Refuse to
+    // authorize either case until a released binary-safe envelope can prove
+    // byte identity end to end.
+    if request.body.contains('\u{FFFD}') {
+        return ProvenEngineOutcome::Unavailable {
+            reason: "Wardnet cannot prove the Coraza v1 request body is byte-exact after UTF-8 projection"
+                .to_string(),
+        };
+    }
     let forwarded_headers = match engine_forwarded_headers(request.headers) {
         Ok(headers) => headers,
         Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
