@@ -165,6 +165,122 @@ def reconcile_monitor_degraded_event_contract() -> None:
     )
 
 
+def collapse_sidecar_evaluation_arguments() -> None:
+    """Keep the proven-engine boundary explicit without suppressing strict Clippy."""
+    source = ROOT / "src/proven_engine.rs"
+    text = source.read_text()
+    start_marker = "pub(crate) async fn evaluate_sidecar("
+    end_marker = "\n}\n\n#[cfg(test)]"
+    if text.count(start_marker) != 1:
+        fail("expected exactly one Coraza sidecar evaluation function")
+    start = text.index(start_marker)
+    end = text.index(end_marker, start) + 2
+    old = text[start:end]
+    for required in (
+        "headers: &axum::http::HeaderMap",
+        "let forwarded_headers = match engine_forwarded_headers(headers)",
+        "outcome_from_sidecar_response(status, &body, method, uri, client_ip, policy_id)",
+    ):
+        if required not in old:
+            fail(f"Coraza sidecar evaluation seam lost expected evidence: {required}")
+
+    new = '''pub(crate) struct SidecarEvaluation<'a> {
+    pub(crate) method: &'a str,
+    pub(crate) uri: &'a str,
+    pub(crate) body: &'a str,
+    pub(crate) client_ip: Option<IpAddr>,
+    pub(crate) headers: &'a axum::http::HeaderMap,
+    pub(crate) policy_id: &'a str,
+}
+
+pub(crate) async fn evaluate_sidecar(
+    client: &reqwest::Client,
+    config: &ProvenEngineConfig,
+    request: SidecarEvaluation<'_>,
+) -> ProvenEngineOutcome {
+    let Some(url) = config.sidecar_url() else {
+        return ProvenEngineOutcome::Unavailable {
+            reason: "Coraza proven engine is not configured".to_string(),
+        };
+    };
+    let forwarded_headers = match engine_forwarded_headers(request.headers) {
+        Ok(headers) => headers,
+        Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
+    };
+    let payload = sidecar_request_body(
+        request.method,
+        request.uri,
+        request.body,
+        request.client_ip,
+        &forwarded_headers,
+        request.policy_id,
+    );
+    let response = match client
+        .post(url)
+        .json(&payload)
+        .timeout(SIDECAR_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let reason = if error.is_timeout() {
+                "Coraza sidecar timed out"
+            } else if error.is_connect() {
+                "Coraza sidecar is unreachable"
+            } else {
+                "Coraza sidecar request failed"
+            };
+            return ProvenEngineOutcome::Unavailable {
+                reason: reason.to_string(),
+            };
+        }
+    };
+    let status = response.status();
+    let body = match bounded_sidecar_text(response).await {
+        Ok(body) => body,
+        Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
+    };
+    outcome_from_sidecar_response(
+        status,
+        &body,
+        request.method,
+        request.uri,
+        request.client_ip,
+        request.policy_id,
+    )
+}'''
+    source.write_text(text[:start] + new + text[end:])
+
+    caller = ROOT / "src/lib.rs"
+    text = caller.read_text()
+    old_call = '''    match proven_engine::evaluate_sidecar(
+        &state.waf_http,
+        &state.proven_engine,
+        method.as_str(),
+        &engine_uri,
+        &body_text,
+        client_ip,
+        &headers,
+        &route.id,
+    )
+    .await'''
+    new_call = '''    match proven_engine::evaluate_sidecar(
+        &state.waf_http,
+        &state.proven_engine,
+        proven_engine::SidecarEvaluation {
+            method: method.as_str(),
+            uri: &engine_uri,
+            body: &body_text,
+            client_ip,
+            headers: &headers,
+            policy_id: &route.id,
+        },
+    )
+    .await'''
+    caller.write_text(replace_once(text, old_call, new_call, "Coraza sidecar request context"))
+
+
 def add_local_deny_ordering_regression() -> None:
     path = ROOT / "tests/coraza_live_enforcement.rs"
     text = path.read_text()
@@ -263,6 +379,7 @@ def main() -> None:
     move_coraza_gate_after_independent_local_deny()
     reconcile_existing_no_engine_contract()
     reconcile_monitor_degraded_event_contract()
+    collapse_sidecar_evaluation_arguments()
     add_local_deny_ordering_regression()
     update_boundary_docs()
     verify_candidate()
