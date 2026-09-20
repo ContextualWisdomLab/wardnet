@@ -123,6 +123,48 @@ def reconcile_existing_no_engine_contract() -> None:
     path.write_text(replace_once(text, old, new, "KEV legitimate-request no-engine contract"))
 
 
+def reconcile_monitor_degraded_event_contract() -> None:
+    path = ROOT / "src/lib.rs"
+    text = path.read_text()
+    old_request = '''        app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
+        )
+        .await;'''
+    new_request = '''        let monitor = app_request(
+            &app,
+            gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
+        )
+        .await;
+        assert_eq!(
+            monitor.status(),
+            StatusCode::OK,
+            "monitor mode must continue traffic when Coraza is unavailable while retaining degraded evidence"
+        );'''
+    text = replace_once(
+        text,
+        old_request,
+        new_request,
+        "monitor-mode degraded-evidence response contract",
+    )
+    old_event = '''        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0]["action"], "monitored");'''
+    new_event = '''        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0]["action"],
+            "engine_unavailable",
+            "an unconfigured proven WAF is degraded security evidence even when monitor mode continues the request"
+        );'''
+    path.write_text(
+        replace_once(
+            text,
+            old_event,
+            new_event,
+            "monitor-mode degraded-evidence event contract",
+        )
+    )
+
+
 def add_local_deny_ordering_regression() -> None:
     path = ROOT / "tests/coraza_live_enforcement.rs"
     text = path.read_text()
@@ -220,6 +262,7 @@ def main() -> None:
     fix_bracketed_ipv6_loopback()
     move_coraza_gate_after_independent_local_deny()
     reconcile_existing_no_engine_contract()
+    reconcile_monitor_degraded_event_contract()
     add_local_deny_ordering_regression()
     update_boundary_docs()
     verify_candidate()
