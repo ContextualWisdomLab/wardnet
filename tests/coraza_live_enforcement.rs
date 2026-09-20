@@ -6,9 +6,9 @@
 //! The minimum acceptable behavior before a proven engine evaluates the request
 //! is fail-closed; the successor implementation will add the real engine port.
 //!
-//! The paired benign-header test is intentionally part of the same contract:
-//! the repair must not turn every block-mode request into a blanket 503. A real
-//! Coraza/CRS adapter must distinguish an attack from ordinary header traffic.
+//! With no proven engine configured, block mode must fail closed even for benign
+//! headers because Wardnet has no authority to infer a clean verdict. The separate
+//! configured-adapter test proves ordinary traffic passes after explicit clean evidence.
 
 use axum::{
     body::Body,
@@ -76,7 +76,7 @@ async fn block_route_fails_closed_for_header_only_attack_without_proven_waf() {
 }
 
 #[tokio::test]
-async fn block_route_does_not_blanket_fail_closed_for_benign_headers() {
+async fn block_route_fails_closed_for_benign_headers_when_proven_waf_is_unconfigured() {
     let app = app_with_block_route("coraza-header-benign", "/header-benign").await;
 
     let response = app
@@ -94,7 +94,29 @@ async fn block_route_does_not_blanket_fail_closed_for_benign_headers() {
 
     assert_eq!(
         response.status(),
-        StatusCode::OK,
-        "a repair may not make every block-mode request unavailable; benign headers must pass once evaluated by the live WAF path"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "block mode must not infer a clean WAF verdict when no proven engine is configured; the adapter contract separately proves benign traffic passes after explicit clean evidence"
+    );
+}
+
+#[tokio::test]
+async fn block_route_preserves_local_deny_before_unconfigured_proven_waf() {
+    let app = app_with_block_route("coraza-local-deny", "/local-deny").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/local-deny?q=1%20UNION%20SELECT%201")
+                .body(Body::empty())
+                .expect("valid hostile request"),
+        )
+        .await
+        .expect("gateway must answer locally denied request");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "independent Wardnet threat scoring may deny before Coraza; the missing proven engine gates only traffic that would otherwise proceed upstream"
     );
 }
