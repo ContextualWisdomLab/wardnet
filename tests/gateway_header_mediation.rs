@@ -11,12 +11,15 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header::{ACCEPT, CONTENT_TYPE}},
+    http::{
+        HeaderMap, HeaderValue, Method, Request, StatusCode,
+        header::{ACCEPT, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
     routing::any,
+    Router,
 };
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -30,7 +33,7 @@ struct Capture {
 async fn capture_upstream(State(capture): State<Capture>, headers: HeaderMap) -> Response {
     *capture.request_headers.lock().await = Some(headers);
 
-    let mut response = (StatusCode::ACCEPTED, r#"{"ok":true}"#).into_response();
+    let mut response = (StatusCode::ACCEPTED, r#"{\"ok\":true}"#).into_response();
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -94,7 +97,7 @@ async fn gateway_preserves_admitted_request_content_negotiation_metadata() {
                 .uri("/gateway/headers/v1/items")
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "application/json")
-                .body(Body::from(r#"{"probe":true}"#))
+                .body(Body::from(r#"{\"probe\":true}"#))
                 .expect("valid buyer request"),
         )
         .await
