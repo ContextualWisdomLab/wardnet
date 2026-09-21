@@ -129,7 +129,11 @@ async fn block_route_preserves_valid_utf8_replacement_character() {
         "valid UTF-8 containing U+FFFD must not be confused with a lossy replacement of invalid bytes"
     );
     let calls = calls.lock().await;
-    assert_eq!(calls.len(), 1, "valid UTF-8 must reach the proven engine exactly once");
+    assert_eq!(
+        calls.len(),
+        1,
+        "valid UTF-8 must reach the proven engine exactly once"
+    );
     assert_eq!(
         calls[0]["transaction"]["request"]["body"],
         Value::String(body.to_string()),
