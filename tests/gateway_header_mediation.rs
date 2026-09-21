@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::Body,
     extract::State,
     http::{
@@ -19,7 +20,6 @@ use axum::{
     },
     response::{IntoResponse, Response},
     routing::any,
-    Router,
 };
 use tokio::sync::Mutex;
 use tower::ServiceExt;
