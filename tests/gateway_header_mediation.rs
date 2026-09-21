@@ -111,7 +111,9 @@ async fn gateway_preserves_admitted_request_content_negotiation_metadata() {
         .clone()
         .expect("loopback upstream must receive the request");
     assert_eq!(
-        captured.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+        captured
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
         Some("application/json"),
         "Wardnet must preserve an explicitly admitted request media type"
     );
