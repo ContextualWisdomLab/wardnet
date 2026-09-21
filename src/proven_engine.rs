@@ -6,7 +6,7 @@
 //! correlated to the exact method/URI. It deliberately does not
 //! implement CRS rules or general-purpose egress policy.
 
-use std::{borrow::Cow, net::IpAddr, time::Duration};
+use std::{borrow::Cow, net::IpAddr, sync::OnceLock, time::Duration};
 
 use futures_util::StreamExt;
 
@@ -322,8 +322,19 @@ pub(crate) struct SidecarEvaluation<'request, 'body> {
     pub(crate) policy_id: &'request str,
 }
 
+fn loopback_sidecar_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("failed to build isolated Coraza sidecar client")
+    })
+}
+
 pub(crate) async fn evaluate_sidecar(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     config: &ProvenEngineConfig,
     request: SidecarEvaluation<'_, '_>,
 ) -> ProvenEngineOutcome {
@@ -355,7 +366,7 @@ pub(crate) async fn evaluate_sidecar(
         &forwarded_headers,
         request.policy_id,
     );
-    let response = match client
+    let response = match loopback_sidecar_client()
         .post(url)
         .json(&payload)
         .timeout(SIDECAR_TIMEOUT)
