@@ -158,14 +158,14 @@ async fn gateway_with_delayed_upstream() -> (Router, StreamProbe, tokio::task::J
     (app, probe, upstream_task)
 }
 
-async fn gateway_with_dishonest_length_upstream() -> (
-    Router,
-    StreamProbe,
-    tokio::task::JoinHandle<()>,
-) {
+async fn gateway_with_dishonest_length_upstream()
+-> (Router, StreamProbe, tokio::task::JoinHandle<()>) {
     let probe = StreamProbe::default();
     let upstream_app = Router::new()
-        .route("/v1/dishonest-length", any(dishonest_content_length_upstream))
+        .route(
+            "/v1/dishonest-length",
+            any(dishonest_content_length_upstream),
+        )
         .with_state(probe.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -204,11 +204,8 @@ async fn gateway_with_dishonest_length_upstream() -> (
     (app, probe, upstream_task)
 }
 
-async fn gateway_with_partial_failure_upstream() -> (
-    Router,
-    StreamProbe,
-    tokio::task::JoinHandle<()>,
-) {
+async fn gateway_with_partial_failure_upstream()
+-> (Router, StreamProbe, tokio::task::JoinHandle<()>) {
     let probe = StreamProbe::default();
     let upstream_app = Router::new()
         .route("/v1/partial", any(partial_failure_upstream))
