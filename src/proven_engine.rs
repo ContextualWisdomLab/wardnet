@@ -6,7 +6,7 @@
 //! correlated to the exact method/URI. It deliberately does not
 //! implement CRS rules or general-purpose egress policy.
 
-use std::{net::IpAddr, time::Duration};
+use std::{borrow::Cow, net::IpAddr, time::Duration};
 
 use futures_util::StreamExt;
 
@@ -313,36 +313,36 @@ fn outcome_from_sidecar_response(
     }
 }
 
-pub(crate) struct SidecarEvaluation<'a> {
-    pub(crate) method: &'a str,
-    pub(crate) uri: &'a str,
-    pub(crate) body: &'a str,
+pub(crate) struct SidecarEvaluation<'request, 'body> {
+    pub(crate) method: &'request str,
+    pub(crate) uri: &'request str,
+    pub(crate) body: &'request Cow<'body, str>,
     pub(crate) client_ip: Option<IpAddr>,
-    pub(crate) headers: &'a axum::http::HeaderMap,
-    pub(crate) policy_id: &'a str,
+    pub(crate) headers: &'request axum::http::HeaderMap,
+    pub(crate) policy_id: &'request str,
 }
 
 pub(crate) async fn evaluate_sidecar(
     client: &reqwest::Client,
     config: &ProvenEngineConfig,
-    request: SidecarEvaluation<'_>,
+    request: SidecarEvaluation<'_, '_>,
 ) -> ProvenEngineOutcome {
     let Some(url) = config.sidecar_url() else {
         return ProvenEngineOutcome::Unavailable {
             reason: "Coraza proven engine is not configured".to_string(),
         };
     };
-    // The current gateway converts bytes with `from_utf8_lossy` before this
-    // v1 JSON envelope. A replacement character is therefore ambiguous: it
-    // can be original UTF-8 or evidence that bytes were changed. Refuse to
-    // authorize either case until a released binary-safe envelope can prove
-    // byte identity end to end.
-    if request.body.contains('\u{FFFD}') {
+    // `String::from_utf8_lossy` returns a borrowed Cow only when the original
+    // request bytes are valid UTF-8. Preserve valid text exactly, including a
+    // literal U+FFFD, but refuse the owned replacement produced for invalid
+    // bytes so Coraza can never authorize a lossy projection.
+    if matches!(request.body, &Cow::Owned(_)) {
         return ProvenEngineOutcome::Unavailable {
-            reason: "Wardnet cannot prove the Coraza v1 request body is byte-exact after UTF-8 projection"
+            reason: "Wardnet cannot prove the Coraza v1 request body is byte-exact because the UTF-8 projection was lossy"
                 .to_string(),
         };
     }
+    let body = request.body.as_ref();
     let forwarded_headers = match engine_forwarded_headers(request.headers) {
         Ok(headers) => headers,
         Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
@@ -350,7 +350,7 @@ pub(crate) async fn evaluate_sidecar(
     let payload = sidecar_request_body(
         request.method,
         request.uri,
-        request.body,
+        body,
         request.client_ip,
         &forwarded_headers,
         request.policy_id,
