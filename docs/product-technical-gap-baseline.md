@@ -28,7 +28,7 @@ All production LLM use must consume an immutable released `contextual-orchestrat
 
 ## Context Fabric and foreign-owner inventory
 
-Fresh read-only default/protected refs remain CGC `develop@99cb34604f9ccd8e43be34e392c84fa2a87bb2fd`, EA `develop@dd71e920a786f22a9684186dc1f6703afbe2de8b`, `quarantine-sandbox-runtime develop@60a85ab499611335a58468ee718539643e7b82bc`, `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`, `contextual-orchestrator main@5665b0ad1e07ffb5e9f8c59e44b6b2a785298013`, and `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Their checked immutable GitHub Release inventories remain empty. Mutable foreign refs are inventory evidence only, never Wardnet production contracts. Wardnet writes neither CGC nor EA while their Context Fabric writer owns them.
+Fresh read-only default/protected refs remain CGC `develop@99cb5468ba3c15c5e79688f53dee74724fae2d13`, EA `develop@dd71e40a86385fb7861b0f1be19891a3f3e29ece`, `quarantine-sandbox-runtime develop@60a85c7633e03b425b67159ec6822c8178cf87ea`, `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`, `contextual-orchestrator main@5665b0ad1e07ffb5e9f8c59e44b6b2a785298013`, and `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Their checked immutable GitHub Release inventories remain empty. Mutable foreign refs are inventory evidence only, never Wardnet production contracts. Wardnet writes neither CGC nor EA while their Context Fabric writer owns them.
 
 ## Agent Artifact Admission
 
