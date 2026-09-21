@@ -24,6 +24,7 @@ use waf_ids_ai_soc::{AppState, build_app};
 
 const RELAY_MEMORY_BUDGET_BYTES: usize = 1024 * 1024;
 const LARGE_PREFIX_BYTES: usize = RELAY_MEMORY_BUDGET_BYTES + 64 * 1024;
+const UPSTREAM_CHUNK_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Default)]
 struct LargeResponseProbe {
@@ -35,20 +36,24 @@ async fn large_prefix_upstream(State(probe): State<LargeResponseProbe>) -> Respo
     probe.request_seen.notify_one();
 
     let release_tail = probe.release_tail.clone();
-    let body_stream = stream::unfold(0u8, move |stage| {
+    let body_stream = stream::unfold(0usize, move |emitted| {
         let release_tail = release_tail.clone();
         async move {
-            match stage {
-                0 => Some((
-                    Ok::<Bytes, Infallible>(Bytes::from(vec![0xA5; LARGE_PREFIX_BYTES])),
-                    1,
-                )),
-                1 => {
-                    release_tail.notified().await;
-                    Some((Ok(Bytes::from_static(b"tail")), 2))
-                }
-                _ => None,
+            if emitted < LARGE_PREFIX_BYTES {
+                let remaining = LARGE_PREFIX_BYTES - emitted;
+                let chunk_len = remaining.min(UPSTREAM_CHUNK_BYTES);
+                return Some((
+                    Ok::<Bytes, Infallible>(Bytes::from(vec![0xA5; chunk_len])),
+                    emitted + chunk_len,
+                ));
             }
+
+            if emitted == LARGE_PREFIX_BYTES {
+                release_tail.notified().await;
+                return Some((Ok(Bytes::from_static(b"tail")), LARGE_PREFIX_BYTES + 1));
+            }
+
+            None
         }
     });
 
@@ -107,6 +112,11 @@ async fn gateway_with_large_upstream() -> (
 
 #[tokio::test]
 async fn gateway_releases_large_prefix_before_held_tail() {
+    assert!(
+        UPSTREAM_CHUNK_BYTES < RELAY_MEMORY_BUDGET_BYTES,
+        "the hostile fixture must not manufacture one upstream chunk larger than the relay budget"
+    );
+
     let (app, probe, upstream_task) = gateway_with_large_upstream().await;
     let request = Request::builder()
         .method(Method::GET)
@@ -147,6 +157,10 @@ async fn gateway_releases_large_prefix_before_held_tail() {
         admitted_prefix_bytes += next.len();
     }
 
+    assert_eq!(
+        admitted_prefix_bytes, LARGE_PREFIX_BYTES,
+        "the bounded fixture must relay exactly the admitted prefix before the held tail"
+    );
     assert!(
         admitted_prefix_bytes > RELAY_MEMORY_BUDGET_BYTES,
         "the buyer must receive more than the relay-memory budget before the upstream tail is released"
