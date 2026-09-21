@@ -18,6 +18,7 @@
 - The state file is trusted only after JSON deserialization succeeds.
 - A non-loopback listener is untrusted until a write-capable admin principal exists in the credential registry. This follows the fail-secure and authenticator-management posture documented in the production guide and runbook: start closed, bootstrap secrets into the registry, then expose the listener only after a usable write credential exists.
 - Threat feed import payloads are untrusted operator-supplied data.
+- A configured Coraza sidecar is an external security-decision authority. Wardnet accepts it only over loopback, forwards a complete bounded credential-minimized request envelope, rejects unrepresentable or truncated allowlisted headers before sidecar authorization, and treats an unconfigured engine and malformed, oversized, uncorrelated, timed-out, or unreachable evidence as `engine_unavailable`; block-mode routes fail closed.
 
 ## Security Grounding
 
@@ -36,6 +37,7 @@ The authentication-specific NIST SP 800-57 Part 1 Rev. 5 and NIST SP 800-63B sou
 | State file corruption | Startup failure or stale policy | JSON parse failure surfaces startup error | Database, backup, schema migration |
 | Upstream SSRF through routes | Internal network exposure | Upstream scheme validation | Upstream allowlists, egress policy |
 | Gateway DoS | Availability loss | Rust memory safety, event retention limit | Rate limits, body limits, async event sink |
+| WAF authority confusion or sidecar spoofing | Attack bypass or false block | Loopback-only Coraza sidecar, exact method/URI response correlation, bounded response/time, explicit `engine_unavailable` evidence | Pin/inventory production Coraza + CRS release identity and expose configuration through the Runtime Configuration owner lane |
 | DNSBL abuse | Reputation damage | Loopback response-code validation | Authoritative DNS service, signing, publisher workflow |
 | Secret disclosure | Admin compromise | Support bundle excludes admin token; secrets bootstrapped into credential registry (`WAF_IDS_CREDENTIALS_PATH` preferred over long-lived env); health exposes source label only | External secret manager / SSO, rotation, access review |
 

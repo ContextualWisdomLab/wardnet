@@ -1,0 +1,31 @@
+# In-path Coraza request adapter
+
+## Decision boundary
+
+Wardnet owns route selection, monitor/block policy, security-event production, and the decision to forward a request. It does not own OWASP CRS detection logic. When a `ProvenEngineConfig` sidecar is configured, Wardnet submits each matched live gateway request to a same-host Coraza/OWASP CRS evaluator before forwarding. The adapter is intentionally loopback-only; executable general-purpose egress authorization remains EgressWeave ownership and is not copied into Wardnet.
+
+The request envelope contains method, effective gateway URI, body, client address when known, a bounded non-secret header allowlist, Wardnet route-policy identity, and contract identifier `coraza-live-evaluate-v1`. `Authorization`, `Cookie`, `Proxy-Authorization`, and `X-Admin-Token` are never forwarded. Raw `X-Forwarded-For` and `X-Real-IP` are also withheld until Wardnet's trusted-proxy attribution owner reaches protected truth; the sidecar receives the transport-derived `client_ip` separately. Header forwarding is capped at 32 fields / 8 KiB. If any allowlisted value cannot be represented as UTF-8 or the complete allowlisted envelope would exceed either cap, Wardnet records `engine_unavailable` and does not call the sidecar; a partial request projection is never eligible for a clean verdict. The v1 JSON envelope can carry the body only as UTF-8 text. The gateway obtains that text through `String::from_utf8_lossy`, whose `Cow` ownership records whether the original request bytes were already valid UTF-8. The adapter accepts only the borrowed projection: valid UTF-8 is therefore preserved exactly, including a literal U+FFFD present in the original request. An owned projection proves that invalid input bytes were replaced, so Wardnet records `engine_unavailable` without calling Coraza and block mode fails closed rather than accepting a verdict over altered bytes. A future binary-safe owner contract may remove this UTF-8 limitation while preserving byte identity end to end. Sidecar evaluation has a 1.5 s timeout and a 1 MiB response cap.
+
+A sidecar response is not accepted merely because it is HTTP 2xx. Wardnet requires parseable JSON evidence correlated to the exact request method and URI. A clean decision additionally requires an explicit non-interrupted transaction, a response status below 400, and an empty messages array. Coraza/CRS rule messages retain their rule text/ID as SOC evidence, but the live adapter projects enforcement authority separately: only explicit `is_interrupted=true`, HTTP 403/406 from the sidecar, or transaction response 403/406 is disruptive. A non-interrupted successful transaction with rule messages remains monitor evidence and is never promoted to a block merely because audit severity maps to a high score. Wardnet adds policy identity plus sidecar ruleset identity when supplied. An unconfigured engine and malformed, oversized, uncorrelated, timed-out, or unreachable evidence are `engine_unavailable`; a block-mode route fails closed with HTTP 503. Independent Wardnet threat/DNSBL evidence may deny a request first; Coraza is the required authorization boundary only for block-mode traffic that has not already been denied and would otherwise proceed upstream. Monitor mode records the degraded evidence and may continue, preserving route-scoped semantics.
+
+`tests/coraza_proven_engine_adapter.rs` uses a protocol fixture, not a substitute detector. The fixture returns Coraza-shaped block/clean evidence by test URI so the test proves Wardnet forwards the hostile `User-Agent`, excludes credential-bearing headers, correlates the response, enforces block versus monitor semantics, and fails closed on unusable engine evidence. `tests/coraza_non_utf8_body.rs` proves both sides of the request-body identity boundary: invalid UTF-8 bytes must produce HTTP 503 without invoking the sidecar, while valid UTF-8 containing a literal U+FFFD must reach the sidecar exactly and may receive a correlated clean verdict. Production detection authority remains a real Coraza deployment with a pinned OWASP CRS ruleset.
+
+## Operational acceptance
+
+Before exposing a block-mode route through this boundary, deploy the Coraza evaluator on loopback, pin and inventory the CRS policy/ruleset, then construct `AppState` with `ProvenEngineConfig::sidecar(...)`. The current bounded slice does not add a new environment-variable or database configuration source because Runtime Configuration is owned by its separate Wardnet lane. That owner must expose the released/configured adapter without reintroducing handler-time environment reads before this becomes a packaged production default.
+
+Treat `engine_unavailable` events as protection-loss evidence. Do not convert malformed or uncorrelated evidence to `Clean`, and do not add local request signatures to compensate for a missing Coraza engine.
+
+Hosted successor run `35509666499` re-proved the hostile request-context boundaries, passed the focused Coraza suites, the full locked workspace test suite, formatting, and strict Clippy, then promoted the reviewed production candidate as `ede52a7a25efc2f98e47b64802484009a43a8532`. That commit is candidate verification evidence only, not protected-branch or release evidence. Any later PR head must reacquire its own exact-head checks, reviews, and thread state before normal protected integration.
+
+## Traceability
+
+Coraza. (n.d.). *Coraza Web Application Firewall documentation*. https://coraza.io/docs/
+
+National Institute of Standards and Technology. (2007). *Guide to intrusion detection and prevention systems (IDPS)* (NIST Special Publication 800-94). https://doi.org/10.6028/NIST.SP.800-94
+
+OWASP Foundation. (2025). *OWASP Core Rule Set documentation*. https://coreruleset.org/docs/
+
+Saltzer, J. H., & Schroeder, M. D. (1975). The protection of information in computer systems. *Proceedings of the IEEE, 63*(9), 1278–1308. https://doi.org/10.1109/PROC.1975.9939
+
+These references ground the use of a proven WAF/ruleset authority and fail-safe treatment of unavailable or unverifiable decisions. They are rationale, not evidence that a specific Coraza/CRS build has been deployed or released. No paper PDF is added in this lane because redistribution permission for the exact retrieved versions was not independently established.

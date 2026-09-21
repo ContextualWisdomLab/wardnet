@@ -103,7 +103,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - durable database storage with backups
 - SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
-- In-process Coraza embedding (HTTP audit ingest at `POST /api/waf/coraza/audit` already fuses block hits into DNSBL/`client_ip` indicators for gateway enforcement)
+- Package the live Coraza boundary: the code-level `ProvenEngineConfig` loopback sidecar port now evaluates matched requests and fails block mode closed when the proven engine is unconfigured or its evidence is unusable, while Runtime Configuration still owns its deployment/bootstrap surface. Audit ingest at `POST /api/waf/coraza/audit` remains available for SOC evidence.
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement
