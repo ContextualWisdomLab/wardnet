@@ -64,11 +64,8 @@ async fn large_prefix_upstream(State(probe): State<LargeResponseProbe>) -> Respo
         .expect("valid loopback large streaming response")
 }
 
-async fn gateway_with_large_upstream() -> (
-    Router,
-    LargeResponseProbe,
-    tokio::task::JoinHandle<()>,
-) {
+async fn gateway_with_large_upstream() -> (Router, LargeResponseProbe, tokio::task::JoinHandle<()>)
+{
     let probe = LargeResponseProbe::default();
     let upstream_app = Router::new()
         .route("/v1/large", any(large_prefix_upstream))
