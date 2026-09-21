@@ -127,8 +127,11 @@ async fn gateway_with_delayed_upstream() -> (Router, StreamProbe, tokio::task::J
     (app, probe, upstream_task)
 }
 
-async fn gateway_with_partial_failure_upstream()
--> (Router, StreamProbe, tokio::task::JoinHandle<()>) {
+async fn gateway_with_partial_failure_upstream() -> (
+    Router,
+    StreamProbe,
+    tokio::task::JoinHandle<()>,
+) {
     let probe = StreamProbe::default();
     let upstream_app = Router::new()
         .route("/v1/partial", any(partial_failure_upstream))
