@@ -85,11 +85,8 @@ async fn cancellation_upstream(State(probe): State<CancellationProbe>) -> Respon
         .expect("valid loopback cancellation response")
 }
 
-async fn gateway_with_cancellation_upstream() -> (
-    Router,
-    CancellationProbe,
-    tokio::task::JoinHandle<()>,
-) {
+async fn gateway_with_cancellation_upstream()
+-> (Router, CancellationProbe, tokio::task::JoinHandle<()>) {
     let probe = CancellationProbe::default();
     let upstream_app = Router::new()
         .route("/v1/cancel", any(cancellation_upstream))
