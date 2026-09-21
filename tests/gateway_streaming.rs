@@ -36,10 +36,7 @@ async fn delayed_chunk_upstream(State(probe): State<StreamProbe>) -> Response {
         let release_tail = release_tail.clone();
         async move {
             match stage {
-                0 => Some((
-                    Ok::<Bytes, Infallible>(Bytes::from_static(b"first-")),
-                    1,
-                )),
+                0 => Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"first-")), 1)),
                 1 => {
                     release_tail.notified().await;
                     Some((Ok(Bytes::from_static(b"second")), 2))
