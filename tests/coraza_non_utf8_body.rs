@@ -104,3 +104,37 @@ async fn block_route_never_authorizes_a_lossy_request_body_projection() {
     );
     task.abort();
 }
+
+#[tokio::test]
+async fn block_route_preserves_valid_utf8_replacement_character() {
+    let (url, calls, task) = spawn_coraza_sidecar().await;
+    let app = block_app(&url).await;
+    let body = "a\u{FFFD}b";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gateway/non-utf8-body")
+                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "valid UTF-8 containing U+FFFD must not be confused with a lossy replacement of invalid bytes"
+    );
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 1, "valid UTF-8 must reach the proven engine exactly once");
+    assert_eq!(
+        calls[0]["transaction"]["request"]["body"],
+        Value::String(body.to_string()),
+        "the proven engine must receive the exact valid UTF-8 body"
+    );
+    drop(calls);
+    task.abort();
+}
