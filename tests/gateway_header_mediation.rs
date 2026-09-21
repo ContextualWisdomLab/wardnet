@@ -78,10 +78,24 @@ async fn capture_upstream(State(capture): State<Capture>, headers: HeaderMap) ->
     response
 }
 
+async fn connection_nominated_response() -> Response {
+    let mut response = (StatusCode::ACCEPTED, "ok").into_response();
+    response.headers_mut().append(
+        "x-wardnet-app-meta",
+        HeaderValue::from_static("must-not-reflect-when-nominated"),
+    );
+    response.headers_mut().insert(
+        "connection",
+        HeaderValue::from_static("x-wardnet-app-meta, keep-alive"),
+    );
+    response
+}
+
 async fn gateway_with_loopback_upstream() -> (Router, Capture, tokio::task::JoinHandle<()>) {
     let capture = Capture::default();
     let upstream_app = Router::new()
         .route("/v1/items", any(capture_upstream))
+        .route("/v1/connection-nominated", any(connection_nominated_response))
         .with_state(capture.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -193,7 +207,11 @@ async fn gateway_strips_request_authority_credentials_and_hop_by_hop_fields() {
                 .header("x-forwarded-for", "203.0.113.77")
                 .header("x-real-ip", "203.0.113.77")
                 .header("proxy-authorization", "Basic cHJveHk6c2VjcmV0")
-                .header("connection", "x-wardnet-connection-secret, keep-alive")
+                .header("x-wardnet-app-meta", "must-not-forward-when-nominated")
+                .header(
+                    "connection",
+                    "x-wardnet-app-meta, x-wardnet-connection-secret, keep-alive",
+                )
                 .header("x-wardnet-connection-secret", "must-not-forward")
                 .header("te", "trailers")
                 .header("trailer", "x-proof")
@@ -218,6 +236,7 @@ async fn gateway_strips_request_authority_credentials_and_hop_by_hop_fields() {
         "x-forwarded-for",
         "x-real-ip",
         "proxy-authorization",
+        "x-wardnet-app-meta",
         "connection",
         "x-wardnet-connection-secret",
         "te",
@@ -269,6 +288,64 @@ async fn duplicate_management_credentials_fail_closed_before_proxying() {
     assert!(
         capture.request_headers.lock().await.is_none(),
         "a fail-closed request must not reach the upstream"
+    );
+
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn duplicate_singleton_content_type_fails_closed_before_proxying() {
+    let (app, capture, upstream_task) = gateway_with_loopback_upstream().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gateway/headers/v1/items")
+                .header(CONTENT_TYPE, "application/json")
+                .header(CONTENT_TYPE, "text/plain")
+                .body(Body::from("{}"))
+                .expect("ambiguous singleton header fixture"),
+        )
+        .await
+        .expect("gateway must answer ambiguous-singleton request");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "ambiguous duplicated singleton application metadata must fail closed"
+    );
+    assert!(
+        capture.request_headers.lock().await.is_none(),
+        "ambiguous singleton metadata must not reach the upstream"
+    );
+
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn oversized_admitted_application_metadata_fails_closed_before_proxying() {
+    let (app, capture, upstream_task) = gateway_with_loopback_upstream().await;
+    let oversized = "x".repeat(16_385);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/headers/v1/items")
+                .header("x-wardnet-app-meta", oversized)
+                .body(Body::empty())
+                .expect("oversized admitted metadata fixture"),
+        )
+        .await
+        .expect("gateway must answer oversized-metadata request");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "oversized admitted metadata must fail closed before outbound allocation"
+    );
+    assert!(
+        capture.request_headers.lock().await.is_none(),
+        "oversized metadata must not reach the upstream"
     );
 
     upstream_task.abort();
@@ -336,6 +413,33 @@ async fn gateway_preserves_admitted_upstream_representation_metadata() {
             "security-sensitive upstream field {name} must not be reflected"
         );
     }
+
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_strips_connection_nominated_response_metadata() {
+    let (app, _capture, upstream_task) = gateway_with_loopback_upstream().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/gateway/headers/v1/connection-nominated")
+                .body(Body::empty())
+                .expect("connection-nominated response fixture"),
+        )
+        .await
+        .expect("gateway must answer hostile upstream response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(
+        response.headers().get("x-wardnet-app-meta").is_none(),
+        "an otherwise admitted field named by Connection must not cross the gateway response boundary"
+    );
+    assert!(
+        response.headers().get("connection").is_none(),
+        "Connection itself is hop-by-hop authority and must not be reflected"
+    );
 
     upstream_task.abort();
 }
