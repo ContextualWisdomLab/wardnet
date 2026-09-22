@@ -11,9 +11,7 @@ use waf_ids_ai_soc::{AppState, ProvenEngineConfig, build_app};
 
 async fn detection_only(Json(payload): Json<Value>) -> Json<Value> {
     let request = &payload["transaction"]["request"];
-    let correlation_id = payload["wardnet"]["correlation_id"]
-        .as_str()
-        .unwrap_or("");
+    let correlation_id = payload["wardnet"]["correlation_id"].as_str().unwrap_or("");
     Json(serde_json::json!({
         "transaction": {
             "client_ip": "203.0.113.44",
