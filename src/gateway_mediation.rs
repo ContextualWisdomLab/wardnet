@@ -79,6 +79,7 @@ fn admit_allowlisted(source: &HeaderMap, allowed: &[&'static str]) -> Result<Hea
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use std::str::FromStr;
 
     #[test]
     fn request_policy_preserves_only_bounded_allowlist_with_multiplicity() {
