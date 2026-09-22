@@ -19,6 +19,9 @@ async fn coraza_evaluate(State(calls): State<Calls>, Json(payload): Json<Value>)
     let request = &payload["transaction"]["request"];
     let method = request["method"].as_str().unwrap_or("GET");
     let uri = request["uri"].as_str().unwrap_or("/");
+    let correlation_id = payload["wardnet"]["correlation_id"]
+        .as_str()
+        .unwrap_or("");
     if uri == "/malformed" {
         return Json(serde_json::json!({"unexpected":"shape"}));
     }
@@ -30,6 +33,7 @@ async fn coraza_evaluate(State(calls): State<Calls>, Json(payload): Json<Value>)
                 "request": {"method": method, "uri": uri},
                 "response": {"http_code": 403}
             },
+            "wardnet": {"correlation_id": correlation_id},
             "messages": [{
                 "message": "Remote Command Execution: Shellshock",
                 "data": {"id": 932170, "severity": 2}
@@ -43,6 +47,7 @@ async fn coraza_evaluate(State(calls): State<Calls>, Json(payload): Json<Value>)
             "request": {"method": method, "uri": uri},
             "response": {"http_code": 200}
         },
+        "wardnet": {"correlation_id": correlation_id},
         "messages": [],
         "engine": {"name":"coraza", "ruleset":"owasp-crs-test-fixture"}
     }))
@@ -121,6 +126,12 @@ async fn block_route_uses_coraza_for_header_only_attack_and_minimizes_credential
 
     let calls = calls.lock().await;
     assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0]["wardnet"]["correlation_id"]
+            .as_str()
+            .is_some_and(|value| value.len() == 49),
+        "every Coraza evaluation must carry one bounded Wardnet correlation id"
+    );
     let headers = calls[0]["transaction"]["request"]["headers"]
         .as_array()
         .unwrap();

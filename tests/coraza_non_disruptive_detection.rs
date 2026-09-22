@@ -4,18 +4,27 @@ use axum::{
     http::{Method, Request, StatusCode, header::CONTENT_TYPE},
     routing::post,
 };
+use serde_json::Value;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower::ServiceExt;
 use waf_ids_ai_soc::{AppState, ProvenEngineConfig, build_app};
 
-async fn detection_only() -> Json<serde_json::Value> {
+async fn detection_only(Json(payload): Json<Value>) -> Json<Value> {
+    let request = &payload["transaction"]["request"];
+    let correlation_id = payload["wardnet"]["correlation_id"]
+        .as_str()
+        .unwrap_or("");
     Json(serde_json::json!({
         "transaction": {
             "client_ip": "203.0.113.44",
             "is_interrupted": false,
-            "request": {"method": "GET", "uri": "/detect-only"},
+            "request": {
+                "method": request["method"].as_str().unwrap_or("GET"),
+                "uri": request["uri"].as_str().unwrap_or("/detect-only")
+            },
             "response": {"http_code": 200}
         },
+        "wardnet": {"correlation_id": correlation_id},
         "messages": [{
             "message": "Protocol Attack Detected",
             "data": {"id": 921110, "severity": 2}

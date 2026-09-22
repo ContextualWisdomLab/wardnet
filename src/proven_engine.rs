@@ -2,11 +2,17 @@
 //!
 //! Wardnet owns the route/policy decision, not WAF signatures. This
 //! adapter sends a bounded, credential-minimized request envelope to a
-//! same-host Coraza sidecar and accepts only response evidence that is
-//! correlated to the exact method/URI. It deliberately does not
-//! implement CRS rules or general-purpose egress policy.
+//! same-host Coraza sidecar and accepts only response evidence bound to
+//! the current Wardnet correlation plus the exact method/URI. It deliberately
+//! does not implement CRS rules or general-purpose egress policy.
 
-use std::{borrow::Cow, net::IpAddr, sync::OnceLock, time::Duration};
+use std::borrow::Cow;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::net::IpAddr;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 
@@ -16,6 +22,8 @@ pub const SIDECAR_TIMEOUT: Duration = Duration::from_millis(1_500);
 pub const SIDECAR_MAX_BODY_BYTES: usize = 1_048_576;
 pub const FORWARDED_HEADER_LIMIT: usize = 32;
 pub const FORWARDED_HEADERS_MAX_BYTES: usize = 8_192;
+
+static CORRELATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Wardnet-owned configuration for the live WAF boundary.
 ///
@@ -129,6 +137,31 @@ pub(crate) fn engine_forwarded_headers(
     Ok(forwarded)
 }
 
+fn random_correlation_word(domain: &[u8]) -> u64 {
+    let state = RandomState::new();
+    let mut hasher = state.build_hasher();
+    hasher.write(domain);
+    hasher.finish()
+}
+
+fn correlation_process_prefix() -> &'static str {
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| {
+        let high = random_correlation_word(b"wardnet-coraza-correlation-high");
+        let low = random_correlation_word(b"wardnet-coraza-correlation-low");
+        format!("{high:016x}{low:016x}")
+    })
+}
+
+fn next_correlation_id() -> Result<String, String> {
+    let sequence = CORRELATION_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| "Coraza request correlation sequence exhausted".to_string())?;
+    Ok(format!("{}-{sequence:016x}", correlation_process_prefix()))
+}
+
 fn sidecar_request_body(
     method: &str,
     uri: &str,
@@ -136,6 +169,7 @@ fn sidecar_request_body(
     client_ip: Option<IpAddr>,
     headers: &[(String, String)],
     policy_id: &str,
+    correlation_id: &str,
 ) -> serde_json::Value {
     let mut request = serde_json::json!({
         "method": method,
@@ -156,7 +190,8 @@ fn sidecar_request_body(
         "transaction": transaction,
         "wardnet": {
             "policy_id": policy_id,
-            "contract": "coraza-live-evaluate-v1"
+            "contract": "coraza-live-evaluate-v1",
+            "correlation_id": correlation_id
         }
     })
 }
@@ -190,7 +225,12 @@ fn response_request(value: &serde_json::Value) -> Option<&serde_json::Value> {
         .or_else(|| value.get("request"))
 }
 
-fn response_correlates(value: &serde_json::Value, method: &str, uri: &str) -> bool {
+fn response_correlates(
+    value: &serde_json::Value,
+    method: &str,
+    uri: &str,
+    correlation_id: &str,
+) -> bool {
     let Some(request) = response_request(value) else {
         return false;
     };
@@ -202,8 +242,12 @@ fn response_correlates(value: &serde_json::Value, method: &str, uri: &str) -> bo
         .get("uri")
         .or_else(|| request.pointer("/http/uri"))
         .and_then(|value| value.as_str());
+    let returned_correlation = value
+        .pointer("/wardnet/correlation_id")
+        .and_then(|value| value.as_str());
     returned_method.is_some_and(|returned| returned.eq_ignore_ascii_case(method))
         && returned_uri == Some(uri)
+        && returned_correlation == Some(correlation_id)
 }
 
 fn response_proves_clean(value: &serde_json::Value) -> bool {
@@ -257,6 +301,7 @@ fn outcome_from_sidecar_response(
     body: &str,
     method: &str,
     uri: &str,
+    correlation_id: &str,
     client_ip: Option<IpAddr>,
     policy_id: &str,
 ) -> ProvenEngineOutcome {
@@ -273,7 +318,7 @@ fn outcome_from_sidecar_response(
             };
         }
     };
-    if !response_correlates(&value, method, uri) {
+    if !response_correlates(&value, method, uri, correlation_id) {
         return ProvenEngineOutcome::Unavailable {
             reason: "Coraza sidecar evidence did not correlate to the exact request".to_string(),
         };
@@ -358,6 +403,10 @@ pub(crate) async fn evaluate_sidecar(
         Ok(headers) => headers,
         Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
     };
+    let correlation_id = match next_correlation_id() {
+        Ok(value) => value,
+        Err(reason) => return ProvenEngineOutcome::Unavailable { reason },
+    };
     let payload = sidecar_request_body(
         request.method,
         request.uri,
@@ -365,6 +414,7 @@ pub(crate) async fn evaluate_sidecar(
         request.client_ip,
         &forwarded_headers,
         request.policy_id,
+        &correlation_id,
     );
     let response = match loopback_sidecar_client()
         .post(url)
@@ -397,6 +447,7 @@ pub(crate) async fn evaluate_sidecar(
         &body,
         request.method,
         request.uri,
+        &correlation_id,
         request.client_ip,
         request.policy_id,
     )
@@ -441,6 +492,15 @@ mod tests {
     }
 
     #[test]
+    fn correlation_ids_are_unique_and_bounded() {
+        let first = next_correlation_id().expect("correlation id");
+        let second = next_correlation_id().expect("correlation id");
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 49);
+        assert_eq!(second.len(), 49);
+    }
+
+    #[test]
     fn clean_evidence_requires_exact_request_correlation() {
         let clean = r#"{
           "transaction": {
@@ -448,6 +508,7 @@ mod tests {
             "request": {"method":"GET","uri":"/ok"},
             "response": {"http_code":200}
           },
+          "wardnet": {"correlation_id":"current"},
           "messages": [],
           "engine": {"ruleset":"owasp-crs-test"}
         }"#;
@@ -457,6 +518,7 @@ mod tests {
                 clean,
                 "GET",
                 "/ok",
+                "current",
                 None,
                 "route:test"
             ),
@@ -467,7 +529,20 @@ mod tests {
                 reqwest::StatusCode::OK,
                 clean,
                 "GET",
+                "/ok",
+                "stale",
+                None,
+                "route:test"
+            ),
+            ProvenEngineOutcome::Unavailable { .. }
+        ));
+        assert!(matches!(
+            outcome_from_sidecar_response(
+                reqwest::StatusCode::OK,
+                clean,
+                "GET",
                 "/different",
+                "current",
                 None,
                 "route:test"
             ),
