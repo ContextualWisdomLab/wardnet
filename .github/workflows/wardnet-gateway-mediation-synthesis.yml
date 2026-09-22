@@ -19,6 +19,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
       - name: Guard repair input
         shell: bash
         run: |
