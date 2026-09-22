@@ -28,7 +28,7 @@ Material UI work is incomplete unless reusable design/tokens/components plus Fig
 
 ## Context Fabric and foreign-owner inventory
 
-Fresh read-only refs: CGC `develop@99cb5468ba3c15c5e79688f53dee74724fae2d13`; EA `develop@dd71e40a45d200d970b9083a08cfd7ebd9d8f69a`; `quarantine-sandbox-runtime develop@60a85ce6e1af4853903db863b0a41037df80ba8b`; `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`; `contextual-orchestrator main@5665b0ad1e07ffb5e9f8c59e44b6b2a785298013`; `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Fresh GitHub Release inventories for all six owners are empty. Mutable owner heads therefore cannot be consumed as Wardnet production contracts. Wardnet writes neither CGC nor EA here.
+Fresh read-only refs: CGC `develop@99cb5468ba3c15c5e79688f53dee74724fae2d13`; EA `develop@dd71e40a86385fb7861b0f1be19891a3f3e29ece`; `quarantine-sandbox-runtime develop@60a85c7633e03b425b67159ec6822c8178cf87ea`; `EgressWeave main@bd0339bf43cf5041e861bac86a84cb6e7e32637e`; `contextual-orchestrator main@5665b0ad1e07ffb5e9f8c59e44b6b2a785298013`; `appguardrail develop@e71d37e7c58118e6764c96ab7c4492fe33eed6f8`. Fresh GitHub Release inventories for all six owners are empty. Mutable owner heads therefore cannot be consumed as Wardnet production contracts. Wardnet writes neither CGC nor EA here.
 
 ## Agent Artifact Admission
 
