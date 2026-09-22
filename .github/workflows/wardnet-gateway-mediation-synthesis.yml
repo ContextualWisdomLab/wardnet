@@ -141,7 +141,10 @@ jobs:
 
           Path('src/lib.rs').write_text(source)
           PY
-          cargo fmt --all
+          # This repair does not use llvm-cov. Explicit +stable keeps rustup from
+          # installing the workspace-only llvm-tools component during fmt/test,
+          # while still using the same stable toolchain as normal Wardnet CI.
+          cargo +stable fmt --all
           git diff --check
           test "$(git diff --name-only)" = "src/lib.rs"
 
@@ -149,9 +152,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --test gateway_header_mediation
-          cargo test --locked --lib
-          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo +stable test --locked --test gateway_header_mediation
+          cargo +stable test --locked --lib
+          cargo +stable clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Commit causal source repair and remove helper
         shell: bash
