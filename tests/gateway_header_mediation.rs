@@ -95,7 +95,10 @@ async fn gateway_with_loopback_upstream() -> (Router, Capture, tokio::task::Join
     let capture = Capture::default();
     let upstream_app = Router::new()
         .route("/v1/items", any(capture_upstream))
-        .route("/v1/connection-nominated", any(connection_nominated_response))
+        .route(
+            "/v1/connection-nominated",
+            any(connection_nominated_response),
+        )
         .with_state(capture.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
