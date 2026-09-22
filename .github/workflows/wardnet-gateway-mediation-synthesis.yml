@@ -1,0 +1,161 @@
+name: Wardnet gateway mediation synthesis repair
+
+on:
+  push:
+    branches:
+      - test/440-gateway-header-mediation-red
+    paths:
+      - .github/workflows/wardnet-gateway-mediation-synthesis.yml
+
+permissions:
+  contents: write
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Guard repair input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "7a769e57b5f53d0765b8a33da4bc5a095f09690a"
+          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".github/workflows/wardnet-gateway-mediation-synthesis.yml"
+          git cat-file -e 7a769e57b5f53d0765b8a33da4bc5a095f09690a^{commit}
+          git cat-file -e 1456845cf40f9e49c017b25ea485238299bf569d^{commit}
+          git merge-base --is-ancestor 1456845cf40f9e49c017b25ea485238299bf569d 7a769e57b5f53d0765b8a33da4bc5a095f09690a
+
+      - name: Synthesize bounded gateway mediation into complete source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show 7a769e57b5f53d0765b8a33da4bc5a095f09690a:src/lib.rs > /tmp/predecessor-lib.rs
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('/tmp/predecessor-lib.rs').read_text()
+
+          old = "mod coraza_audit;\nmod credentials;\nmod kev_import;"
+          new = "mod coraza_audit;\nmod credentials;\nmod gateway_mediation;\nmod kev_import;"
+          assert source.count(old) == 1, source.count(old)
+          source = source.replace(old, new, 1)
+
+          old = "    if route.upstream.starts_with(\"mock://\") {"
+          new = '''    let admitted_request_headers = match gateway_mediation::admit_request_headers(&headers) {
+              Ok(headers) => headers,
+              Err(message) => return error(StatusCode::BAD_REQUEST, message),
+          };
+
+          if route.upstream.starts_with("mock://") {'''
+          assert source.count(old) == 1, source.count(old)
+          source = source.replace(old, new, 1)
+
+          old = "    match proxy_request(&state, &route, &method, gateway_path, uri.query(), body).await {"
+          new = '''    match proxy_request_with_headers(
+              &state,
+              &route,
+              &method,
+              gateway_path,
+              uri.query(),
+              admitted_request_headers,
+              body,
+          )
+          .await
+          {'''
+          assert source.count(old) == 1, source.count(old)
+          source = source.replace(old, new, 1)
+
+          proxy_start = source.index("async fn proxy_request(\n")
+          target_start = source.index("\npub fn upstream_target(\n", proxy_start)
+          replacement = r'''async fn proxy_request(
+              state: &AppState,
+              route: &RouteConfig,
+              method: &Method,
+              path: &str,
+              query: Option<&str>,
+              body: Bytes,
+          ) -> Result<Response, String> {
+              proxy_request_with_headers(
+                  state,
+                  route,
+                  method,
+                  path,
+                  query,
+                  HeaderMap::new(),
+                  body,
+              )
+              .await
+          }
+
+          async fn proxy_request_with_headers(
+              state: &AppState,
+              route: &RouteConfig,
+              method: &Method,
+              path: &str,
+              query: Option<&str>,
+              request_headers: HeaderMap,
+              body: Bytes,
+          ) -> Result<Response, String> {
+              let target = upstream_target(route, path, query)?;
+              let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+                  .expect("axum HTTP methods are valid reqwest HTTP methods");
+              let response = state
+                  .http
+                  .request(method, target)
+                  .headers(request_headers)
+                  .body(body)
+                  .send()
+                  .await
+                  .map_err(|error| format!("upstream request failed: {error}"))?;
+              let status = StatusCode::from_u16(response.status().as_u16())
+                  .expect("reqwest upstream status codes are valid axum status codes");
+              let admitted_response_headers = gateway_mediation::admit_response_headers(response.headers())
+                  .map_err(|message| format!("upstream response rejected: {message}"))?;
+              let bytes = response
+                  .bytes()
+                  .await
+                  .map_err(|error| format!("upstream body read failed: {error}"))?;
+              let mut response = (status, bytes).into_response();
+              *response.headers_mut() = admitted_response_headers;
+              Ok(response)
+          }
+          '''
+          source = source[:proxy_start] + replacement + source[target_start:]
+
+          assert source.count("mod gateway_mediation;") == 1
+          assert source.count("gateway_mediation::admit_request_headers(&headers)") == 1
+          assert source.count("gateway_mediation::admit_response_headers(response.headers())") == 1
+          assert source.count("async fn proxy_request_with_headers(") == 1
+          assert ".headers(request_headers)" in source
+          assert "StatusCode::BAD_REQUEST" in source[source.index("async fn gateway("):source.index("fn client_ip_from_headers")]
+          assert "upstream response rejected" in source
+
+          Path('src/lib.rs').write_text(source)
+          PY
+          cargo fmt --all
+          git diff --check
+          test "$(git diff --name-only)" = "src/lib.rs"
+
+      - name: Prove hostile mediation locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --test gateway_header_mediation
+          cargo test --locked --lib
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Commit causal source repair and remove helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git diff --name-only)" = "src/lib.rs"
+          git rm .github/workflows/wardnet-gateway-mediation-synthesis.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lib.rs
+          git commit -m "fix(gateway): enforce bounded header mediation"
+          git push origin HEAD:test/440-gateway-header-mediation-red
