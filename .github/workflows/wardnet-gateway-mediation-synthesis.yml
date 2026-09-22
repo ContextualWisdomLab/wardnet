@@ -28,11 +28,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "853f468c46697c39c29bd1342c097f33939c618e"
-          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".github/workflows/wardnet-gateway-mediation-synthesis.yml"
           git cat-file -e 853f468c46697c39c29bd1342c097f33939c618e^{commit}
           git cat-file -e 11e7fabfca76e0051fa883905228a0dbe472f4df^{commit}
           git merge-base --is-ancestor 11e7fabfca76e0051fa883905228a0dbe472f4df 853f468c46697c39c29bd1342c097f33939c618e
+          git merge-base --is-ancestor 853f468c46697c39c29bd1342c097f33939c618e HEAD
+          test "$(git diff --name-only 853f468c46697c39c29bd1342c097f33939c618e..HEAD)" = ".github/workflows/wardnet-gateway-mediation-synthesis.yml"
 
       - name: Synthesize bounded gateway mediation into complete source
         shell: bash
