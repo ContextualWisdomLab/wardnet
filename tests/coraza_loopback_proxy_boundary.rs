@@ -26,9 +26,7 @@ type Calls = Arc<Mutex<Vec<Value>>>;
 async fn clean_coraza(State(calls): State<Calls>, Json(payload): Json<Value>) -> Json<Value> {
     calls.lock().await.push(payload.clone());
     let request = &payload["transaction"]["request"];
-    let correlation_id = payload["wardnet"]["correlation_id"]
-        .as_str()
-        .unwrap_or("");
+    let correlation_id = payload["wardnet"]["correlation_id"].as_str().unwrap_or("");
     Json(serde_json::json!({
         "transaction": {
             "is_interrupted": false,
