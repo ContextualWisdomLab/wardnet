@@ -135,7 +135,7 @@ jobs:
           assert source.count("mod gateway_mediation;") == 1
           assert source.count("gateway_mediation::admit_request_headers(&headers)") == 1
           assert source.count("gateway_mediation::admit_response_headers(response.headers())") == 1
-          assert source.count("#[cfg(test)]\n          async fn proxy_request(") == 1
+          assert source.count("#[cfg(test)]\nasync fn proxy_request(") == 1
           assert source.count("async fn proxy_request_with_headers(") == 1
           assert ".headers(request_headers)" in source
           assert "StatusCode::BAD_REQUEST" in source[source.index("async fn gateway("):source.index("fn client_ip_from_headers")]
