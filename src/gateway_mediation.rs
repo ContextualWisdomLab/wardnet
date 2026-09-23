@@ -36,7 +36,9 @@ fn reject_oversized_app_metadata(source: &HeaderMap) -> Result<(), String> {
     let total = source
         .get_all(APP_METADATA_HEADER)
         .iter()
-        .fold(0usize, |size, value| size.saturating_add(value.as_bytes().len()));
+        .fold(0usize, |size, value| {
+            size.saturating_add(value.as_bytes().len())
+        });
     if total > APP_METADATA_MAX_BYTES {
         return Err(format!(
             "gateway header {APP_METADATA_HEADER} exceeds {APP_METADATA_MAX_BYTES} bytes"
@@ -51,7 +53,11 @@ fn connection_nominations(source: &HeaderMap) -> Result<HashSet<HeaderName>, Str
         let raw = value
             .to_str()
             .map_err(|_| "gateway Connection header must be visible ASCII".to_string())?;
-        for token in raw.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+        for token in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
             let name = HeaderName::from_bytes(token.as_bytes())
                 .map_err(|_| format!("gateway Connection nomination {token:?} is invalid"))?;
             nominated.insert(name);
@@ -79,7 +85,6 @@ fn admit_allowlisted(source: &HeaderMap, allowed: &[&'static str]) -> Result<Hea
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use std::str::FromStr;
 
     #[test]
     fn request_policy_preserves_only_bounded_allowlist_with_multiplicity() {
@@ -142,7 +147,10 @@ mod tests {
         source.append(APP_METADATA_HEADER, HeaderValue::from_static("b"));
         source.append("location", HeaderValue::from_static("/v1/items/42"));
         source.append("retry-after", HeaderValue::from_static("5"));
-        source.append("www-authenticate", HeaderValue::from_static("Bearer realm=\"buyer\""));
+        source.append(
+            "www-authenticate",
+            HeaderValue::from_static("Bearer realm=\"buyer\""),
+        );
         source.append("set-cookie", HeaderValue::from_static("secret=1"));
         source.append("connection", HeaderValue::from_static(APP_METADATA_HEADER));
 
