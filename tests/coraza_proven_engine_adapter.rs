@@ -19,9 +19,7 @@ async fn coraza_evaluate(State(calls): State<Calls>, Json(payload): Json<Value>)
     let request = &payload["transaction"]["request"];
     let method = request["method"].as_str().unwrap_or("GET");
     let uri = request["uri"].as_str().unwrap_or("/");
-    let correlation_id = payload["wardnet"]["correlation_id"]
-        .as_str()
-        .unwrap_or("");
+    let correlation_id = payload["wardnet"]["correlation_id"].as_str().unwrap_or("");
     if uri == "/malformed" {
         return Json(serde_json::json!({"unexpected":"shape"}));
     }
