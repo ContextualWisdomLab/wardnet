@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path as PathParam, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -45,6 +45,7 @@ mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
+pub use credentials::{listen_is_loopback_only, require_write_auth_for_bind};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -58,6 +59,8 @@ pub struct AppState {
     admin_tokens: HashMap<String, AdminPrincipal>,
     /// Where admin secrets were bootstrapped from (file/env/none). Never holds values.
     credentials_source: CredentialSource,
+    /// True when the process listener is numeric loopback-only.
+    listen_loopback: bool,
     state_path: Option<PathBuf>,
     dnsbl_origin: String,
     event_limit: usize,
@@ -132,6 +135,7 @@ impl AppState {
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
+            listen_loopback: true,
             state_path: config.state_path,
             dnsbl_origin: normalized_origin(&config.dnsbl_origin),
             event_limit: config.event_limit.max(1),
@@ -209,12 +213,19 @@ impl AppState {
         self
     }
 
+    /// Record whether the process listener is loopback-only. Builder-style.
+    pub fn with_listen_loopback(mut self, listen_loopback: bool) -> Self {
+        self.listen_loopback = listen_loopback;
+        self
+    }
+
+    fn has_write_capable_admin(&self) -> bool {
+        has_write_admin_credential(self)
+    }
+
     /// The principal mapped to the request's `X-Admin-Token`, if configured.
     fn principal_for_token(&self, headers: &HeaderMap) -> Option<&AdminPrincipal> {
-        headers
-            .get("x-admin-token")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|token| self.admin_tokens.get(token))
+        presented_admin_token(headers).and_then(|token| matching_rbac_principal(self, token))
     }
 
     /// The actor name mapped to the request's `X-Admin-Token`, if that token is a
@@ -283,6 +294,11 @@ impl AppState {
             event_limit: self.event_limit,
             credentials_source: self.credentials_source.as_str().to_string(),
             admin_auth_configured: self.admin_token.is_some() || !self.admin_tokens.is_empty(),
+            auth_mode: if self.listen_loopback && !self.has_write_capable_admin() {
+                "development".to_string()
+            } else {
+                "production".to_string()
+            },
         }
     }
 }
@@ -402,8 +418,11 @@ pub struct HealthStatus {
     pub event_limit: usize,
     /// Bootstrap origin for admin secrets: `file`, `env`, or `none` (never secret values).
     pub credentials_source: String,
-    /// True when at least one admin write token is configured.
+    /// True when at least one admin credential is configured.
     pub admin_auth_configured: bool,
+    /// `development` only when the listener is loopback-only and no
+    /// write-capable principal is configured.
+    pub auth_mode: String,
 }
 
 const PHISHING_DATABASE_DEFAULT_FEED_ID: &str = "phishing-database-active";
@@ -620,8 +639,8 @@ async fn clearfolio_submit(
     PathParam(kind): PathParam<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     let Some(config) = state.clearfolio.clone() else {
         return error(
@@ -667,8 +686,8 @@ async fn clearfolio_status(
     PathParam(job_id): PathParam<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     let Some(config) = state.clearfolio.clone() else {
         return error(
@@ -810,8 +829,8 @@ async fn soc_analyze(
     headers: HeaderMap,
     Json(request): Json<SocAnalyzeRequest>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     let Some(config) = state.soc_llm.clone() else {
         return error(
@@ -918,8 +937,8 @@ async fn create_route(
     headers: HeaderMap,
     Json(route): Json<RouteConfig>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_route(&route) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -948,8 +967,8 @@ async fn create_threat(
     headers: HeaderMap,
     Json(indicator): Json<ThreatIndicator>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_threat(&indicator) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -985,8 +1004,8 @@ async fn create_dnsbl(
     headers: HeaderMap,
     Json(entry): Json<DnsblEntry>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_dnsbl(&entry) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1124,8 +1143,8 @@ async fn update_commercial_license(
     headers: HeaderMap,
     Json(profile): Json<CommercialProfile>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_commercial_profile(&profile) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1180,8 +1199,8 @@ async fn import_threat_feed(
     headers: HeaderMap,
     Json(feed): Json<ThreatFeedImport>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_threat_feed_import(&feed) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -1232,8 +1251,8 @@ async fn import_stix_document(
     Query(query): Query<StixImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
         return error(
@@ -1323,8 +1342,8 @@ async fn import_misp_document(
     Query(query): Query<MispImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
         return error(
@@ -1414,8 +1433,8 @@ async fn import_opencti_document(
     Query(query): Query<OpenCtiImportQuery>,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if query.feed_id.trim().is_empty() || query.source.trim().is_empty() {
         return error(
@@ -1526,8 +1545,8 @@ async fn poll_taxii_collection(
     headers: HeaderMap,
     Json(request): Json<TaxiiPollRequest>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if request.feed_id.trim().is_empty() || request.source.trim().is_empty() {
         return error(
@@ -1710,8 +1729,8 @@ async fn import_suricata_eve(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     let body_text = match std::str::from_utf8(&body) {
         Ok(text) => text,
@@ -1813,8 +1832,8 @@ async fn import_coraza_audit(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     let body_text = match std::str::from_utf8(&body) {
         Ok(text) => text,
@@ -1979,8 +1998,8 @@ async fn import_phishing_database_feed(
     headers: HeaderMap,
     Json(request): Json<PhishingDatabaseImportRequest>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_phishing_database_import_request(&request) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -2112,8 +2131,8 @@ async fn import_kev_feed(
             "KEV import requires a configured write-capable admin credential",
         );
     }
-    if !admin_authorized(&state, &headers) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token");
+    if let Some(denied) = reject_management_write(&state, &headers) {
+        return denied;
     }
     if let Err(message) = validate_kev_import_request(&request) {
         return error(StatusCode::BAD_REQUEST, message);
@@ -2559,54 +2578,86 @@ pub struct AdminPrincipal {
     pub can_write: bool,
 }
 
-/// True when the request presents a valid admin credential (write or readonly).
-/// When no admin credentials are configured, returns true (auth disabled).
-fn admin_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
-    let presented = headers
+fn presented_admin_token(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get("x-admin-token")
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+}
+
+/// Startup should only trust secrets that can be presented back through the
+/// `X-Admin-Token` header without wire-format rejection.
+fn admin_secret_supports_header_auth(token: &str) -> bool {
+    !token.trim().is_empty() && HeaderValue::from_str(token).is_ok()
+}
+
+/// Scan every configured RBAC secret with constant-time comparison so a miss
+/// does not reveal which slot matched.
+fn matching_rbac_principal<'a>(state: &'a AppState, presented: &str) -> Option<&'a AdminPrincipal> {
+    let mut found = None;
+    for (token, principal) in &state.admin_tokens {
+        if credentials::constant_time_eq(token.as_bytes(), presented.as_bytes()) {
+            found = Some(principal);
+        }
+    }
+    found
+}
+
+/// True when the request presents a valid admin credential (write or readonly).
+/// When no admin credentials are configured, loopback development remains open.
+fn admin_authenticated(state: &AppState, headers: &HeaderMap) -> bool {
     if !state.admin_tokens.is_empty() {
-        return presented.is_some_and(|token| state.admin_tokens.contains_key(token));
+        return presented_admin_token(headers)
+            .is_some_and(|token| matching_rbac_principal(state, token).is_some());
     }
     let Some(expected) = state.admin_token.as_deref() else {
         return true;
     };
-    presented.is_some_and(|actual| actual == expected)
+    presented_admin_token(headers)
+        .is_some_and(|actual| credentials::constant_time_eq(expected.as_bytes(), actual.as_bytes()))
 }
 
 /// True when the request may perform management **writes**.
 /// Readonly RBAC tokens authenticate but cannot write.
 fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    let presented = headers
-        .get("x-admin-token")
-        .and_then(|value| value.to_str().ok());
-    // RBAC tokens take precedence when configured.
     if !state.admin_tokens.is_empty() {
-        return presented.is_some_and(|token| {
-            state
-                .admin_tokens
-                .get(token)
-                .is_some_and(|principal| principal.can_write)
+        return presented_admin_token(headers).is_some_and(|token| {
+            matching_rbac_principal(state, token).is_some_and(|principal| principal.can_write)
         });
     }
-    // Fallback: single shared token (None means auth is disabled).
     let Some(expected) = state.admin_token.as_deref() else {
         return true;
     };
-    presented.is_some_and(|actual| actual == expected)
+    presented_admin_token(headers)
+        .is_some_and(|actual| credentials::constant_time_eq(expected.as_bytes(), actual.as_bytes()))
+}
+
+/// `401` when the caller is not authenticated; `403` when authenticated but not
+/// permitted to write. The body stays stable so the expected role is not leaked.
+fn reject_management_write(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if admin_authorized(state, headers) {
+        return None;
+    }
+    let (status, message) = if admin_authenticated(state, headers) {
+        (
+            StatusCode::FORBIDDEN,
+            "X-Admin-Token is not authorized for management writes",
+        )
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing or invalid X-Admin-Token")
+    };
+    Some(error(status, message))
 }
 
 fn has_write_admin_credential(state: &AppState) -> bool {
     if !state.admin_tokens.is_empty() {
-        return state
-            .admin_tokens
-            .values()
-            .any(|principal| principal.can_write);
+        return state.admin_tokens.iter().any(|(token, principal)| {
+            principal.can_write && admin_secret_supports_header_auth(token)
+        });
     }
     state
         .admin_token
         .as_deref()
-        .is_some_and(|token| !token.is_empty())
+        .is_some_and(admin_secret_supports_header_auth)
 }
 
 fn audit_actor(state: &AppState, headers: &HeaderMap) -> String {
@@ -2666,6 +2717,53 @@ pub fn parse_admin_tokens(raw: &str) -> HashMap<String, AdminPrincipal> {
             Some((token.to_string(), AdminPrincipal { actor, can_write }))
         })
         .collect()
+}
+
+/// Startup parser for `ADMIN_TOKENS`. Rejects blank entries, blank tokens,
+/// duplicate secrets, and unknown roles so ambiguous auth cannot become ready.
+pub fn parse_admin_tokens_strict(raw: &str) -> Result<HashMap<String, AdminPrincipal>, String> {
+    let mut map = HashMap::new();
+    for item in raw.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(
+                "ADMIN_TOKENS contains a blank entry; remove repeated, leading, or trailing commas"
+                    .to_string(),
+            );
+        }
+        let mut parts = item.splitn(3, ':').map(str::trim);
+        let token = parts.next().unwrap_or("");
+        if token.is_empty() {
+            return Err(
+                "ADMIN_TOKENS contains a blank token; remove the empty entry or supply a secret"
+                    .to_string(),
+            );
+        }
+        if map.contains_key(token) {
+            return Err(
+                "ADMIN_TOKENS contains a duplicate token; each secret must map to one principal"
+                    .to_string(),
+            );
+        }
+        let actor_raw = parts.next().unwrap_or("");
+        let role_raw = parts.next().unwrap_or("");
+        let actor = if actor_raw.is_empty() {
+            "admin".to_string()
+        } else {
+            actor_raw.to_string()
+        };
+        let can_write = match role_raw.to_ascii_lowercase().as_str() {
+            "" | "admin" | "write" | "writer" | "operator" => true,
+            "readonly" | "read" | "reader" | "ro" => false,
+            other => {
+                return Err(format!(
+                    "ADMIN_TOKENS role {other:?} is not recognised; use admin, write, or readonly"
+                ));
+            }
+        };
+        map.insert(token.to_string(), AdminPrincipal { actor, can_write });
+    }
+    Ok(map)
 }
 
 fn record_successful_audit_log(
@@ -3277,6 +3375,7 @@ pub async fn run_from_env(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let listen_loopback = listen_is_loopback_only(&bind_addr);
     // Secret-bearing values go through the credential registry (env/file are
     // bootstrap transports only). Operational config remains env for now.
     let credentials_path = std::env::var("WAF_IDS_CREDENTIALS_PATH")
@@ -3291,7 +3390,10 @@ pub async fn run_from_env(
         admin_token: credentials
             .get_credential(CRED_ADMIN_TOKEN)
             .map(str::to_owned),
-        state_path: std::env::var("WAF_IDS_STATE_PATH").ok().map(PathBuf::from),
+        state_path: std::env::var("WAF_IDS_STATE_PATH")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from),
         dnsbl_origin: std::env::var("DNSBL_ORIGIN")
             .unwrap_or_else(|_| AppConfig::DEFAULT_DNSBL_ORIGIN.to_string()),
         event_limit: parse_event_limit(std::env::var("EVENT_LIMIT").ok().as_deref())?,
@@ -3302,11 +3404,20 @@ pub async fn run_from_env(
         std::env::var("RATE_LIMIT_WINDOW").ok().as_deref(),
         60,
     )?;
-    let admin_tokens = parse_admin_tokens(
+    let admin_tokens = match credentials.get_credential(CRED_ADMIN_TOKENS) {
+        Some(raw) if !raw.trim().is_empty() => parse_admin_tokens_strict(raw)?,
+        _ => HashMap::new(),
+    };
+    let has_write_capable_admin = if !admin_tokens.is_empty() {
+        admin_tokens.iter().any(|(token, principal)| {
+            principal.can_write && admin_secret_supports_header_auth(token)
+        })
+    } else {
         credentials
-            .get_credential(CRED_ADMIN_TOKENS)
-            .unwrap_or_default(),
-    );
+            .get_credential(CRED_ADMIN_TOKEN)
+            .is_some_and(admin_secret_supports_header_auth)
+    };
+    require_write_auth_for_bind(&bind_addr, has_write_capable_admin)?;
     let max_body_bytes = parse_u64_env(
         "MAX_BODY_BYTES",
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
@@ -3314,17 +3425,23 @@ pub async fn run_from_env(
     )? as usize;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
-    println!("waf-ids-ai-soc listening on http://{local_addr}");
-    // Flush so a supervising parent process (the e2e test) sees the readiness
-    // line immediately even though stdout is block-buffered when piped.
-    std::io::Write::flush(&mut std::io::stdout())?;
+    let auth_mode = if listen_loopback && !has_write_capable_admin {
+        "development"
+    } else {
+        "production"
+    };
     let state = AppState::load(config)
         .await
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
         .with_rate_limit(rate_limit, rate_limit_window)
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
+        .with_listen_loopback(listen_loopback)
         .with_max_body_size(max_body_bytes);
+    println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
+    // Flush so a supervising parent process (the e2e test) sees the readiness
+    // line immediately even though stdout is block-buffered when piped.
+    std::io::Write::flush(&mut std::io::stdout())?;
     let served = axum::serve(listener, build_app(state))
         .with_graceful_shutdown(shutdown)
         .await;
@@ -3433,6 +3550,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_from_env_fail_closes_non_loopback_without_admin() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+        }
+        let err = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to bind 0.0.0.0:0"), "{err}");
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_allows_non_loopback_when_admin_token_is_set() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::set_var("ADMIN_TOKEN", "startup-secret");
+        }
+        run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap();
+        clear_run_env();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_fail_closes_non_loopback_with_unpresentable_admin_token() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::set_var("ADMIN_TOKEN", "line\nbreak");
+        }
+        let err = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("admin_token must contain only visible ASCII header characters"),
+            "{err}"
+        );
+        clear_run_env();
+    }
+
+    #[tokio::test]
     async fn run_from_env_defaults_bind_addr_when_unset() {
         let _guard = ENV_GUARD.lock().await;
         clear_run_env();
@@ -3498,6 +3663,22 @@ mod tests {
         );
         clear_run_env();
         std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn run_from_env_fail_closes_when_admin_tokens_are_readonly_only() {
+        let _guard = ENV_GUARD.lock().await;
+        clear_run_env();
+        unsafe {
+            std::env::set_var("BIND_ADDR", "0.0.0.0:0");
+            std::env::set_var("ADMIN_TOKENS", "tokR:reader:readonly");
+        }
+        let err = run_from_env(Box::pin(std::future::ready(())))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to bind 0.0.0.0:0"), "{err}");
+        clear_run_env();
     }
 
     #[tokio::test]
@@ -3778,6 +3959,33 @@ mod tests {
         assert_eq!(audit_actor(&state, &named), "carol");
     }
 
+    #[test]
+    fn reject_management_write_distinguishes_authentication_from_authorization() {
+        let state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("write:ops:admin,read:auditor:readonly"));
+
+        let unauthenticated = reject_management_write(&state, &HeaderMap::new()).unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let mut readonly = HeaderMap::new();
+        readonly.insert("x-admin-token", "read".parse().unwrap());
+        let unauthorized = reject_management_write(&state, &readonly).unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = runtime.block_on(body_text(unauthorized));
+        assert!(
+            body.contains("not authorized for management writes"),
+            "{body}"
+        );
+
+        let mut writer = HeaderMap::new();
+        writer.insert("x-admin-token", "write".parse().unwrap());
+        assert!(reject_management_write(&state, &writer).is_none());
+    }
+
     #[tokio::test]
     async fn readonly_token_can_read_audit_logs_but_cannot_write() {
         let tokens = parse_admin_tokens("write:ops:admin,read:auditor:readonly");
@@ -3799,7 +4007,7 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
         let created = app_request(
             &app,
@@ -7635,6 +7843,7 @@ mod tests {
                 event_limit: 25,
                 credentials_source: "none".to_string(),
                 admin_auth_configured: false,
+                auth_mode: "development".to_string(),
             }
         );
 
@@ -7645,6 +7854,41 @@ mod tests {
         let health = authed.health_status();
         assert_eq!(health.credentials_source, "file");
         assert!(health.admin_auth_configured);
+        assert_eq!(health.auth_mode, "production");
+
+        let unpresentable = state
+            .clone()
+            .with_admin_tokens(parse_admin_tokens("bad\nwrite:ops:admin"))
+            .with_credentials_source(CredentialSource::Env);
+        let health = unpresentable.health_status();
+        assert_eq!(health.credentials_source, "env");
+        assert!(health.admin_auth_configured);
+        assert_eq!(health.auth_mode, "development");
+    }
+
+    #[test]
+    fn parse_admin_tokens_strict_rejects_ambiguous_bootstrap_entries() {
+        let map = parse_admin_tokens_strict("tokA:alice,tokR:reader:readonly").unwrap();
+        assert!(map.get("tokA").is_some_and(|p| p.can_write));
+        assert!(map.get("tokR").is_some_and(|p| !p.can_write));
+        let dup = parse_admin_tokens_strict("tokA:alice,tokA:bob").unwrap_err();
+        assert!(dup.contains("duplicate token"), "{dup}");
+        let role = parse_admin_tokens_strict("tokA:alice:superuser").unwrap_err();
+        assert!(role.contains("not recognised"), "{role}");
+        let blank = parse_admin_tokens_strict(":noname").unwrap_err();
+        assert!(blank.contains("blank token"), "{blank}");
+        let blank_entry = parse_admin_tokens_strict("tokA:alice,,tokB:bob").unwrap_err();
+        assert!(blank_entry.contains("blank entry"), "{blank_entry}");
+    }
+
+    #[test]
+    fn has_write_admin_credential_ignores_unpresentable_tokens() {
+        let state = AppState::seeded(Some("line\nbreak".to_string()));
+        assert!(!has_write_admin_credential(&state));
+
+        let rbac_state = AppState::seeded(None)
+            .with_admin_tokens(parse_admin_tokens("good:ops:readonly,bad\nwrite:ops:admin"));
+        assert!(!has_write_admin_credential(&rbac_state));
     }
 
     fn clearfolio_test_config(base_url: &str) -> ClearfolioConfig {

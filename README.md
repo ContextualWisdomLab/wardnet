@@ -73,14 +73,14 @@ DNSBL_ORIGIN=dnsbl.example \
 cargo run
 ```
 
-`ADMIN_TOKEN` protects management writes through `X-Admin-Token`. The current baseline permits a credential-free local development mode; do not interpret that convenience as a safe public-bind configuration.
+Management writes through `X-Admin-Token` require a write-capable administrator credential. Provide either `ADMIN_TOKEN`, a write-capable `ADMIN_TOKENS` principal, or `WAF_IDS_CREDENTIALS_PATH`. Credentials are optional only for numeric loopback binds (`127.0.0.0/8` or `::1`); on any other `BIND_ADDR` the process refuses readiness without a usable write-capable principal. Recovery is to provision the credential authority and restart, not disable the gate. See [`docs/runbooks/operations.md`](docs/runbooks/operations.md) and [`docs/security/threat-model.md`](docs/security/threat-model.md).
 
 Useful current settings:
 
 | Setting | Purpose |
 | --- | --- |
 | `BIND_ADDR` | Listener address; defaults to `127.0.0.1:8080` |
-| `ADMIN_TOKEN` | Optional management-write token for the current baseline |
+| `ADMIN_TOKEN`, `ADMIN_TOKENS`, `WAF_IDS_CREDENTIALS_PATH` | Administrator credential bootstrap for management writes; one usable write principal is required before readiness on non-loopback binds |
 | `WAF_IDS_STATE_PATH` | Optional JSON persistence path |
 | `DNSBL_ORIGIN` | DNSBL zone origin; defaults to `dnsbl.local` |
 | `EVENT_LIMIT` | Retained event bound; must be greater than zero |
