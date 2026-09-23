@@ -141,10 +141,12 @@ jobs:
 
           Path('src/lib.rs').write_text(source)
           PY
-          # This repair does not use llvm-cov. Explicit +stable keeps rustup from
-          # installing the workspace-only llvm-tools component during fmt/test,
-          # while still using the same stable toolchain as normal Wardnet CI.
-          cargo +stable fmt --all
+
+      - name: Format synthesized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt +stable --edition 2024 src/lib.rs
           git diff --check
           test "$(git diff --name-only)" = "src/lib.rs"
 
