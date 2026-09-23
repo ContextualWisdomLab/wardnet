@@ -49,10 +49,7 @@ async fn backpressure_upstream(State(probe): State<BackpressureProbe>) -> Respon
 
             probe.chunks_emitted.fetch_add(1, Ordering::Release);
             Some((
-                Ok::<Bytes, Infallible>(Bytes::from(vec![
-                    0x5A;
-                    BACKPRESSURE_CHUNK_BYTES
-                ])),
+                Ok::<Bytes, Infallible>(Bytes::from(vec![0x5A; BACKPRESSURE_CHUNK_BYTES])),
                 emitted + 1,
             ))
         }
@@ -174,10 +171,7 @@ async fn concurrent_slow_upstream(State(probe): State<ConcurrentProbe>) -> Respo
         let release_tails = release_tails.clone();
         async move {
             match stage {
-                0 => Some((
-                    Ok::<Bytes, Infallible>(Bytes::from_static(b"first-")),
-                    1,
-                )),
+                0 => Some((Ok::<Bytes, Infallible>(Bytes::from_static(b"first-")), 1)),
                 1 => {
                     release_tails.notified().await;
                     Some((Ok(Bytes::from_static(b"tail")), 2))
@@ -203,8 +197,8 @@ async fn concurrent_fast_upstream(State(probe): State<ConcurrentProbe>) -> Respo
         .expect("valid fast loopback response")
 }
 
-async fn gateway_with_concurrent_upstream()
--> (Router, ConcurrentProbe, tokio::task::JoinHandle<()>) {
+async fn gateway_with_concurrent_upstream() -> (Router, ConcurrentProbe, tokio::task::JoinHandle<()>)
+{
     let probe = ConcurrentProbe::default();
     let upstream_app = Router::new()
         .route("/v1/slow", any(concurrent_slow_upstream))
@@ -270,7 +264,8 @@ async fn concurrent_held_streams_expose_prefixes_and_do_not_block_fast_buyer_tra
     .await
     .expect("all concurrent slow requests must reach the loopback upstream");
 
-    let joined = match tokio::time::timeout(Duration::from_millis(500), join_all(slow_tasks)).await {
+    let joined = match tokio::time::timeout(Duration::from_millis(500), join_all(slow_tasks)).await
+    {
         Ok(joined) => joined,
         Err(_) => {
             probe.release_tails.notify_waiters();
