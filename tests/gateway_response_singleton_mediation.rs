@@ -16,7 +16,11 @@ use tower::ServiceExt;
 use waf_ids_ai_soc::{AppState, build_app};
 
 async fn duplicate_location_response() -> Response {
-    let mut response = (StatusCode::FOUND, "ambiguous location").into_response();
+    // 201 exercises Location as representation/control metadata without invoking
+    // reqwest's redirect machinery, so this fixture isolates Wardnet's header
+    // mediation boundary instead of conflating it with EgressWeave-owned redirect
+    // authorization.
+    let mut response = (StatusCode::CREATED, "ambiguous location").into_response();
     response
         .headers_mut()
         .append("location", HeaderValue::from_static("/v1/items/first"));
