@@ -21,6 +21,8 @@ pub(crate) fn admit_request_headers(source: &HeaderMap) -> Result<HeaderMap, Str
 
 pub(crate) fn admit_response_headers(source: &HeaderMap) -> Result<HeaderMap, String> {
     reject_duplicate(source, "content-type")?;
+    reject_duplicate(source, "location")?;
+    reject_duplicate(source, "retry-after")?;
     reject_oversized_app_metadata(source)?;
     admit_allowlisted(source, RESPONSE_ALLOWED)
 }
@@ -164,11 +166,16 @@ mod tests {
     }
 
     #[test]
-    fn response_policy_rejects_duplicate_type_and_oversized_metadata() {
-        let mut duplicate_type = HeaderMap::new();
-        duplicate_type.append("content-type", HeaderValue::from_static("text/plain"));
-        duplicate_type.append("content-type", HeaderValue::from_static("application/json"));
-        assert!(admit_response_headers(&duplicate_type).is_err());
+    fn response_policy_rejects_duplicate_singletons_and_oversized_metadata() {
+        for name in ["content-type", "location", "retry-after"] {
+            let mut duplicate = HeaderMap::new();
+            duplicate.append(name, HeaderValue::from_static("first"));
+            duplicate.append(name, HeaderValue::from_static("second"));
+            assert!(
+                admit_response_headers(&duplicate).is_err(),
+                "duplicate {name} must fail closed"
+            );
+        }
 
         let mut oversized = HeaderMap::new();
         oversized.insert(
