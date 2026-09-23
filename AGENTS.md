@@ -24,7 +24,7 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 
 ### GitHub Actions ownership
 
-- Organization ruleset `18156473` owns Wardnet PR review, governance, security, and CodeQL through the seven required workflows in `ContextualWisdomLab/.github@769691526f8c73cf714de8fe8ba51ae6cfa2901a`. Do not add local PR Governance, Dependency Review, Close Empty PR, CodeQL, Security Scan, SAST, Strix, OpenCode, or Noema copies.
+- Organization ruleset `18156473` owns Wardnet PR review, governance, security, and CodeQL through seven required workflows from the protected `ContextualWisdomLab/.github` owner ref. Re-read the live ruleset and protected owner ref before changing workflow ownership; do not treat a historical central SHA as current authority. Do not add local PR Governance, Dependency Review, Close Empty PR, CodeQL, Security Scan, SAST, Strix, OpenCode, or Noema copies.
 - Keep repository-local `CI` and path-filtered `Fuzz` because they validate Wardnet's Rust code. Their PR concurrency keys must include a fixed workflow name, `github.repository`, and the PR number; only superseded heads of that PR may be cancelled.
 - Keep the local Scorecard default-branch, weekly, and branch-protection workflow until the central reusable owner matches Wardnet's pinned Scorecard version. The compared central revision uses Scorecard v2.4.3 while Wardnet uses v2.4.4, so delegating now would weaken deployed security evidence.
 
@@ -42,7 +42,7 @@ Cross-agent conventions for any agent (Claude, Codex, Cursor, opencode, …) wor
 
 - **This repo (`wardnet`) is the WAF / IDS / AI SOC / software load balancer / APIM for the ecosystem.** It fronts and protects the other components and mediates their traffic.
 - The org is an ecosystem around **naruon** (the hub: an email/PIM that DOM-decomposes emails and files into a persisted knowledge graph). Every component is a standalone program that must **also** work as a git submodule, grown separately and together.
-- Sibling components: **clearfolio** (document viewer), **pg-erd-cloud** (ERD tool), **contextual-orchestrator** (LLM cost/perf/upstream-LB gateway, beyond LiteLLM), **codec-carver** (STT/omni-modal speech-video codec), **fast-mlsirm** (LLM-as-a-Judge calibration + evaluation-item quality, using aFIPC FIPC + kaefa item-fit), **keyverse** (passwordless SSO: OIDC/SCIM/ADFS/LDAP/FIDO2/OAuth2.1, eliminate passwords), **newsdom-api** (PDF→DOM sidecar), and **semantic-data-portal** (upper-ontology/catalog/governance plane with its own graph engine).
+- Sibling components: **clearfolio** (document viewer), **pg-erd-cloud** (ERD tool), **contextual-orchestrator** (LLM cost/perf/upstream-LB gateway, beyond LiteLLM), **codec-carver** (STT/omni-modal speech-video codec), **fast-mlsirm** (LLM-as-a-Judge calibration + evaluation-item quality, using aFIPC FIPC + kaefa item-fit), **keyverse** (passwordless SSO: OIDC/SCIM/ADFS/LDAP/FIDO2.1, eliminate passwords), **newsdom-api** (PDF→DOM sidecar), and **semantic-data-portal** (upper-ontology/catalog/governance plane with its own graph engine).
 
 ### Research grounding (attach paper PDFs)
 
