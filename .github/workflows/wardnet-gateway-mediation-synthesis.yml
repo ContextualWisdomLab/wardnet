@@ -146,7 +146,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustfmt +stable --edition 2024 src/lib.rs
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          cp -a src "$scratch/src"
+          rustfmt +stable --edition 2024 "$scratch/src/lib.rs"
+          cp "$scratch/src/lib.rs" src/lib.rs
           git diff --check
           test "$(git diff --name-only)" = "src/lib.rs"
 
