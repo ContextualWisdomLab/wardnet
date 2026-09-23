@@ -9,4 +9,5 @@
 
 ### Operations
 
+- Renamed the hardened Kubernetes deployment asset from `deploy/kubernetes/waf-ids-ai-soc.yaml` to `deploy/kubernetes/wardnet.yaml` without renaming in-cluster resources. Operators and GitOps/package references must use the new repository path; rollback to a pre-migration source revision uses that revision's old path.
 - Documented administrator credential provisioning, rotation, rollout verification, rollback, evidence handling, and the boundary with the separate runtime-authentication fail-closed work tracked in issue #78.

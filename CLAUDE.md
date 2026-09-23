@@ -71,7 +71,7 @@ Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `
 - Audit logs must never leak admin tokens (`scripts/smoke.sh` asserts this).
 - Untrusted-input surfaces (request scorer, state deserializer, admin-token parser, DNSBL zone export) are fuzzed; if you change one, keep its libFuzzer target and proptest mirror in sync (`docs/fuzzing.md` lists the invariants per target).
 - Block mode is route-scoped; default bind is localhost. See `docs/architecture.md` for security boundaries and the near-term adapter roadmap.
-- Deployment assets: `Dockerfile` (two-stage build, pinned base images, runs as non-root `wafids`), `deploy/docker-compose.yml`, `deploy/kubernetes/waf-ids-ai-soc.yaml`.
+- Deployment assets: `Dockerfile` (two-stage build, pinned base images, runs as non-root `wafids`), `deploy/docker-compose.yml`, `deploy/kubernetes/wardnet.yaml`.
 
 ## Further Docs
 
