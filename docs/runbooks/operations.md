@@ -86,6 +86,14 @@ When `WAF_IDS_STATE_PATH` is enabled, the process writes a temporary sibling fil
 4. Keep the previous route JSON available for rollback.
 5. Disable the route or switch back to `monitor` if legitimate traffic is blocked.
 
+## Coraza Sidecar Acceptance
+
+When a block-mode route uses `ProvenEngineConfig`, the Coraza evaluator must run on the configured loopback endpoint. Wardnet's dedicated sidecar transport ignores ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` settings and does not follow redirects. Do not add proxying or non-loopback sidecar endpoints locally; broader executable outbound authorization belongs to EgressWeave through a released owner contract.
+
+Each `coraza-live-evaluate-v1` request includes `wardnet.correlation_id`. The sidecar adapter must echo that exact value in the matching JSON response. It must not cache, reuse, normalize, or substitute a correlation value from another request. A response with no correlation value, a stale value from a prior same-method/same-URI request, malformed JSON, an oversized body, or a timeout/connect failure is `engine_unavailable`; block mode returns HTTP 503 rather than treating it as clean evidence. This applies to disruptive evidence as well as clean evidence.
+
+If a newly deployed sidecar causes a sudden rise in `engine_unavailable`, first verify that its response adapter echoes `wardnet.correlation_id` from the same request and preserves method/URI. Do not disable the correlation check as a recovery measure. Roll back the sidecar adapter or the route to the previous safe/monitor configuration instead.
+
 ## Commercial Readiness Procedure
 
 1. Register buyer-approved license metadata through `POST /api/commercial/license`.
@@ -103,7 +111,7 @@ This baseline is suitable for local and controlled lab deployments. Internet-fac
 - durable database storage with backups
 - SSO/OIDC federation (multi-token RBAC with readonly role and audit-log auth are available)
 - asynchronous event persistence or a database-backed event store for high-throughput gateway traffic
-- In-process Coraza embedding (HTTP audit ingest at `POST /api/waf/coraza/audit` already fuses block hits into DNSBL/`client_ip` indicators for gateway enforcement)
+- Package the live Coraza boundary: the code-level `ProvenEngineConfig` loopback sidecar port now evaluates matched requests, binds accepted verdict evidence to a request-unique Wardnet correlation plus method/URI, and fails block mode closed when the proven engine is unconfigured or its evidence is unusable, while Runtime Configuration still owns its deployment/bootstrap surface. Audit ingest at `POST /api/waf/coraza/audit` remains available for SOC evidence.
 - Live Suricata EVE tailing / shipper (HTTP ingest of EVE alerts is available at `POST /api/ids/suricata/eve`)
 - Live MISP REST pull or live OpenCTI GraphQL pull (HTTP STIX/MISP/OpenCTI document ingest and TAXII 2.1 poll are available at `POST /api/threat-intel/stix`, `POST /api/threat-intel/misp`, `POST /api/threat-intel/opencti`, and `POST /api/threat-intel/taxii/poll`)
 - human approval workflow for AI SOC recommendations that change enforcement

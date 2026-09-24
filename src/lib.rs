@@ -38,14 +38,17 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod gateway_mediation;
 mod kev_import;
 mod misp_import;
 mod opencti_import;
+mod proven_engine;
 mod stix_import;
 mod suricata_eve;
 mod taxii;
 pub use credentials::{CRED_ADMIN_TOKEN, CRED_ADMIN_TOKENS, CredentialRegistry, CredentialSource};
 pub use credentials::{listen_is_loopback_only, require_write_auth_for_bind};
+pub use proven_engine::ProvenEngineConfig;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -53,6 +56,8 @@ pub struct AppState {
     persist_lock: Arc<Mutex<()>>,
     http: reqwest::Client,
     feed_http: reqwest::Client,
+    waf_http: reqwest::Client,
+    proven_engine: ProvenEngineConfig,
     admin_token: Option<String>,
     // RBAC: multiple admin tokens each mapped to an actor + write capability.
     // Empty falls back to the single `admin_token`. Token values are never logged.
@@ -132,6 +137,11 @@ impl AppState {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build no-redirect feed client"),
+            waf_http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("failed to build no-redirect WAF client"),
+            proven_engine: ProvenEngineConfig::disabled(),
             admin_token: config.admin_token,
             admin_tokens: HashMap::new(),
             credentials_source: CredentialSource::None,
@@ -174,6 +184,12 @@ impl AppState {
     /// rejected with 413 before the handler runs. Builder-style.
     pub fn with_max_body_size(mut self, max_body_bytes: usize) -> Self {
         self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    /// Configure live request evaluation by the Wardnet-owned proven-engine port.
+    pub fn with_proven_engine(mut self, config: ProvenEngineConfig) -> Self {
+        self.proven_engine = config;
         self
     }
 
@@ -2426,16 +2442,102 @@ async fn gateway(
             .into_response();
     }
 
-    record_event(
-        &state,
-        client_ip,
-        Some(route.id.clone()),
-        "monitored",
-        scored.reason.clone(),
-        scored.score,
-        gateway_path,
+    let engine_uri = match uri.query() {
+        Some(query) if !query.is_empty() => format!("{gateway_path}?{query}"),
+        _ => gateway_path.to_string(),
+    };
+    let mut proven_engine_recorded = false;
+    match proven_engine::evaluate_sidecar(
+        &state.waf_http,
+        &state.proven_engine,
+        proven_engine::SidecarEvaluation {
+            method: method.as_str(),
+            uri: &engine_uri,
+            body: &body_text,
+            client_ip,
+            headers: &headers,
+            policy_id: &route.id,
+        },
     )
-    .await;
+    .await
+    {
+        proven_engine::ProvenEngineOutcome::Clean => {}
+        proven_engine::ProvenEngineOutcome::Hit(hit) => {
+            let disruptive = hit.action == "block";
+            let action = if route.mode == EnforcementMode::Block && disruptive {
+                "blocked"
+            } else {
+                "monitored"
+            };
+            record_event(
+                &state,
+                client_ip,
+                Some(route.id.clone()),
+                action,
+                hit.reason.clone(),
+                hit.score,
+                gateway_path,
+            )
+            .await;
+            proven_engine_recorded = true;
+            if action == "blocked" {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "action": "blocked",
+                        "route_id": route.id,
+                        "score": hit.score,
+                        "reason": hit.reason,
+                        "engine": "coraza"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        proven_engine::ProvenEngineOutcome::Unavailable { reason } => {
+            record_event(
+                &state,
+                client_ip,
+                Some(route.id.clone()),
+                "engine_unavailable",
+                reason.clone(),
+                0,
+                gateway_path,
+            )
+            .await;
+            proven_engine_recorded = true;
+            if route.mode == EnforcementMode::Block {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "action": "engine_unavailable",
+                        "route_id": route.id,
+                        "reason": reason,
+                        "engine": "coraza"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    if !proven_engine_recorded {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "monitored",
+            scored.reason.clone(),
+            scored.score,
+            gateway_path,
+        )
+        .await;
+    }
+
+    let admitted_request_headers = match gateway_mediation::admit_request_headers(&headers) {
+        Ok(headers) => headers,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
 
     if route.upstream.starts_with("mock://") {
         return (
@@ -2453,7 +2555,17 @@ async fn gateway(
             .into_response();
     }
 
-    match proxy_request(&state, &route, &method, gateway_path, uri.query(), body).await {
+    match proxy_request_with_headers(
+        &state,
+        &route,
+        &method,
+        gateway_path,
+        uri.query(),
+        admitted_request_headers,
+        body,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(message) => error(StatusCode::BAD_GATEWAY, message),
     }
@@ -2473,6 +2585,7 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(|value| value.parse().ok())
 }
 
+#[cfg(test)]
 async fn proxy_request(
     state: &AppState,
     route: &RouteConfig,
@@ -2481,23 +2594,41 @@ async fn proxy_request(
     query: Option<&str>,
     body: Bytes,
 ) -> Result<Response, String> {
+    proxy_request_with_headers(state, route, method, path, query, HeaderMap::new(), body).await
+}
+
+async fn proxy_request_with_headers(
+    state: &AppState,
+    route: &RouteConfig,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    request_headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = state
         .http
         .request(method, target)
+        .headers(request_headers)
         .body(body)
         .send()
         .await
         .map_err(|error| format!("upstream request failed: {error}"))?;
     let status = StatusCode::from_u16(response.status().as_u16())
         .expect("reqwest upstream status codes are valid axum status codes");
+    let admitted_response_headers =
+        gateway_mediation::admit_response_headers(response.headers())
+            .map_err(|message| format!("upstream response rejected: {message}"))?;
     let bytes = response
         .bytes()
         .await
         .map_err(|error| format!("upstream body read failed: {error}"))?;
-    Ok((status, bytes).into_response())
+    let mut response = (status, bytes).into_response();
+    *response.headers_mut() = admitted_response_headers;
+    Ok(response)
 }
 
 pub fn upstream_target(
@@ -4142,11 +4273,16 @@ mod tests {
             gateway_get_from_ip("/gateway/app?q=1%20UNION%20SELECT%201", "203.0.113.9"),
         )
         .await;
-        app_request(
+        let monitor = app_request(
             &app,
             gateway_get_from_ip("/gateway/demo?q=hi", "203.0.113.9"),
         )
         .await;
+        assert_eq!(
+            monitor.status(),
+            StatusCode::OK,
+            "monitor mode must continue traffic when Coraza is unavailable while retaining degraded evidence"
+        );
         let all: Vec<serde_json::Value> =
             json_body(app_request(&app, empty_request(Method::GET, "/api/events")).await).await;
         assert_eq!(all.len(), 2);
@@ -4164,7 +4300,10 @@ mod tests {
             json_body(app_request(&app, empty_request(Method::GET, "/api/events?limit=1")).await)
                 .await;
         assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0]["action"], "monitored");
+        assert_eq!(
+            recent[0]["action"], "engine_unavailable",
+            "an unconfigured proven WAF is degraded security evidence even when monitor mode continues the request"
+        );
     }
 
     #[tokio::test]
@@ -5515,12 +5654,16 @@ mod tests {
         .await;
         assert_eq!(route_response.status(), StatusCode::CREATED);
 
-        let allowed = app_request(
+        let undecidable = app_request(
             &app,
             empty_request(Method::GET, "/gateway/cve-lookup?id=CVE-2021-44228"),
         )
         .await;
-        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(
+            undecidable.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "KEV metadata must not become a request signature; without a proven WAF, an otherwise-allowed block-mode request is unavailable rather than falsely blocked"
+        );
     }
 
     #[tokio::test]
