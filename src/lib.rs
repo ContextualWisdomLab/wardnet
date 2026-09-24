@@ -6959,7 +6959,13 @@ mod tests {
 
         let truncated_response =
             app_request(&app, empty_request(Method::GET, "/gateway/truncated")).await;
-        assert_eq!(truncated_response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(truncated_response.status(), StatusCode::OK);
+        let truncated_body =
+            axum::body::to_bytes(truncated_response.into_body(), usize::MAX).await;
+        assert!(
+            truncated_body.is_err(),
+            "truncated upstream streaming must surface a downstream body error"
+        );
         raw_task.join().unwrap();
 
         upstream_task.abort();
