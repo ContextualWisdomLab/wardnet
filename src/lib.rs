@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path as PathParam, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
@@ -2622,11 +2622,8 @@ async fn proxy_request_with_headers(
     let admitted_response_headers =
         gateway_mediation::admit_response_headers(response.headers())
             .map_err(|message| format!("upstream response rejected: {message}"))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("upstream body read failed: {error}"))?;
-    let mut response = (status, bytes).into_response();
+    let body = Body::from_stream(response.bytes_stream());
+    let mut response = (status, body).into_response();
     *response.headers_mut() = admitted_response_headers;
     Ok(response)
 }
