@@ -38,6 +38,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod gateway_mediation;
 mod kev_import;
 mod misp_import;
 mod opencti_import;
@@ -2533,6 +2534,11 @@ async fn gateway(
         .await;
     }
 
+    let admitted_request_headers = match gateway_mediation::admit_request_headers(&headers) {
+        Ok(headers) => headers,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+
     if route.upstream.starts_with("mock://") {
         return (
             StatusCode::OK,
@@ -2549,7 +2555,17 @@ async fn gateway(
             .into_response();
     }
 
-    match proxy_request(&state, &route, &method, gateway_path, uri.query(), body).await {
+    match proxy_request_with_headers(
+        &state,
+        &route,
+        &method,
+        gateway_path,
+        uri.query(),
+        admitted_request_headers,
+        body,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(message) => error(StatusCode::BAD_GATEWAY, message),
     }
@@ -2569,6 +2585,7 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(|value| value.parse().ok())
 }
 
+#[cfg(test)]
 async fn proxy_request(
     state: &AppState,
     route: &RouteConfig,
@@ -2577,23 +2594,41 @@ async fn proxy_request(
     query: Option<&str>,
     body: Bytes,
 ) -> Result<Response, String> {
+    proxy_request_with_headers(state, route, method, path, query, HeaderMap::new(), body).await
+}
+
+async fn proxy_request_with_headers(
+    state: &AppState,
+    route: &RouteConfig,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    request_headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, String> {
     let target = upstream_target(route, path, query)?;
     let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .expect("axum HTTP methods are valid reqwest HTTP methods");
     let response = state
         .http
         .request(method, target)
+        .headers(request_headers)
         .body(body)
         .send()
         .await
         .map_err(|error| format!("upstream request failed: {error}"))?;
     let status = StatusCode::from_u16(response.status().as_u16())
         .expect("reqwest upstream status codes are valid axum status codes");
+    let admitted_response_headers =
+        gateway_mediation::admit_response_headers(response.headers())
+            .map_err(|message| format!("upstream response rejected: {message}"))?;
     let bytes = response
         .bytes()
         .await
         .map_err(|error| format!("upstream body read failed: {error}"))?;
-    Ok((status, bytes).into_response())
+    let mut response = (status, bytes).into_response();
+    *response.headers_mut() = admitted_response_headers;
+    Ok(response)
 }
 
 pub fn upstream_target(
