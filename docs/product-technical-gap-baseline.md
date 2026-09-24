@@ -64,6 +64,8 @@ Rust-first owned hot paths retain the target of 100% rustdoc/test/edge coverage.
 
 Material UI work is incomplete unless reusable design/tokens/components plus Figma/Storybook evidence exist and buyer-critical flows cover normal/loading/empty/error/permission-denied/responsive/keyboard-accessibility states plus KO/EN/JA/ZH/VI/ES/DE/FR text-layout robustness. Visible mock behavior, decorative controls or unverified security/performance copy are not completion.
 
+The local Scorecard supply-chain evidence lane is independently code-current work, not release authority. Protected `main` still pins `github/codeql-action/upload-sarif` v4.37.7 in the local Scorecard workflow. Draft #174 exact `077fd4679093d57e6b7f18cc3a00353734cfffc3` advances only that uploader to immutable upstream v4.38.2 commit `2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2` while retaining the supported non-PR Scorecard event contract and explicit `security-events: write`; CI/Security/SAST/CodeQL on that exact head are freshly queued, so no predecessor result is promoted. Dependabot #451's v4.38.1 proposal is version-superseded by #174 but remains open until #174 is a verified complete successor; no routine close is authorized.
+
 #77 remains a Rust/reproducibility prerequisite for #164. Draft #164 owns release-evidence/SBOM/provenance foundations only; PR-executable jobs do not mint protected release authority. No release is ready until one unchanged protected candidate binds exact source/artifact identity across version, CHANGELOG, immutable tag/release, package/image digest, SBOM, signature/provenance, reproducibility, deployment promotion, rollback/roll-forward, security/coverage and recovery evidence.
 
 ## Research and standards grounding
