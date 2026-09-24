@@ -3,9 +3,15 @@ use std::collections::HashSet;
 
 const APP_METADATA_HEADER: &str = "x-wardnet-app-meta";
 const APP_METADATA_MAX_BYTES: usize = 16_384;
-const REQUEST_ALLOWED: &[&str] = &["content-type", "accept", APP_METADATA_HEADER];
+const REQUEST_ALLOWED: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "accept",
+    APP_METADATA_HEADER,
+];
 const RESPONSE_ALLOWED: &[&str] = &[
     "content-type",
+    "content-encoding",
     APP_METADATA_HEADER,
     "location",
     "retry-after",
@@ -92,6 +98,8 @@ mod tests {
     fn request_policy_preserves_only_bounded_allowlist_with_multiplicity() {
         let mut source = HeaderMap::new();
         source.append("content-type", HeaderValue::from_static("application/json"));
+        source.append("content-encoding", HeaderValue::from_static("gzip"));
+        source.append("content-encoding", HeaderValue::from_static("br"));
         source.append("accept", HeaderValue::from_static("application/json"));
         source.append(APP_METADATA_HEADER, HeaderValue::from_static("a"));
         source.append(APP_METADATA_HEADER, HeaderValue::from_static("b"));
@@ -99,6 +107,14 @@ mod tests {
 
         let admitted = admit_request_headers(&source).unwrap();
         assert_eq!(admitted.get("content-type").unwrap(), "application/json");
+        assert_eq!(
+            admitted
+                .get_all("content-encoding")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["gzip", "br"]
+        );
         assert_eq!(admitted.get("accept").unwrap(), "application/json");
         assert_eq!(admitted.get_all(APP_METADATA_HEADER).iter().count(), 2);
         assert!(admitted.get("authorization").is_none());
@@ -128,9 +144,14 @@ mod tests {
     fn connection_nominations_remove_otherwise_allowed_fields() {
         let mut source = HeaderMap::new();
         source.append(APP_METADATA_HEADER, HeaderValue::from_static("keep-out"));
-        source.append("connection", HeaderValue::from_static(APP_METADATA_HEADER));
+        source.append("content-encoding", HeaderValue::from_static("gzip"));
+        source.append(
+            "connection",
+            HeaderValue::from_static("x-wardnet-app-meta, content-encoding"),
+        );
         let admitted = admit_request_headers(&source).unwrap();
         assert!(admitted.get(APP_METADATA_HEADER).is_none());
+        assert!(admitted.get("content-encoding").is_none());
 
         let mut malformed = HeaderMap::new();
         malformed.append("connection", HeaderValue::from_bytes(&[0xff]).unwrap());
@@ -145,6 +166,8 @@ mod tests {
     fn response_policy_preserves_representation_metadata_and_strips_authority() {
         let mut source = HeaderMap::new();
         source.append("content-type", HeaderValue::from_static("application/json"));
+        source.append("content-encoding", HeaderValue::from_static("gzip"));
+        source.append("content-encoding", HeaderValue::from_static("br"));
         source.append(APP_METADATA_HEADER, HeaderValue::from_static("a"));
         source.append(APP_METADATA_HEADER, HeaderValue::from_static("b"));
         source.append("location", HeaderValue::from_static("/v1/items/42"));
@@ -158,6 +181,14 @@ mod tests {
 
         let admitted = admit_response_headers(&source).unwrap();
         assert_eq!(admitted.get("content-type").unwrap(), "application/json");
+        assert_eq!(
+            admitted
+                .get_all("content-encoding")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["gzip", "br"]
+        );
         assert!(admitted.get(APP_METADATA_HEADER).is_none());
         assert_eq!(admitted.get("location").unwrap(), "/v1/items/42");
         assert_eq!(admitted.get("retry-after").unwrap(), "5");
