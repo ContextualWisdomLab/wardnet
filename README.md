@@ -1,5 +1,7 @@
 # WAF IDS AI SOC
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ContextualWisdomLab/wardnet)
+
 Rust-first gateway and SOC control-plane baseline for ContextualWisdomLab.
 
 The project starts small on purpose:
