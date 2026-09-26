@@ -39,3 +39,22 @@ fn product_quality_ambition_is_not_a_customer_contract_threshold() {
     assert!(legacy.contains("usd-20b-product-quality-bar.md"));
     assert!(legacy.contains("must not be used as numeric authority"));
 }
+
+#[test]
+fn public_repository_surfaces_are_single_sourced_and_boundary_accurate() {
+    const DEEPWIKI_BADGE: &str =
+        "[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ContextualWisdomLab/wardnet)";
+
+    let readme = repo_file("README.md");
+    let pages = repo_file("docs/index.md");
+
+    assert_eq!(
+        readme.matches(DEEPWIKI_BADGE).count(),
+        1,
+        "README must expose exactly one repository-specific DeepWiki entry point"
+    );
+    assert!(pages.contains("# Wardnet"));
+    assert!(pages.contains("Rust-first gateway and SOC control plane"));
+    assert!(pages.contains("does not claim complete WAF, IDS, SIEM, or SOAR coverage"));
+    assert!(pages.contains(DEEPWIKI_BADGE));
+}
