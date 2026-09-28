@@ -4808,8 +4808,9 @@ mod tests {
     #[tokio::test]
     async fn commercial_license_feed_readiness_and_bundle_surfaces_work() {
         let path = temp_state_path("commercial");
+        let admin_token = "support-bundle-admin-token-123";
         let state = AppState::load(AppConfig {
-            admin_token: Some("secret".to_string()),
+            admin_token: Some(admin_token.to_string()),
             state_path: Some(path.clone()),
             dnsbl_origin: "dnsbl.example".to_string(),
             event_limit: 10,
@@ -4858,7 +4859,7 @@ mod tests {
             json_request(
                 Method::POST,
                 "/api/commercial/license",
-                Some("secret"),
+                Some(admin_token),
                 &bad_profile,
             ),
         )
@@ -4871,7 +4872,7 @@ mod tests {
                 json_request(
                     Method::POST,
                     "/api/commercial/license",
-                    Some("secret"),
+                    Some(admin_token),
                     &profile,
                 ),
             )
@@ -4898,7 +4899,7 @@ mod tests {
             json_request(
                 Method::POST,
                 "/api/threat-feeds/import",
-                Some("secret"),
+                Some(admin_token),
                 &empty_feed,
             ),
         )
@@ -4911,7 +4912,7 @@ mod tests {
                 json_request(
                     Method::POST,
                     "/api/threat-feeds/import",
-                    Some("secret"),
+                    Some(admin_token),
                     &feed,
                 ),
             )
@@ -5021,6 +5022,47 @@ mod tests {
         assert_eq!(support.threat_feed_freshness.len(), 1);
         assert!(!support.threat_feed_freshness[0].stale);
         assert!(support.event_count >= 1);
+        assert!(support.health.admin_auth_configured);
+        assert_eq!(support.health.credentials_source, "none");
+        assert_eq!(support.route_count, support.kpis.route_count);
+        assert_eq!(
+            support.threat_indicator_count,
+            support.kpis.threat_indicator_count
+        );
+        assert_eq!(support.dnsbl_entry_count, support.kpis.dnsbl_entry_count);
+        assert_eq!(support.threat_feed_count, support.kpis.threat_feed_count);
+        assert_eq!(support.event_count, support.kpis.event_count);
+        assert_eq!(support.audit_log_count, support.kpis.audit_log_count);
+        assert_eq!(
+            support.route_count,
+            support.evidence_manifest.runtime_counts.route_count
+        );
+        assert_eq!(
+            support.threat_indicator_count,
+            support
+                .evidence_manifest
+                .runtime_counts
+                .threat_indicator_count
+        );
+        assert_eq!(
+            support.dnsbl_entry_count,
+            support.evidence_manifest.runtime_counts.dnsbl_entry_count
+        );
+        assert_eq!(
+            support.threat_feed_count,
+            support.evidence_manifest.runtime_counts.threat_feed_count
+        );
+        assert_eq!(
+            support.event_count,
+            support.evidence_manifest.runtime_counts.event_count
+        );
+        assert_eq!(
+            support.audit_log_count,
+            support.evidence_manifest.runtime_counts.audit_log_count
+        );
+        let support_json = serde_json::to_string(&support).unwrap();
+        assert!(!support_json.contains("x-admin-token"));
+        assert!(!support_json.contains(admin_token));
 
         let persisted: AppData =
             serde_json::from_str(&fs::read_to_string(&path).await.unwrap()).unwrap();
