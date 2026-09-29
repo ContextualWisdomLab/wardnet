@@ -10,8 +10,8 @@ FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    ca-certificates=20230311+deb12u1 \
-    curl=7.88.1-10+deb12u14 \
+    ca-certificates=20250419~deb12u1 \
+    curl=7.88.1-10+deb12u15 \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 wafids \
   && useradd --uid 10001 --gid 10001 --create-home --home-dir /var/lib/waf-ids-ai-soc wafids
