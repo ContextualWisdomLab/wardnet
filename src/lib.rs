@@ -584,6 +584,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/soc/analyze", post(soc_analyze))
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
+        // `{*path}` needs a non-empty tail, so the upstream root has its own route.
+        .route("/gateway/", any(gateway))
         .route("/gateway/{*path}", any(gateway))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
@@ -7448,6 +7450,29 @@ mod tests {
         }
         assert!(!forwarded.iter().any(|seen| seen == "x-admin-token"));
         waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_root_reaches_the_upstream_root() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(
+            axum::serve(
+                upstream_listener,
+                Router::new().route("/", any(|| async { (StatusCode::OK, "root") })),
+            )
+            .into_future(),
+        );
+        let state = litellm_front_state(upstream_addr, Vec::new());
+        {
+            let mut data = state.inner.write().await;
+            data.routes[0].ingress.require_credential = false;
+        }
+        let app = build_app(state);
+        let response = app_request(&app, empty_request(Method::GET, "/gateway/")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_text(response).await, "root");
         upstream_task.abort();
     }
 
