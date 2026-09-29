@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -22,10 +22,10 @@ use tokio::{
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
     enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
-    replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
-    threat_indicator_key, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
-    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
-    validate_threat_feed_import,
+    replace_threat_feed_ownership, score_request_with, select_route, signature_catalog,
+    threat_feed_freshness_snapshot, threat_indicator_key, upsert_dnsbl, upsert_route,
+    upsert_threat, upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
+    validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
@@ -38,6 +38,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod gateway_ban;
 mod gateway_mediation;
 mod kev_import;
 mod misp_import;
@@ -74,6 +75,10 @@ pub struct AppState {
     rate_limiter: Arc<Mutex<HashMap<IpAddr, (u64, u32)>>>,
     rate_limit: u32,
     rate_limit_window: u64,
+    // Fail2ban-style bans for routes with `ingress.ban_on_auth_failure`.
+    bans: Arc<Mutex<gateway_ban::BanTable>>,
+    // Peers allowed to supply X-Real-IP / X-Forwarded-For, as (network, prefix).
+    trusted_proxies: Arc<Vec<(IpAddr, u8)>>,
     // Max accepted request body size in bytes; oversized requests get 413.
     max_body_bytes: usize,
     // Optional Clearfolio document-viewer integration. `None` unless configured.
@@ -152,6 +157,10 @@ impl AppState {
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
             rate_limit: 0,
             rate_limit_window: 60,
+            bans: Arc::new(Mutex::new(gateway_ban::BanTable::new(
+                gateway_ban::BanPolicy::DISABLED,
+            ))),
+            trusted_proxies: Arc::new(Vec::new()),
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
@@ -182,6 +191,16 @@ impl AppState {
 
     /// Set the maximum accepted request body size in bytes; larger requests are
     /// rejected with 413 before the handler runs. Builder-style.
+    pub fn with_ban_policy(mut self, policy: gateway_ban::BanPolicy) -> Self {
+        self.bans = Arc::new(Mutex::new(gateway_ban::BanTable::new(policy)));
+        self
+    }
+
+    pub fn with_trusted_proxies(mut self, trusted_proxies: Vec<(IpAddr, u8)>) -> Self {
+        self.trusted_proxies = Arc::new(trusted_proxies);
+        self
+    }
+
     pub fn with_max_body_size(mut self, max_body_bytes: usize) -> Self {
         self.max_body_bytes = max_body_bytes;
         self
@@ -565,6 +584,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/soc/analyze", post(soc_analyze))
         .route("/api/support-bundle", get(support_bundle))
         .route("/dnsbl/zone", get(dnsbl_zone))
+        // `{*path}` needs a non-empty tail, so the upstream root has its own route.
+        .route("/gateway/", any(gateway))
         .route("/gateway/{*path}", any(gateway))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
@@ -2356,11 +2377,25 @@ async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn gateway(
     State(state): State<AppState>,
+    connect: Option<axum::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let peer = connect.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr.ip());
+    let client_ip = resolve_client_ip(peer, &headers, &state.trusted_proxies);
+    // A trusted hop is never a ban target: banning nginx would ban everyone.
+    // Loopback is always a local proxy hop, even when TRUSTED_PROXIES is unset.
+    let ban_ip =
+        client_ip.filter(|ip| !ip.is_loopback() && !is_trusted_ip(*ip, &state.trusted_proxies));
+    if let Some(ip) = ban_ip
+        && let Some(remaining) = state.bans.lock().await.banned_for(ip, now_unix())
+    {
+        // Not recorded per request: a banned flood must not reach the event store.
+        return banned_response(remaining);
+    }
+
     let gateway_path = uri
         .path()
         .strip_prefix("/gateway")
@@ -2377,8 +2412,6 @@ async fn gateway(
         };
         (route.clone(), data.threats.clone(), data.dnsbl.clone())
     };
-
-    let client_ip = client_ip_from_headers(&headers);
 
     // Rate limiting runs before scoring/proxying so floods are shed cheaply.
     if !state.allow_request(client_ip).await {
@@ -2407,14 +2440,62 @@ async fn gateway(
             .into_response();
     }
 
+    if route.ingress.require_credential
+        && let Err(reason) = gateway_mediation::admit_credential_in(
+            &headers,
+            route.ingress.credential_prefix.as_deref(),
+            &route.ingress.credential_headers,
+        )
+        .and_then(|()| {
+            // A credential the route does not forward would pass here and then
+            // reach the upstream without it. Transparent routes forward all.
+            if route.ingress.transparent_headers {
+                return Ok(());
+            }
+            let credential_names: Vec<String> = if route.ingress.credential_headers.is_empty() {
+                vec!["authorization".into(), "x-litellm-api-key".into()]
+            } else {
+                route.ingress.credential_headers.clone()
+            };
+            credential_names
+                .iter()
+                .filter(|name| headers.contains_key(name.as_str()))
+                .all(|name| route.ingress.forward_request_headers.contains(name))
+                .then_some(())
+                .ok_or("credential header is not forwarded by this route")
+        })
+    {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "credential_rejected",
+            reason.to_string(),
+            0,
+            gateway_path,
+        )
+        .await;
+        strike_auth_failure(&state, &route, ban_ip, gateway_path).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "action": "credential_rejected",
+                "route_id": route.id,
+                "reason": reason
+            })),
+        )
+            .into_response();
+    }
+
     let body_text = String::from_utf8_lossy(&body);
-    let scored = score_request(
+    let scored = score_request_with(
         gateway_path,
         uri.query(),
         &body_text,
         client_ip,
         &threats,
         &dnsbl,
+        &route.ingress.disabled_detections,
     );
 
     if route.mode == EnforcementMode::Block
@@ -2534,7 +2615,14 @@ async fn gateway(
         .await;
     }
 
-    let admitted_request_headers = match gateway_mediation::admit_request_headers(&headers) {
+    let admitted_request_headers = match if route.ingress.transparent_headers {
+        gateway_mediation::admit_transparent(&headers)
+    } else {
+        gateway_mediation::admit_route_request_headers(
+            &headers,
+            &route.ingress.forward_request_headers,
+        )
+    } {
         Ok(headers) => headers,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
@@ -2566,9 +2654,206 @@ async fn gateway(
     )
     .await
     {
-        Ok(response) => response,
+        Ok(response) => {
+            let (response, auth_failure) = classify_auth_failure(&route.ingress, response).await;
+            if auth_failure {
+                strike_auth_failure(&state, &route, ban_ip, gateway_path).await;
+            }
+            response
+        }
         Err(message) => error(StatusCode::BAD_GATEWAY, message),
     }
+}
+
+/// Largest upstream 4xx body read to find its JSON `error.type`.
+const AUTH_ERROR_PEEK_BYTES: usize = 64 * 1024;
+
+/// Whether an upstream response is an auth failure under the route's policy:
+/// a configured status, or a JSON 4xx body whose `error.type` is one of
+/// `auth_failure_error_types`. The body is streamed on unchanged: only its
+/// first [`AUTH_ERROR_PEEK_BYTES`] are held, and a larger body is not an
+/// auth-error candidate.
+async fn classify_auth_failure(
+    policy: &waf_ids_core::IngressPolicy,
+    response: Response,
+) -> (Response, bool) {
+    use futures_util::StreamExt;
+    let status = response.status();
+    if !policy.ban_on_auth_failure {
+        return (response, false);
+    }
+    if policy.is_auth_failure_status(status.as_u16()) {
+        return (response, true);
+    }
+    let json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("json"));
+    if policy.auth_failure_error_types.is_empty() || !status.is_client_error() || !json {
+        return (response, false);
+    }
+    let (parts, body) = response.into_parts();
+    let mut stream = body.into_data_stream();
+    let mut head = Vec::new();
+    let complete = loop {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                head.extend_from_slice(&chunk);
+                if head.len() > AUTH_ERROR_PEEK_BYTES {
+                    break false;
+                }
+            }
+            Some(Err(_)) => {
+                return (
+                    error(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream error body could not be read",
+                    ),
+                    false,
+                );
+            }
+            None => break true,
+        }
+    };
+    if !complete {
+        let rest = futures_util::stream::once(async move { Ok(Bytes::from(head)) }).chain(stream);
+        return (Response::from_parts(parts, Body::from_stream(rest)), false);
+    }
+    let error_type = serde_json::from_slice::<serde_json::Value>(&head)
+        .ok()
+        .and_then(|value| value.get("error")?.get("type")?.as_str().map(str::to_owned));
+    let matched = error_type.is_some_and(|kind| {
+        policy
+            .auth_failure_error_types
+            .iter()
+            .any(|wanted| wanted == &kind)
+    });
+    (Response::from_parts(parts, Body::from(head)), matched)
+}
+
+/// Counts an auth failure toward a ban and records the ban when it starts.
+async fn strike_auth_failure(
+    state: &AppState,
+    route: &RouteConfig,
+    client_ip: Option<IpAddr>,
+    path: &str,
+) {
+    let Some(ip) = client_ip.filter(|_| route.ingress.ban_on_auth_failure) else {
+        return;
+    };
+    let banned = state.bans.lock().await.strike(ip, now_unix());
+    // Every strike is visible, not only the one that starts a ban.
+    record_event(
+        state,
+        Some(ip),
+        Some(route.id.clone()),
+        "auth_failure",
+        "upstream or credential auth failure".to_string(),
+        0,
+        path,
+    )
+    .await;
+    if let Some(seconds) = banned {
+        record_event(
+            state,
+            Some(ip),
+            Some(route.id.clone()),
+            "banned",
+            format!("repeated auth failures; banned for {seconds}s"),
+            0,
+            path,
+        )
+        .await;
+    }
+}
+
+fn banned_response(remaining: u64) -> Response {
+    let mut response = (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({"action": "banned", "retry_after_seconds": remaining})),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&remaining.to_string()) {
+        response.headers_mut().insert("retry-after", value);
+    }
+    response
+}
+
+/// The TCP peer is the client unless it is a trusted proxy, in which case
+/// `X-Real-IP` or the right-most untrusted `X-Forwarded-For` hop is. Without a
+/// socket (in-process callers) the legacy forwarded-header reading applies.
+fn resolve_client_ip(
+    peer: Option<IpAddr>,
+    headers: &HeaderMap,
+    trusted: &[(IpAddr, u8)],
+) -> Option<IpAddr> {
+    let Some(peer) = peer.map(|ip| ip.to_canonical()) else {
+        return client_ip_from_headers(headers).map(|ip| ip.to_canonical());
+    };
+    let is_trusted = |ip: IpAddr| is_trusted_ip(ip, trusted);
+    if !is_trusted(peer) {
+        return Some(peer);
+    }
+    let real_ip = headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<IpAddr>().ok())
+        .map(|ip| ip.to_canonical());
+    if real_ip.is_some() {
+        return real_ip;
+    }
+    let forwarded = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
+        .collect::<Vec<_>>();
+    forwarded
+        .into_iter()
+        .rev()
+        .find(|hop| !is_trusted(*hop))
+        .or(Some(peer))
+}
+
+/// IPv4-mapped IPv6 peers (`::ffff:127.0.0.1`) match their IPv4 entries.
+fn is_trusted_ip(ip: IpAddr, trusted: &[(IpAddr, u8)]) -> bool {
+    let ip = ip.to_canonical();
+    trusted
+        .iter()
+        .any(|(net, len)| ip_in_network(*net, *len, ip))
+}
+
+/// Parses `TRUSTED_PROXIES`: comma-separated IPs or CIDRs.
+pub fn parse_trusted_proxies(raw: Option<&str>) -> Result<Vec<(IpAddr, u8)>, String> {
+    let mut parsed = Vec::new();
+    for item in raw
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let (address, prefix) = match item.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (item, None),
+        };
+        let address: IpAddr = address
+            .parse()
+            .map_err(|_| format!("TRUSTED_PROXIES entry {item:?} is not an IP or CIDR"))?;
+        let max = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|prefix| *prefix <= max)
+                .ok_or_else(|| format!("TRUSTED_PROXIES entry {item:?} has an invalid prefix"))?,
+            None => max,
+        };
+        parsed.push((address, prefix));
+    }
+    Ok(parsed)
 }
 
 fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
@@ -2619,9 +2904,12 @@ async fn proxy_request_with_headers(
         .map_err(|error| format!("upstream request failed: {error}"))?;
     let status = StatusCode::from_u16(response.status().as_u16())
         .expect("reqwest upstream status codes are valid axum status codes");
-    let admitted_response_headers =
+    let admitted_response_headers = if route.ingress.transparent_headers {
+        gateway_mediation::admit_transparent(response.headers())
+    } else {
         gateway_mediation::admit_response_headers(response.headers())
-            .map_err(|message| format!("upstream response rejected: {message}"))?;
+    }
+    .map_err(|message| format!("upstream response rejected: {message}"))?;
     let body = Body::from_stream(response.bytes_stream());
     let mut response = (status, body).into_response();
     *response.headers_mut() = admitted_response_headers;
@@ -3551,6 +3839,32 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
+    let ban_policy = gateway_ban::BanPolicy {
+        strikes: parse_u32_env(
+            "BAN_STRIKES",
+            std::env::var("BAN_STRIKES").ok().as_deref(),
+            0,
+        )?,
+        window_secs: parse_u64_env(
+            "BAN_WINDOW",
+            std::env::var("BAN_WINDOW").ok().as_deref(),
+            60,
+        )?,
+        ban_secs: parse_u64_env(
+            "BAN_SECONDS",
+            std::env::var("BAN_SECONDS").ok().as_deref(),
+            600,
+        )?,
+        max_ban_secs: parse_u64_env(
+            "BAN_MAX_SECONDS",
+            std::env::var("BAN_MAX_SECONDS").ok().as_deref(),
+            86_400,
+        )?,
+        max_tracked: gateway_ban::BanPolicy::DISABLED.max_tracked,
+    };
+    let trusted_proxies =
+        parse_trusted_proxies(std::env::var("TRUSTED_PROXIES").ok().as_deref())
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     let auth_mode = if listen_loopback && !has_write_capable_admin {
@@ -3565,14 +3879,19 @@ pub async fn run_from_env(
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_listen_loopback(listen_loopback)
-        .with_max_body_size(max_body_bytes);
+        .with_max_body_size(max_body_bytes)
+        .with_ban_policy(ban_policy)
+        .with_trusted_proxies(trusted_proxies);
     println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let served = axum::serve(listener, build_app(state))
-        .with_graceful_shutdown(shutdown)
-        .await;
+    let served = axum::serve(
+        listener,
+        build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await;
     served?;
     Ok(())
 }
@@ -3834,6 +4153,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         }
     }
 
@@ -4654,6 +4974,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             },
         ];
 
@@ -4692,6 +5013,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         };
         let response = app_request(
             &app,
@@ -4892,6 +5214,7 @@ mod tests {
             mode: EnforcementMode::Monitor,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         };
 
         let unauthorized = app_request(
@@ -5279,6 +5602,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: Some(50),
+            ingress: Default::default(),
         };
         let route_response = app_request(
             &app,
@@ -5643,6 +5967,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         };
         let route_response = app_request(
             &app,
@@ -6848,6 +7173,481 @@ mod tests {
         );
     }
 
+    fn litellm_front_state(upstream: SocketAddr, trusted: Vec<(IpAddr, u8)>) -> AppState {
+        litellm_front_state_with(
+            upstream,
+            trusted,
+            waf_ids_core::IngressPolicy {
+                forward_request_headers: vec!["authorization".to_string()],
+                require_credential: true,
+                credential_prefix: Some("sk-".to_string()),
+                ban_on_auth_failure: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn litellm_front_state_with(
+        upstream: SocketAddr,
+        trusted: Vec<(IpAddr, u8)>,
+        ingress: waf_ids_core::IngressPolicy,
+    ) -> AppState {
+        AppState::new(
+            AppData {
+                routes: vec![RouteConfig {
+                    id: "litellm".to_string(),
+                    path_prefix: "/".to_string(),
+                    upstream: format!("http://{upstream}"),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                    block_threshold: None,
+                    ingress,
+                }],
+                threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
+                dnsbl: Vec::new(),
+                events: Vec::new(),
+                next_event_id: 1,
+                audit_logs: Vec::new(),
+                next_audit_log_id: 1,
+                commercial: CommercialProfile::seeded(),
+                threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
+            },
+            AppConfig {
+                admin_token: None,
+                state_path: None,
+                dnsbl_origin: "dnsbl.local".to_string(),
+                event_limit: 50,
+            },
+        )
+        .with_ban_policy(gateway_ban::BanPolicy {
+            strikes: 3,
+            window_secs: 60,
+            ban_secs: 600,
+            max_ban_secs: 3_600,
+            max_tracked: 100,
+        })
+        .with_trusted_proxies(trusted)
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_error_types_strike_at_any_4xx_and_keep_the_body() {
+        let upstream_app = Router::new().fallback(any(|headers: HeaderMap| async move {
+            let kind = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                Some("Bearer malformed") => "auth_error",
+                _ => "key_model_access_denied",
+            };
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": {"type": kind, "code": "403"}})),
+            )
+                .into_response()
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+        let state = litellm_front_state_with(
+            upstream_addr,
+            vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)],
+            waf_ids_core::IngressPolicy {
+                transparent_headers: true,
+                ban_on_auth_failure: true,
+                auth_failure_error_types: vec!["auth_error".to_string()],
+                ..Default::default()
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/models");
+        let send = |caller: &'static str, auth: &'static str| {
+            client
+                .get(&url)
+                .header("x-real-ip", caller)
+                .header("authorization", auth)
+                .send()
+        };
+
+        // Another 403 type is not an auth failure and never bans.
+        for _ in 0..4 {
+            let denied = send("198.51.100.20", "Bearer denied").await.unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+            let body: serde_json::Value = denied.json().await.unwrap();
+            assert_eq!(body["error"]["type"], "key_model_access_denied");
+        }
+        // auth_error at 403 strikes; the third one bans the caller.
+        for _ in 0..3 {
+            let rejected = send("203.0.113.30", "Bearer malformed").await.unwrap();
+            let body: serde_json::Value = rejected.json().await.unwrap();
+            assert_eq!(body["error"]["type"], "auth_error");
+        }
+        let banned = send("203.0.113.30", "Bearer denied").await.unwrap();
+        assert_eq!(banned.status(), StatusCode::FORBIDDEN);
+        assert!(banned.headers().contains_key("retry-after"));
+        let unaffected = send("198.51.100.20", "Bearer denied").await.unwrap();
+        assert!(!unaffected.headers().contains_key("retry-after"));
+        let events: Vec<SecurityEvent> = client
+            .get(format!("http://{addr}/api/events"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            events.iter().filter(|e| e.action == "auth_failure").count(),
+            3
+        );
+
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn litellm_front_forwards_credentials_streams_and_bans_repeat_offenders() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let upstream_hits = hits.clone();
+        let upstream_app = Router::new().fallback(any(move |headers: HeaderMap| {
+            let hits = upstream_hits.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                {
+                    Some("Bearer sk-good") => (
+                        StatusCode::OK,
+                        [("content-type", "text/event-stream")],
+                        "data: {\"ok\":true}\n\ndata: [DONE]\n\n",
+                    )
+                        .into_response(),
+                    _ => StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+
+        // 127.0.0.1 is the trusted nginx hop; X-Real-IP names the caller.
+        let state = litellm_front_state(upstream_addr, vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/chat/completions");
+        let send = |caller: &'static str, auth: Option<&'static str>| {
+            let mut request = client
+                .post(&url)
+                .header("x-real-ip", caller)
+                .header("content-type", "application/json")
+                .body(r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"select 1"}]}"#);
+            if let Some(auth) = auth {
+                request = request.header("authorization", auth);
+            }
+            request.send()
+        };
+
+        let ok = send("198.51.100.10", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(ok.headers()["content-type"], "text/event-stream");
+        assert!(ok.text().await.unwrap().ends_with("data: [DONE]\n\n"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A missing or malformed key never reaches the upstream.
+        for auth in [None, Some("Bearer {}"), Some("Bearer ' OR 1=1--")] {
+            let rejected = send("203.0.113.9", auth).await.unwrap();
+            assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The third strike banned the caller, even with a well-formed key.
+        let banned = send("203.0.113.9", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(banned.status(), StatusCode::FORBIDDEN);
+        assert!(banned.headers().contains_key("retry-after"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Upstream 401s count as strikes too.
+        for _ in 0..3 {
+            let denied = send("203.0.113.20", Some("Bearer sk-revoked"))
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let banned = send("203.0.113.20", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(banned.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+
+        // Other callers are unaffected.
+        let ok = send("198.51.100.10", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_is_never_banned_when_no_client_address_is_forwarded() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(
+            axum::serve(
+                upstream_listener,
+                Router::new().fallback(any(|| async { StatusCode::OK })),
+            )
+            .into_future(),
+        );
+        let state = litellm_front_state(upstream_addr, vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/models");
+        for _ in 0..5 {
+            let response = client
+                .get(&url)
+                .header("x-forwarded-for", "127.0.0.1")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = client
+            .get(&url)
+            .header("x-real-ip", "198.51.100.44")
+            .header("authorization", "Bearer sk-good")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "nginx's own address must not be banned"
+        );
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn loopback_proxy_without_trusted_list_is_never_banned() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(
+            axum::serve(
+                upstream_listener,
+                Router::new().fallback(any(|| async { StatusCode::OK })),
+            )
+            .into_future(),
+        );
+        // No trusted proxies: forwarded headers are ignored and the loopback
+        // peer (an unconfigured nginx) must still never be banned.
+        let state = litellm_front_state(upstream_addr, Vec::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/models");
+        for spoof in ["192.0.2.1", "192.0.2.2", "192.0.2.3"] {
+            let response = client
+                .get(&url)
+                .header("x-forwarded-for", spoof)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = client
+            .get(&url)
+            .header("x-forwarded-for", "192.0.2.4")
+            .header("authorization", "Bearer sk-good")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "banning the loopback proxy would ban every caller"
+        );
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[test]
+    fn client_ip_resolution_trusts_forwarding_only_from_trusted_peers() {
+        let trusted = parse_trusted_proxies(Some("127.0.0.1, 10.0.0.0/8")).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("192.0.2.1, 198.51.100.7, 10.1.2.3"),
+        );
+        let loopback = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let outsider = Some("203.0.113.5".parse().unwrap());
+        assert_eq!(resolve_client_ip(outsider, &headers, &trusted), outsider);
+        assert_eq!(
+            resolve_client_ip(loopback, &headers, &trusted),
+            Some("198.51.100.7".parse().unwrap()),
+            "right-most untrusted hop, not the spoofable left-most one"
+        );
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.99"));
+        assert_eq!(
+            resolve_client_ip(loopback, &headers, &trusted),
+            Some("198.51.100.99".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_client_ip(loopback, &HeaderMap::new(), &trusted),
+            loopback
+        );
+        let mapped_loopback = Some("::ffff:127.0.0.1".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(mapped_loopback, &headers, &trusted),
+            Some("198.51.100.99".parse().unwrap()),
+            "an IPv4-mapped nginx peer is still trusted"
+        );
+        let mut mapped = HeaderMap::new();
+        mapped.insert("x-real-ip", HeaderValue::from_static("::ffff:203.0.113.9"));
+        assert_eq!(
+            resolve_client_ip(loopback, &mapped, &trusted),
+            Some("203.0.113.9".parse().unwrap()),
+            "a mapped spelling cannot evade an IPv4 ban"
+        );
+        assert!(is_trusted_ip("::ffff:10.1.2.3".parse().unwrap(), &trusted));
+        for bad in ["not-an-ip", "10.0.0.0/33", "::1/129"] {
+            assert!(parse_trusted_proxies(Some(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(parse_trusted_proxies(None).unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn transparent_route_carries_custom_headers_and_provider_credentials() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let upstream_seen = seen.clone();
+        let upstream_app = Router::new().fallback(any(move |headers: HeaderMap| {
+            let seen = upstream_seen.clone();
+            async move {
+                *seen.lock().unwrap() = headers.keys().map(|name| name.to_string()).collect();
+                (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "text/event-stream"),
+                        ("mcp-session-id", "session-1"),
+                        ("x-litellm-response-cost", "0.0001"),
+                        ("keep-alive", "timeout=5"),
+                    ],
+                    "data: {}\n\ndata: [DONE]\n\n",
+                )
+            }
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+        let state = litellm_front_state(upstream_addr, vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)]);
+        {
+            let mut data = state.inner.write().await;
+            let ingress = &mut data.routes[0].ingress;
+            ingress.transparent_headers = true;
+            ingress.credential_headers = vec![
+                "authorization".to_string(),
+                "x-litellm-api-key".to_string(),
+                "x-api-key".to_string(),
+            ];
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/gateway/mcp"))
+            .header("x-real-ip", "198.51.100.30")
+            .header("x-api-key", "sk-anthropic-style")
+            .header("anthropic-version", "2023-06-01")
+            .header("mcp-session-id", "session-1")
+            .header("x-litellm-tags", "rehearsal")
+            .header("x-admin-token", "must-not-leak")
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["mcp-session-id"], "session-1");
+        assert_eq!(response.headers()["x-litellm-response-cost"], "0.0001");
+        assert!(response.headers().get("keep-alive").is_none());
+        assert!(response.text().await.unwrap().ends_with("data: [DONE]\n\n"));
+        let forwarded = seen.lock().unwrap().clone();
+        for name in [
+            "x-api-key",
+            "anthropic-version",
+            "mcp-session-id",
+            "x-litellm-tags",
+        ] {
+            assert!(
+                forwarded.iter().any(|seen| seen == name),
+                "{name} not forwarded"
+            );
+        }
+        assert!(!forwarded.iter().any(|seen| seen == "x-admin-token"));
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_root_reaches_the_upstream_root() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(
+            axum::serve(
+                upstream_listener,
+                Router::new().route("/", any(|| async { (StatusCode::OK, "root") })),
+            )
+            .into_future(),
+        );
+        let state = litellm_front_state(upstream_addr, Vec::new());
+        {
+            let mut data = state.inner.write().await;
+            data.routes[0].ingress.require_credential = false;
+        }
+        let app = build_app(state);
+        let response = app_request(&app, empty_request(Method::GET, "/gateway/")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_text(response).await, "root");
+        upstream_task.abort();
+    }
+
     #[tokio::test]
     async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
         let upstream_app = Router::new().route(
@@ -6883,6 +7683,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                     RouteConfig {
                         id: "proxy".to_string(),
@@ -6891,6 +7692,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                     RouteConfig {
                         id: "down".to_string(),
@@ -6899,6 +7701,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                     RouteConfig {
                         id: "truncated".to_string(),
@@ -6907,6 +7710,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                 ],
                 threats: Vec::new(),
@@ -6960,8 +7764,7 @@ mod tests {
         let truncated_response =
             app_request(&app, empty_request(Method::GET, "/gateway/truncated")).await;
         assert_eq!(truncated_response.status(), StatusCode::OK);
-        let truncated_body =
-            axum::body::to_bytes(truncated_response.into_body(), usize::MAX).await;
+        let truncated_body = axum::body::to_bytes(truncated_response.into_body(), usize::MAX).await;
         assert!(
             truncated_body.is_err(),
             "truncated upstream streaming must surface a downstream body error"
@@ -6983,6 +7786,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             },
             &Method::GET,
             "/mock",
@@ -7050,6 +7854,7 @@ mod tests {
                         mode: EnforcementMode::Block,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                 );
             })
@@ -7175,6 +7980,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route id is required")
         );
@@ -7186,6 +7992,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route path_prefix must start with /")
         );
@@ -7197,6 +8004,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -7208,6 +8016,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -7219,6 +8028,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route upstream is required")
         );
@@ -7336,6 +8146,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route upstream must start with mock://, http://, or https://")
         );
@@ -7791,6 +8602,7 @@ mod tests {
                     mode: EnforcementMode::Monitor,
                     enabled: true,
                     block_threshold: None,
+                    ingress: Default::default(),
                 }],
                 threats: Vec::new(),
                 operator_threat_keys: Vec::new(),
@@ -7825,6 +8637,7 @@ mod tests {
                     mode: EnforcementMode::Monitor,
                     enabled: true,
                     block_threshold: None,
+                    ingress: Default::default(),
                 },
             ),
         )

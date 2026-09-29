@@ -38,6 +38,7 @@ impl AppData {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }],
             threats: vec![ThreatIndicator {
                 value: "union select".to_string(),
@@ -114,6 +115,127 @@ pub struct RouteConfig {
     /// global [`BLOCK_SCORE`], letting operators tune sensitivity per endpoint.
     #[serde(default)]
     pub block_threshold: Option<u16>,
+    /// Caller admission applied before scoring and proxying. The default keeps
+    /// the fixed header allowlist and admits requests without a credential.
+    #[serde(default)]
+    pub ingress: IngressPolicy,
+}
+
+/// Request admission for a route whose upstream authenticates callers itself.
+///
+/// Wardnet checks only that a credential is present and well formed; the
+/// upstream still decides whether it is valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressPolicy {
+    /// Request headers forwarded upstream in addition to the fixed allowlist,
+    /// such as `authorization` or `x-litellm-api-key`.
+    #[serde(default)]
+    pub forward_request_headers: Vec<String>,
+    /// Reject a request without a well-formed caller credential before it
+    /// reaches the upstream.
+    #[serde(default)]
+    pub require_credential: bool,
+    /// Token prefix the credential must carry, such as `sk-`.
+    #[serde(default)]
+    pub credential_prefix: Option<String>,
+    /// Count credential rejections and upstream 401/403 responses toward a
+    /// client ban.
+    #[serde(default)]
+    pub ban_on_auth_failure: bool,
+    /// Forward every end-to-end request and response header, removing only
+    /// hop-by-hop headers, Connection nominations, framing and Wardnet's own
+    /// credential. For upstreams such as LiteLLM whose clients depend on custom
+    /// headers (MCP session ids, provider SDK versions, cost and rate headers).
+    #[serde(default)]
+    pub transparent_headers: bool,
+    /// Headers that may carry the caller credential. Empty means
+    /// `authorization` and `x-litellm-api-key`.
+    #[serde(default)]
+    pub credential_headers: Vec<String>,
+    /// Upstream statuses counted as auth failures when `ban_on_auth_failure`
+    /// is on. Empty means `[401]`.
+    #[serde(default)]
+    pub auth_failure_statuses: Vec<u16>,
+    /// Upstream JSON `error.type` values counted as auth failures at any 4xx
+    /// status, for upstreams that report an authentication error with another
+    /// code (LiteLLM sends `auth_error` with 403 for a malformed header).
+    #[serde(default)]
+    pub auth_failure_error_types: Vec<String>,
+    /// Detections switched off for this route: built-in signature classes
+    /// (`sqli`, `xss`, `path-traversal`, `command-injection`, `ssrf`,
+    /// `deserialization`) and `indicator`,
+    /// `dnsbl`, `anomaly`. Empty keeps every detection on.
+    #[serde(default)]
+    pub disabled_detections: Vec<String>,
+}
+
+impl IngressPolicy {
+    pub fn is_auth_failure_status(&self, status: u16) -> bool {
+        if self.auth_failure_statuses.is_empty() {
+            status == 401
+        } else {
+            self.auth_failure_statuses.contains(&status)
+        }
+    }
+}
+
+/// Headers a route may never forward: framing, hop-by-hop, host, cookies and
+/// Wardnet's own management credential.
+const NEVER_FORWARDED: &[&str] = &[
+    "connection",
+    "content-length",
+    "cookie",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "x-admin-token",
+];
+const MAX_FORWARDED_HEADERS: usize = 8;
+
+pub fn validate_ingress(policy: &IngressPolicy) -> Result<(), &'static str> {
+    if policy.forward_request_headers.len() > MAX_FORWARDED_HEADERS {
+        return Err("route ingress may forward at most 8 extra headers");
+    }
+    for name in &policy.forward_request_headers {
+        let token = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !token {
+            return Err("route ingress header names must be lowercase header tokens");
+        }
+        if NEVER_FORWARDED.contains(&name.as_str()) {
+            return Err("route ingress must not forward framing, host, cookie or admin headers");
+        }
+    }
+    if policy.credential_headers.len() > MAX_FORWARDED_HEADERS {
+        return Err("route ingress may name at most 8 credential headers");
+    }
+    for name in &policy.credential_headers {
+        let token = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !token || NEVER_FORWARDED.contains(&name.as_str()) {
+            return Err("route ingress credential headers must be lowercase header tokens");
+        }
+    }
+    if let Some(prefix) = &policy.credential_prefix
+        && (prefix.is_empty()
+            || prefix.len() > 32
+            || !prefix.bytes().all(|b| (0x21..=0x7e).contains(&b)))
+    {
+        return Err("route ingress credential_prefix must be 1-32 visible ASCII bytes");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,7 +485,7 @@ pub fn validate_route(route: &RouteConfig) -> Result<(), &'static str> {
     if route.block_threshold == Some(0) {
         return Err("route block_threshold must be greater than 0");
     }
-    Ok(())
+    validate_ingress(&route.ingress)
 }
 
 pub fn validate_threat(indicator: &ThreatIndicator) -> Result<(), &'static str> {
@@ -870,6 +992,21 @@ pub fn score_request(
     threats: &[ThreatIndicator],
     dnsbl: &[DnsblEntry],
 ) -> ScoredRequest {
+    score_request_with(path, query, body, client_ip, threats, dnsbl, &[])
+}
+
+/// [`score_request`] with the detections named in `disabled` skipped; see
+/// [`IngressPolicy::disabled_detections`].
+pub fn score_request_with(
+    path: &str,
+    query: Option<&str>,
+    body: &str,
+    client_ip: Option<IpAddr>,
+    threats: &[ThreatIndicator],
+    dnsbl: &[DnsblEntry],
+    disabled: &[String],
+) -> ScoredRequest {
+    let on = |class: &str| !disabled.iter().any(|d| d.eq_ignore_ascii_case(class));
     let decoded_query = query
         .map(|value| percent_decode_str(value).decode_utf8_lossy())
         .unwrap_or_default();
@@ -879,14 +1016,14 @@ pub fn score_request(
 
     // Built-in OWASP-shape signatures (no operator configuration required).
     for sig in builtin_signatures() {
-        if haystack.contains(sig.pattern) {
+        if on(sig.class) && haystack.contains(sig.pattern) {
             score = score.saturating_add(severity_score(&sig.severity));
             reasons.push(format!("builtin {} rule {}", sig.class, sig.id));
         }
     }
 
     // Operator-configured threat indicators (and engine-fed IP/path hits).
-    for indicator in threats {
+    for indicator in threats.iter().filter(|_| on("indicator")) {
         let kind = indicator.indicator_type.to_ascii_lowercase();
         let matched = if matches!(kind.as_str(), "ip" | "client_ip" | "source_ip" | "src_ip") {
             client_ip.is_some_and(|ip| indicator.value.parse::<IpAddr>().ok() == Some(ip))
@@ -911,7 +1048,7 @@ pub fn score_request(
     }
 
     // DNSBL client reputation.
-    if let Some(ip) = client_ip
+    if let Some(ip) = client_ip.filter(|_| on("dnsbl"))
         && let Some(entry) = dnsbl.iter().find(|entry| dnsbl_matches(entry, ip))
     {
         score = score.saturating_add(100);
@@ -922,7 +1059,7 @@ pub fn score_request(
     }
 
     // Behavioral anomaly heuristic (first-tier AI SOC signal).
-    if let Some((anomaly, reason)) = anomaly_signal(&haystack) {
+    if let Some((anomaly, reason)) = anomaly_signal(&haystack).filter(|_| on("anomaly")) {
         score = score.saturating_add(anomaly);
         reasons.push(reason);
     }
@@ -1471,6 +1608,27 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_detections_skip_only_the_named_classes() {
+        let attack = "' or 1=1 -- <script>alert(1)</script>";
+        let all = score_request("/x", None, attack, None, &[], &[]);
+        let no_sqli = score_request_with("/x", None, attack, None, &[], &[], &["SQLI".to_string()]);
+        assert!(all.reason.contains("builtin sqli") && all.reason.contains("builtin xss"));
+        assert!(!no_sqli.reason.contains("builtin sqli") && no_sqli.reason.contains("builtin xss"));
+        assert!(no_sqli.score < all.score);
+    }
+
+    #[test]
+    fn auth_failure_statuses_default_to_401() {
+        let default = IngressPolicy::default();
+        assert!(default.is_auth_failure_status(401) && !default.is_auth_failure_status(403));
+        let wide = IngressPolicy {
+            auth_failure_statuses: vec![401, 403],
+            ..Default::default()
+        };
+        assert!(wide.is_auth_failure_status(403));
+    }
 
     #[test]
     fn score_request_matches_client_ip_threat_indicators() {

@@ -15,6 +15,8 @@ const RESPONSE_ALLOWED: &[&str] = &[
     APP_METADATA_HEADER,
     "location",
     "retry-after",
+    // SSE relays need no-cache so the edge proxy does not buffer the stream.
+    "cache-control",
     "www-authenticate",
 ];
 
@@ -23,6 +25,129 @@ pub(crate) fn admit_request_headers(source: &HeaderMap) -> Result<HeaderMap, Str
     reject_duplicate(source, "content-type")?;
     reject_oversized_app_metadata(source)?;
     admit_allowlisted(source, REQUEST_ALLOWED)
+}
+
+/// The fixed request allowlist plus the route's extra forwarded headers.
+/// An extra header must not repeat, and a `Connection` nomination still drops it.
+pub(crate) fn admit_route_request_headers(
+    source: &HeaderMap,
+    extra: &[String],
+) -> Result<HeaderMap, String> {
+    let mut admitted = admit_request_headers(source)?;
+    let nominated = connection_nominations(source)?;
+    for name in extra {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("gateway route header {name:?} is invalid"))?;
+        if nominated.contains(&header_name) {
+            // Dropping a forwarded credential would turn a valid request into
+            // an upstream 401 and a strike against the caller.
+            return Err(format!(
+                "gateway header {name} must not be nominated in Connection"
+            ));
+        }
+        let mut values = source.get_all(&header_name).iter();
+        if let Some(value) = values.next() {
+            if values.next().is_some() {
+                return Err(format!("gateway header {name} must not be duplicated"));
+            }
+            admitted.insert(header_name, value.clone());
+        }
+    }
+    Ok(admitted)
+}
+
+const CREDENTIAL_MAX_BYTES: usize = 512;
+
+/// Checks that the caller sent one well-formed credential: `Authorization:
+/// Bearer <token>` or `x-litellm-api-key: [Bearer ]<token>`. It does not decide
+/// whether the credential is valid; the upstream does.
+#[cfg(test)]
+pub(crate) fn admit_credential(
+    source: &HeaderMap,
+    prefix: Option<&str>,
+) -> Result<(), &'static str> {
+    admit_credential_in(source, prefix, &[])
+}
+
+const DEFAULT_CREDENTIAL_HEADERS: &[&str] = &["authorization", "x-litellm-api-key"];
+
+/// One well-formed credential in exactly one of the route's credential
+/// headers. `authorization` needs the Bearer scheme; the others (for example
+/// Anthropic's `x-api-key` or Azure's `api-key`) carry the bare token.
+pub(crate) fn admit_credential_in(
+    source: &HeaderMap,
+    prefix: Option<&str>,
+    names: &[String],
+) -> Result<(), &'static str> {
+    let names: Vec<&str> = if names.is_empty() {
+        DEFAULT_CREDENTIAL_HEADERS.to_vec()
+    } else {
+        names.iter().map(String::as_str).collect()
+    };
+    let present: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| source.contains_key(*name))
+        .collect();
+    match present.as_slice() {
+        [] => return Err("missing credential"),
+        [_] => {}
+        _ => return Err("conflicting credential headers"),
+    }
+    let name = present[0];
+    let mut values = source.get_all(name).iter();
+    let value = values.next().ok_or("missing credential")?;
+    if values.next().is_some() {
+        return Err("duplicate credential header");
+    }
+    let raw = value.to_str().map_err(|_| "malformed credential")?;
+    let token = match raw.split_once(' ') {
+        Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token,
+        Some(_) => return Err("unsupported credential scheme"),
+        None if name == "authorization" => return Err("unsupported credential scheme"),
+        None => raw,
+    };
+    let well_formed = !token.is_empty()
+        && token.len() <= CREDENTIAL_MAX_BYTES
+        && token.bytes().all(|b| (0x21..=0x7e).contains(&b))
+        && prefix.is_none_or(|prefix| token.len() > prefix.len() && token.starts_with(prefix));
+    if well_formed {
+        Ok(())
+    } else {
+        Err("malformed credential")
+    }
+}
+
+/// Hop-by-hop and framing headers (RFC 9110 section 7.6.1), plus Wardnet's
+/// own management credential. Everything else is end-to-end.
+const NOT_END_TO_END: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "x-admin-token",
+];
+
+/// Every end-to-end header, with multiplicity, minus hop-by-hop, framing,
+/// Connection nominations and the Wardnet admin token.
+pub(crate) fn admit_transparent(source: &HeaderMap) -> Result<HeaderMap, String> {
+    reject_duplicate(source, "content-type")?;
+    let nominated = connection_nominations(source)?;
+    let mut admitted = HeaderMap::new();
+    for (name, value) in source.iter() {
+        if NOT_END_TO_END.contains(&name.as_str()) || nominated.contains(name) {
+            continue;
+        }
+        admitted.append(name.clone(), value.clone());
+    }
+    Ok(admitted)
 }
 
 pub(crate) fn admit_response_headers(source: &HeaderMap) -> Result<HeaderMap, String> {
@@ -93,6 +218,147 @@ fn admit_allowlisted(source: &HeaderMap, allowed: &[&'static str]) -> Result<Hea
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(*name, HeaderValue::from_static(value));
+        }
+        map
+    }
+
+    #[test]
+    fn route_headers_forward_credentials_only_when_configured() {
+        let source = headers(&[("authorization", "Bearer sk-1"), ("cookie", "a=b")]);
+        assert!(
+            admit_route_request_headers(&source, &[])
+                .unwrap()
+                .get("authorization")
+                .is_none()
+        );
+        let admitted =
+            admit_route_request_headers(&source, &["authorization".to_string()]).unwrap();
+        assert_eq!(admitted.get("authorization").unwrap(), "Bearer sk-1");
+        assert!(admitted.get("cookie").is_none());
+        let duplicated = headers(&[("authorization", "Bearer a"), ("authorization", "Bearer b")]);
+        assert!(admit_route_request_headers(&duplicated, &["authorization".to_string()]).is_err());
+        let nominated = headers(&[
+            ("authorization", "Bearer a"),
+            ("connection", "authorization"),
+        ]);
+        assert!(admit_route_request_headers(&nominated, &["authorization".to_string()]).is_err());
+    }
+
+    #[test]
+    fn credential_headers_are_route_configurable() {
+        let names = vec![
+            "authorization".to_string(),
+            "x-api-key".to_string(),
+            "api-key".to_string(),
+        ];
+        assert!(
+            admit_credential_in(&headers(&[("x-api-key", "sk-abc")]), Some("sk-"), &names).is_ok()
+        );
+        assert!(
+            admit_credential_in(
+                &headers(&[("api-key", "Bearer sk-abc")]),
+                Some("sk-"),
+                &names
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            admit_credential_in(
+                &headers(&[("x-api-key", "sk-a"), ("api-key", "sk-b")]),
+                None,
+                &names
+            ),
+            Err("conflicting credential headers")
+        );
+        assert_eq!(
+            admit_credential_in(&headers(&[("x-litellm-api-key", "sk-a")]), None, &names),
+            Err("missing credential"),
+            "only the route's headers count"
+        );
+    }
+
+    #[test]
+    fn transparent_policy_drops_only_hop_by_hop_and_admin_headers() {
+        let source = headers(&[
+            ("mcp-session-id", "s"),
+            ("x-litellm-tags", "t"),
+            ("connection", "x-custom-hop"),
+            ("x-custom-hop", "gone"),
+            ("transfer-encoding", "chunked"),
+            ("x-admin-token", "secret"),
+            ("host", "example"),
+        ]);
+        let admitted = admit_transparent(&source).unwrap();
+        assert!(admitted.contains_key("mcp-session-id") && admitted.contains_key("x-litellm-tags"));
+        for gone in [
+            "connection",
+            "x-custom-hop",
+            "transfer-encoding",
+            "x-admin-token",
+            "host",
+        ] {
+            assert!(!admitted.contains_key(gone), "{gone} must not pass");
+        }
+    }
+
+    #[test]
+    fn credential_admission_requires_one_well_formed_token() {
+        let prefix = Some("sk-");
+        assert_eq!(
+            admit_credential(&HeaderMap::new(), prefix),
+            Err("missing credential")
+        );
+        for (name, value) in [
+            ("authorization", "Bearer "),
+            ("authorization", "Bearer ' OR 1=1--"),
+            ("authorization", "Bearer {}"),
+            ("authorization", "Bearer none"),
+            ("x-litellm-api-key", "{}"),
+            ("authorization", "Bearer sk-"),
+        ] {
+            let map = headers(&[(name, value)]);
+            assert_eq!(
+                admit_credential(&map, prefix),
+                Err("malformed credential"),
+                "{name}: {value}"
+            );
+        }
+        assert_eq!(
+            admit_credential(&headers(&[("authorization", "Basic abc")]), prefix),
+            Err("unsupported credential scheme")
+        );
+        assert_eq!(
+            admit_credential(&headers(&[("authorization", "sk-raw")]), prefix),
+            Err("unsupported credential scheme")
+        );
+        assert_eq!(
+            admit_credential(
+                &headers(&[("authorization", "Bearer a"), ("authorization", "Bearer b")]),
+                None
+            ),
+            Err("duplicate credential header")
+        );
+        assert_eq!(
+            admit_credential(
+                &headers(&[
+                    ("authorization", "Bearer sk-a"),
+                    ("x-litellm-api-key", "sk-b")
+                ]),
+                prefix
+            ),
+            Err("conflicting credential headers")
+        );
+        assert!(admit_credential(&headers(&[("authorization", "bearer sk-ok")]), prefix).is_ok());
+        assert!(admit_credential(&headers(&[("x-litellm-api-key", "sk-ok")]), prefix).is_ok());
+        assert!(
+            admit_credential(&headers(&[("x-litellm-api-key", "Bearer sk-ok")]), prefix).is_ok()
+        );
+    }
 
     #[test]
     fn request_policy_preserves_only_bounded_allowlist_with_multiplicity() {
