@@ -2383,7 +2383,9 @@ async fn gateway(
 ) -> Response {
     let peer = connect.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr.ip());
     let client_ip = resolve_client_ip(peer, &headers, &state.trusted_proxies);
-    if let Some(ip) = client_ip
+    // A trusted hop is never a ban target: banning nginx would ban everyone.
+    let ban_ip = client_ip.filter(|ip| !is_trusted_ip(*ip, &state.trusted_proxies));
+    if let Some(ip) = ban_ip
         && let Some(remaining) = state.bans.lock().await.banned_for(ip, now_unix())
     {
         // Not recorded per request: a banned flood must not reach the event store.
@@ -2450,7 +2452,7 @@ async fn gateway(
             gateway_path,
         )
         .await;
-        strike_auth_failure(&state, &route, client_ip, gateway_path).await;
+        strike_auth_failure(&state, &route, ban_ip, gateway_path).await;
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
@@ -2629,7 +2631,7 @@ async fn gateway(
                 response.status(),
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
             ) {
-                strike_auth_failure(&state, &route, client_ip, gateway_path).await;
+                strike_auth_failure(&state, &route, ban_ip, gateway_path).await;
             }
             response
         }
@@ -2682,21 +2684,18 @@ fn resolve_client_ip(
     headers: &HeaderMap,
     trusted: &[(IpAddr, u8)],
 ) -> Option<IpAddr> {
-    let Some(peer) = peer else {
-        return client_ip_from_headers(headers);
+    let Some(peer) = peer.map(|ip| ip.to_canonical()) else {
+        return client_ip_from_headers(headers).map(|ip| ip.to_canonical());
     };
-    let is_trusted = |ip: IpAddr| {
-        trusted
-            .iter()
-            .any(|(net, len)| ip_in_network(*net, *len, ip))
-    };
+    let is_trusted = |ip: IpAddr| is_trusted_ip(ip, trusted);
     if !is_trusted(peer) {
         return Some(peer);
     }
     let real_ip = headers
         .get("x-real-ip")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<IpAddr>().ok());
+        .and_then(|value| value.trim().parse::<IpAddr>().ok())
+        .map(|ip| ip.to_canonical());
     if real_ip.is_some() {
         return real_ip;
     }
@@ -2706,12 +2705,21 @@ fn resolve_client_ip(
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
         .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
         .collect::<Vec<_>>();
     forwarded
         .into_iter()
         .rev()
         .find(|hop| !is_trusted(*hop))
         .or(Some(peer))
+}
+
+/// IPv4-mapped IPv6 peers (`::ffff:127.0.0.1`) match their IPv4 entries.
+fn is_trusted_ip(ip: IpAddr, trusted: &[(IpAddr, u8)]) -> bool {
+    let ip = ip.to_canonical();
+    trusted
+        .iter()
+        .any(|(net, len)| ip_in_network(*net, *len, ip))
 }
 
 /// Parses `TRUSTED_PROXIES`: comma-separated IPs or CIDRs.
@@ -7195,6 +7203,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_proxy_is_never_banned_when_no_client_address_is_forwarded() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(
+            axum::serve(
+                upstream_listener,
+                Router::new().fallback(any(|| async { StatusCode::OK })),
+            )
+            .into_future(),
+        );
+        let state = litellm_front_state(upstream_addr, vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/models");
+        for _ in 0..5 {
+            let response = client
+                .get(&url)
+                .header("x-forwarded-for", "127.0.0.1")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = client
+            .get(&url)
+            .header("x-real-ip", "198.51.100.44")
+            .header("authorization", "Bearer sk-good")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "nginx's own address must not be banned"
+        );
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
     async fn untrusted_peer_cannot_spoof_its_address_out_of_a_ban() {
         let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_listener.local_addr().unwrap();
@@ -7268,6 +7324,20 @@ mod tests {
             resolve_client_ip(loopback, &HeaderMap::new(), &trusted),
             loopback
         );
+        let mapped_loopback = Some("::ffff:127.0.0.1".parse().unwrap());
+        assert_eq!(
+            resolve_client_ip(mapped_loopback, &headers, &trusted),
+            Some("198.51.100.99".parse().unwrap()),
+            "an IPv4-mapped nginx peer is still trusted"
+        );
+        let mut mapped = HeaderMap::new();
+        mapped.insert("x-real-ip", HeaderValue::from_static("::ffff:203.0.113.9"));
+        assert_eq!(
+            resolve_client_ip(loopback, &mapped, &trusted),
+            Some("203.0.113.9".parse().unwrap()),
+            "a mapped spelling cannot evade an IPv4 ban"
+        );
+        assert!(is_trusted_ip("::ffff:10.1.2.3".parse().unwrap(), &trusted));
         for bad in ["not-an-ip", "10.0.0.0/33", "::1/129"] {
             assert!(parse_trusted_proxies(Some(bad)).is_err(), "{bad}");
         }

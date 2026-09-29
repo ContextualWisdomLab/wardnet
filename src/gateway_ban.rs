@@ -98,11 +98,17 @@ impl BanTable {
         Some(length)
     }
 
-    /// Drops clients that are neither banned nor seen within the longest ban,
-    /// which is also how long an offence history is remembered.
+    /// Drops idle clients. A client with no ban history is forgotten after one
+    /// strike window, so a spray of one-off addresses cannot pin the table;
+    /// a past offender is remembered for the longest ban to keep escalating.
     fn prune(&mut self, now: u64) {
-        let memory = self.policy.max_ban_secs.max(self.policy.window_secs);
+        let policy = self.policy;
         self.clients.retain(|_, client| {
+            let memory = if client.offences == 0 {
+                policy.window_secs
+            } else {
+                policy.max_ban_secs.max(policy.window_secs)
+            };
             client.banned_until > now || now.saturating_sub(client.last_seen) < memory
         });
     }
@@ -173,6 +179,21 @@ mod tests {
             assert_eq!(table.strike(IP, now), None);
         }
         assert_eq!(table.tracked(), 0);
+    }
+
+    #[test]
+    fn one_off_spray_is_forgotten_after_the_window_but_offenders_are_kept() {
+        let mut table = BanTable::new(policy());
+        for now in 0..3 {
+            table.strike(IP, now);
+        }
+        for last in 1..=3u8 {
+            table.strike(IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, last)), 0);
+        }
+        // t=200: the offender's ban (until 102) is over but it is remembered;
+        // the one-off strikers are past the 60 s window and are pruned.
+        table.strike(IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)), 200);
+        assert_eq!(table.tracked(), 2);
     }
 
     #[test]

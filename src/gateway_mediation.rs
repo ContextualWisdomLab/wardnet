@@ -15,6 +15,8 @@ const RESPONSE_ALLOWED: &[&str] = &[
     APP_METADATA_HEADER,
     "location",
     "retry-after",
+    // SSE relays need no-cache so the edge proxy does not buffer the stream.
+    "cache-control",
     "www-authenticate",
 ];
 
@@ -37,7 +39,11 @@ pub(crate) fn admit_route_request_headers(
         let header_name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| format!("gateway route header {name:?} is invalid"))?;
         if nominated.contains(&header_name) {
-            continue;
+            // Dropping a forwarded credential would turn a valid request into
+            // an upstream 401 and a strike against the caller.
+            return Err(format!(
+                "gateway header {name} must not be nominated in Connection"
+            ));
         }
         let mut values = source.get_all(&header_name).iter();
         if let Some(value) = values.next() {
@@ -60,6 +66,9 @@ pub(crate) fn admit_credential(
     prefix: Option<&str>,
 ) -> Result<(), &'static str> {
     let mut seen = false;
+    if source.contains_key("authorization") && source.contains_key("x-litellm-api-key") {
+        return Err("conflicting credential headers");
+    }
     for (name, bearer_required) in [("authorization", true), ("x-litellm-api-key", false)] {
         let mut values = source.get_all(name).iter();
         let Some(value) = values.next() else { continue };
@@ -76,7 +85,7 @@ pub(crate) fn admit_credential(
         let well_formed = !token.is_empty()
             && token.len() <= CREDENTIAL_MAX_BYTES
             && token.bytes().all(|b| (0x21..=0x7e).contains(&b))
-            && prefix.is_none_or(|prefix| token.starts_with(prefix));
+            && prefix.is_none_or(|prefix| token.len() > prefix.len() && token.starts_with(prefix));
         if !well_formed {
             return Err("malformed credential");
         }
@@ -185,9 +194,7 @@ mod tests {
             ("authorization", "Bearer a"),
             ("connection", "authorization"),
         ]);
-        let admitted =
-            admit_route_request_headers(&nominated, &["authorization".to_string()]).unwrap();
-        assert!(admitted.get("authorization").is_none());
+        assert!(admit_route_request_headers(&nominated, &["authorization".to_string()]).is_err());
     }
 
     #[test]
@@ -203,6 +210,7 @@ mod tests {
             ("authorization", "Bearer {}"),
             ("authorization", "Bearer none"),
             ("x-litellm-api-key", "{}"),
+            ("authorization", "Bearer sk-"),
         ] {
             let map = headers(&[(name, value)]);
             assert_eq!(
@@ -225,6 +233,16 @@ mod tests {
                 None
             ),
             Err("duplicate credential header")
+        );
+        assert_eq!(
+            admit_credential(
+                &headers(&[
+                    ("authorization", "Bearer sk-a"),
+                    ("x-litellm-api-key", "sk-b")
+                ]),
+                prefix
+            ),
+            Err("conflicting credential headers")
         );
         assert!(admit_credential(&headers(&[("authorization", "bearer sk-ok")]), prefix).is_ok());
         assert!(admit_credential(&headers(&[("x-litellm-api-key", "sk-ok")]), prefix).is_ok());
