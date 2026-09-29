@@ -2384,7 +2384,9 @@ async fn gateway(
     let peer = connect.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr.ip());
     let client_ip = resolve_client_ip(peer, &headers, &state.trusted_proxies);
     // A trusted hop is never a ban target: banning nginx would ban everyone.
-    let ban_ip = client_ip.filter(|ip| !is_trusted_ip(*ip, &state.trusted_proxies));
+    // Loopback is always a local proxy hop, even when TRUSTED_PROXIES is unset.
+    let ban_ip =
+        client_ip.filter(|ip| !ip.is_loopback() && !is_trusted_ip(*ip, &state.trusted_proxies));
     if let Some(ip) = ban_ip
         && let Some(remaining) = state.bans.lock().await.banned_for(ip, now_unix())
     {
@@ -2441,6 +2443,22 @@ async fn gateway(
             &headers,
             route.ingress.credential_prefix.as_deref(),
         )
+        .and_then(|()| {
+            // A credential the route does not forward would pass here and then
+            // reach the upstream without it.
+            ["authorization", "x-litellm-api-key"]
+                .into_iter()
+                .filter(|name| headers.contains_key(*name))
+                .all(|name| {
+                    route
+                        .ingress
+                        .forward_request_headers
+                        .iter()
+                        .any(|f| f == name)
+                })
+                .then_some(())
+                .ok_or("credential header is not forwarded by this route")
+        })
     {
         record_event(
             &state,
@@ -2627,10 +2645,8 @@ async fn gateway(
     .await
     {
         Ok(response) => {
-            if matches!(
-                response.status(),
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-            ) {
+            // Only 401: a 403 can be a valid key calling a model it may not use.
+            if response.status() == StatusCode::UNAUTHORIZED {
                 strike_auth_failure(&state, &route, ban_ip, gateway_path).await;
             }
             response
@@ -7251,7 +7267,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn untrusted_peer_cannot_spoof_its_address_out_of_a_ban() {
+    async fn loopback_proxy_without_trusted_list_is_never_banned() {
         let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_listener.local_addr().unwrap();
         let upstream_task = tokio::spawn(
@@ -7261,7 +7277,8 @@ mod tests {
             )
             .into_future(),
         );
-        // No trusted proxies: the TCP peer is the client whatever headers say.
+        // No trusted proxies: forwarded headers are ignored and the loopback
+        // peer (an unconfigured nginx) must still never be banned.
         let state = litellm_front_state(upstream_addr, Vec::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -7292,8 +7309,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             response.status(),
-            StatusCode::FORBIDDEN,
-            "rotating XFF did not evade the ban"
+            StatusCode::OK,
+            "banning the loopback proxy would ban every caller"
         );
         waf_task.abort();
         upstream_task.abort();
