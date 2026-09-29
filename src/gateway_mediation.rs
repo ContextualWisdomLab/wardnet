@@ -25,6 +25,70 @@ pub(crate) fn admit_request_headers(source: &HeaderMap) -> Result<HeaderMap, Str
     admit_allowlisted(source, REQUEST_ALLOWED)
 }
 
+/// The fixed request allowlist plus the route's extra forwarded headers.
+/// An extra header must not repeat, and a `Connection` nomination still drops it.
+pub(crate) fn admit_route_request_headers(
+    source: &HeaderMap,
+    extra: &[String],
+) -> Result<HeaderMap, String> {
+    let mut admitted = admit_request_headers(source)?;
+    let nominated = connection_nominations(source)?;
+    for name in extra {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("gateway route header {name:?} is invalid"))?;
+        if nominated.contains(&header_name) {
+            continue;
+        }
+        let mut values = source.get_all(&header_name).iter();
+        if let Some(value) = values.next() {
+            if values.next().is_some() {
+                return Err(format!("gateway header {name} must not be duplicated"));
+            }
+            admitted.insert(header_name, value.clone());
+        }
+    }
+    Ok(admitted)
+}
+
+const CREDENTIAL_MAX_BYTES: usize = 512;
+
+/// Checks that the caller sent one well-formed credential: `Authorization:
+/// Bearer <token>` or `x-litellm-api-key: [Bearer ]<token>`. It does not decide
+/// whether the credential is valid; the upstream does.
+pub(crate) fn admit_credential(
+    source: &HeaderMap,
+    prefix: Option<&str>,
+) -> Result<(), &'static str> {
+    let mut seen = false;
+    for (name, bearer_required) in [("authorization", true), ("x-litellm-api-key", false)] {
+        let mut values = source.get_all(name).iter();
+        let Some(value) = values.next() else { continue };
+        if values.next().is_some() {
+            return Err("duplicate credential header");
+        }
+        let raw = value.to_str().map_err(|_| "malformed credential")?;
+        let token = match raw.split_once(' ') {
+            Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token,
+            Some(_) => return Err("unsupported credential scheme"),
+            None if bearer_required => return Err("unsupported credential scheme"),
+            None => raw,
+        };
+        let well_formed = !token.is_empty()
+            && token.len() <= CREDENTIAL_MAX_BYTES
+            && token.bytes().all(|b| (0x21..=0x7e).contains(&b))
+            && prefix.is_none_or(|prefix| token.starts_with(prefix));
+        if !well_formed {
+            return Err("malformed credential");
+        }
+        seen = true;
+    }
+    if seen {
+        Ok(())
+    } else {
+        Err("missing credential")
+    }
+}
+
 pub(crate) fn admit_response_headers(source: &HeaderMap) -> Result<HeaderMap, String> {
     reject_duplicate(source, "content-type")?;
     reject_duplicate(source, "location")?;
@@ -93,6 +157,81 @@ fn admit_allowlisted(source: &HeaderMap, allowed: &[&'static str]) -> Result<Hea
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(*name, HeaderValue::from_static(value));
+        }
+        map
+    }
+
+    #[test]
+    fn route_headers_forward_credentials_only_when_configured() {
+        let source = headers(&[("authorization", "Bearer sk-1"), ("cookie", "a=b")]);
+        assert!(
+            admit_route_request_headers(&source, &[])
+                .unwrap()
+                .get("authorization")
+                .is_none()
+        );
+        let admitted =
+            admit_route_request_headers(&source, &["authorization".to_string()]).unwrap();
+        assert_eq!(admitted.get("authorization").unwrap(), "Bearer sk-1");
+        assert!(admitted.get("cookie").is_none());
+        let duplicated = headers(&[("authorization", "Bearer a"), ("authorization", "Bearer b")]);
+        assert!(admit_route_request_headers(&duplicated, &["authorization".to_string()]).is_err());
+        let nominated = headers(&[
+            ("authorization", "Bearer a"),
+            ("connection", "authorization"),
+        ]);
+        let admitted =
+            admit_route_request_headers(&nominated, &["authorization".to_string()]).unwrap();
+        assert!(admitted.get("authorization").is_none());
+    }
+
+    #[test]
+    fn credential_admission_requires_one_well_formed_token() {
+        let prefix = Some("sk-");
+        assert_eq!(
+            admit_credential(&HeaderMap::new(), prefix),
+            Err("missing credential")
+        );
+        for (name, value) in [
+            ("authorization", "Bearer "),
+            ("authorization", "Bearer ' OR 1=1--"),
+            ("authorization", "Bearer {}"),
+            ("authorization", "Bearer none"),
+            ("x-litellm-api-key", "{}"),
+        ] {
+            let map = headers(&[(name, value)]);
+            assert_eq!(
+                admit_credential(&map, prefix),
+                Err("malformed credential"),
+                "{name}: {value}"
+            );
+        }
+        assert_eq!(
+            admit_credential(&headers(&[("authorization", "Basic abc")]), prefix),
+            Err("unsupported credential scheme")
+        );
+        assert_eq!(
+            admit_credential(&headers(&[("authorization", "sk-raw")]), prefix),
+            Err("unsupported credential scheme")
+        );
+        assert_eq!(
+            admit_credential(
+                &headers(&[("authorization", "Bearer a"), ("authorization", "Bearer b")]),
+                None
+            ),
+            Err("duplicate credential header")
+        );
+        assert!(admit_credential(&headers(&[("authorization", "bearer sk-ok")]), prefix).is_ok());
+        assert!(admit_credential(&headers(&[("x-litellm-api-key", "sk-ok")]), prefix).is_ok());
+        assert!(
+            admit_credential(&headers(&[("x-litellm-api-key", "Bearer sk-ok")]), prefix).is_ok()
+        );
+    }
 
     #[test]
     fn request_policy_preserves_only_bounded_allowlist_with_multiplicity() {

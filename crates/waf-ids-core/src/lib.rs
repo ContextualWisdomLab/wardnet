@@ -38,6 +38,7 @@ impl AppData {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }],
             threats: vec![ThreatIndicator {
                 value: "union select".to_string(),
@@ -114,6 +115,79 @@ pub struct RouteConfig {
     /// global [`BLOCK_SCORE`], letting operators tune sensitivity per endpoint.
     #[serde(default)]
     pub block_threshold: Option<u16>,
+    /// Caller admission applied before scoring and proxying. The default keeps
+    /// the fixed header allowlist and admits requests without a credential.
+    #[serde(default)]
+    pub ingress: IngressPolicy,
+}
+
+/// Request admission for a route whose upstream authenticates callers itself.
+///
+/// Wardnet checks only that a credential is present and well formed; the
+/// upstream still decides whether it is valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressPolicy {
+    /// Request headers forwarded upstream in addition to the fixed allowlist,
+    /// such as `authorization` or `x-litellm-api-key`.
+    #[serde(default)]
+    pub forward_request_headers: Vec<String>,
+    /// Reject a request without a well-formed caller credential before it
+    /// reaches the upstream.
+    #[serde(default)]
+    pub require_credential: bool,
+    /// Token prefix the credential must carry, such as `sk-`.
+    #[serde(default)]
+    pub credential_prefix: Option<String>,
+    /// Count credential rejections and upstream 401/403 responses toward a
+    /// client ban.
+    #[serde(default)]
+    pub ban_on_auth_failure: bool,
+}
+
+/// Headers a route may never forward: framing, hop-by-hop, host, cookies and
+/// Wardnet's own management credential.
+const NEVER_FORWARDED: &[&str] = &[
+    "connection",
+    "content-length",
+    "cookie",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "x-admin-token",
+];
+const MAX_FORWARDED_HEADERS: usize = 8;
+
+pub fn validate_ingress(policy: &IngressPolicy) -> Result<(), &'static str> {
+    if policy.forward_request_headers.len() > MAX_FORWARDED_HEADERS {
+        return Err("route ingress may forward at most 8 extra headers");
+    }
+    for name in &policy.forward_request_headers {
+        let token = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !token {
+            return Err("route ingress header names must be lowercase header tokens");
+        }
+        if NEVER_FORWARDED.contains(&name.as_str()) {
+            return Err("route ingress must not forward framing, host, cookie or admin headers");
+        }
+    }
+    if let Some(prefix) = &policy.credential_prefix
+        && (prefix.is_empty()
+            || prefix.len() > 32
+            || !prefix.bytes().all(|b| (0x21..=0x7e).contains(&b)))
+    {
+        return Err("route ingress credential_prefix must be 1-32 visible ASCII bytes");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,7 +437,7 @@ pub fn validate_route(route: &RouteConfig) -> Result<(), &'static str> {
     if route.block_threshold == Some(0) {
         return Err("route block_threshold must be greater than 0");
     }
-    Ok(())
+    validate_ingress(&route.ingress)
 }
 
 pub fn validate_threat(indicator: &ThreatIndicator) -> Result<(), &'static str> {

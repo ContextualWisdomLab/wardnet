@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::ErrorKind,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -38,6 +38,7 @@ pub use waf_ids_core::{
 
 mod coraza_audit;
 mod credentials;
+mod gateway_ban;
 mod gateway_mediation;
 mod kev_import;
 mod misp_import;
@@ -74,6 +75,10 @@ pub struct AppState {
     rate_limiter: Arc<Mutex<HashMap<IpAddr, (u64, u32)>>>,
     rate_limit: u32,
     rate_limit_window: u64,
+    // Fail2ban-style bans for routes with `ingress.ban_on_auth_failure`.
+    bans: Arc<Mutex<gateway_ban::BanTable>>,
+    // Peers allowed to supply X-Real-IP / X-Forwarded-For, as (network, prefix).
+    trusted_proxies: Arc<Vec<(IpAddr, u8)>>,
     // Max accepted request body size in bytes; oversized requests get 413.
     max_body_bytes: usize,
     // Optional Clearfolio document-viewer integration. `None` unless configured.
@@ -152,6 +157,10 @@ impl AppState {
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
             rate_limit: 0,
             rate_limit_window: 60,
+            bans: Arc::new(Mutex::new(gateway_ban::BanTable::new(
+                gateway_ban::BanPolicy::DISABLED,
+            ))),
+            trusted_proxies: Arc::new(Vec::new()),
             max_body_bytes: 1_048_576,
             clearfolio: None,
             soc_llm: None,
@@ -182,6 +191,16 @@ impl AppState {
 
     /// Set the maximum accepted request body size in bytes; larger requests are
     /// rejected with 413 before the handler runs. Builder-style.
+    pub fn with_ban_policy(mut self, policy: gateway_ban::BanPolicy) -> Self {
+        self.bans = Arc::new(Mutex::new(gateway_ban::BanTable::new(policy)));
+        self
+    }
+
+    pub fn with_trusted_proxies(mut self, trusted_proxies: Vec<(IpAddr, u8)>) -> Self {
+        self.trusted_proxies = Arc::new(trusted_proxies);
+        self
+    }
+
     pub fn with_max_body_size(mut self, max_body_bytes: usize) -> Self {
         self.max_body_bytes = max_body_bytes;
         self
@@ -2356,11 +2375,21 @@ async fn dnsbl_zone(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn gateway(
     State(state): State<AppState>,
+    connect: Option<axum::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let peer = connect.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr.ip());
+    let client_ip = resolve_client_ip(peer, &headers, &state.trusted_proxies);
+    if let Some(ip) = client_ip
+        && let Some(remaining) = state.bans.lock().await.banned_for(ip, now_unix())
+    {
+        // Not recorded per request: a banned flood must not reach the event store.
+        return banned_response(remaining);
+    }
+
     let gateway_path = uri
         .path()
         .strip_prefix("/gateway")
@@ -2377,8 +2406,6 @@ async fn gateway(
         };
         (route.clone(), data.threats.clone(), data.dnsbl.clone())
     };
-
-    let client_ip = client_ip_from_headers(&headers);
 
     // Rate limiting runs before scoring/proxying so floods are shed cheaply.
     if !state.allow_request(client_ip).await {
@@ -2402,6 +2429,34 @@ async fn gateway(
                 "route_id": route.id,
                 "limit": state.rate_limit,
                 "window_seconds": state.rate_limit_window
+            })),
+        )
+            .into_response();
+    }
+
+    if route.ingress.require_credential
+        && let Err(reason) = gateway_mediation::admit_credential(
+            &headers,
+            route.ingress.credential_prefix.as_deref(),
+        )
+    {
+        record_event(
+            &state,
+            client_ip,
+            Some(route.id.clone()),
+            "credential_rejected",
+            reason.to_string(),
+            0,
+            gateway_path,
+        )
+        .await;
+        strike_auth_failure(&state, &route, client_ip, gateway_path).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "action": "credential_rejected",
+                "route_id": route.id,
+                "reason": reason
             })),
         )
             .into_response();
@@ -2534,7 +2589,10 @@ async fn gateway(
         .await;
     }
 
-    let admitted_request_headers = match gateway_mediation::admit_request_headers(&headers) {
+    let admitted_request_headers = match gateway_mediation::admit_route_request_headers(
+        &headers,
+        &route.ingress.forward_request_headers,
+    ) {
         Ok(headers) => headers,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
@@ -2566,9 +2624,124 @@ async fn gateway(
     )
     .await
     {
-        Ok(response) => response,
+        Ok(response) => {
+            if matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ) {
+                strike_auth_failure(&state, &route, client_ip, gateway_path).await;
+            }
+            response
+        }
         Err(message) => error(StatusCode::BAD_GATEWAY, message),
     }
+}
+
+/// Counts an auth failure toward a ban and records the ban when it starts.
+async fn strike_auth_failure(
+    state: &AppState,
+    route: &RouteConfig,
+    client_ip: Option<IpAddr>,
+    path: &str,
+) {
+    let Some(ip) = client_ip.filter(|_| route.ingress.ban_on_auth_failure) else {
+        return;
+    };
+    let banned = state.bans.lock().await.strike(ip, now_unix());
+    if let Some(seconds) = banned {
+        record_event(
+            state,
+            Some(ip),
+            Some(route.id.clone()),
+            "banned",
+            format!("repeated auth failures; banned for {seconds}s"),
+            0,
+            path,
+        )
+        .await;
+    }
+}
+
+fn banned_response(remaining: u64) -> Response {
+    let mut response = (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({"action": "banned", "retry_after_seconds": remaining})),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&remaining.to_string()) {
+        response.headers_mut().insert("retry-after", value);
+    }
+    response
+}
+
+/// The TCP peer is the client unless it is a trusted proxy, in which case
+/// `X-Real-IP` or the right-most untrusted `X-Forwarded-For` hop is. Without a
+/// socket (in-process callers) the legacy forwarded-header reading applies.
+fn resolve_client_ip(
+    peer: Option<IpAddr>,
+    headers: &HeaderMap,
+    trusted: &[(IpAddr, u8)],
+) -> Option<IpAddr> {
+    let Some(peer) = peer else {
+        return client_ip_from_headers(headers);
+    };
+    let is_trusted = |ip: IpAddr| {
+        trusted
+            .iter()
+            .any(|(net, len)| ip_in_network(*net, *len, ip))
+    };
+    if !is_trusted(peer) {
+        return Some(peer);
+    }
+    let real_ip = headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<IpAddr>().ok());
+    if real_ip.is_some() {
+        return real_ip;
+    }
+    let forwarded = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
+        .collect::<Vec<_>>();
+    forwarded
+        .into_iter()
+        .rev()
+        .find(|hop| !is_trusted(*hop))
+        .or(Some(peer))
+}
+
+/// Parses `TRUSTED_PROXIES`: comma-separated IPs or CIDRs.
+pub fn parse_trusted_proxies(raw: Option<&str>) -> Result<Vec<(IpAddr, u8)>, String> {
+    let mut parsed = Vec::new();
+    for item in raw
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let (address, prefix) = match item.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (item, None),
+        };
+        let address: IpAddr = address
+            .parse()
+            .map_err(|_| format!("TRUSTED_PROXIES entry {item:?} is not an IP or CIDR"))?;
+        let max = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|prefix| *prefix <= max)
+                .ok_or_else(|| format!("TRUSTED_PROXIES entry {item:?} has an invalid prefix"))?,
+            None => max,
+        };
+        parsed.push((address, prefix));
+    }
+    Ok(parsed)
 }
 
 fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
@@ -3551,6 +3724,32 @@ pub async fn run_from_env(
         std::env::var("MAX_BODY_BYTES").ok().as_deref(),
         1_048_576,
     )? as usize;
+    let ban_policy = gateway_ban::BanPolicy {
+        strikes: parse_u32_env(
+            "BAN_STRIKES",
+            std::env::var("BAN_STRIKES").ok().as_deref(),
+            0,
+        )?,
+        window_secs: parse_u64_env(
+            "BAN_WINDOW",
+            std::env::var("BAN_WINDOW").ok().as_deref(),
+            60,
+        )?,
+        ban_secs: parse_u64_env(
+            "BAN_SECONDS",
+            std::env::var("BAN_SECONDS").ok().as_deref(),
+            600,
+        )?,
+        max_ban_secs: parse_u64_env(
+            "BAN_MAX_SECONDS",
+            std::env::var("BAN_MAX_SECONDS").ok().as_deref(),
+            86_400,
+        )?,
+        max_tracked: gateway_ban::BanPolicy::DISABLED.max_tracked,
+    };
+    let trusted_proxies =
+        parse_trusted_proxies(std::env::var("TRUSTED_PROXIES").ok().as_deref())
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener.local_addr()?;
     let auth_mode = if listen_loopback && !has_write_capable_admin {
@@ -3565,14 +3764,19 @@ pub async fn run_from_env(
         .with_admin_tokens(admin_tokens)
         .with_credentials_source(credentials.source())
         .with_listen_loopback(listen_loopback)
-        .with_max_body_size(max_body_bytes);
+        .with_max_body_size(max_body_bytes)
+        .with_ban_policy(ban_policy)
+        .with_trusted_proxies(trusted_proxies);
     println!("waf-ids-ai-soc listening on http://{local_addr} auth_mode={auth_mode}");
     // Flush so a supervising parent process (the e2e test) sees the readiness
     // line immediately even though stdout is block-buffered when piped.
     std::io::Write::flush(&mut std::io::stdout())?;
-    let served = axum::serve(listener, build_app(state))
-        .with_graceful_shutdown(shutdown)
-        .await;
+    let served = axum::serve(
+        listener,
+        build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await;
     served?;
     Ok(())
 }
@@ -3834,6 +4038,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         }
     }
 
@@ -4654,6 +4859,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             },
         ];
 
@@ -4692,6 +4898,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         };
         let response = app_request(
             &app,
@@ -4892,6 +5099,7 @@ mod tests {
             mode: EnforcementMode::Monitor,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         };
 
         let unauthorized = app_request(
@@ -5279,6 +5487,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: Some(50),
+            ingress: Default::default(),
         };
         let route_response = app_request(
             &app,
@@ -5643,6 +5852,7 @@ mod tests {
             mode: EnforcementMode::Block,
             enabled: true,
             block_threshold: None,
+            ingress: Default::default(),
         };
         let route_response = app_request(
             &app,
@@ -6848,6 +7058,222 @@ mod tests {
         );
     }
 
+    fn litellm_front_state(upstream: SocketAddr, trusted: Vec<(IpAddr, u8)>) -> AppState {
+        AppState::new(
+            AppData {
+                routes: vec![RouteConfig {
+                    id: "litellm".to_string(),
+                    path_prefix: "/".to_string(),
+                    upstream: format!("http://{upstream}"),
+                    mode: EnforcementMode::Monitor,
+                    enabled: true,
+                    block_threshold: None,
+                    ingress: waf_ids_core::IngressPolicy {
+                        forward_request_headers: vec!["authorization".to_string()],
+                        require_credential: true,
+                        credential_prefix: Some("sk-".to_string()),
+                        ban_on_auth_failure: true,
+                    },
+                }],
+                threats: Vec::new(),
+                operator_threat_keys: Vec::new(),
+                dnsbl: Vec::new(),
+                events: Vec::new(),
+                next_event_id: 1,
+                audit_logs: Vec::new(),
+                next_audit_log_id: 1,
+                commercial: CommercialProfile::seeded(),
+                threat_feeds: Vec::new(),
+                threat_feed_ownership: Vec::new(),
+            },
+            AppConfig {
+                admin_token: None,
+                state_path: None,
+                dnsbl_origin: "dnsbl.local".to_string(),
+                event_limit: 50,
+            },
+        )
+        .with_ban_policy(gateway_ban::BanPolicy {
+            strikes: 3,
+            window_secs: 60,
+            ban_secs: 600,
+            max_ban_secs: 3_600,
+            max_tracked: 100,
+        })
+        .with_trusted_proxies(trusted)
+    }
+
+    #[tokio::test]
+    async fn litellm_front_forwards_credentials_streams_and_bans_repeat_offenders() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let upstream_hits = hits.clone();
+        let upstream_app = Router::new().fallback(any(move |headers: HeaderMap| {
+            let hits = upstream_hits.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                {
+                    Some("Bearer sk-good") => (
+                        StatusCode::OK,
+                        [("content-type", "text/event-stream")],
+                        "data: {\"ok\":true}\n\ndata: [DONE]\n\n",
+                    )
+                        .into_response(),
+                    _ => StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+
+        // 127.0.0.1 is the trusted nginx hop; X-Real-IP names the caller.
+        let state = litellm_front_state(upstream_addr, vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/chat/completions");
+        let send = |caller: &'static str, auth: Option<&'static str>| {
+            let mut request = client
+                .post(&url)
+                .header("x-real-ip", caller)
+                .header("content-type", "application/json")
+                .body(r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"select 1"}]}"#);
+            if let Some(auth) = auth {
+                request = request.header("authorization", auth);
+            }
+            request.send()
+        };
+
+        let ok = send("198.51.100.10", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(ok.headers()["content-type"], "text/event-stream");
+        assert!(ok.text().await.unwrap().ends_with("data: [DONE]\n\n"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A missing or malformed key never reaches the upstream.
+        for auth in [None, Some("Bearer {}"), Some("Bearer ' OR 1=1--")] {
+            let rejected = send("203.0.113.9", auth).await.unwrap();
+            assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The third strike banned the caller, even with a well-formed key.
+        let banned = send("203.0.113.9", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(banned.status(), StatusCode::FORBIDDEN);
+        assert!(banned.headers().contains_key("retry-after"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Upstream 401s count as strikes too.
+        for _ in 0..3 {
+            let denied = send("203.0.113.20", Some("Bearer sk-revoked"))
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let banned = send("203.0.113.20", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(banned.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+
+        // Other callers are unaffected.
+        let ok = send("198.51.100.10", Some("Bearer sk-good")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn untrusted_peer_cannot_spoof_its_address_out_of_a_ban() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(
+            axum::serve(
+                upstream_listener,
+                Router::new().fallback(any(|| async { StatusCode::OK })),
+            )
+            .into_future(),
+        );
+        // No trusted proxies: the TCP peer is the client whatever headers say.
+        let state = litellm_front_state(upstream_addr, Vec::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/models");
+        for spoof in ["192.0.2.1", "192.0.2.2", "192.0.2.3"] {
+            let response = client
+                .get(&url)
+                .header("x-forwarded-for", spoof)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = client
+            .get(&url)
+            .header("x-forwarded-for", "192.0.2.4")
+            .header("authorization", "Bearer sk-good")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "rotating XFF did not evade the ban"
+        );
+        waf_task.abort();
+        upstream_task.abort();
+    }
+
+    #[test]
+    fn client_ip_resolution_trusts_forwarding_only_from_trusted_peers() {
+        let trusted = parse_trusted_proxies(Some("127.0.0.1, 10.0.0.0/8")).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("192.0.2.1, 198.51.100.7, 10.1.2.3"),
+        );
+        let loopback = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let outsider = Some("203.0.113.5".parse().unwrap());
+        assert_eq!(resolve_client_ip(outsider, &headers, &trusted), outsider);
+        assert_eq!(
+            resolve_client_ip(loopback, &headers, &trusted),
+            Some("198.51.100.7".parse().unwrap()),
+            "right-most untrusted hop, not the spoofable left-most one"
+        );
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.99"));
+        assert_eq!(
+            resolve_client_ip(loopback, &headers, &trusted),
+            Some("198.51.100.99".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_client_ip(loopback, &HeaderMap::new(), &trusted),
+            loopback
+        );
+        for bad in ["not-an-ip", "10.0.0.0/33", "::1/129"] {
+            assert!(parse_trusted_proxies(Some(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(parse_trusted_proxies(None).unwrap(), Vec::new());
+    }
+
     #[tokio::test]
     async fn gateway_covers_monitor_proxy_not_found_and_bad_gateway_paths() {
         let upstream_app = Router::new().route(
@@ -6883,6 +7309,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                     RouteConfig {
                         id: "proxy".to_string(),
@@ -6891,6 +7318,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                     RouteConfig {
                         id: "down".to_string(),
@@ -6899,6 +7327,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                     RouteConfig {
                         id: "truncated".to_string(),
@@ -6907,6 +7336,7 @@ mod tests {
                         mode: EnforcementMode::Monitor,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                 ],
                 threats: Vec::new(),
@@ -6960,8 +7390,7 @@ mod tests {
         let truncated_response =
             app_request(&app, empty_request(Method::GET, "/gateway/truncated")).await;
         assert_eq!(truncated_response.status(), StatusCode::OK);
-        let truncated_body =
-            axum::body::to_bytes(truncated_response.into_body(), usize::MAX).await;
+        let truncated_body = axum::body::to_bytes(truncated_response.into_body(), usize::MAX).await;
         assert!(
             truncated_body.is_err(),
             "truncated upstream streaming must surface a downstream body error"
@@ -6983,6 +7412,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             },
             &Method::GET,
             "/mock",
@@ -7050,6 +7480,7 @@ mod tests {
                         mode: EnforcementMode::Block,
                         enabled: true,
                         block_threshold: None,
+                        ingress: Default::default(),
                     },
                 );
             })
@@ -7175,6 +7606,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route id is required")
         );
@@ -7186,6 +7618,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route path_prefix must start with /")
         );
@@ -7197,6 +7630,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -7208,6 +7642,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route path_prefix must not contain query or fragment characters")
         );
@@ -7219,6 +7654,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route upstream is required")
         );
@@ -7336,6 +7772,7 @@ mod tests {
                 mode: EnforcementMode::Monitor,
                 enabled: true,
                 block_threshold: None,
+                ingress: Default::default(),
             }),
             Err("route upstream must start with mock://, http://, or https://")
         );
@@ -7791,6 +8228,7 @@ mod tests {
                     mode: EnforcementMode::Monitor,
                     enabled: true,
                     block_threshold: None,
+                    ingress: Default::default(),
                 }],
                 threats: Vec::new(),
                 operator_threat_keys: Vec::new(),
@@ -7825,6 +8263,7 @@ mod tests {
                     mode: EnforcementMode::Monitor,
                     enabled: true,
                     block_threshold: None,
+                    ingress: Default::default(),
                 },
             ),
         )
