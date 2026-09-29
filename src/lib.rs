@@ -2743,6 +2743,17 @@ async fn strike_auth_failure(
         return;
     };
     let banned = state.bans.lock().await.strike(ip, now_unix());
+    // Every strike is visible, not only the one that starts a ban.
+    record_event(
+        state,
+        Some(ip),
+        Some(route.id.clone()),
+        "auth_failure",
+        "upstream or credential auth failure".to_string(),
+        0,
+        path,
+    )
+    .await;
     if let Some(seconds) = banned {
         record_event(
             state,
@@ -7284,6 +7295,18 @@ mod tests {
         assert!(banned.headers().contains_key("retry-after"));
         let unaffected = send("198.51.100.20", "Bearer denied").await.unwrap();
         assert!(!unaffected.headers().contains_key("retry-after"));
+        let events: Vec<SecurityEvent> = client
+            .get(format!("http://{addr}/api/events"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            events.iter().filter(|e| e.action == "auth_failure").count(),
+            3
+        );
 
         waf_task.abort();
         upstream_task.abort();
