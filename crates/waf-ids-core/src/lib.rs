@@ -152,6 +152,31 @@ pub struct IngressPolicy {
     /// `authorization` and `x-litellm-api-key`.
     #[serde(default)]
     pub credential_headers: Vec<String>,
+    /// Upstream statuses counted as auth failures when `ban_on_auth_failure`
+    /// is on. Empty means `[401]`.
+    #[serde(default)]
+    pub auth_failure_statuses: Vec<u16>,
+    /// Upstream JSON `error.type` values counted as auth failures at any 4xx
+    /// status, for upstreams that report an authentication error with another
+    /// code (LiteLLM sends `auth_error` with 403 for a malformed header).
+    #[serde(default)]
+    pub auth_failure_error_types: Vec<String>,
+    /// Detections switched off for this route: built-in signature classes
+    /// (`sqli`, `xss`, `path-traversal`, `command-injection`, `ssrf`,
+    /// `deserialization`) and `indicator`,
+    /// `dnsbl`, `anomaly`. Empty keeps every detection on.
+    #[serde(default)]
+    pub disabled_detections: Vec<String>,
+}
+
+impl IngressPolicy {
+    pub fn is_auth_failure_status(&self, status: u16) -> bool {
+        if self.auth_failure_statuses.is_empty() {
+            status == 401
+        } else {
+            self.auth_failure_statuses.contains(&status)
+        }
+    }
 }
 
 /// Headers a route may never forward: framing, hop-by-hop, host, cookies and
@@ -967,6 +992,21 @@ pub fn score_request(
     threats: &[ThreatIndicator],
     dnsbl: &[DnsblEntry],
 ) -> ScoredRequest {
+    score_request_with(path, query, body, client_ip, threats, dnsbl, &[])
+}
+
+/// [`score_request`] with the detections named in `disabled` skipped; see
+/// [`IngressPolicy::disabled_detections`].
+pub fn score_request_with(
+    path: &str,
+    query: Option<&str>,
+    body: &str,
+    client_ip: Option<IpAddr>,
+    threats: &[ThreatIndicator],
+    dnsbl: &[DnsblEntry],
+    disabled: &[String],
+) -> ScoredRequest {
+    let on = |class: &str| !disabled.iter().any(|d| d.eq_ignore_ascii_case(class));
     let decoded_query = query
         .map(|value| percent_decode_str(value).decode_utf8_lossy())
         .unwrap_or_default();
@@ -976,14 +1016,14 @@ pub fn score_request(
 
     // Built-in OWASP-shape signatures (no operator configuration required).
     for sig in builtin_signatures() {
-        if haystack.contains(sig.pattern) {
+        if on(sig.class) && haystack.contains(sig.pattern) {
             score = score.saturating_add(severity_score(&sig.severity));
             reasons.push(format!("builtin {} rule {}", sig.class, sig.id));
         }
     }
 
     // Operator-configured threat indicators (and engine-fed IP/path hits).
-    for indicator in threats {
+    for indicator in threats.iter().filter(|_| on("indicator")) {
         let kind = indicator.indicator_type.to_ascii_lowercase();
         let matched = if matches!(kind.as_str(), "ip" | "client_ip" | "source_ip" | "src_ip") {
             client_ip.is_some_and(|ip| indicator.value.parse::<IpAddr>().ok() == Some(ip))
@@ -1008,7 +1048,7 @@ pub fn score_request(
     }
 
     // DNSBL client reputation.
-    if let Some(ip) = client_ip
+    if let Some(ip) = client_ip.filter(|_| on("dnsbl"))
         && let Some(entry) = dnsbl.iter().find(|entry| dnsbl_matches(entry, ip))
     {
         score = score.saturating_add(100);
@@ -1019,7 +1059,7 @@ pub fn score_request(
     }
 
     // Behavioral anomaly heuristic (first-tier AI SOC signal).
-    if let Some((anomaly, reason)) = anomaly_signal(&haystack) {
+    if let Some((anomaly, reason)) = anomaly_signal(&haystack).filter(|_| on("anomaly")) {
         score = score.saturating_add(anomaly);
         reasons.push(reason);
     }
@@ -1568,6 +1608,27 @@ fn escape_txt(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_detections_skip_only_the_named_classes() {
+        let attack = "' or 1=1 -- <script>alert(1)</script>";
+        let all = score_request("/x", None, attack, None, &[], &[]);
+        let no_sqli = score_request_with("/x", None, attack, None, &[], &[], &["SQLI".to_string()]);
+        assert!(all.reason.contains("builtin sqli") && all.reason.contains("builtin xss"));
+        assert!(!no_sqli.reason.contains("builtin sqli") && no_sqli.reason.contains("builtin xss"));
+        assert!(no_sqli.score < all.score);
+    }
+
+    #[test]
+    fn auth_failure_statuses_default_to_401() {
+        let default = IngressPolicy::default();
+        assert!(default.is_auth_failure_status(401) && !default.is_auth_failure_status(403));
+        let wide = IngressPolicy {
+            auth_failure_statuses: vec![401, 403],
+            ..Default::default()
+        };
+        assert!(wide.is_auth_failure_status(403));
+    }
 
     #[test]
     fn score_request_matches_client_ip_threat_indicators() {

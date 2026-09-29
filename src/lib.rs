@@ -22,10 +22,10 @@ use tokio::{
 use waf_ids_core::{
     AppData, BLOCK_SCORE, buyer_evidence_manifest_at, commercial_readiness_snapshot_at,
     enforce_event_limit, kpi_snapshot_at, prometheus_exposition, rate_limit_step, record_audit_log,
-    replace_threat_feed_ownership, select_route, signature_catalog, threat_feed_freshness_snapshot,
-    threat_indicator_key, upsert_dnsbl, upsert_route, upsert_threat, upsert_threat_feed,
-    validate_commercial_profile, validate_dnsbl, validate_route, validate_threat,
-    validate_threat_feed_import,
+    replace_threat_feed_ownership, score_request_with, select_route, signature_catalog,
+    threat_feed_freshness_snapshot, threat_indicator_key, upsert_dnsbl, upsert_route,
+    upsert_threat, upsert_threat_feed, validate_commercial_profile, validate_dnsbl, validate_route,
+    validate_threat, validate_threat_feed_import,
 };
 pub use waf_ids_core::{
     AuditLogEntry, BuyerEvidenceEndpoint, BuyerEvidenceManifest, BuyerEvidenceRuntimeCounts,
@@ -2488,13 +2488,14 @@ async fn gateway(
     }
 
     let body_text = String::from_utf8_lossy(&body);
-    let scored = score_request(
+    let scored = score_request_with(
         gateway_path,
         uri.query(),
         &body_text,
         client_ip,
         &threats,
         &dnsbl,
+        &route.ingress.disabled_detections,
     );
 
     if route.mode == EnforcementMode::Block
@@ -2654,14 +2655,81 @@ async fn gateway(
     .await
     {
         Ok(response) => {
-            // Only 401: a 403 can be a valid key calling a model it may not use.
-            if response.status() == StatusCode::UNAUTHORIZED {
+            let (response, auth_failure) = classify_auth_failure(&route.ingress, response).await;
+            if auth_failure {
                 strike_auth_failure(&state, &route, ban_ip, gateway_path).await;
             }
             response
         }
         Err(message) => error(StatusCode::BAD_GATEWAY, message),
     }
+}
+
+/// Largest upstream 4xx body read to find its JSON `error.type`.
+const AUTH_ERROR_PEEK_BYTES: usize = 64 * 1024;
+
+/// Whether an upstream response is an auth failure under the route's policy:
+/// a configured status, or a JSON 4xx body whose `error.type` is one of
+/// `auth_failure_error_types`. The body is streamed on unchanged: only its
+/// first [`AUTH_ERROR_PEEK_BYTES`] are held, and a larger body is not an
+/// auth-error candidate.
+async fn classify_auth_failure(
+    policy: &waf_ids_core::IngressPolicy,
+    response: Response,
+) -> (Response, bool) {
+    use futures_util::StreamExt;
+    let status = response.status();
+    if !policy.ban_on_auth_failure {
+        return (response, false);
+    }
+    if policy.is_auth_failure_status(status.as_u16()) {
+        return (response, true);
+    }
+    let json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("json"));
+    if policy.auth_failure_error_types.is_empty() || !status.is_client_error() || !json {
+        return (response, false);
+    }
+    let (parts, body) = response.into_parts();
+    let mut stream = body.into_data_stream();
+    let mut head = Vec::new();
+    let complete = loop {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                head.extend_from_slice(&chunk);
+                if head.len() > AUTH_ERROR_PEEK_BYTES {
+                    break false;
+                }
+            }
+            Some(Err(_)) => {
+                return (
+                    error(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream error body could not be read",
+                    ),
+                    false,
+                );
+            }
+            None => break true,
+        }
+    };
+    if !complete {
+        let rest = futures_util::stream::once(async move { Ok(Bytes::from(head)) }).chain(stream);
+        return (Response::from_parts(parts, Body::from_stream(rest)), false);
+    }
+    let error_type = serde_json::from_slice::<serde_json::Value>(&head)
+        .ok()
+        .and_then(|value| value.get("error")?.get("type")?.as_str().map(str::to_owned));
+    let matched = error_type.is_some_and(|kind| {
+        policy
+            .auth_failure_error_types
+            .iter()
+            .any(|wanted| wanted == &kind)
+    });
+    (Response::from_parts(parts, Body::from(head)), matched)
 }
 
 /// Counts an auth failure toward a ban and records the ban when it starts.
@@ -7095,6 +7163,24 @@ mod tests {
     }
 
     fn litellm_front_state(upstream: SocketAddr, trusted: Vec<(IpAddr, u8)>) -> AppState {
+        litellm_front_state_with(
+            upstream,
+            trusted,
+            waf_ids_core::IngressPolicy {
+                forward_request_headers: vec!["authorization".to_string()],
+                require_credential: true,
+                credential_prefix: Some("sk-".to_string()),
+                ban_on_auth_failure: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn litellm_front_state_with(
+        upstream: SocketAddr,
+        trusted: Vec<(IpAddr, u8)>,
+        ingress: waf_ids_core::IngressPolicy,
+    ) -> AppState {
         AppState::new(
             AppData {
                 routes: vec![RouteConfig {
@@ -7104,13 +7190,7 @@ mod tests {
                     mode: EnforcementMode::Monitor,
                     enabled: true,
                     block_threshold: None,
-                    ingress: waf_ids_core::IngressPolicy {
-                        forward_request_headers: vec!["authorization".to_string()],
-                        require_credential: true,
-                        credential_prefix: Some("sk-".to_string()),
-                        ban_on_auth_failure: true,
-                        ..Default::default()
-                    },
+                    ingress,
                 }],
                 threats: Vec::new(),
                 operator_threat_keys: Vec::new(),
@@ -7138,6 +7218,75 @@ mod tests {
             max_tracked: 100,
         })
         .with_trusted_proxies(trusted)
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_error_types_strike_at_any_4xx_and_keep_the_body() {
+        let upstream_app = Router::new().fallback(any(|headers: HeaderMap| async move {
+            let kind = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                Some("Bearer malformed") => "auth_error",
+                _ => "key_model_access_denied",
+            };
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": {"type": kind, "code": "403"}})),
+            )
+                .into_response()
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+        let state = litellm_front_state_with(
+            upstream_addr,
+            vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)],
+            waf_ids_core::IngressPolicy {
+                transparent_headers: true,
+                ban_on_auth_failure: true,
+                auth_failure_error_types: vec!["auth_error".to_string()],
+                ..Default::default()
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/gateway/v1/models");
+        let send = |caller: &'static str, auth: &'static str| {
+            client
+                .get(&url)
+                .header("x-real-ip", caller)
+                .header("authorization", auth)
+                .send()
+        };
+
+        // Another 403 type is not an auth failure and never bans.
+        for _ in 0..4 {
+            let denied = send("198.51.100.20", "Bearer denied").await.unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+            let body: serde_json::Value = denied.json().await.unwrap();
+            assert_eq!(body["error"]["type"], "key_model_access_denied");
+        }
+        // auth_error at 403 strikes; the third one bans the caller.
+        for _ in 0..3 {
+            let rejected = send("203.0.113.30", "Bearer malformed").await.unwrap();
+            let body: serde_json::Value = rejected.json().await.unwrap();
+            assert_eq!(body["error"]["type"], "auth_error");
+        }
+        let banned = send("203.0.113.30", "Bearer denied").await.unwrap();
+        assert_eq!(banned.status(), StatusCode::FORBIDDEN);
+        assert!(banned.headers().contains_key("retry-after"));
+        let unaffected = send("198.51.100.20", "Bearer denied").await.unwrap();
+        assert!(!unaffected.headers().contains_key("retry-after"));
+
+        waf_task.abort();
+        upstream_task.abort();
     }
 
     #[tokio::test]
