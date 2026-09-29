@@ -2439,23 +2439,26 @@ async fn gateway(
     }
 
     if route.ingress.require_credential
-        && let Err(reason) = gateway_mediation::admit_credential(
+        && let Err(reason) = gateway_mediation::admit_credential_in(
             &headers,
             route.ingress.credential_prefix.as_deref(),
+            &route.ingress.credential_headers,
         )
         .and_then(|()| {
             // A credential the route does not forward would pass here and then
-            // reach the upstream without it.
-            ["authorization", "x-litellm-api-key"]
-                .into_iter()
-                .filter(|name| headers.contains_key(*name))
-                .all(|name| {
-                    route
-                        .ingress
-                        .forward_request_headers
-                        .iter()
-                        .any(|f| f == name)
-                })
+            // reach the upstream without it. Transparent routes forward all.
+            if route.ingress.transparent_headers {
+                return Ok(());
+            }
+            let credential_names: Vec<String> = if route.ingress.credential_headers.is_empty() {
+                vec!["authorization".into(), "x-litellm-api-key".into()]
+            } else {
+                route.ingress.credential_headers.clone()
+            };
+            credential_names
+                .iter()
+                .filter(|name| headers.contains_key(name.as_str()))
+                .all(|name| route.ingress.forward_request_headers.contains(name))
                 .then_some(())
                 .ok_or("credential header is not forwarded by this route")
         })
@@ -2609,10 +2612,14 @@ async fn gateway(
         .await;
     }
 
-    let admitted_request_headers = match gateway_mediation::admit_route_request_headers(
-        &headers,
-        &route.ingress.forward_request_headers,
-    ) {
+    let admitted_request_headers = match if route.ingress.transparent_headers {
+        gateway_mediation::admit_transparent(&headers)
+    } else {
+        gateway_mediation::admit_route_request_headers(
+            &headers,
+            &route.ingress.forward_request_headers,
+        )
+    } {
         Ok(headers) => headers,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
@@ -2816,9 +2823,12 @@ async fn proxy_request_with_headers(
         .map_err(|error| format!("upstream request failed: {error}"))?;
     let status = StatusCode::from_u16(response.status().as_u16())
         .expect("reqwest upstream status codes are valid axum status codes");
-    let admitted_response_headers =
+    let admitted_response_headers = if route.ingress.transparent_headers {
+        gateway_mediation::admit_transparent(response.headers())
+    } else {
         gateway_mediation::admit_response_headers(response.headers())
-            .map_err(|message| format!("upstream response rejected: {message}"))?;
+    }
+    .map_err(|message| format!("upstream response rejected: {message}"))?;
     let body = Body::from_stream(response.bytes_stream());
     let mut response = (status, body).into_response();
     *response.headers_mut() = admitted_response_headers;
@@ -7097,6 +7107,7 @@ mod tests {
                         require_credential: true,
                         credential_prefix: Some("sk-".to_string()),
                         ban_on_auth_failure: true,
+                        ..Default::default()
                     },
                 }],
                 threats: Vec::new(),
@@ -7359,6 +7370,85 @@ mod tests {
             assert!(parse_trusted_proxies(Some(bad)).is_err(), "{bad}");
         }
         assert_eq!(parse_trusted_proxies(None).unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn transparent_route_carries_custom_headers_and_provider_credentials() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let upstream_seen = seen.clone();
+        let upstream_app = Router::new().fallback(any(move |headers: HeaderMap| {
+            let seen = upstream_seen.clone();
+            async move {
+                *seen.lock().unwrap() = headers.keys().map(|name| name.to_string()).collect();
+                (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "text/event-stream"),
+                        ("mcp-session-id", "session-1"),
+                        ("x-litellm-response-cost", "0.0001"),
+                        ("keep-alive", "timeout=5"),
+                    ],
+                    "data: {}\n\ndata: [DONE]\n\n",
+                )
+            }
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task =
+            tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+        let state = litellm_front_state(upstream_addr, vec![(IpAddr::V4(Ipv4Addr::LOCALHOST), 32)]);
+        {
+            let mut data = state.inner.write().await;
+            let ingress = &mut data.routes[0].ingress;
+            ingress.transparent_headers = true;
+            ingress.credential_headers = vec![
+                "authorization".to_string(),
+                "x-litellm-api-key".to_string(),
+                "x-api-key".to_string(),
+            ];
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waf_task = tokio::spawn(
+            axum::serve(
+                listener,
+                build_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/gateway/mcp"))
+            .header("x-real-ip", "198.51.100.30")
+            .header("x-api-key", "sk-anthropic-style")
+            .header("anthropic-version", "2023-06-01")
+            .header("mcp-session-id", "session-1")
+            .header("x-litellm-tags", "rehearsal")
+            .header("x-admin-token", "must-not-leak")
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["mcp-session-id"], "session-1");
+        assert_eq!(response.headers()["x-litellm-response-cost"], "0.0001");
+        assert!(response.headers().get("keep-alive").is_none());
+        assert!(response.text().await.unwrap().ends_with("data: [DONE]\n\n"));
+        let forwarded = seen.lock().unwrap().clone();
+        for name in [
+            "x-api-key",
+            "anthropic-version",
+            "mcp-session-id",
+            "x-litellm-tags",
+        ] {
+            assert!(
+                forwarded.iter().any(|seen| seen == name),
+                "{name} not forwarded"
+            );
+        }
+        assert!(!forwarded.iter().any(|seen| seen == "x-admin-token"));
+        waf_task.abort();
+        upstream_task.abort();
     }
 
     #[tokio::test]

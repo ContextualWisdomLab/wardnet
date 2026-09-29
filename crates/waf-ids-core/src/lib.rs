@@ -142,6 +142,16 @@ pub struct IngressPolicy {
     /// client ban.
     #[serde(default)]
     pub ban_on_auth_failure: bool,
+    /// Forward every end-to-end request and response header, removing only
+    /// hop-by-hop headers, Connection nominations, framing and Wardnet's own
+    /// credential. For upstreams such as LiteLLM whose clients depend on custom
+    /// headers (MCP session ids, provider SDK versions, cost and rate headers).
+    #[serde(default)]
+    pub transparent_headers: bool,
+    /// Headers that may carry the caller credential. Empty means
+    /// `authorization` and `x-litellm-api-key`.
+    #[serde(default)]
+    pub credential_headers: Vec<String>,
 }
 
 /// Headers a route may never forward: framing, hop-by-hop, host, cookies and
@@ -178,6 +188,19 @@ pub fn validate_ingress(policy: &IngressPolicy) -> Result<(), &'static str> {
         }
         if NEVER_FORWARDED.contains(&name.as_str()) {
             return Err("route ingress must not forward framing, host, cookie or admin headers");
+        }
+    }
+    if policy.credential_headers.len() > MAX_FORWARDED_HEADERS {
+        return Err("route ingress may name at most 8 credential headers");
+    }
+    for name in &policy.credential_headers {
+        let token = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !token || NEVER_FORWARDED.contains(&name.as_str()) {
+            return Err("route ingress credential headers must be lowercase header tokens");
         }
     }
     if let Some(prefix) = &policy.credential_prefix
