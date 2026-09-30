@@ -107,10 +107,12 @@ async fn gateway_with_backpressure_upstream()
 
 #[tokio::test]
 async fn unpolled_buyer_body_does_not_drain_the_entire_large_upstream() {
-    assert!(
-        MAX_UNPOLLED_CHUNKS < BACKPRESSURE_TOTAL_CHUNKS,
-        "the bounded read-ahead witness must be smaller than the hostile body"
-    );
+    const {
+        assert!(
+            MAX_UNPOLLED_CHUNKS < BACKPRESSURE_TOTAL_CHUNKS,
+            "the bounded read-ahead witness must be smaller than the hostile body"
+        );
+    }
 
     let (app, probe, upstream_task) = gateway_with_backpressure_upstream().await;
     let request = Request::builder()
