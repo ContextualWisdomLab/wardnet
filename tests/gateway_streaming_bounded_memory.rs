@@ -109,10 +109,12 @@ async fn gateway_with_large_upstream() -> (Router, LargeResponseProbe, tokio::ta
 
 #[tokio::test]
 async fn gateway_releases_large_prefix_before_held_tail() {
-    assert!(
-        UPSTREAM_CHUNK_BYTES < RELAY_MEMORY_BUDGET_BYTES,
-        "the hostile fixture must not manufacture one upstream chunk larger than the relay budget"
-    );
+    const {
+        assert!(
+            UPSTREAM_CHUNK_BYTES < RELAY_MEMORY_BUDGET_BYTES,
+            "the hostile fixture must not manufacture one upstream chunk larger than the relay budget"
+        );
+    }
 
     let (app, probe, upstream_task) = gateway_with_large_upstream().await;
     let request = Request::builder()
