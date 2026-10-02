@@ -34,6 +34,17 @@ The property-test mirror lives in `crates/waf-ids-core/tests/fuzz_invariants.rs`
 and `tests/fuzz_invariants.rs` (proptest); it enforces the same invariants on
 stable as part of `cargo test --workspace`.
 
+DNSBL publication additionally has a package-local independent oracle in
+`crates/waf-ids-core/tests/support/dnsbl_zone.rs`. It checks input-derived A/TXT
+counts, owner and source order, lossless metadata and shortest valid TTL per
+IPv4 owner without calling the production projection or its limit constant.
+The stable shared-owner property always generates at least two publishable
+records with valid TTLs; metadata may still contain arbitrary or empty text.
+the fuzz harness retains its arbitrary-input pass and adds a bounded shared-owner
+positive projection. `dnsbl_zone_oracle.rs` pairs legal controls with malformed
+TTL, missing-record and identity/metadata negatives. These are test-sensitivity
+checks, not new production defects or proof that a fuzz campaign ran.
+
 ## Running locally
 
 Coverage-guided fuzzing needs a nightly toolchain:

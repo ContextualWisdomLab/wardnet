@@ -6,8 +6,10 @@
 //! without a nightly toolchain. The fuzz targets explore far deeper; these keep
 //! a fast, always-green signal.
 
-#[path = "support/dnsbl_txt.rs"]
-mod dnsbl_txt;
+#[path = "support/dnsbl_zone.rs"]
+mod dnsbl_zone;
+
+use dnsbl_zone::dnsbl_txt;
 
 use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr};
@@ -100,6 +102,38 @@ proptest! {
         }
     }
 
+    // Unlike the broad mixed-input property below, force 2..8 publishable
+    // records to share one owner, with independently varied positive TTLs and
+    // metadata. The test-only oracle independently checks minimum-per-owner TTL,
+    // A/TXT parity, record identity/order, and lossless reason/source bytes.
+    #[test]
+    fn dnsbl_zone_preserves_shared_owner_source_metadata_and_minimum_ttl(
+        address in any::<u32>(),
+        records in proptest::collection::vec((
+            1u64..=2_147_483_647,
+            ".{0,600}",
+            ".{0,120}",
+        ), 2..8),
+    ) {
+        let address = IpAddr::V4(Ipv4Addr::from(address));
+        let entries: Vec<_> = records
+            .into_iter()
+            .enumerate()
+            .map(|(index, (ttl_seconds, reason, source))| DnsblEntry {
+                address,
+                code: format!("127.0.0.{}", index + 1),
+                reason,
+                source,
+                ttl_seconds,
+                prefix_len: None,
+            })
+            .collect();
+        let original = entries.clone();
+        let zone = export_dnsbl_zone("dnsbl.example", &entries);
+        dnsbl_zone::assert_zone_matches_entries(&zone, &entries);
+        prop_assert_eq!(entries, original, "export must not mutate source-owned entries");
+    }
+
     // DNSBL classification and zone generation must never panic; TXT payloads
     // must retain valid escaped strings and legal adjacent-string delimiters.
     #[test]
@@ -112,6 +146,7 @@ proptest! {
         }
         let zone = export_dnsbl_zone(&origin, &entries);
         prop_assert!(zone.starts_with("$ORIGIN "));
+        dnsbl_zone::assert_zone_matches_entries(&zone, &entries);
 
         // Parse optional explicit TTL before class/type so TXT content cannot
         // masquerade as an A record. Both record forms keep the 127/8 check.

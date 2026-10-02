@@ -11,13 +11,15 @@
 //! at most 255 decoded bytes each; concatenation preserves reason/source bytes.
 //! Quotes, backslashes and control characters cannot break out into zone lines.
 
-#[path = "../support/dnsbl_txt.rs"]
-mod dnsbl_txt;
+#[path = "../support/dnsbl_zone.rs"]
+mod dnsbl_zone;
+
+use dnsbl_zone::dnsbl_txt;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use waf_ids_core::{DnsblEntry, export_dnsbl_zone, validate_dnsbl};
+use waf_ids_core::{export_dnsbl_zone, validate_dnsbl, DnsblEntry};
 
 /// A response code drawn from the raw fuzz bytes: arbitrary strings plus real IP
 /// literals (loopback, non-loopback IPv4, IPv6) so the zone A-record invariant
@@ -78,6 +80,27 @@ fuzz_target!(|input: Input| {
 
     // Zone generation must never panic on arbitrary strings.
     let zone = export_dnsbl_zone(&input.origin, &entries);
+
+    dnsbl_zone::assert_zone_matches_entries(&zone, &entries);
+
+    // Retain the arbitrary-input pass above. Add a bounded positive projection
+    // with a shared owner, loopback codes and valid TTLs so almost-all-invalid
+    // arbitrary u64 lifetimes cannot make the evidence checks vacuous.
+    if let Some(first) = entries.first() {
+        let shared: Vec<_> = entries
+            .iter()
+            .take(8)
+            .enumerate()
+            .map(|(index, entry)| DnsblEntry {
+                address: first.address,
+                code: format!("127.0.0.{}", index + 1),
+                ttl_seconds: 1 + entry.ttl_seconds % 2_147_483_647,
+                ..entry.clone()
+            })
+            .collect();
+        let shared_zone = export_dnsbl_zone(&input.origin, &shared);
+        dnsbl_zone::assert_zone_matches_entries(&shared_zone, &shared);
+    }
 
     // The zone always carries its header directive.
     assert!(
