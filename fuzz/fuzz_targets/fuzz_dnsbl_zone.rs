@@ -85,24 +85,17 @@ fuzz_target!(|input: Input| {
         "zone must start with $ORIGIN directive"
     );
 
-    // Every published A-record response code is an IPv4 loopback literal
-    // (RFC 5782 / the "response code in 127.0.0.0/8" invariant). Codes outside
-    // 127/8, IPv6 literals, and unparseable strings must all be dropped. Parse
-    // by record structure from the start of the line: an A record is exactly
-    // `<name> IN A <code>` (four whitespace fields, no spaces in name or code).
-    // Matching on the substring " IN A " instead would misread a TXT line whose
-    // escaped reason/source payload merely contains that substring as an A-record.
+    // Parse optional explicit TTL before class/type; TXT content must never
+    // masquerade as an A record, and every answer retains its 127/8 check.
     for line in zone.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(_name), Some("IN"), Some("A"), Some(code), None) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
-            continue;
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let record = match fields.as_slice() {
+            [_name, "IN", "A", code] => Some((300, *code)),
+            [_name, ttl, "IN", "A", code] => Some((ttl.parse::<u64>().unwrap(), *code)),
+            _ => None,
         };
+        let Some((ttl, code)) = record else { continue };
+        assert!((1..=2_147_483_647).contains(&ttl));
         match code.parse::<IpAddr>() {
             Ok(IpAddr::V4(v4)) => assert_eq!(
                 v4.octets()[0],
@@ -122,7 +115,10 @@ fuzz_target!(|input: Input| {
         .collect();
     let expected: Vec<_> = entries
         .iter()
-        .filter(|e| matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127))
+        .filter(|e| {
+            (1..=2_147_483_647).contains(&e.ttl_seconds)
+                && matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
+        })
         .collect();
     assert_eq!(txt_lines.len(), expected.len());
     for ((_, text), entry) in txt_lines.iter().zip(expected) {

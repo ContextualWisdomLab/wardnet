@@ -5,6 +5,9 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BLOCK_SCORE: u16 = 50;
+// RFC 2181 section 8 permits TTLs from zero through 2^31 - 1; Wardnet
+// separately requires a nonzero lifetime at DNSBL admission.
+const DNSBL_MAX_TTL_SECONDS: u64 = 2_147_483_647;
 pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -382,6 +385,8 @@ pub fn validate_threat(indicator: &ThreatIndicator) -> Result<(), &'static str> 
     Ok(())
 }
 
+/// Validate DNSBL metadata, address-family prefix, loopback answer and cache
+/// lifetime. Wardnet requires a positive TTL within RFC 2181's 31-bit range.
 pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     if entry.reason.trim().is_empty() {
         return Err("DNSBL reason is required");
@@ -391,6 +396,9 @@ pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     }
     if entry.ttl_seconds == 0 {
         return Err("DNSBL ttl_seconds must be greater than 0");
+    }
+    if entry.ttl_seconds > DNSBL_MAX_TTL_SECONDS {
+        return Err("DNSBL ttl_seconds must not exceed 2147483647");
     }
     if let Some(prefix) = entry.prefix_len {
         let max = if entry.address.is_ipv4() { 32 } else { 128 };
@@ -1396,9 +1404,34 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
 /// Export IPv4 DNSBL entries with loopback answers and lossless TXT metadata.
 /// Each TXT character string is at most 255 decoded UTF-8 bytes (RFC 1035
 /// sections 3.3 and 3.3.14); longer metadata uses adjacent quoted strings.
+/// Valid entries sharing an IPv4 owner use their shortest TTL for both RRsets;
+/// persisted zero/out-of-range lifetimes are omitted rather than clamped.
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
+    // Source-owned entries can share a published owner. RFC 2181 section 5.2
+    // requires one TTL per RRset; use the shortest valid published lifetime,
+    // without changing stored source evidence or depending on input order.
+    let mut owner_ttls = std::collections::HashMap::<std::net::Ipv4Addr, u64>::new();
     for entry in entries {
+        let IpAddr::V4(address) = entry.address else {
+            continue;
+        };
+        let Ok(IpAddr::V4(code)) = IpAddr::from_str(&entry.code) else {
+            continue;
+        };
+        if code.octets()[0] == 127 && (1..=DNSBL_MAX_TTL_SECONDS).contains(&entry.ttl_seconds) {
+            owner_ttls
+                .entry(address)
+                .and_modify(|ttl| *ttl = (*ttl).min(entry.ttl_seconds))
+                .or_insert(entry.ttl_seconds);
+        }
+    }
+    for entry in entries {
+        // Persisted input bypasses admission; never publish a lifetime that is
+        // zero or outside RFC 2181's 31-bit wire range.
+        if entry.ttl_seconds == 0 || entry.ttl_seconds > DNSBL_MAX_TTL_SECONDS {
+            continue;
+        }
         if let IpAddr::V4(address) = entry.address {
             // The response code is emitted as a bare, unquoted A-record token, so
             // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers
@@ -1414,9 +1447,17 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
                 _ => continue,
             };
             let name = reverse_ipv4_for_dnsbl(address.octets());
-            out.push_str(&format!("{} IN A {}\n", name, code));
+            // Keep the existing 300-second representation byte-compatible, but
+            // publish other admitted cache lifetimes explicitly on both records.
+            let owner_ttl = owner_ttls[&address];
+            let ttl = if owner_ttl == 300 {
+                String::new()
+            } else {
+                format!("{owner_ttl} ")
+            };
+            out.push_str(&format!("{name} {ttl}IN A {code}\n"));
             out.push_str(&format!(
-                "{} IN TXT \"{}\"\n",
+                "{} {ttl}IN TXT \"{}\"\n",
                 name,
                 escape_txt(&format!("{} source={}", entry.reason, entry.source))
             ));
@@ -1487,6 +1528,76 @@ mod dnsbl_txt;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise the validation matrix in the unit-test library instantiation,
+    /// including existing non-TTL admission invariants and the new wire bound.
+    #[test]
+    fn dnsbl_admission_validates_metadata_prefix_code_and_ttl() {
+        let base = AppData::seeded().dnsbl.remove(0);
+        assert_eq!(validate_dnsbl(&base), Ok(()));
+        let mut cases = Vec::new();
+        let mut entry = base.clone();
+        entry.reason = " ".into();
+        cases.push((entry, "DNSBL reason is required"));
+        let mut entry = base.clone();
+        entry.source = " ".into();
+        cases.push((entry, "DNSBL source is required"));
+        let mut entry = base.clone();
+        entry.ttl_seconds = 0;
+        cases.push((entry, "DNSBL ttl_seconds must be greater than 0"));
+        let mut entry = base.clone();
+        entry.ttl_seconds = 2_147_483_648;
+        cases.push((entry, "DNSBL ttl_seconds must not exceed 2147483647"));
+        let mut entry = base.clone();
+        entry.prefix_len = Some(33);
+        cases.push((entry, "DNSBL prefix_len exceeds the address family width"));
+        for (code, error) in [
+            ("8.8.8.8", "DNSBL response code must be in 127.0.0.0/8"),
+            (
+                "::1",
+                "DNSBL response code must be an IPv4 loopback address",
+            ),
+            ("invalid", "DNSBL response code must be an IP address"),
+        ] {
+            let mut entry = base.clone();
+            entry.code = code.into();
+            cases.push((entry, error));
+        }
+        for (entry, error) in cases {
+            assert_eq!(validate_dnsbl(&entry), Err(error));
+        }
+        let mut v6 = base;
+        v6.address = "2001:db8::1".parse().unwrap();
+        v6.prefix_len = Some(128);
+        assert_eq!(validate_dnsbl(&v6), Ok(()));
+        v6.prefix_len = Some(129);
+        assert_eq!(
+            validate_dnsbl(&v6),
+            Err("DNSBL prefix_len exceeds the address family width")
+        );
+    }
+
+    /// Unit-library coverage control for duplicate-owner minimums, explicit
+    /// lifetimes and invalid persisted state. This is not another product RED.
+    #[test]
+    fn dnsbl_unit_publication_covers_shared_and_invalid_cache_lifetimes() {
+        let mut first = AppData::seeded().dnsbl.remove(0);
+        first.ttl_seconds = 600;
+        let mut second = first.clone();
+        second.ttl_seconds = 60;
+        second.source = "second-source".into();
+        let mut zero = first.clone();
+        zero.ttl_seconds = 0;
+        let mut too_large = first.clone();
+        too_large.ttl_seconds = u64::MAX;
+        let zone = export_dnsbl_zone("dnsbl.example", &[first, second, zero, too_large]);
+        assert_eq!(zone.lines().count(), 6);
+        assert!(
+            zone.lines()
+                .skip(2)
+                .all(|line| line.starts_with("10.113.0.203 60 IN "))
+        );
+    }
 
     #[test]
     fn score_request_matches_client_ip_threat_indicators() {

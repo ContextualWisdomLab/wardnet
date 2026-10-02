@@ -55,7 +55,7 @@ fn dnsbl_strategy() -> impl Strategy<Value = DnsblEntry> {
         dnsbl_code_strategy(),
         ".*",
         ".*",
-        any::<u64>(),
+        prop_oneof![any::<u64>(), 1u64..=2_147_483_647, Just(0), Just(300)],
     )
         .prop_map(|(addr, code, reason, source, ttl_seconds)| DnsblEntry {
             address: IpAddr::V4(Ipv4Addr::from(addr)),
@@ -100,8 +100,8 @@ proptest! {
         }
     }
 
-    // DNSBL classification and zone generation must never panic, and every TXT
-    // payload must be fully escaped (no unescaped double quote survives).
+    // DNSBL classification and zone generation must never panic; TXT payloads
+    // must retain valid escaped strings and legal adjacent-string delimiters.
     #[test]
     fn dnsbl_zone_generation_escapes_and_never_panics(
         origin in ".*",
@@ -113,23 +113,17 @@ proptest! {
         let zone = export_dnsbl_zone(&origin, &entries);
         prop_assert!(zone.starts_with("$ORIGIN "));
 
-        // Every published A-record response code is an IPv4 loopback literal
-        // (RFC 5782 / the "response code in 127.0.0.0/8" invariant); non-127/8
-        // or IPv6 codes must be dropped, never emitted. Parse by record structure
-        // (`<name> IN A <code>` = four whitespace fields) so a TXT line whose
-        // escaped reason/source payload contains the substring " IN A " is never
-        // misread as an A-record.
+        // Parse optional explicit TTL before class/type so TXT content cannot
+        // masquerade as an A record. Both record forms keep the 127/8 check.
         for line in zone.lines() {
-            let mut fields = line.split_whitespace();
-            let (Some(_name), Some("IN"), Some("A"), Some(code), None) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            ) else {
-                continue;
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let record = match fields.as_slice() {
+                [_name, "IN", "A", code] => Some((300, *code)),
+                [_name, ttl, "IN", "A", code] => Some((ttl.parse::<u64>().unwrap(), *code)),
+                _ => None,
             };
+            let Some((ttl, code)) = record else { continue };
+            prop_assert!((1..=2_147_483_647).contains(&ttl));
             match code.parse::<IpAddr>() {
                 Ok(IpAddr::V4(v4)) => {
                     prop_assert_eq!(v4.octets()[0], 127, "non-loopback A code: {}", code)
@@ -141,7 +135,8 @@ proptest! {
         dnsbl_txt::assert_zone_txt_valid(&zone);
         let txt_lines: Vec<_> = zone.lines().filter_map(|l| l.split_once(" IN TXT ")).collect();
         let expected: Vec<_> = entries.iter().filter(|e| {
-            matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
+            (1..=2_147_483_647).contains(&e.ttl_seconds)
+                && matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
         }).collect();
         prop_assert_eq!(txt_lines.len(), expected.len());
         for ((_, text), entry) in txt_lines.iter().zip(expected) {

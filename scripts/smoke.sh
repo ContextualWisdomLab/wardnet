@@ -209,7 +209,8 @@ fi
 zone="$(curl -fsS "$BASE_URL/dnsbl/zone")"
 grep -q '^\$ORIGIN dnsbl.test\.$' <<<"$zone"
 grep -q '^10.113.0.203 IN A 127.0.0.2$' <<<"$zone"
-grep -q '^23.100.51.198 IN A 127.0.0.4$' <<<"$zone"
+grep -q '^23.100.51.198 600 IN A 127.0.0.4$' <<<"$zone"
+grep -q '^23.100.51.198 600 IN TXT "feed scanner source=misp-seoul"$' <<<"$zone"
 
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
