@@ -134,6 +134,34 @@ proptest! {
         prop_assert_eq!(entries, original, "export must not mutate source-owned entries");
     }
 
+    // Force aggregate RDATA boundary cases as well as the short arbitrary-input
+    // path. A low-TTL oversized sibling must not influence the valid owner.
+    #[test]
+    fn dnsbl_rdata_boundary_preserves_valid_shared_owner_projection(
+        address in any::<u32>(),
+        payload_bytes in 65_270usize..65_290,
+        scalar in prop::sample::select(vec!['x', '😀', '\n', '"', '\\']),
+    ) {
+        let mut entry = DnsblEntry {
+            address: IpAddr::V4(Ipv4Addr::from(address)),
+            code: "127.0.0.2".into(),
+            reason: format!("x{}", scalar.to_string().repeat((payload_bytes - 13) / scalar.len_utf8())),
+            source: "unit".into(),
+            ttl_seconds: 1,
+            prefix_len: None,
+        };
+        let mut valid = entry.clone();
+        valid.reason = "short-positive".into();
+        valid.ttl_seconds = 600;
+        // Metadata is nonblank, so admission must agree with the input oracle.
+        prop_assert_eq!(validate_dnsbl(&entry).is_ok(), dnsbl_zone::metadata_fits_rdata(&entry));
+        let zone = export_dnsbl_zone("dnsbl.example", &[valid.clone(), entry.clone()]);
+        dnsbl_zone::assert_zone_matches_entries(&zone, &[valid.clone(), entry.clone()]);
+        entry.reason.push(scalar);
+        let zone = export_dnsbl_zone("dnsbl.example", &[entry.clone(), valid.clone()]);
+        dnsbl_zone::assert_zone_matches_entries(&zone, &[entry, valid]);
+    }
+
     // DNSBL classification and zone generation must never panic; TXT payloads
     // must retain valid escaped strings and legal adjacent-string delimiters.
     #[test]
@@ -171,6 +199,7 @@ proptest! {
         let txt_lines: Vec<_> = zone.lines().filter_map(|l| l.split_once(" IN TXT ")).collect();
         let expected: Vec<_> = entries.iter().filter(|e| {
             (1..=2_147_483_647).contains(&e.ttl_seconds)
+                && dnsbl_zone::metadata_fits_rdata(e)
                 && matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
         }).collect();
         prop_assert_eq!(txt_lines.len(), expected.len());

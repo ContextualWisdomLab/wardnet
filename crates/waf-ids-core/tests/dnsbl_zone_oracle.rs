@@ -82,6 +82,38 @@ fn oracle_rejects_unparseable_origin_names() {
     }
 }
 
+/// Accept a maximum-size TXT record, but reject aggregate RDATA overflow even
+/// when every constituent character string remains legal.
+#[test]
+fn oracle_bounds_total_txt_rdata_and_omits_unpublishable_input() {
+    let mut entry = entries().remove(0);
+    entry.ttl_seconds = 300;
+    entry.reason = "x".repeat(65_267);
+    let full = format!("\"{}\"", "x".repeat(255));
+    let valid_text = format!(
+        "{} \"{} source=unit\"",
+        vec![full.clone(); 255].join(" "),
+        "x".repeat(242)
+    );
+    let valid_zone = format!(
+        "$ORIGIN dnsbl.example.\n$TTL 300\n10.2.0.192 IN A 127.0.0.2\n10.2.0.192 IN TXT {valid_text}\n"
+    );
+    dnsbl_zone::assert_zone_matches_entries(&valid_zone, &[entry.clone()]);
+    let invalid_text = vec![full; 256].join(" ");
+    let invalid_zone = valid_zone.replace(&valid_text, &invalid_text);
+    assert!(
+        std::panic::catch_unwind(|| {
+            dnsbl_zone::dnsbl_txt::assert_zone_txt_valid(&invalid_zone);
+        })
+        .is_err(),
+        "oracle accepted 65536 RDATA octets"
+    );
+    let mut invalid = entry.clone();
+    invalid.reason.push('x');
+    invalid.ttl_seconds = 1;
+    dnsbl_zone::assert_zone_matches_entries(&valid_zone, &[entry, invalid]);
+}
+
 /// Reject malformed cache lifetimes while requiring valid controls to pass.
 #[test]
 fn oracle_rejects_wrong_or_inconsistent_cache_lifetimes() {

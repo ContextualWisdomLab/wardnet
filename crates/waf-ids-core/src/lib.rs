@@ -394,6 +394,9 @@ pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     if entry.source.trim().is_empty() {
         return Err("DNSBL source is required");
     }
+    if !dnsbl_txt_fits_wire(entry) {
+        return Err("DNSBL TXT metadata exceeds 65535 wire bytes");
+    }
     if entry.ttl_seconds == 0 {
         return Err("DNSBL ttl_seconds must be greater than 0");
     }
@@ -1419,7 +1422,10 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
         let Ok(IpAddr::V4(code)) = IpAddr::from_str(&entry.code) else {
             continue;
         };
-        if code.octets()[0] == 127 && (1..=DNSBL_MAX_TTL_SECONDS).contains(&entry.ttl_seconds) {
+        if code.octets()[0] == 127
+            && (1..=DNSBL_MAX_TTL_SECONDS).contains(&entry.ttl_seconds)
+            && dnsbl_txt_fits_wire(entry)
+        {
             owner_ttls
                 .entry(address)
                 .and_modify(|ttl| *ttl = (*ttl).min(entry.ttl_seconds))
@@ -1427,9 +1433,12 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
         }
     }
     for entry in entries {
-        // Persisted input bypasses admission; never publish a lifetime that is
-        // zero or outside RFC 2181's 31-bit wire range.
-        if entry.ttl_seconds == 0 || entry.ttl_seconds > DNSBL_MAX_TTL_SECONDS {
+        // Persisted input bypasses admission; omit invalid wire lifetimes and
+        // oversized metadata from both record and owner-lifetime projections.
+        if entry.ttl_seconds == 0
+            || entry.ttl_seconds > DNSBL_MAX_TTL_SECONDS
+            || !dnsbl_txt_fits_wire(entry)
+        {
             continue;
         }
         if let IpAddr::V4(address) = entry.address {
@@ -1499,6 +1508,32 @@ pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
 }
 
+/// Check the complete TXT RDATA length without allocating an escaped copy.
+/// Include one length octet for each UTF-8-safe character string and stop at
+/// RFC 1035's unsigned 16-bit RDLENGTH ceiling. The separator is payload too.
+fn dnsbl_txt_fits_wire(entry: &DnsblEntry) -> bool {
+    let mut wire_bytes = 1usize;
+    let mut chunk_bytes = 0usize;
+    for ch in entry
+        .reason
+        .chars()
+        .chain(" source=".chars())
+        .chain(entry.source.chars())
+    {
+        let bytes = ch.len_utf8();
+        if chunk_bytes + bytes > 255 {
+            wire_bytes += 1;
+            chunk_bytes = 0;
+        }
+        wire_bytes += bytes;
+        if wire_bytes > 65_535 {
+            return false;
+        }
+        chunk_bytes += bytes;
+    }
+    true
+}
+
 /// Escape metadata and split it at UTF-8 character boundaries into adjacent
 /// TXT strings. Count decoded bytes, not master-file escape characters, so
 /// every string fits RFC 1035's one-octet length without dropping metadata.
@@ -1537,6 +1572,28 @@ mod dnsbl_txt;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise all new RDATA accounting branches in the unit-library object.
+    /// These are coverage controls; actual admission/export REDs are retained.
+    #[test]
+    fn dnsbl_unit_rdata_admission_and_publication_boundaries() {
+        let mut valid = AppData::seeded().dnsbl.remove(0);
+        valid.source = "unit".into();
+        valid.reason = "😀".repeat(16_315);
+        valid.ttl_seconds = 600;
+        let mut invalid = valid.clone();
+        invalid.reason.push('😀');
+        invalid.ttl_seconds = 1;
+        assert_eq!(validate_dnsbl(&valid), Ok(()));
+        assert_eq!(
+            validate_dnsbl(&invalid),
+            Err("DNSBL TXT metadata exceeds 65535 wire bytes")
+        );
+        let zone = export_dnsbl_zone("dnsbl.example", &[valid.clone(), invalid]);
+        assert_eq!(zone.lines().count(), 4);
+        assert!(zone.contains(" 600 IN A "));
+        dnsbl_txt::assert_zone_txt_valid(&zone);
+    }
 
     /// Exercise the validation matrix in the unit-test library instantiation,
     /// including existing non-TTL admission invariants and the new wire bound.

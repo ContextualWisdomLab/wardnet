@@ -46,7 +46,14 @@ TTL, missing-record and identity/metadata negatives. The same oracle checks
 ASCII origin labels of 1..=63 bytes and independently computes the encoded
 origin length, including label-length and root octets, with room for all four
 reversed IPv4 labels. Invalid origins use the existing `dnsbl.invalid` fallback;
-ordinary origin spelling and record evidence remain unchanged. Oracle negatives
+ordinary origin spelling and record evidence remain unchanged. TXT publication
+also bounds total RDATA to 65,535 decoded payload-plus-length octets; oversized
+persisted metadata is omitted from both record and owner-TTL projections. The
+independent oracle computes UTF-8 chunk endpoints from input and counts emitted
+length octets; stable boundary properties force near-limit metadata with a
+short valid shared-owner control. See `doctoring/dnsbl-txt-rdata-limits.md` for
+the actual admission/export/RR-serialization boundary and message-size limits.
+Oracle negatives
 are test-sensitivity checks, not proof that a fuzz campaign ran.
 
 ## Running locally

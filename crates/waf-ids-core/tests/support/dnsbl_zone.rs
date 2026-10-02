@@ -6,6 +6,23 @@ pub mod dnsbl_txt;
 use std::net::IpAddr;
 use waf_ids_core::DnsblEntry;
 
+/// Model UTF-8-safe chunking from input bytes without the production validator.
+/// The independently allocated payload is bounded by the test/fuzz input budget.
+pub fn metadata_fits_rdata(entry: &DnsblEntry) -> bool {
+    let payload = format!("{} source={}", entry.reason, entry.source);
+    let mut offset = 0;
+    let mut lengths = Vec::new();
+    while offset < payload.len() {
+        let mut end = (offset + 255).min(payload.len());
+        while !payload.is_char_boundary(end) {
+            end -= 1;
+        }
+        lengths.push(end - offset);
+        offset = end;
+    }
+    lengths.iter().map(|length| 1 + length).sum::<usize>() <= 65_535
+}
+
 /// Check the exported records against input evidence without calling production
 /// validation, address reversal or lifetime projection helpers. Expected TTLs
 /// use an independent linear scan per owner rather than the exporter's map.
@@ -15,6 +32,7 @@ pub fn assert_zone_matches_entries(zone: &str, entries: &[DnsblEntry]) {
         .iter()
         .filter(|entry| {
             entry.address.is_ipv4()
+                && metadata_fits_rdata(entry)
                 && (1..=2_147_483_647).contains(&entry.ttl_seconds)
                 && matches!(entry.code.parse::<IpAddr>(), Ok(IpAddr::V4(code)) if code.octets()[0] == 127)
         })

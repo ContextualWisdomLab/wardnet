@@ -140,6 +140,7 @@ fuzz_target!(|input: Input| {
         .iter()
         .filter(|e| {
             (1..=2_147_483_647).contains(&e.ttl_seconds)
+                && dnsbl_zone::metadata_fits_rdata(e)
                 && matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
         })
         .collect();

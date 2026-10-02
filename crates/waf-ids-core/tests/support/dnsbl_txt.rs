@@ -59,6 +59,10 @@ pub fn assert_zone_txt_valid(zone: &str) {
         if let Some((_, text)) = line.split_once(" IN TXT ") {
             let strings = decode_txt_rdata(text);
             assert!(strings.iter().all(|string| string.len() <= 255));
+            assert!(
+                strings.iter().map(|string| 1 + string.len()).sum::<usize>() <= 65_535,
+                "TXT RDATA exceeds the unsigned 16-bit RDLENGTH field"
+            );
         }
     }
 }
