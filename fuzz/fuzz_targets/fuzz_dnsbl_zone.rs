@@ -7,14 +7,17 @@
 //! strings flow into the generated zone. Generation must never panic, and
 //! `validate_dnsbl` must never panic while classifying arbitrary entries.
 //!
-//! Invariant: every TXT record payload is fully escaped — inside the quoted
-//! payload every `"` is backslash-escaped, so the zone can never be broken out
-//! of by adversarial reason/source strings.
+//! Invariant: every TXT record consists of valid escaped quoted strings with
+//! at most 255 decoded bytes each; concatenation preserves reason/source bytes.
+//! Quotes, backslashes and control characters cannot break out into zone lines.
+
+#[path = "../support/dnsbl_txt.rs"]
+mod dnsbl_txt;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use waf_ids_core::{export_dnsbl_zone, validate_dnsbl, DnsblEntry};
+use waf_ids_core::{DnsblEntry, export_dnsbl_zone, validate_dnsbl};
 
 /// A response code drawn from the raw fuzz bytes: arbitrary strings plus real IP
 /// literals (loopback, non-loopback IPv4, IPv6) so the zone A-record invariant
@@ -110,35 +113,22 @@ fuzz_target!(|input: Input| {
         }
     }
 
-    // Every TXT record payload must be properly escaped: inside the wrapping
-    // quotes, each `"` must be backslash-escaped. Extract the payload between
-    // the first and last quote of each TXT line and verify no *unescaped* quote
-    // survives (a quote is escaped iff preceded by an odd run of backslashes).
-    for line in zone.lines() {
-        if !line.contains(" IN TXT ") {
-            continue;
-        }
-        let first = line.find('"');
-        let last = line.rfind('"');
-        if let (Some(start), Some(end)) = (first, last) {
-            if end <= start {
-                continue;
-            }
-            let bytes = &line.as_bytes()[start + 1..end];
-            for (idx, &b) in bytes.iter().enumerate() {
-                if b == b'"' {
-                    let mut backslashes = 0usize;
-                    let mut j = idx;
-                    while j > 0 && bytes[j - 1] == b'\\' {
-                        backslashes += 1;
-                        j -= 1;
-                    }
-                    assert!(
-                        backslashes % 2 == 1,
-                        "unescaped quote in TXT payload: {line:?}"
-                    );
-                }
-            }
-        }
+    // Check every string, including chunk separators, with an independent
+    // decoder; require both wire-size legality and lossless metadata bytes.
+    dnsbl_txt::assert_zone_txt_valid(&zone);
+    let txt_lines: Vec<_> = zone
+        .lines()
+        .filter_map(|l| l.split_once(" IN TXT "))
+        .collect();
+    let expected: Vec<_> = entries
+        .iter()
+        .filter(|e| matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127))
+        .collect();
+    assert_eq!(txt_lines.len(), expected.len());
+    for ((_, text), entry) in txt_lines.iter().zip(expected) {
+        assert_eq!(
+            dnsbl_txt::decode_txt_rdata(text).concat(),
+            format!("{} source={}", entry.reason, entry.source).into_bytes()
+        );
     }
 });

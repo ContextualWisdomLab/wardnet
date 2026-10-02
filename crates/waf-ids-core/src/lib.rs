@@ -1393,6 +1393,9 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
     }
 }
 
+/// Export IPv4 DNSBL entries with loopback answers and lossless TXT metadata.
+/// Each TXT character string is at most 255 decoded UTF-8 bytes (RFC 1035
+/// sections 3.3 and 3.3.14); longer metadata uses adjacent quoted strings.
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
     for entry in entries {
@@ -1446,9 +1449,18 @@ pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
 }
 
+/// Escape metadata and split it at UTF-8 character boundaries into adjacent
+/// TXT strings. Count decoded bytes, not master-file escape characters, so
+/// every string fits RFC 1035's one-octet length without dropping metadata.
 fn escape_txt(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
+    let mut decoded_bytes = 0;
     for ch in value.chars() {
+        if decoded_bytes + ch.len_utf8() > 255 {
+            out.push_str("\" \"");
+            decoded_bytes = 0;
+        }
+        decoded_bytes += ch.len_utf8();
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
@@ -1467,6 +1479,10 @@ fn escape_txt(value: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "../tests/support/dnsbl_txt.rs"]
+mod dnsbl_txt;
 
 #[cfg(test)]
 mod tests {
@@ -1553,29 +1569,38 @@ mod tests {
         assert!(scored.score >= BLOCK_SCORE);
     }
 
-    /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
-    /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
-    /// so regressions in zone escaping fail as a plain unit test too.
+    /// Check quoted-string grammar and byte limits with the same independent
+    /// decoder used by the stable property tests and coverage-guided fuzzing.
     fn assert_txt_quotes_escaped(zone: &str) {
-        for line in zone.lines().filter(|l| l.contains(" IN TXT ")) {
-            let start = line.find('"').expect("TXT record has an opening quote");
-            let end = line.rfind('"').expect("TXT record has a closing quote");
-            let payload = &line.as_bytes()[start + 1..end];
-            for (idx, &b) in payload.iter().enumerate() {
-                if b == b'"' {
-                    let mut backslashes = 0usize;
-                    let mut j = idx;
-                    while j > 0 && payload[j - 1] == b'\\' {
-                        backslashes += 1;
-                        j -= 1;
-                    }
-                    assert!(
-                        backslashes % 2 == 1,
-                        "unescaped quote in TXT payload: {line:?}"
-                    );
-                }
-            }
-        }
+        crate::dnsbl_txt::assert_zone_txt_valid(zone);
+    }
+
+    #[test]
+    fn escape_long_txt_uses_valid_adjacent_strings() {
+        let value = format!("{}한🛡\\\"\n", "x".repeat(254));
+        let text = format!("\"{}\"", escape_txt(&value));
+        let strings = crate::dnsbl_txt::decode_txt_rdata(&text);
+        assert_eq!(strings[0].len(), 254);
+        assert_eq!(strings.concat(), value.as_bytes());
+        let ipv6 = DnsblEntry {
+            address: "2001:db8::1".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: value,
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+            prefix_len: None,
+        };
+        let zone = export_dnsbl_zone("dnsbl.example", &[ipv6]);
+        assert_eq!(zone, "$ORIGIN dnsbl.example.\n$TTL 300\n");
+    }
+
+    #[test]
+    fn escape_empty_txt_preserves_the_empty_character_string() {
+        assert_eq!(escape_txt(""), "");
+        assert_eq!(
+            crate::dnsbl_txt::decode_txt_rdata("\"\""),
+            [Vec::<u8>::new()]
+        );
     }
 
     #[test]

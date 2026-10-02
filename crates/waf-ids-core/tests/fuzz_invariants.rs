@@ -6,6 +6,9 @@
 //! without a nightly toolchain. The fuzz targets explore far deeper; these keep
 //! a fast, always-green signal.
 
+#[path = "support/dnsbl_txt.rs"]
+mod dnsbl_txt;
+
 use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr};
 use waf_ids_core::{
@@ -135,28 +138,15 @@ proptest! {
             }
         }
 
-        for line in zone.lines() {
-            if !line.contains(" IN TXT ") {
-                continue;
-            }
-            let (Some(start), Some(end)) = (line.find('"'), line.rfind('"')) else {
-                continue;
-            };
-            if end <= start {
-                continue;
-            }
-            let payload = &line.as_bytes()[start + 1..end];
-            for (idx, &b) in payload.iter().enumerate() {
-                if b == b'"' {
-                    let mut backslashes = 0usize;
-                    let mut j = idx;
-                    while j > 0 && payload[j - 1] == b'\\' {
-                        backslashes += 1;
-                        j -= 1;
-                    }
-                    prop_assert!(backslashes % 2 == 1, "unescaped quote in TXT payload");
-                }
-            }
+        dnsbl_txt::assert_zone_txt_valid(&zone);
+        let txt_lines: Vec<_> = zone.lines().filter_map(|l| l.split_once(" IN TXT ")).collect();
+        let expected: Vec<_> = entries.iter().filter(|e| {
+            matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
+        }).collect();
+        prop_assert_eq!(txt_lines.len(), expected.len());
+        for ((_, text), entry) in txt_lines.iter().zip(expected) {
+            let decoded = dnsbl_txt::decode_txt_rdata(text).concat();
+            prop_assert_eq!(decoded, format!("{} source={}", entry.reason, entry.source).into_bytes());
         }
     }
 }
