@@ -45,6 +45,43 @@ fn oracle_accepts_valid_shared_owner_minimum_and_default_ttl() {
     );
 }
 
+/// Reject unparseable origins with otherwise-valid records and metadata.
+#[test]
+fn oracle_rejects_unparseable_origin_names() {
+    // A 237-character origin plus the longest IPv4 owner fits exactly.
+    let valid_origin = [
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(45),
+    ]
+    .join(".");
+    dnsbl_zone::assert_zone_matches_entries(
+        &zone([60, 60]).replace("dnsbl.example.", &format!("{valid_origin}.")),
+        &entries(),
+    );
+    for origin in [
+        format!("{}.example", "a".repeat(64)),
+        "dnsbl..example".into(),
+        [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(46),
+        ]
+        .join("."),
+    ] {
+        let bad = zone([60, 60]).replace("dnsbl.example.", &format!("{origin}."));
+        assert!(
+            std::panic::catch_unwind(|| {
+                dnsbl_zone::assert_zone_matches_entries(&bad, &entries());
+            })
+            .is_err(),
+            "oracle admitted invalid origin: {origin}"
+        );
+    }
+}
+
 /// Reject malformed cache lifetimes while requiring valid controls to pass.
 #[test]
 fn oracle_rejects_wrong_or_inconsistent_cache_lifetimes() {

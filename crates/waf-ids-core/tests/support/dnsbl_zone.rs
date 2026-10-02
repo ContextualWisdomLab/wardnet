@@ -20,7 +20,21 @@ pub fn assert_zone_matches_entries(zone: &str, entries: &[DnsblEntry]) {
         })
         .collect();
     let mut lines = zone.lines();
-    assert!(lines.next().unwrap().starts_with("$ORIGIN "));
+    let origin = lines.next().unwrap().strip_prefix("$ORIGIN ").unwrap();
+    let labels: Vec<_> = origin.strip_suffix('.').unwrap().split('.').collect();
+    assert!(labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }));
+    // Calculate encoded label lengths independently of the sanitizer's text cap.
+    let origin_wire_bytes = 1 + labels.iter().map(|label| 1 + label.len()).sum::<usize>();
+    assert!(
+        origin_wire_bytes + 4 * (1 + 3) <= 255,
+        "origin cannot fit every IPv4 owner"
+    );
     assert_eq!(lines.next(), Some("$TTL 300"));
     let mut answers = Vec::new();
     let mut texts = Vec::new();

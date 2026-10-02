@@ -42,8 +42,12 @@ The stable shared-owner property always generates at least two publishable
 records with valid TTLs; metadata may still contain arbitrary or empty text.
 the fuzz harness retains its arbitrary-input pass and adds a bounded shared-owner
 positive projection. `dnsbl_zone_oracle.rs` pairs legal controls with malformed
-TTL, missing-record and identity/metadata negatives. These are test-sensitivity
-checks, not new production defects or proof that a fuzz campaign ran.
+TTL, missing-record and identity/metadata negatives. The same oracle checks
+ASCII origin labels of 1..=63 bytes and independently computes the encoded
+origin length, including label-length and root octets, with room for all four
+reversed IPv4 labels. Invalid origins use the existing `dnsbl.invalid` fallback;
+ordinary origin spelling and record evidence remain unchanged. Oracle negatives
+are test-sensitivity checks, not proof that a fuzz campaign ran.
 
 ## Running locally
 

@@ -1470,8 +1470,9 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
 /// of the generated zone file. A legitimate origin is a domain name, so only
 /// letters, digits, `-`, `_`, and `.` are kept; every other byte (newline,
 /// quote, space, control char) is dropped. Leading/trailing dots are trimmed
-/// because the caller re-appends the root dot. Empty input falls back to the
-/// RFC 6761 reserved `.invalid` TLD, which is guaranteed non-resolvable.
+/// because the caller re-appends the root dot. Empty labels, oversized labels
+/// or an origin that cannot fit every reversed IPv4 owner fall back to the
+/// RFC 6761 reserved `.invalid` TLD. Existing valid origin spelling is retained.
 fn sanitize_zone_origin(origin: &str) -> String {
     let filtered: String = origin
         .trim()
@@ -1479,7 +1480,15 @@ fn sanitize_zone_origin(origin: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         .collect();
     let trimmed = filtered.trim_matches('.');
-    if trimmed.is_empty() {
+    // A textual ASCII origin uses len + 2 wire octets (label lengths and
+    // root). Reserve 16 more for four maximum-length reversed IPv4 labels.
+    // RFC 1035 sections 2.3.4/3.1 cap the full owner at 255 wire octets.
+    if trimmed.is_empty()
+        || trimmed.len() > 237
+        || trimmed
+            .split('.')
+            .any(|label| label.is_empty() || label.len() > 63)
+    {
         "dnsbl.invalid".to_string()
     } else {
         trimmed.to_string()
