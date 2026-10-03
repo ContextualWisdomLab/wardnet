@@ -42,8 +42,7 @@ fn product_quality_ambition_is_not_a_customer_contract_threshold() {
 
 #[test]
 fn public_repository_surfaces_are_single_sourced_and_boundary_accurate() {
-    const DEEPWIKI_BADGE: &str =
-        "[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ContextualWisdomLab/wardnet)";
+    const DEEPWIKI_BADGE: &str = "[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ContextualWisdomLab/wardnet)";
 
     let readme = repo_file("README.md");
     let pages = repo_file("docs/index.md");
