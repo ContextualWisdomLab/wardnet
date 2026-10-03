@@ -1131,7 +1131,7 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
         .iter()
         .any(|feed| !feed.stale && (feed.threat_count > 0 || feed.dnsbl_count > 0));
     let route_ready = data.routes.iter().any(|route| route.enabled);
-    let dnsbl_ready = !data.dnsbl.is_empty();
+    let dnsbl_ready = data.dnsbl.iter().any(dnsbl_entry_is_publishable);
     let support_evidence_ready = !data.events.is_empty();
 
     let checks = vec![
@@ -1404,6 +1404,22 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
     }
 }
 
+/// Whether a stored DNSBL entry can produce an A/TXT RR in the exported zone.
+/// Kept in the domain crate so publication and commercial readiness share the
+/// actual wire-admission contract instead of counting arbitrary stored rows.
+fn dnsbl_entry_is_publishable(entry: &DnsblEntry) -> bool {
+    if !entry.address.is_ipv4()
+        || !(1..=DNSBL_MAX_TTL_SECONDS).contains(&entry.ttl_seconds)
+        || !dnsbl_txt_fits_wire(entry)
+    {
+        return false;
+    }
+    matches!(
+        IpAddr::from_str(&entry.code),
+        Ok(IpAddr::V4(code)) if code.octets()[0] == 127
+    )
+}
+
 /// Export IPv4 DNSBL entries with loopback answers and lossless TXT metadata.
 /// Each TXT character string is at most 255 decoded UTF-8 bytes (RFC 1035
 /// sections 3.3 and 3.3.14); longer metadata uses adjacent quoted strings.
@@ -1416,16 +1432,10 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     // without changing stored source evidence or depending on input order.
     let mut owner_ttls = std::collections::HashMap::<std::net::Ipv4Addr, u64>::new();
     for entry in entries {
-        let IpAddr::V4(address) = entry.address else {
+        if !dnsbl_entry_is_publishable(entry) {
             continue;
-        };
-        let Ok(IpAddr::V4(code)) = IpAddr::from_str(&entry.code) else {
-            continue;
-        };
-        if code.octets()[0] == 127
-            && (1..=DNSBL_MAX_TTL_SECONDS).contains(&entry.ttl_seconds)
-            && dnsbl_txt_fits_wire(entry)
-        {
+        }
+        if let IpAddr::V4(address) = entry.address {
             owner_ttls
                 .entry(address)
                 .and_modify(|ttl| *ttl = (*ttl).min(entry.ttl_seconds))
@@ -1433,12 +1443,8 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
         }
     }
     for entry in entries {
-        // Persisted input bypasses admission; omit invalid wire lifetimes and
-        // oversized metadata from both record and owner-lifetime projections.
-        if entry.ttl_seconds == 0
-            || entry.ttl_seconds > DNSBL_MAX_TTL_SECONDS
-            || !dnsbl_txt_fits_wire(entry)
-        {
+        // Persisted input bypasses admission; omit entries that cannot be emitted.
+        if !dnsbl_entry_is_publishable(entry) {
             continue;
         }
         if let IpAddr::V4(address) = entry.address {
