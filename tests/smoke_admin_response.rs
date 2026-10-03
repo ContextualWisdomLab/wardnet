@@ -51,6 +51,15 @@ impl Drop for FixtureDirectory {
 /// Replay a single response with a title-bearing first chunk and delayed tail.
 /// The bytes are the application's actual /admin body, not a replacement page.
 fn execute_check(body: Vec<u8>, status: u16, truncate: bool) -> (Output, FixtureDirectory) {
+    execute_check_with_request_delay(body, status, truncate, false)
+}
+
+fn execute_check_with_request_delay(
+    body: Vec<u8>,
+    status: u16,
+    truncate: bool,
+    delayed_request: bool,
+) -> (Output, FixtureDirectory) {
     let directory = FixtureDirectory::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -67,6 +76,9 @@ fn execute_check(body: Vec<u8>, status: u16, truncate: bool) -> (Output, Fixture
                 Err(error) => panic!("fixture accept failed: {error}"),
             }
         };
+        // macOS can retain the listener's nonblocking mode on accepted sockets.
+        // Acceptance does not mean HTTP bytes arrived; timed reads must wait.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -99,12 +111,63 @@ fn execute_check(body: Vec<u8>, status: u16, truncate: bool) -> (Output, Fixture
             let _ = stream.write_all(&body[split..]);
         }
     });
+    // A test-owned relay connects before forwarding the HTTP header, making
+    // the accepted-socket read mode observable without changing the curl check.
+    let mut relay = None;
+    let check_address = if delayed_request {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let relay_address = listener.local_addr().unwrap();
+        relay = Some(thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut downstream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "relay accept timed out");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("relay accept: {error}"),
+                }
+            };
+            downstream.set_nonblocking(false).unwrap();
+            downstream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            downstream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut upstream = std::net::TcpStream::connect(address).unwrap();
+            upstream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            upstream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            // The fixture polls accept every 5ms; no request bytes are sent
+            // until well after it accepts the new connection.
+            thread::sleep(Duration::from_millis(150));
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let size = downstream.read(&mut chunk).unwrap();
+                assert!(size > 0 && request.len() + size <= 4096);
+                request.extend_from_slice(&chunk[..size]);
+            }
+            if upstream.write_all(&request).is_ok() {
+                let _ = std::io::copy(&mut upstream, &mut downstream);
+            }
+        }));
+        relay_address
+    } else {
+        address
+    };
     let shell = format!("set -euo pipefail\n{}\n", actual_admin_check());
     let mut child = Command::new("bash")
         .args(["-c", &shell])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("BASE_URL", format!("http://{address}"))
+        .env("BASE_URL", format!("http://{check_address}"))
         .env("TMP_DIR", &directory.0)
         .env("NO_PROXY", "127.0.0.1")
         .stdout(Stdio::null())
@@ -122,7 +185,11 @@ fn execute_check(body: Vec<u8>, status: u16, truncate: bool) -> (Output, Fixture
         thread::sleep(Duration::from_millis(5));
     }
     let output = child.wait_with_output().unwrap();
-    server.join().unwrap();
+    let server_result = server.join();
+    if let Some(relay) = relay {
+        relay.join().unwrap();
+    }
+    server_result.unwrap();
     assert!(!timed_out, "smoke check exceeded owned diagnostic deadline");
     (output, directory)
 }
@@ -161,6 +228,16 @@ async fn admin_smoke_check_accepts_complete_delayed_production_response() {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// TCP connection establishment does not imply that HTTP header bytes arrived.
+#[test]
+fn admin_smoke_check_waits_for_delayed_request_headers() {
+    let body = format!("{TITLE}{}", "x".repeat(32_768)).into_bytes();
+    for (status, truncate, expected) in [(200, false, 0), (200, true, 18), (503, false, 22)] {
+        let (output, _) = execute_check_with_request_delay(body.clone(), status, truncate, true);
+        assert_eq!(output.status.code(), Some(expected));
+    }
 }
 
 #[test]

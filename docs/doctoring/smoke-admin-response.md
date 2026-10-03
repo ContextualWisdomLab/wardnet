@@ -42,6 +42,27 @@ local fixtures, not observed deployed failures. Fixture deadlines bound this
 regression; no global timeout, credential, provider, runner or protection
 setting is changed.
 
+## Accepted-socket fixture regression
+
+A subsequent committed-head workspace execution failed in the fixture's request
+read with `WouldBlock`, before any response was sent. The fixture used a
+nonblocking listener and assumed the accepted stream would block. An owned
+native macOS probe reproduced an immediate `WouldBlock` when a client connected
+before sending headers; explicitly switching the accepted stream to blocking
+mode allowed the same delayed request to be read within the existing timeout.
+This is a test-fixture defect, not a new gateway or curl response defect.
+
+The fixture now sets the accepted stream to blocking before applying its
+unchanged two-second read/write timeouts. A test-owned loopback relay holds
+request bytes for 150 ms after connecting, reproducing the original failure
+without changing the extracted shipped curl check. The repaired test retains
+complete-response success, truncated-response exit 18 and HTTP-error exit 22,
+and joins the relay and server threads before reporting failure. Existing
+accept and child deadlines remain in place; no global timeout is widened.
+The initial committed-head failure and deterministic delayed-header RED are
+retained separately from GREEN. No production shell or gateway change is
+part of this fixture repair.
+
 ## Ownership and acceptance boundary
 
 A historical alternative that buffers the complete response is already
