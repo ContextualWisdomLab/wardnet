@@ -1,5 +1,7 @@
 # WAF IDS AI SOC
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ContextualWisdomLab/wardnet)
+
 Rust-first gateway and SOC control-plane baseline for ContextualWisdomLab.
 
 The project starts small on purpose:
@@ -39,7 +41,7 @@ The 2B KRW sale readiness baseline means the runtime can prove a buyer-facing pi
 - `GET /api/commercial/evidence-manifest` returns the buyer-verifiable runtime, document, and deployment evidence map.
 - `GET /api/support-bundle` returns health, KPIs, license, readiness, and evidence counts without admin secrets.
 
-The formal acceptance criteria are in `docs/commercial/20b-krw-sale-readiness.md`.
+The customer-contract acceptance criteria are in `docs/commercial/2b-krw-customer-contract-readiness.md`. The separate USD 20 billion software-quality ambition is defined in `docs/commercial/usd-20b-product-quality-bar.md`; it is not a tenant contract-value threshold.
 
 The enterprise product package evidence is tracked in:
 

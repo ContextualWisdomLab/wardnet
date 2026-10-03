@@ -77,5 +77,7 @@ Read in `run_from_env` (`src/lib.rs`): `BIND_ADDR` (default `127.0.0.1:8080`), `
 
 - `docs/architecture.md` — component map, security boundaries, integration roadmap.
 - `docs/fuzzing.md` — fuzz target table and invariants.
-- `docs/commercial/20b-krw-sale-readiness.md` — formal acceptance criteria behind the commercial readiness APIs.
+- `docs/commercial/2b-krw-customer-contract-readiness.md` — customer-contract readiness acceptance criteria behind the existing commercial readiness APIs.
+- `docs/commercial/usd-20b-product-quality-bar.md` — separate USD 20 billion software-quality ambition; never use it as tenant contract-value authority.
+- `docs/commercial/20b-krw-sale-readiness.md` — compatibility path retained for published evidence-manifest references; not numeric authority.
 - `docs/runbooks/operations.md`, `docs/security/threat-model.md`.
