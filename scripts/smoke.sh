@@ -88,7 +88,10 @@ assert_json_field "$health" 'data["event_limit"] == 5'
 assert_json_field "$health" 'data["admin_auth_configured"] is True'
 assert_json_field "$health" 'data["auth_mode"] == "production"'
 
-curl -fsS "$BASE_URL/admin" | grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway"
+# Download the complete response before checking its content. With pipefail,
+# grep -q can close the pipe after an early match and make curl exit 23.
+curl -fsS "$BASE_URL/admin" -o "$TMP_DIR/admin.html"
+grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway" "$TMP_DIR/admin.html"
 
 unauthorized_code="$(
   curl -sS -o /dev/null -w '%{http_code}' \
