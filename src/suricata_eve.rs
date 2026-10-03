@@ -118,8 +118,9 @@ pub fn suricata_alert_from_value(value: &serde_json::Value) -> Option<SuricataIn
 /// Parse common Suricata EVE timestamp forms to Unix seconds (UTC).
 ///
 /// Accepts `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds and a
-/// trailing `Z`, `+0000`, or `+00:00` timezone. Other offsets are treated as UTC
-/// (lab ingest); unparseable values return `None`.
+/// trailing `Z`, `+HHMM`, or `+HH:MM` timezone (also negative offsets).
+/// Numeric offsets are subtracted from local time to obtain UTC. Timezone-less
+/// lab values retain UTC interpretation; malformed suffixes return `None`.
 pub fn parse_suricata_timestamp(raw: &str) -> Option<u64> {
     let s = raw.trim();
     if s.len() < 19 {
@@ -155,13 +156,55 @@ pub fn parse_suricata_timestamp(raw: &str) -> Option<u64> {
     {
         return None;
     }
-    days_from_civil(year, month, day).and_then(|days| {
-        let secs = i64::from(days) * 86_400
-            + i64::from(hour) * 3_600
-            + i64::from(minute) * 60
-            + i64::from(second);
-        u64::try_from(secs).ok()
-    })
+    let mut remainder = &s[19..];
+    if remainder.starts_with('.') {
+        remainder = &remainder[1..];
+        let fraction_len = remainder.bytes().take_while(u8::is_ascii_digit).count();
+        if fraction_len == 0 {
+            return None;
+        }
+        remainder = &remainder[fraction_len..];
+    }
+
+    let offset_seconds = if remainder.is_empty() || remainder == "Z" {
+        0_i64
+    } else {
+        let (sign, offset) = match remainder.as_bytes().first()? {
+            b'+' => (1_i64, &remainder[1..]),
+            b'-' => (-1_i64, &remainder[1..]),
+            _ => return None,
+        };
+        let (hours, minutes) = match offset.len() {
+            4 if offset.bytes().all(|byte| byte.is_ascii_digit()) => (
+                offset.get(0..2)?.parse::<u32>().ok()?,
+                offset.get(2..4)?.parse::<u32>().ok()?,
+            ),
+            5 if offset.as_bytes().get(2) == Some(&b':')
+                && offset
+                    .as_bytes()
+                    .iter()
+                    .enumerate()
+                    .all(|(index, byte)| index == 2 || byte.is_ascii_digit()) =>
+            {
+                (
+                    offset.get(0..2)?.parse::<u32>().ok()?,
+                    offset.get(3..5)?.parse::<u32>().ok()?,
+                )
+            }
+            _ => return None,
+        };
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        sign * (i64::from(hours) * 3_600 + i64::from(minutes) * 60)
+    };
+
+    let days = days_from_civil(year, month, day)?;
+    let local_seconds = i64::from(days) * 86_400
+        + i64::from(hour) * 3_600
+        + i64::from(minute) * 60
+        + i64::from(second);
+    u64::try_from(local_seconds.checked_sub(offset_seconds)?).ok()
 }
 
 /// Howard Hinnant civil-from-days inverse: days since Unix epoch for a UTC date.
@@ -299,6 +342,58 @@ mod tests {
         assert!(alert.reason.contains("Web Application Attack"));
         // 2024-06-15T12:34:56Z
         assert_eq!(alert.timestamp_unix, Some(1_718_454_896));
+    }
+
+    #[test]
+    fn numeric_offsets_preserve_the_utc_instant() {
+        for timestamp in [
+            "2024-06-15T12:34:56Z",
+            "2024-06-15T13:34:56.123456+0100",
+            "2024-06-15T21:34:56+09:00",
+            "2024-06-15T07:04:56-0530",
+            "2024-06-15T06:49:56.999-05:45",
+        ] {
+            assert_eq!(
+                parse_suricata_timestamp(timestamp),
+                Some(1_718_454_896),
+                "{timestamp}"
+            );
+        }
+        assert_eq!(
+            parse_suricata_timestamp("1970-01-01T01:00:00+0100"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_suricata_timestamp("1969-12-31T23:00:00-0100"),
+            Some(0)
+        );
+        assert_eq!(parse_suricata_timestamp("1970-01-01T00:00:00+0100"), None);
+    }
+
+    #[test]
+    fn malformed_timezone_suffixes_are_not_silently_utc() {
+        for suffix in [
+            "+2400",
+            "-00:60",
+            "+090",
+            "+09:0",
+            "+aa00",
+            "Zjunk",
+            ".Z",
+            ".abc+0100",
+            "💥",
+            "+0100trailing",
+        ] {
+            let timestamp = format!("2024-06-15T12:34:56{suffix}");
+            assert_eq!(parse_suricata_timestamp(&timestamp), None, "{timestamp}");
+        }
+        // Preserve the existing timezone-less lab contract and zero-offset forms.
+        for suffix in ["", ".123456", "Z", "+0000", "+00:00", "-0000", "-00:00"] {
+            assert_eq!(
+                parse_suricata_timestamp(&format!("2024-06-15T12:34:56{suffix}")),
+                Some(1_718_454_896)
+            );
+        }
     }
 
     #[test]
