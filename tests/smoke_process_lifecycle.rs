@@ -88,6 +88,11 @@ with tempfile.TemporaryDirectory(prefix='wardnet smoke lifecycle ', dir=scratch)
         'OWNED_CARGO_ARTIFACT': json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'waf-ids-ai-soc'}, 'executable': str(binary)}),
         'NO_PROXY': '127.0.0.1',
     }
+    if 'LLVM_PROFILE_FILE' in os.environ:
+        # Preserve only the profiler's output route, not ambient credentials or
+        # application configuration discarded by the fixture's allowlist.
+        env['LLVM_PROFILE_FILE'] = os.environ['LLVM_PROFILE_FILE']
+        assert env.get('LLVM_PROFILE_FILE') == os.environ['LLVM_PROFILE_FILE'], 'lifecycle fixture dropped coverage output routing'
     driver = prefix + '''
 start_server
 FIRST_PID="$SERVER_PID"

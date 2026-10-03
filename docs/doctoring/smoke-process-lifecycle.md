@@ -52,6 +52,15 @@ to be removed. Five offline artifact rejection controls require zero gateway
 execution. Diagnostic timeouts and process-group cleanup apply only to newly
 created fixture resources, never other owners or production services.
 
+Under instrumented test execution, the lifecycle fixture forwards only
+`LLVM_PROFILE_FILE` from its parent into the otherwise explicit child-environment
+allowlist. Without that route, the real gateway wrote default profiles outside
+the collector and its two executions were omitted. The fixture still discards
+ambient credentials and application configuration. A configured-route regression
+and a full instrumented workspace replay verify the route; test success alone
+is not proof of profile collection. Collection completeness does not raise or
+waive the original 100% coverage requirement.
+
 Unix SIGTERM/reaping behavior is covered by the Unix regression. Other platforms,
 hosted runner execution, arbitrary escaped descendants and a stalled graceful
 shutdown are not certified by this test. Passing smoke is not protected merge,
