@@ -1942,7 +1942,12 @@ fn apply_engine_enforcement_hints(
     let reason = {
         let trimmed = reason.trim();
         if trimmed.len() > 200 {
-            format!("{}…", &trimmed[..199])
+            // Keep the existing byte allowance, but never split a UTF-8 scalar.
+            let mut end = 199;
+            while !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &trimmed[..end])
         } else if trimmed.is_empty() {
             format!("{source} engine hit")
         } else {
@@ -5924,6 +5929,70 @@ mod tests {
             import_result.upserted_threats, 1,
             "only the non-operator-owned threat should count as upserted"
         );
+    }
+
+    /// Keep the original byte budget and fallback without UTF-8 slicing panics.
+    #[test]
+    fn engine_hint_reason_boundary_and_policy_controls() {
+        let ip = "192.0.2.201".parse().unwrap();
+        let cases = [
+            ("x".repeat(199), "x".repeat(199)),
+            ("x".repeat(200), "x".repeat(200)),
+            ("x".repeat(201), format!("{}…", "x".repeat(199))),
+            ("é".repeat(110), format!("{}…", "é".repeat(99))),
+            ("한".repeat(80), format!("{}…", "한".repeat(66))),
+            ("🛡".repeat(60), format!("{}…", "🛡".repeat(49))),
+            (
+                format!("{}é", "x".repeat(199)),
+                format!("{}…", "x".repeat(199)),
+            ),
+            ("  short 한  ".into(), "short 한".into()),
+            (" \n\t ".into(), "fixture engine hit".into()),
+        ];
+        for (input, expected) in cases {
+            let mut data = AppData::seeded();
+            assert_eq!(
+                apply_engine_enforcement_hints(
+                    &mut data,
+                    "fixture",
+                    "block",
+                    Some(ip),
+                    "/case?x=1",
+                    &input,
+                    80
+                ),
+                3
+            );
+            let entry = data
+                .dnsbl
+                .iter()
+                .find(|row| row.source == "fixture")
+                .unwrap();
+            assert_eq!(entry.reason, expected);
+            assert_eq!(entry.ttl_seconds, 3_600);
+            assert_eq!(entry.code, "127.0.0.2");
+            assert!(
+                entry.reason.len() <= 202,
+                "199 bytes plus three-byte ellipsis"
+            );
+        }
+        let mut data = AppData::seeded();
+        let original_dnsbl = data.dnsbl.clone();
+        let original_threats = data.threats.clone();
+        assert_eq!(
+            apply_engine_enforcement_hints(
+                &mut data,
+                "fixture",
+                "monitor",
+                Some(ip),
+                "/case",
+                &"한".repeat(80),
+                25
+            ),
+            0
+        );
+        assert_eq!(data.dnsbl, original_dnsbl);
+        assert_eq!(data.threats, original_threats);
     }
 
     #[tokio::test]
