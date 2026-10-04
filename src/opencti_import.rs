@@ -360,6 +360,9 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
                         .map(str::trim)
                         .filter(|s| !s.is_empty());
                     if let (Some(algorithm), Some(hash)) = (algorithm, hash) {
+                        if !valid_known_digest(algorithm, hash) {
+                            continue;
+                        }
                         threats.push(ThreatIndicator {
                             value: hash.to_ascii_lowercase(),
                             indicator_type: algorithm.to_ascii_lowercase(),
@@ -376,6 +379,9 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
                 let mut any = false;
                 for (algo, hash_val) in hashes {
                     if let Some(hash) = hash_val.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        if !valid_known_digest(algo, hash) {
+                            continue;
+                        }
                         threats.push(ThreatIndicator {
                             value: hash.to_ascii_lowercase(),
                             indicator_type: algo.to_ascii_lowercase(),
@@ -402,6 +408,9 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
             }
         }
         "md5" | "sha1" | "sha256" | "sha512" => {
+            if !valid_known_digest(&normalized_type, value) {
+                return NodeOutcome::Skipped;
+            }
             threats.push(ThreatIndicator {
                 value: value.to_ascii_lowercase(),
                 indicator_type: normalized_type,
@@ -474,6 +483,19 @@ fn is_plausible_domain(host: &str) -> bool {
     }
     host.bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+}
+
+// Only known fixed-length hexadecimal digests gain stricter admission.
+// Unknown algorithms retain the existing nonempty export-compatibility policy.
+fn valid_known_digest(algorithm: &str, value: &str) -> bool {
+    let length = match algorithm.trim().to_ascii_lowercase().as_str() {
+        "md5" => 32,
+        "sha1" | "sha-1" => 40,
+        "sha256" | "sha-256" => 64,
+        "sha512" | "sha-512" => 128,
+        _ => return true,
+    };
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn looks_like_hash(value: &str) -> bool {
