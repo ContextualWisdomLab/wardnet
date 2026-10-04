@@ -10,6 +10,7 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -17,6 +18,7 @@ use tower::ServiceExt;
 use waf_ids_ai_soc::{AppState, build_app};
 
 const TITLE: &str = "ContextualWisdomLab WAF/IDS/AI SOC Gateway";
+static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn actual_admin_check() -> &'static str {
     let script = include_str!("../scripts/smoke.sh");
@@ -29,16 +31,51 @@ struct FixtureDirectory(PathBuf);
 
 impl FixtureDirectory {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "wardnet smoke admin {} {}",
-            std::process::id(),
+        Self::new_at(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&path).unwrap();
-        Self(path)
+                .as_nanos(),
+        )
+    }
+
+    fn new_at(timestamp: u128) -> Self {
+        for _ in 0..16 {
+            let path = std::env::temp_dir().join(format!(
+                "wardnet smoke admin {} {} {}",
+                std::process::id(),
+                timestamp,
+                FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create exclusive admin fixture: {error}"),
+            }
+        }
+        panic!("exclusive admin fixture names exhausted");
+    }
+}
+
+#[test]
+fn equal_clock_admin_fixtures_have_independent_owned_directories() {
+    let fixtures: Vec<_> = (0..32).map(|_| FixtureDirectory::new_at(0)).collect();
+    let paths: std::collections::HashSet<_> =
+        fixtures.iter().map(|fixture| fixture.0.clone()).collect();
+    assert_eq!(paths.len(), fixtures.len());
+    for (index, fixture) in fixtures.iter().enumerate() {
+        std::fs::write(fixture.0.join("sentinel"), index.to_string()).unwrap();
+    }
+    let mut fixtures = fixtures;
+    let first = fixtures.remove(0);
+    let removed = first.0.clone();
+    drop(first);
+    assert!(!removed.exists());
+    for (index, fixture) in fixtures.iter().enumerate() {
+        assert_eq!(
+            std::fs::read_to_string(fixture.0.join("sentinel")).unwrap(),
+            (index + 1).to_string()
+        );
     }
 }
 

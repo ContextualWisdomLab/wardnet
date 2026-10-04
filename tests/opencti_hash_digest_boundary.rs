@@ -1,6 +1,7 @@
 //! Synthetic export documents exercise actual management, storage and gateway code.
 //! No live OpenCTI service, operator credentials or file malware scanning.
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -11,7 +12,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use waf_ids_ai_soc::{AppConfig, AppState, build_app};
+use waf_ids_ai_soc::{AdminPrincipal, AppConfig, AppState, build_app};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -348,6 +349,150 @@ async fn mixed_hash_rows_keep_valid_evidence_and_authorization_precedes_validati
 
 async fn app_after_reload(fixture: &StateFixture, token: &str) -> axum::Router {
     app(fixture, token).await
+}
+
+#[tokio::test]
+async fn every_digest_ingress_denies_wrong_and_readonly_tokens_before_digest_validation() {
+    for kind in ["direct", "array", "map"] {
+        let fixture = StateFixture::new();
+        let writer = format!("opencti-writer-fixture-{}", std::process::id());
+        let reader = format!("opencti-reader-fixture-{}", std::process::id());
+        let wrong = format!("opencti-wrong-fixture-{}", std::process::id());
+        drop(block_app(&fixture, &writer).await);
+        let state = AppState::load(AppConfig {
+            admin_token: None,
+            state_path: Some(fixture.path.clone()),
+            dnsbl_origin: "dnsbl.fixture".to_string(),
+            event_limit: 100,
+        })
+        .await
+        .unwrap()
+        .with_admin_tokens(HashMap::from([
+            (
+                writer.clone(),
+                AdminPrincipal {
+                    actor: "fixture-writer".into(),
+                    can_write: true,
+                },
+            ),
+            (
+                reader.clone(),
+                AdminPrincipal {
+                    actor: "fixture-reader".into(),
+                    can_write: false,
+                },
+            ),
+        ]));
+        let app = build_app(state);
+        assert_eq!(
+            read(&app, "/api/threats", &reader).await,
+            read(&app, "/api/threats", &writer).await
+        );
+        allowed_status(&app).await;
+        let before = snapshot(&app, &writer).await;
+        let bytes = fixture.bytes();
+        let valid = "AB".repeat(16);
+        for value in [valid.as_str(), "status"] {
+            let document = hash_document(kind, "MD5", value);
+            for (token, expected) in [
+                (None, StatusCode::UNAUTHORIZED),
+                (Some(wrong.as_str()), StatusCode::UNAUTHORIZED),
+                (Some(reader.as_str()), StatusCode::FORBIDDEN),
+            ] {
+                let (status, body) = import(&app, &document, token).await;
+                assert_eq!(status, expected, "{kind}/{value}");
+                let expected_error = if expected == StatusCode::FORBIDDEN {
+                    "X-Admin-Token is not authorized for management writes"
+                } else {
+                    "missing or invalid X-Admin-Token"
+                };
+                assert_eq!(body["error"], expected_error);
+                assert_eq!(snapshot(&app, &writer).await, before);
+                assert_eq!(fixture.bytes(), bytes);
+            }
+        }
+        let (status, _) = import(&app, &hash_document(kind, "MD5", "status"), Some(&writer)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(snapshot(&app, &writer).await, before);
+        assert_eq!(fixture.bytes(), bytes);
+        let (status, result) =
+            import(&app, &hash_document(kind, "MD5", &valid), Some(&writer)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(result["upserted_threats"], 1);
+        assert_eq!(result["upserted_dnsbl"], 0);
+        let rows = read(&app, "/api/threats", &reader).await;
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["source"] == "fixture:digest"
+                    && row["value"] == valid.to_ascii_lowercase())
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_known_digest_mapping_preserves_feed_metadata_and_rejection_after_reload() {
+    for kind in ["direct", "array", "map"] {
+        for (algorithm, length) in [("MD5", 32), ("SHA1", 40), ("SHA256", 64), ("SHA512", 128)] {
+            let fixture = StateFixture::new();
+            let token = format!("opencti-digest-fixture-{}", std::process::id());
+            let app = block_app(&fixture, &token).await;
+            let valid = "AB".repeat(length / 2);
+            let (status, result) = import(
+                &app,
+                &hash_document(kind, algorithm, &format!(" {valid} ")),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{kind}/{algorithm}");
+            assert_eq!(result["feed_id"], "digest-boundary");
+            assert_eq!(result["upserted_threats"], 1);
+            assert_eq!(result["upserted_dnsbl"], 0);
+            assert_eq!(result["skipped_objects"], 0);
+            assert!(result["last_updated_unix"].as_u64().unwrap() > 0);
+            let before = snapshot(&app, &token).await;
+            let rows: Vec<_> = before["threats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["source"] == "fixture:digest")
+                .collect();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["value"], valid.to_ascii_lowercase());
+            assert_eq!(rows[0]["indicator_type"], algorithm.to_ascii_lowercase());
+            assert_eq!(rows[0]["severity"], "critical");
+            assert_eq!(rows[0]["ttl_seconds"], 600);
+            let feeds: Vec<_> = before["feeds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["feed_id"] == "digest-boundary")
+                .collect();
+            assert_eq!(feeds.len(), 1);
+            assert_eq!(
+                feeds[0],
+                &json!({"feed_id": "digest-boundary", "source": "fixture:digest", "ttl_seconds": 600, "threat_count": 1, "dnsbl_count": 0, "last_updated_unix": result["last_updated_unix"]})
+            );
+            let bytes = fixture.bytes();
+            let reloaded = app_after_reload(&fixture, &token).await;
+            assert_eq!(snapshot(&reloaded, &token).await, before);
+            assert_eq!(fixture.bytes(), bytes);
+            let (status, _) = import(
+                &reloaded,
+                &hash_document(kind, algorithm, "status"),
+                Some(&token),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}/{algorithm}");
+            assert_eq!(snapshot(&reloaded, &token).await, before);
+            assert_eq!(fixture.bytes(), bytes);
+            let second_reload = app_after_reload(&fixture, &token).await;
+            assert_eq!(snapshot(&second_reload, &token).await, before);
+            assert_eq!(fixture.bytes(), bytes);
+            allowed_status(&second_reload).await;
+        }
+    }
 }
 
 #[tokio::test]

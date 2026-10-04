@@ -12,10 +12,12 @@ fn smoke_rejects_failed_or_ambiguous_cargo_artifact_discovery() {
             r#"
 import json, os, pathlib, subprocess, sys, tempfile
 script_path, scratch = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(script_path.parent.parent / 'tests' / 'support'))
+from smoke_subtree import owned_root, run as run_subtree
 script = script_path.read_text()
 prefix = script.split('\nstart_server\n', 1)[0]
 prefix = prefix.replace('ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"', 'ROOT_DIR="$OWNED_ROOT"')
-with tempfile.TemporaryDirectory(prefix='wardnet cargo artifact ', dir=scratch) as directory:
+with owned_root(prefix='wardnet cargo artifact ', dir=scratch) as directory:
     root = pathlib.Path(directory)
     tools = root / 'tools'; tools.mkdir()
     sentinel = tools / 'gateway'
@@ -36,8 +38,8 @@ with tempfile.TemporaryDirectory(prefix='wardnet cargo artifact ', dir=scratch) 
                'ARTIFACT_BYTES': payload, 'ARTIFACT_EXIT': str(exit_code),
                'EXECUTION_SENTINEL': str(root / 'executed')}
         driver = prefix + '\nstart_server\necho UNEXPECTED_START_SUCCESS\n'
-        result = subprocess.run(['bash', '-s'], input=driver.encode(), env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=6)
+        result = run_subtree(['bash', '-s'], input=driver.encode(), env=env,
+                             timeout=6, root=root)
         assert result.returncode != 0, (name, 'failed discovery passed')
         assert not (root / 'executed').exists(), (name, 'binary executed before build acceptance')
         assert b'UNEXPECTED_START_SUCCESS' not in result.stdout, name
@@ -51,6 +53,29 @@ with tempfile.TemporaryDirectory(prefix='wardnet cargo artifact ', dir=scratch) 
     assert!(
         output.status.success(),
         "artifact discovery contract failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn smoke_subtree_settlement_controls() {
+    let output = std::process::Command::new("python3")
+        .args([
+            "-B",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/test_smoke_subtree.py"
+            ),
+            "-v",
+        ])
+        .env("TMPDIR", std::env::temp_dir())
+        .output()
+        .expect("run native subtree settlement controls");
+    assert!(
+        output.status.success(),
+        "subtree controls failed: stdout={}, stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

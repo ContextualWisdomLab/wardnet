@@ -44,12 +44,24 @@ repository: direct MD5; explicit array; explicit map after the array was fixed.
 Each repair was followed by the same real Axum control. The direct case pairs
 invalid rejection with valid-digest acceptance and an explicit block route.
 
-Six integration tests additionally cover known lengths, short/long/nonhex/
+Eight integration tests additionally cover known lengths, short/long/nonhex/
 UTF-8/internal-space denials, hyphenated algorithm spelling, uppercase and outer
 whitespace normalization, unknown-algorithm compatibility, mixed valid evidence,
-unauthenticated denial, full management snapshot and persisted-byte nonmutation,
+unauthenticated denial, five management projections and persisted-byte nonmutation,
 normal gateway admission, and fresh application reload. Fixtures allocate
 exclusive owned directories and remove only those directories.
+
+The two follow-up tests characterize existing behavior; they do not repair a new
+production defect. For direct, explicit-array and explicit-map MD5 documents,
+missing and wrong tokens return HTTP401 and a read-only RBAC token returns
+HTTP403 for both valid and invalid digests. A read-only read and an authorized
+writer import provide positive controls. Every denial preserves the five
+management projections and complete persisted bytes. For each of those three
+input shapes with MD5/SHA1/SHA256/SHA512, fresh application loads preserve
+normalized digest metadata and the exact feed source, counts, TTL and timestamp.
+Invalid imports after reload preserve the same projections and persisted bytes
+through a second load. These are sequential observations, not concurrent-read
+or complete authentication-matrix guarantees.
 
 These are synthetic documents through actual parser, management API, persistence
 and gateway code. They are not live OpenCTI pull, deployed authentication, file

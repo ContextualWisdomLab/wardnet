@@ -196,8 +196,17 @@ fn parse_bracket_comparison(s: &str) -> Option<(String, String, usize)> {
     let eq = inner.find('=')?;
     let left = inner[..eq].trim();
     let right = inner[eq + 1..].trim();
-    let sco_type = left.split(':').next()?.trim();
-    if sco_type.is_empty() {
+    let (sco_type, property) = left.split_once(':')?;
+    let sco_type = sco_type.trim();
+    // Non-equality operators must not lose their meaning during projection.
+    if sco_type.is_empty()
+        || left.ends_with(['!', '<', '>'])
+        || right.starts_with('=')
+        || (matches!(
+            sco_type,
+            "ipv4-addr" | "ipv6-addr" | "domain-name" | "hostname" | "url"
+        ) && property.trim() != "value")
+    {
         return None;
     }
     let value = unquote_stix_string(right)?;
