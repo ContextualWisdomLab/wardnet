@@ -250,6 +250,7 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
                 "name": node.get("name").cloned().unwrap_or(serde_json::json!("opencti-indicator")),
                 "pattern": pattern,
                 "pattern_type": node.get("pattern_type").cloned().unwrap_or(serde_json::json!("stix")),
+                "revoked": node.get("revoked").cloned().unwrap_or(serde_json::json!(false)),
                 "valid_from": "1970-01-01T00:00:00Z",
                 "confidence": node.get("confidence")
                     .or_else(|| node.get("x_opencti_score"))

@@ -8,6 +8,7 @@ fn smoke_rejects_failed_or_ambiguous_cargo_artifact_discovery() {
 
     let output = Command::new("python3")
         .args([
+            "-B",
             "-c",
             r#"
 import json, os, pathlib, subprocess, sys, tempfile

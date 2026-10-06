@@ -56,6 +56,15 @@ pub fn stix_material_from_value(
             skipped_objects += 1;
             continue;
         }
+        // STIX 2.1 section 3.2: revoked objects are no longer valid for their creator.
+        // Only an absent or literal `false` value is admissible enforcement evidence.
+        if !matches!(
+            obj.get("revoked"),
+            None | Some(serde_json::Value::Bool(false))
+        ) {
+            skipped_objects += 1;
+            continue;
+        }
         let pattern = obj
             .get("pattern")
             .and_then(|p| p.as_str())
