@@ -33,7 +33,8 @@ pub use waf_ids_core::{
     NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
     SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
     ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus,
-    ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
+    ThreatIndicator, event_action_class, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl,
+    score_request,
 };
 
 mod coraza_audit;
@@ -1047,12 +1048,19 @@ async fn list_events(
 ) -> Json<Vec<SecurityEvent>> {
     let data = state.inner.read().await;
     let mut events: Vec<SecurityEvent> = match &query.action {
-        Some(action) => data
-            .events
-            .iter()
-            .filter(|event| &event.action == action)
-            .cloned()
-            .collect(),
+        Some(action) => {
+            // A known class matches both gateway and engine spellings; an
+            // unknown filter keeps exact-match semantics.
+            let wanted = event_action_class(action);
+            data.events
+                .iter()
+                .filter(|event| match wanted {
+                    Some(class) => event_action_class(&event.action) == Some(class),
+                    None => &event.action == action,
+                })
+                .cloned()
+                .collect()
+        }
         None => data.events.clone(),
     };
     if let Some(limit) = query.limit {

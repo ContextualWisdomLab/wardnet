@@ -1015,6 +1015,18 @@ pub fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
     kpi_snapshot_at(data, unix_now())
 }
 
+/// SOC outcome class of a recorded event action. Gateway decisions record
+/// `blocked`/`monitored`; the Suricata EVE and Coraza audit adapters keep the
+/// engine vocabulary `block`/`monitor`. Both spellings are one class, so KPIs,
+/// Prometheus gauges and triage filters count engine events as documented.
+pub fn event_action_class(action: &str) -> Option<&'static str> {
+    match action {
+        "blocked" | "block" => Some("blocked"),
+        "monitored" | "monitor" => Some("monitored"),
+        _ => None,
+    }
+}
+
 pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
     let feed_freshness = threat_feed_freshness_snapshot(&data.threat_feeds, now_unix);
     SocKpiSnapshot {
@@ -1028,12 +1040,12 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
         blocked_event_count: data
             .events
             .iter()
-            .filter(|event| event.action == "blocked")
+            .filter(|event| event_action_class(&event.action) == Some("blocked"))
             .count(),
         monitor_event_count: data
             .events
             .iter()
-            .filter(|event| event.action == "monitored")
+            .filter(|event| event_action_class(&event.action) == Some("monitored"))
             .count(),
         audit_log_count: data.audit_logs.len(),
         gateway_mode: "rust-first edge gateway program baseline".to_string(),
