@@ -1579,6 +1579,33 @@ mod dnsbl_txt;
 mod tests {
     use super::*;
 
+    /// Two publishable entries for the same IPv4 owner share one TTL per RRset
+    /// (RFC 2181 section 5.2): the shortest lifetime wins regardless of order.
+    #[test]
+    fn dnsbl_shared_owner_uses_shortest_ttl_in_both_orders() {
+        let mut long = AppData::seeded().dnsbl.remove(0);
+        long.address = "192.0.2.77".parse().unwrap();
+        long.ttl_seconds = 900;
+        long.source = "unit-long".into();
+        let mut short = long.clone();
+        short.ttl_seconds = 120;
+        short.source = "unit-short".into();
+        for entries in [[long.clone(), short.clone()], [short, long]] {
+            let zone = export_dnsbl_zone("dnsbl.example", &entries);
+            let owner_lines: Vec<_> = zone
+                .lines()
+                .filter(|line| line.starts_with("77.2.0.192 "))
+                .collect();
+            assert_eq!(owner_lines.len(), 4, "{zone}");
+            assert!(
+                owner_lines
+                    .iter()
+                    .all(|line| line.starts_with("77.2.0.192 120 IN ")),
+                "{zone}"
+            );
+        }
+    }
+
     /// Exercise all new RDATA accounting branches in the unit-library object.
     /// These are coverage controls; actual admission/export REDs are retained.
     #[test]

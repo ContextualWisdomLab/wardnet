@@ -19,6 +19,12 @@ class SettlementError(RuntimeError):
     """The caller must retain its fixture because settlement is unproved."""
 
 
+# Finite hang guards, sized for heavily loaded shared hosts. A 3 s `ps` probe
+# and 3 s settlement windows were observed to expire at load average ~170 on
+# 10 CPUs; a slow observation is not evidence of an escaped subtree.
+OBSERVE_TIMEOUT = 30
+SETTLE_SECONDS = 15
+
 # Keep the returned owner on uncertainty and refuse further fixture launches.
 _unresolved = []
 
@@ -40,7 +46,7 @@ def owned_root(*, prefix, dir):
 
 def members(group):
     output = subprocess.check_output(
-        ['ps', '-axo', 'pid,ppid,pgid'], text=True, timeout=3
+        ['ps', '-axo', 'pid,ppid,pgid'], text=True, timeout=OBSERVE_TIMEOUT
     )
     rows = []
     for line in output.splitlines()[1:]:
@@ -80,7 +86,7 @@ bash -s
 result=$?
 trap '' TERM
 printf '%s\\n' "$result" >&"$1"
-IFS= read -r -t 15 release <&"$2"
+IFS= read -r -t 60 release <&"$2"
 exit "$result"
 '''
         try:
@@ -108,7 +114,7 @@ exit "$result"
                     # The leader pins the group until release or escalation.
                     # There are no signals after the exact wait below.
                     os.killpg(child.pid, signal.SIGTERM)
-                    deadline = time.monotonic() + 3
+                    deadline = time.monotonic() + SETTLE_SECONDS
                     remaining = members(child.pid)
                     while any(pid != child.pid for pid in remaining) and time.monotonic() < deadline:
                         time.sleep(.01)
@@ -121,8 +127,8 @@ exit "$result"
                     cleanup_error = exc
                 # Signal/observation failure cannot skip an exact wait attempt.
                 try:
-                    child.wait(timeout=3)
-                    deadline = time.monotonic() + 3
+                    child.wait(timeout=SETTLE_SECONDS)
+                    deadline = time.monotonic() + SETTLE_SECONDS
                     while members(child.pid) and time.monotonic() < deadline:
                         time.sleep(.01)
                     if members(child.pid):

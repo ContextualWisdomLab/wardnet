@@ -39,8 +39,10 @@ with owned_root(prefix='wardnet cargo artifact ', dir=scratch) as directory:
                'ARTIFACT_BYTES': payload, 'ARTIFACT_EXIT': str(exit_code),
                'EXECUTION_SENTINEL': str(root / 'executed')}
         driver = prefix + '\nstart_server\necho UNEXPECTED_START_SUCCESS\n'
+        # Hang guard only: each case starts several python3 processes, and on a
+        # loaded host one case measured 3-7 s wall time, so 6 s was load-flaky.
         result = run_subtree(['bash', '-s'], input=driver.encode(), env=env,
-                             timeout=6, root=root)
+                             timeout=60, root=root)
         assert result.returncode != 0, (name, 'failed discovery passed')
         assert not (root / 'executed').exists(), (name, 'binary executed before build acceptance')
         assert b'UNEXPECTED_START_SUCCESS' not in result.stdout, name
