@@ -689,6 +689,81 @@ mod tests {
     }
 
     #[test]
+    fn maps_email_and_hash_observables_with_severity_boundaries() {
+        let md5 = "a".repeat(32);
+        let sha1 = "b".repeat(40);
+        let sha512 = "c".repeat(128);
+        let material = opencti_material_from_value(
+            &serde_json::json!({"entities": [
+                {"entity_type":"Email-Addr", "observable_value":" User@Example.COM ", "confidence":0},
+                {"entity_type":"SHA1", "observable_value":sha1, "confidence":25},
+                {"entity_type":"SHA512", "observable_value":sha512, "confidence":50},
+                {"entity_type":"StixFile", "observable_value":"ignored", "hashes":{"MD5":md5}, "confidence":75}
+            ]}),
+            "fixture",
+            60,
+        ).unwrap();
+        assert_eq!(material.skipped_objects, 0);
+        assert_eq!(material.threats.len(), 4);
+        assert!(material.threats.iter().any(|t| {
+            t.indicator_type == "email"
+                && t.value == "user@example.com"
+                && t.severity == Severity::Low
+        }));
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|t| { t.indicator_type == "sha1" && t.severity == Severity::Medium })
+        );
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|t| { t.indicator_type == "sha512" && t.severity == Severity::High })
+        );
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|t| { t.indicator_type == "md5" && t.severity == Severity::Critical })
+        );
+    }
+
+    #[test]
+    fn accepts_single_nodes_and_counts_malformed_graphql_edges() {
+        let single = opencti_material_from_value(
+            &serde_json::json!({
+                "entity_type":"Hostname",
+                "observable_value":"Host.Example",
+                "name":"single"
+            }),
+            "fixture",
+            60,
+        )
+        .unwrap();
+        assert_eq!(single.threats[0].value, "host.example");
+
+        let graph = opencti_material_from_value(
+            &serde_json::json!({"data":{"indicators":{"edges":[
+                {},
+                {"node":null},
+                {"node":{"entity_type":"Text","observable_value":"ignored"}},
+                {"node":{"entity_type":"IPv4-Addr","observable_value":"192.0.2.10"}}
+            ]}}}),
+            "fixture",
+            60,
+        )
+        .unwrap();
+        assert_eq!(graph.skipped_objects, 3);
+        assert_eq!(graph.dnsbl.len(), 1);
+        assert_eq!(
+            graph.dnsbl[0].address,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))
+        );
+    }
+
+    #[test]
     fn rejects_implausible_domains() {
         let raw = r#"[{"entity_type":"Domain-Name","observable_value":"a"}]"#;
         assert!(parse_opencti_document(raw, "s", 60).is_err());
