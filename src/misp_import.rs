@@ -499,6 +499,93 @@ mod tests {
     }
 
     #[test]
+    fn maps_response_list_loose_attributes_and_event_severity_boundaries() {
+        let material = misp_material_from_value(
+            &serde_json::json!({"response": [
+                {"type":"email-src","value":" User@Example.COM ","to_ids":true},
+                {"type":"uri","value":"https://example.test/a","to_ids":"true"},
+                {"type":"ip-src","value":"192.0.2.20","to_ids":1},
+                {"type":"unknown","value":"ignored","to_ids":true},
+                {"foo":"skipped"}
+            ]}),
+            "misp",
+            60,
+        )
+        .unwrap();
+        assert_eq!(material.skipped_attributes, 2);
+        assert!(material.threats.iter().any(|t| {
+            t.indicator_type == "email"
+                && t.value == "user@example.com"
+                && t.severity == Severity::Medium
+        }));
+        assert!(material.threats.iter().any(|t| t.indicator_type == "url"));
+        assert!(
+            material
+                .dnsbl
+                .iter()
+                .any(|d| d.address == IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)))
+        );
+
+        for (level, expected) in [
+            (1, Severity::Critical),
+            (2, Severity::High),
+            (3, Severity::Medium),
+            (4, Severity::Low),
+            (9, Severity::Low),
+        ] {
+            let event = serde_json::json!({
+                "id":"event", "info":"severity", "threat_level_id":level,
+                "Attribute":[{"type":"domain","value":"level.example","to_ids":true}]
+            });
+            let mapped = misp_material_from_value(&event, "misp", 60).unwrap();
+            assert_eq!(mapped.threats[0].severity, expected);
+        }
+    }
+
+    #[test]
+    fn maps_single_attributes_and_nested_objects_and_honors_to_ids_variants() {
+        let single = parse_misp_document(
+            r#"{"type":"email-dst","value":"DEST@Example.COM","to_ids":true}"#,
+            "misp",
+            60,
+        )
+        .unwrap();
+        assert_eq!(single.threats[0].value, "dest@example.com");
+
+        let nested = misp_material_from_value(
+            &serde_json::json!({"info":"objects","uuid":"event", "Object":[
+                {"Attribute":[
+                    {"type":"ip-dst|port","value":"198.51.100.8|8443","to_ids":"1"},
+                    {"type":"domain|ip","value":"nested.example|bad-ip","to_ids":true}
+                ]}
+            ]}),
+            "misp",
+            60,
+        )
+        .unwrap();
+        assert_eq!(nested.dnsbl.len(), 1);
+        assert_eq!(
+            nested
+                .threats
+                .iter()
+                .filter(|t| t.indicator_type == "domain")
+                .count(),
+            1
+        );
+        assert_eq!(nested.skipped_attributes, 0);
+
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!("0"),
+            serde_json::json!(0),
+        ] {
+            let doc = serde_json::json!({"type":"ip-src","value":"203.0.113.5","to_ids":value});
+            let mapped = misp_material_from_value(&doc, "misp", 60).unwrap_err();
+            assert!(mapped.contains("no MISP attributes"));
+        }
+    }
+
+    #[test]
     fn rejects_empty_and_non_misp() {
         assert!(parse_misp_document("", "s", 60).is_err());
         assert!(parse_misp_document("{\"foo\":1}", "s", 60).is_err());
