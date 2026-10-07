@@ -3782,6 +3782,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn phishing_database_empty_json_selects_valid_builtin_defaults() {
+        let request: PhishingDatabaseImportRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.feed_id, "phishing-database-active");
+        assert_eq!(
+            request.source,
+            "https://github.com/Phishing-Database/Phishing.Database"
+        );
+        assert_eq!(request.domain_url, PHISHING_DATABASE_DEFAULT_DOMAIN_URL);
+        assert_eq!(request.ip_url, PHISHING_DATABASE_DEFAULT_IP_URL);
+        assert_eq!(request.ttl_seconds, 3_600);
+        assert_eq!(request.domain_limit, 5_000);
+        assert_eq!(request.ip_limit, 5_000);
+        assert_eq!(request.severity, Severity::High);
+        assert!(request.import_domains);
+        assert!(request.import_ips);
+        assert!(!request.allow_non_default_hosts);
+        assert_eq!(validate_phishing_database_import_request(&request), Ok(()));
+
+        // Explicit false values must not be replaced by the true defaults.
+        let disabled: PhishingDatabaseImportRequest =
+            serde_json::from_str(r#"{"import_domains":false,"import_ips":false}"#).unwrap();
+        assert!(!disabled.import_domains);
+        assert!(!disabled.import_ips);
+        assert_eq!(
+            validate_phishing_database_import_request(&disabled),
+            Err("at least one of import_domains or import_ips must be true")
+        );
+    }
+
+    #[test]
+    fn kev_empty_json_selects_valid_builtin_defaults() {
+        let request: KevImportRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.feed_id, "cisa-kev");
+        assert_eq!(request.source, "feed:cisa-kev");
+        assert_eq!(request.ttl_seconds, 86_400);
+        assert_eq!(validate_kev_import_request(&request), Ok(()));
+
+        let zero_ttl: KevImportRequest = serde_json::from_str(r#"{"ttl_seconds":0}"#).unwrap();
+        assert_eq!(zero_ttl.ttl_seconds, 0);
+        assert_eq!(
+            validate_kev_import_request(&zero_ttl),
+            Err("ttl_seconds must be greater than zero")
+        );
+    }
+
     fn kev_import_request() -> KevImportRequest {
         KevImportRequest {
             feed_id: "cisa-kev-seoul".to_string(),
