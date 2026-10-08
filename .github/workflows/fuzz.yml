@@ -24,11 +24,14 @@ concurrency:
 jobs:
   fuzz:
     # One runner covers every bounded target; a matrix would consume four org slots.
-    runs-on: ubuntu-24.04
+    # Require operator-provisioned isolated CI; never privileged control/model hosts.
+    runs-on: [self-hosted, Linux, X64, cwlab-ci-isolated]
     env:
       FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '300' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly

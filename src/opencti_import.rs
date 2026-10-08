@@ -250,6 +250,7 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
                 "name": node.get("name").cloned().unwrap_or(serde_json::json!("opencti-indicator")),
                 "pattern": pattern,
                 "pattern_type": node.get("pattern_type").cloned().unwrap_or(serde_json::json!("stix")),
+                "revoked": node.get("revoked").cloned().unwrap_or(serde_json::json!(false)),
                 "valid_from": "1970-01-01T00:00:00Z",
                 "confidence": node.get("confidence")
                     .or_else(|| node.get("x_opencti_score"))
@@ -343,11 +344,45 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
             });
         }
         "file" | "stixfile" | "artifact" => {
-            // Prefer explicit hash fields when present.
-            if let Some(hashes) = node.get("hashes").and_then(|h| h.as_object()) {
+            // OpenCTI GraphQL uses [Hash { algorithm, hash }]; STIX/list
+            // exports may retain the existing algorithm-to-value object map.
+            // An explicit array is authoritative: never replace missing or
+            // malformed hash evidence with the observable's display value.
+            if let Some(hashes) = node.get("hashes").and_then(|h| h.as_array()) {
+                for item in hashes {
+                    let algorithm = item
+                        .get("algorithm")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let hash = item
+                        .get("hash")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    if let (Some(algorithm), Some(hash)) = (algorithm, hash) {
+                        if !valid_known_digest(algorithm, hash) {
+                            continue;
+                        }
+                        threats.push(ThreatIndicator {
+                            value: hash.to_ascii_lowercase(),
+                            indicator_type: algorithm.to_ascii_lowercase(),
+                            severity: severity.clone(),
+                            source: source.to_string(),
+                            ttl_seconds,
+                        });
+                    }
+                }
+                if threats.is_empty() {
+                    return NodeOutcome::Skipped;
+                }
+            } else if let Some(hashes) = node.get("hashes").and_then(|h| h.as_object()) {
                 let mut any = false;
                 for (algo, hash_val) in hashes {
                     if let Some(hash) = hash_val.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        if !valid_known_digest(algo, hash) {
+                            continue;
+                        }
                         threats.push(ThreatIndicator {
                             value: hash.to_ascii_lowercase(),
                             indicator_type: algo.to_ascii_lowercase(),
@@ -374,6 +409,9 @@ fn materialize_node(node: &serde_json::Value, source: &str, ttl_seconds: u64) ->
             }
         }
         "md5" | "sha1" | "sha256" | "sha512" => {
+            if !valid_known_digest(&normalized_type, value) {
+                return NodeOutcome::Skipped;
+            }
             threats.push(ThreatIndicator {
                 value: value.to_ascii_lowercase(),
                 indicator_type: normalized_type,
@@ -448,6 +486,19 @@ fn is_plausible_domain(host: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
 }
 
+// Only known fixed-length hexadecimal digests gain stricter admission.
+// Unknown algorithms retain the existing nonempty export-compatibility policy.
+fn valid_known_digest(algorithm: &str, value: &str) -> bool {
+    let length = match algorithm.trim().to_ascii_lowercase().as_str() {
+        "md5" => 32,
+        "sha1" | "sha-1" => 40,
+        "sha256" | "sha-256" => 64,
+        "sha512" | "sha-512" => 128,
+        _ => return true,
+    };
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn looks_like_hash(value: &str) -> bool {
     let len = value.len();
     matches!(len, 32 | 40 | 64 | 128) && value.bytes().all(|b| b.is_ascii_hexdigit())
@@ -467,6 +518,82 @@ fn guess_hash_type(value: &str) -> String {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    /// GraphQL file hashes carry algorithm/hash pairs, not a STIX hash map.
+    #[test]
+    fn maps_every_graphql_file_hash_without_using_display_value() {
+        let md5 = "AB".repeat(16);
+        let sha256 = "CD".repeat(32);
+        for display in [serde_json::json!(md5), serde_json::json!("sample.exe")] {
+            let node = serde_json::json!({
+                "entity_type": "StixFile",
+                "observable_value": display,
+                "hashes": [
+                    {"algorithm": "MD5", "hash": md5},
+                    {"algorithm": "SHA-256", "hash": sha256}
+                ],
+                "x_opencti_score": 80
+            });
+            let document = serde_json::json!({
+                "data": {"stixCyberObservables": {"edges": [{"node": node}]}}
+            });
+            let material = opencti_material_from_value(&document, "fixture", 600).unwrap();
+            assert_eq!(material.threats.len(), 2, "display value lost a file hash");
+            assert_eq!(material.threats[0].indicator_type, "md5");
+            assert_eq!(material.threats[0].value, md5.to_ascii_lowercase());
+            assert_eq!(material.threats[1].indicator_type, "sha-256");
+            assert_eq!(material.threats[1].value, sha256.to_ascii_lowercase());
+            assert!(material.threats.iter().all(|row| row.source == "fixture"
+                && row.ttl_seconds == 600
+                && row.severity == Severity::Critical));
+            assert!(material.dnsbl.is_empty());
+            assert_eq!(material.skipped_objects, 0);
+        }
+    }
+
+    /// Explicit GraphQL evidence must not fall back to a plausible display hash.
+    #[test]
+    fn skips_empty_or_malformed_graphql_hash_evidence() {
+        let display = "a".repeat(32);
+        for hashes in [
+            serde_json::json!([]),
+            serde_json::json!([null, {}, {"algorithm": "MD5", "hash": null},
+                {"algorithm": " ", "hash": display},
+                {"algorithm": "MD5", "hash": " "},
+                {"algorithm": 42, "hash": display}]),
+        ] {
+            let file = serde_json::json!({
+                "entity_type": "StixFile", "observable_value": display, "hashes": hashes
+            });
+            let valid = serde_json::json!({
+                "entity_type": "Domain-Name", "observable_value": "fixture.example"
+            });
+            let material = opencti_material_from_value(
+                &serde_json::json!({"entities": [file, valid]}),
+                "fixture",
+                600,
+            )
+            .unwrap();
+            assert_eq!(material.threats.len(), 1);
+            assert_eq!(material.threats[0].indicator_type, "domain");
+            assert_eq!(material.skipped_objects, 1);
+        }
+        let material = opencti_material_from_value(
+            &serde_json::json!({
+                "entity_type": "Artifact", "observable_value": "file.bin", "hashes": [
+                    null, {"algorithm": " SHA-256 ", "hash": format!(" {} ", "AB".repeat(32))},
+                    {"algorithm": "MD5", "hash": " "}
+                ]
+            }),
+            "fixture",
+            600,
+        )
+        .unwrap();
+        assert_eq!(material.threats.len(), 1);
+        assert_eq!(material.threats[0].indicator_type, "sha-256");
+        assert_eq!(material.threats[0].value, "ab".repeat(32));
+        assert_eq!(material.skipped_objects, 0);
+    }
 
     #[test]
     fn maps_graphql_observables() {
@@ -559,6 +686,81 @@ mod tests {
             60
         )
         .is_err());
+    }
+
+    #[test]
+    fn maps_email_and_hash_observables_with_severity_boundaries() {
+        let md5 = "a".repeat(32);
+        let sha1 = "b".repeat(40);
+        let sha512 = "c".repeat(128);
+        let material = opencti_material_from_value(
+            &serde_json::json!({"entities": [
+                {"entity_type":"Email-Addr", "observable_value":" User@Example.COM ", "confidence":0},
+                {"entity_type":"SHA1", "observable_value":sha1, "confidence":25},
+                {"entity_type":"SHA512", "observable_value":sha512, "confidence":50},
+                {"entity_type":"StixFile", "observable_value":"ignored", "hashes":{"MD5":md5}, "confidence":75}
+            ]}),
+            "fixture",
+            60,
+        ).unwrap();
+        assert_eq!(material.skipped_objects, 0);
+        assert_eq!(material.threats.len(), 4);
+        assert!(material.threats.iter().any(|t| {
+            t.indicator_type == "email"
+                && t.value == "user@example.com"
+                && t.severity == Severity::Low
+        }));
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|t| { t.indicator_type == "sha1" && t.severity == Severity::Medium })
+        );
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|t| { t.indicator_type == "sha512" && t.severity == Severity::High })
+        );
+        assert!(
+            material
+                .threats
+                .iter()
+                .any(|t| { t.indicator_type == "md5" && t.severity == Severity::Critical })
+        );
+    }
+
+    #[test]
+    fn accepts_single_nodes_and_counts_malformed_graphql_edges() {
+        let single = opencti_material_from_value(
+            &serde_json::json!({
+                "entity_type":"Hostname",
+                "observable_value":"Host.Example",
+                "name":"single"
+            }),
+            "fixture",
+            60,
+        )
+        .unwrap();
+        assert_eq!(single.threats[0].value, "host.example");
+
+        let graph = opencti_material_from_value(
+            &serde_json::json!({"data":{"indicators":{"edges":[
+                {},
+                {"node":null},
+                {"node":{"entity_type":"Text","observable_value":"ignored"}},
+                {"node":{"entity_type":"IPv4-Addr","observable_value":"192.0.2.10"}}
+            ]}}}),
+            "fixture",
+            60,
+        )
+        .unwrap();
+        assert_eq!(graph.skipped_objects, 3);
+        assert_eq!(graph.dnsbl.len(), 1);
+        assert_eq!(
+            graph.dnsbl[0].address,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))
+        );
     }
 
     #[test]

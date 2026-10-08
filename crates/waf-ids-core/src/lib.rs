@@ -5,6 +5,9 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BLOCK_SCORE: u16 = 50;
+// RFC 2181 section 8 permits TTLs from zero through 2^31 - 1; Wardnet
+// separately requires a nonzero lifetime at DNSBL admission.
+const DNSBL_MAX_TTL_SECONDS: u64 = 2_147_483_647;
 pub const TARGET_SALE_VALUE_KRW: u64 = 2_000_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -382,6 +385,8 @@ pub fn validate_threat(indicator: &ThreatIndicator) -> Result<(), &'static str> 
     Ok(())
 }
 
+/// Validate DNSBL metadata, address-family prefix, loopback answer and cache
+/// lifetime. Wardnet requires a positive TTL within RFC 2181's 31-bit range.
 pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     if entry.reason.trim().is_empty() {
         return Err("DNSBL reason is required");
@@ -389,8 +394,14 @@ pub fn validate_dnsbl(entry: &DnsblEntry) -> Result<(), &'static str> {
     if entry.source.trim().is_empty() {
         return Err("DNSBL source is required");
     }
+    if !dnsbl_txt_fits_wire(entry) {
+        return Err("DNSBL TXT metadata exceeds 65535 wire bytes");
+    }
     if entry.ttl_seconds == 0 {
         return Err("DNSBL ttl_seconds must be greater than 0");
+    }
+    if entry.ttl_seconds > DNSBL_MAX_TTL_SECONDS {
+        return Err("DNSBL ttl_seconds must not exceed 2147483647");
     }
     if let Some(prefix) = entry.prefix_len {
         let max = if entry.address.is_ipv4() { 32 } else { 128 };
@@ -1004,6 +1015,18 @@ pub fn kpi_snapshot(data: &AppData) -> SocKpiSnapshot {
     kpi_snapshot_at(data, unix_now())
 }
 
+/// SOC outcome class of a recorded event action. Gateway decisions record
+/// `blocked`/`monitored`; the Suricata EVE and Coraza audit adapters keep the
+/// engine vocabulary `block`/`monitor`. Both spellings are one class, so KPIs,
+/// Prometheus gauges and triage filters count engine events as documented.
+pub fn event_action_class(action: &str) -> Option<&'static str> {
+    match action {
+        "blocked" | "block" => Some("blocked"),
+        "monitored" | "monitor" => Some("monitored"),
+        _ => None,
+    }
+}
+
 pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
     let feed_freshness = threat_feed_freshness_snapshot(&data.threat_feeds, now_unix);
     SocKpiSnapshot {
@@ -1017,12 +1040,12 @@ pub fn kpi_snapshot_at(data: &AppData, now_unix: u64) -> SocKpiSnapshot {
         blocked_event_count: data
             .events
             .iter()
-            .filter(|event| event.action == "blocked")
+            .filter(|event| event_action_class(&event.action) == Some("blocked"))
             .count(),
         monitor_event_count: data
             .events
             .iter()
-            .filter(|event| event.action == "monitored")
+            .filter(|event| event_action_class(&event.action) == Some("monitored"))
             .count(),
         audit_log_count: data.audit_logs.len(),
         gateway_mode: "rust-first edge gateway program baseline".to_string(),
@@ -1120,7 +1143,7 @@ pub fn commercial_readiness_snapshot_at(data: &AppData, now_unix: u64) -> Commer
         .iter()
         .any(|feed| !feed.stale && (feed.threat_count > 0 || feed.dnsbl_count > 0));
     let route_ready = data.routes.iter().any(|route| route.enabled);
-    let dnsbl_ready = !data.dnsbl.is_empty();
+    let dnsbl_ready = data.dnsbl.iter().any(dnsbl_entry_is_publishable);
     let support_evidence_ready = !data.events.is_empty();
 
     let checks = vec![
@@ -1393,9 +1416,49 @@ pub fn readiness_check(id: &str, passed: bool, evidence: &str) -> ReadinessCheck
     }
 }
 
+/// Whether a stored DNSBL entry can produce an A/TXT RR in the exported zone.
+/// Kept in the domain crate so publication and commercial readiness share the
+/// actual wire-admission contract instead of counting arbitrary stored rows.
+fn dnsbl_entry_is_publishable(entry: &DnsblEntry) -> bool {
+    if !entry.address.is_ipv4()
+        || !(1..=DNSBL_MAX_TTL_SECONDS).contains(&entry.ttl_seconds)
+        || !dnsbl_txt_fits_wire(entry)
+    {
+        return false;
+    }
+    matches!(
+        IpAddr::from_str(&entry.code),
+        Ok(IpAddr::V4(code)) if code.octets()[0] == 127
+    )
+}
+
+/// Export IPv4 DNSBL entries with loopback answers and lossless TXT metadata.
+/// Each TXT character string is at most 255 decoded UTF-8 bytes (RFC 1035
+/// sections 3.3 and 3.3.14); longer metadata uses adjacent quoted strings.
+/// Valid entries sharing an IPv4 owner use their shortest TTL for both RRsets;
+/// persisted zero/out-of-range lifetimes are omitted rather than clamped.
 pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
     let mut out = format!("$ORIGIN {}.\n$TTL 300\n", sanitize_zone_origin(origin));
+    // Source-owned entries can share a published owner. RFC 2181 section 5.2
+    // requires one TTL per RRset; use the shortest valid published lifetime,
+    // without changing stored source evidence or depending on input order.
+    let mut owner_ttls = std::collections::HashMap::<std::net::Ipv4Addr, u64>::new();
     for entry in entries {
+        if !dnsbl_entry_is_publishable(entry) {
+            continue;
+        }
+        if let IpAddr::V4(address) = entry.address {
+            owner_ttls
+                .entry(address)
+                .and_modify(|ttl| *ttl = (*ttl).min(entry.ttl_seconds))
+                .or_insert(entry.ttl_seconds);
+        }
+    }
+    for entry in entries {
+        // Persisted input bypasses admission; omit entries that cannot be emitted.
+        if !dnsbl_entry_is_publishable(entry) {
+            continue;
+        }
         if let IpAddr::V4(address) = entry.address {
             // The response code is emitted as a bare, unquoted A-record token, so
             // it must be a valid IPv4 loopback literal (RFC 5782: DNSBL answers
@@ -1411,9 +1474,17 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
                 _ => continue,
             };
             let name = reverse_ipv4_for_dnsbl(address.octets());
-            out.push_str(&format!("{} IN A {}\n", name, code));
+            // Keep the existing 300-second representation byte-compatible, but
+            // publish other admitted cache lifetimes explicitly on both records.
+            let owner_ttl = owner_ttls[&address];
+            let ttl = if owner_ttl == 300 {
+                String::new()
+            } else {
+                format!("{owner_ttl} ")
+            };
+            out.push_str(&format!("{name} {ttl}IN A {code}\n"));
             out.push_str(&format!(
-                "{} IN TXT \"{}\"\n",
+                "{} {ttl}IN TXT \"{}\"\n",
                 name,
                 escape_txt(&format!("{} source={}", entry.reason, entry.source))
             ));
@@ -1426,8 +1497,9 @@ pub fn export_dnsbl_zone(origin: &str, entries: &[DnsblEntry]) -> String {
 /// of the generated zone file. A legitimate origin is a domain name, so only
 /// letters, digits, `-`, `_`, and `.` are kept; every other byte (newline,
 /// quote, space, control char) is dropped. Leading/trailing dots are trimmed
-/// because the caller re-appends the root dot. Empty input falls back to the
-/// RFC 6761 reserved `.invalid` TLD, which is guaranteed non-resolvable.
+/// because the caller re-appends the root dot. Empty labels, oversized labels
+/// or an origin that cannot fit every reversed IPv4 owner fall back to the
+/// RFC 6761 reserved `.invalid` TLD. Existing valid origin spelling is retained.
 fn sanitize_zone_origin(origin: &str) -> String {
     let filtered: String = origin
         .trim()
@@ -1435,7 +1507,15 @@ fn sanitize_zone_origin(origin: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         .collect();
     let trimmed = filtered.trim_matches('.');
-    if trimmed.is_empty() {
+    // A textual ASCII origin uses len + 2 wire octets (label lengths and
+    // root). Reserve 16 more for four maximum-length reversed IPv4 labels.
+    // RFC 1035 sections 2.3.4/3.1 cap the full owner at 255 wire octets.
+    if trimmed.is_empty()
+        || trimmed.len() > 237
+        || trimmed
+            .split('.')
+            .any(|label| label.is_empty() || label.len() > 63)
+    {
         "dnsbl.invalid".to_string()
     } else {
         trimmed.to_string()
@@ -1446,9 +1526,44 @@ pub fn reverse_ipv4_for_dnsbl(octets: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", octets[3], octets[2], octets[1], octets[0])
 }
 
+/// Check the complete TXT RDATA length without allocating an escaped copy.
+/// Include one length octet for each UTF-8-safe character string and stop at
+/// RFC 1035's unsigned 16-bit RDLENGTH ceiling. The separator is payload too.
+fn dnsbl_txt_fits_wire(entry: &DnsblEntry) -> bool {
+    let mut wire_bytes = 1usize;
+    let mut chunk_bytes = 0usize;
+    for ch in entry
+        .reason
+        .chars()
+        .chain(" source=".chars())
+        .chain(entry.source.chars())
+    {
+        let bytes = ch.len_utf8();
+        if chunk_bytes + bytes > 255 {
+            wire_bytes += 1;
+            chunk_bytes = 0;
+        }
+        wire_bytes += bytes;
+        if wire_bytes > 65_535 {
+            return false;
+        }
+        chunk_bytes += bytes;
+    }
+    true
+}
+
+/// Escape metadata and split it at UTF-8 character boundaries into adjacent
+/// TXT strings. Count decoded bytes, not master-file escape characters, so
+/// every string fits RFC 1035's one-octet length without dropping metadata.
 fn escape_txt(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
+    let mut decoded_bytes = 0;
     for ch in value.chars() {
+        if decoded_bytes + ch.len_utf8() > 255 {
+            out.push_str("\" \"");
+            decoded_bytes = 0;
+        }
+        decoded_bytes += ch.len_utf8();
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
@@ -1469,8 +1584,131 @@ fn escape_txt(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/dnsbl_txt.rs"]
+mod dnsbl_txt;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two publishable entries for the same IPv4 owner share one TTL per RRset
+    /// (RFC 2181 section 5.2): the shortest lifetime wins regardless of order.
+    #[test]
+    fn dnsbl_shared_owner_uses_shortest_ttl_in_both_orders() {
+        let mut long = AppData::seeded().dnsbl.remove(0);
+        long.address = "192.0.2.77".parse().unwrap();
+        long.ttl_seconds = 900;
+        long.source = "unit-long".into();
+        let mut short = long.clone();
+        short.ttl_seconds = 120;
+        short.source = "unit-short".into();
+        for entries in [[long.clone(), short.clone()], [short, long]] {
+            let zone = export_dnsbl_zone("dnsbl.example", &entries);
+            let owner_lines: Vec<_> = zone
+                .lines()
+                .filter(|line| line.starts_with("77.2.0.192 "))
+                .collect();
+            assert_eq!(owner_lines.len(), 4, "{zone}");
+            assert!(
+                owner_lines
+                    .iter()
+                    .all(|line| line.starts_with("77.2.0.192 120 IN ")),
+                "{zone}"
+            );
+        }
+    }
+
+    /// Exercise all new RDATA accounting branches in the unit-library object.
+    /// These are coverage controls; actual admission/export REDs are retained.
+    #[test]
+    fn dnsbl_unit_rdata_admission_and_publication_boundaries() {
+        let mut valid = AppData::seeded().dnsbl.remove(0);
+        valid.source = "unit".into();
+        valid.reason = "😀".repeat(16_315);
+        valid.ttl_seconds = 600;
+        let mut invalid = valid.clone();
+        invalid.reason.push('😀');
+        invalid.ttl_seconds = 1;
+        assert_eq!(validate_dnsbl(&valid), Ok(()));
+        assert_eq!(
+            validate_dnsbl(&invalid),
+            Err("DNSBL TXT metadata exceeds 65535 wire bytes")
+        );
+        let zone = export_dnsbl_zone("dnsbl.example", &[valid.clone(), invalid]);
+        assert_eq!(zone.lines().count(), 4);
+        assert!(zone.contains(" 600 IN A "));
+        dnsbl_txt::assert_zone_txt_valid(&zone);
+    }
+
+    /// Exercise the validation matrix in the unit-test library instantiation,
+    /// including existing non-TTL admission invariants and the new wire bound.
+    #[test]
+    fn dnsbl_admission_validates_metadata_prefix_code_and_ttl() {
+        let base = AppData::seeded().dnsbl.remove(0);
+        assert_eq!(validate_dnsbl(&base), Ok(()));
+        let mut cases = Vec::new();
+        let mut entry = base.clone();
+        entry.reason = " ".into();
+        cases.push((entry, "DNSBL reason is required"));
+        let mut entry = base.clone();
+        entry.source = " ".into();
+        cases.push((entry, "DNSBL source is required"));
+        let mut entry = base.clone();
+        entry.ttl_seconds = 0;
+        cases.push((entry, "DNSBL ttl_seconds must be greater than 0"));
+        let mut entry = base.clone();
+        entry.ttl_seconds = 2_147_483_648;
+        cases.push((entry, "DNSBL ttl_seconds must not exceed 2147483647"));
+        let mut entry = base.clone();
+        entry.prefix_len = Some(33);
+        cases.push((entry, "DNSBL prefix_len exceeds the address family width"));
+        for (code, error) in [
+            ("8.8.8.8", "DNSBL response code must be in 127.0.0.0/8"),
+            (
+                "::1",
+                "DNSBL response code must be an IPv4 loopback address",
+            ),
+            ("invalid", "DNSBL response code must be an IP address"),
+        ] {
+            let mut entry = base.clone();
+            entry.code = code.into();
+            cases.push((entry, error));
+        }
+        for (entry, error) in cases {
+            assert_eq!(validate_dnsbl(&entry), Err(error));
+        }
+        let mut v6 = base;
+        v6.address = "2001:db8::1".parse().unwrap();
+        v6.prefix_len = Some(128);
+        assert_eq!(validate_dnsbl(&v6), Ok(()));
+        v6.prefix_len = Some(129);
+        assert_eq!(
+            validate_dnsbl(&v6),
+            Err("DNSBL prefix_len exceeds the address family width")
+        );
+    }
+
+    /// Unit-library coverage control for duplicate-owner minimums, explicit
+    /// lifetimes and invalid persisted state. This is not another product RED.
+    #[test]
+    fn dnsbl_unit_publication_covers_shared_and_invalid_cache_lifetimes() {
+        let mut first = AppData::seeded().dnsbl.remove(0);
+        first.ttl_seconds = 600;
+        let mut second = first.clone();
+        second.ttl_seconds = 60;
+        second.source = "second-source".into();
+        let mut zero = first.clone();
+        zero.ttl_seconds = 0;
+        let mut too_large = first.clone();
+        too_large.ttl_seconds = u64::MAX;
+        let zone = export_dnsbl_zone("dnsbl.example", &[first, second, zero, too_large]);
+        assert_eq!(zone.lines().count(), 6);
+        assert!(
+            zone.lines()
+                .skip(2)
+                .all(|line| line.starts_with("10.113.0.203 60 IN "))
+        );
+    }
 
     #[test]
     fn score_request_matches_client_ip_threat_indicators() {
@@ -1553,29 +1791,38 @@ mod tests {
         assert!(scored.score >= BLOCK_SCORE);
     }
 
-    /// Assert every double quote inside a TXT payload is backslash-escaped, i.e.
-    /// preceded by an odd run of backslashes. Mirrors the fuzz/proptest invariant
-    /// so regressions in zone escaping fail as a plain unit test too.
+    /// Check quoted-string grammar and byte limits with the same independent
+    /// decoder used by the stable property tests and coverage-guided fuzzing.
     fn assert_txt_quotes_escaped(zone: &str) {
-        for line in zone.lines().filter(|l| l.contains(" IN TXT ")) {
-            let start = line.find('"').expect("TXT record has an opening quote");
-            let end = line.rfind('"').expect("TXT record has a closing quote");
-            let payload = &line.as_bytes()[start + 1..end];
-            for (idx, &b) in payload.iter().enumerate() {
-                if b == b'"' {
-                    let mut backslashes = 0usize;
-                    let mut j = idx;
-                    while j > 0 && payload[j - 1] == b'\\' {
-                        backslashes += 1;
-                        j -= 1;
-                    }
-                    assert!(
-                        backslashes % 2 == 1,
-                        "unescaped quote in TXT payload: {line:?}"
-                    );
-                }
-            }
-        }
+        crate::dnsbl_txt::assert_zone_txt_valid(zone);
+    }
+
+    #[test]
+    fn escape_long_txt_uses_valid_adjacent_strings() {
+        let value = format!("{}한🛡\\\"\n", "x".repeat(254));
+        let text = format!("\"{}\"", escape_txt(&value));
+        let strings = crate::dnsbl_txt::decode_txt_rdata(&text);
+        assert_eq!(strings[0].len(), 254);
+        assert_eq!(strings.concat(), value.as_bytes());
+        let ipv6 = DnsblEntry {
+            address: "2001:db8::1".parse().unwrap(),
+            code: "127.0.0.2".to_string(),
+            reason: value,
+            source: "unit".to_string(),
+            ttl_seconds: 300,
+            prefix_len: None,
+        };
+        let zone = export_dnsbl_zone("dnsbl.example", &[ipv6]);
+        assert_eq!(zone, "$ORIGIN dnsbl.example.\n$TTL 300\n");
+    }
+
+    #[test]
+    fn escape_empty_txt_preserves_the_empty_character_string() {
+        assert_eq!(escape_txt(""), "");
+        assert_eq!(
+            crate::dnsbl_txt::decode_txt_rdata("\"\""),
+            [Vec::<u8>::new()]
+        );
     }
 
     #[test]

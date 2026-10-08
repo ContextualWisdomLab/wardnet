@@ -6,6 +6,11 @@
 //! without a nightly toolchain. The fuzz targets explore far deeper; these keep
 //! a fast, always-green signal.
 
+#[path = "support/dnsbl_zone.rs"]
+mod dnsbl_zone;
+
+use dnsbl_zone::dnsbl_txt;
+
 use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr};
 use waf_ids_core::{
@@ -52,7 +57,7 @@ fn dnsbl_strategy() -> impl Strategy<Value = DnsblEntry> {
         dnsbl_code_strategy(),
         ".*",
         ".*",
-        any::<u64>(),
+        prop_oneof![any::<u64>(), 1u64..=2_147_483_647, Just(0), Just(300)],
     )
         .prop_map(|(addr, code, reason, source, ttl_seconds)| DnsblEntry {
             address: IpAddr::V4(Ipv4Addr::from(addr)),
@@ -97,8 +102,68 @@ proptest! {
         }
     }
 
-    // DNSBL classification and zone generation must never panic, and every TXT
-    // payload must be fully escaped (no unescaped double quote survives).
+    // Unlike the broad mixed-input property below, force 2..8 publishable
+    // records to share one owner, with independently varied positive TTLs and
+    // metadata. The test-only oracle independently checks minimum-per-owner TTL,
+    // A/TXT parity, record identity/order, and lossless reason/source bytes.
+    #[test]
+    fn dnsbl_zone_preserves_shared_owner_source_metadata_and_minimum_ttl(
+        address in any::<u32>(),
+        records in proptest::collection::vec((
+            1u64..=2_147_483_647,
+            ".{0,600}",
+            ".{0,120}",
+        ), 2..8),
+    ) {
+        let address = IpAddr::V4(Ipv4Addr::from(address));
+        let entries: Vec<_> = records
+            .into_iter()
+            .enumerate()
+            .map(|(index, (ttl_seconds, reason, source))| DnsblEntry {
+                address,
+                code: format!("127.0.0.{}", index + 1),
+                reason,
+                source,
+                ttl_seconds,
+                prefix_len: None,
+            })
+            .collect();
+        let original = entries.clone();
+        let zone = export_dnsbl_zone("dnsbl.example", &entries);
+        dnsbl_zone::assert_zone_matches_entries(&zone, &entries);
+        prop_assert_eq!(entries, original, "export must not mutate source-owned entries");
+    }
+
+    // Force aggregate RDATA boundary cases as well as the short arbitrary-input
+    // path. A low-TTL oversized sibling must not influence the valid owner.
+    #[test]
+    fn dnsbl_rdata_boundary_preserves_valid_shared_owner_projection(
+        address in any::<u32>(),
+        payload_bytes in 65_270usize..65_290,
+        scalar in prop::sample::select(vec!['x', '😀', '\n', '"', '\\']),
+    ) {
+        let mut entry = DnsblEntry {
+            address: IpAddr::V4(Ipv4Addr::from(address)),
+            code: "127.0.0.2".into(),
+            reason: format!("x{}", scalar.to_string().repeat((payload_bytes - 13) / scalar.len_utf8())),
+            source: "unit".into(),
+            ttl_seconds: 1,
+            prefix_len: None,
+        };
+        let mut valid = entry.clone();
+        valid.reason = "short-positive".into();
+        valid.ttl_seconds = 600;
+        // Metadata is nonblank, so admission must agree with the input oracle.
+        prop_assert_eq!(validate_dnsbl(&entry).is_ok(), dnsbl_zone::metadata_fits_rdata(&entry));
+        let zone = export_dnsbl_zone("dnsbl.example", &[valid.clone(), entry.clone()]);
+        dnsbl_zone::assert_zone_matches_entries(&zone, &[valid.clone(), entry.clone()]);
+        entry.reason.push(scalar);
+        let zone = export_dnsbl_zone("dnsbl.example", &[entry.clone(), valid.clone()]);
+        dnsbl_zone::assert_zone_matches_entries(&zone, &[entry, valid]);
+    }
+
+    // DNSBL classification and zone generation must never panic; TXT payloads
+    // must retain valid escaped strings and legal adjacent-string delimiters.
     #[test]
     fn dnsbl_zone_generation_escapes_and_never_panics(
         origin in ".*",
@@ -109,24 +174,19 @@ proptest! {
         }
         let zone = export_dnsbl_zone(&origin, &entries);
         prop_assert!(zone.starts_with("$ORIGIN "));
+        dnsbl_zone::assert_zone_matches_entries(&zone, &entries);
 
-        // Every published A-record response code is an IPv4 loopback literal
-        // (RFC 5782 / the "response code in 127.0.0.0/8" invariant); non-127/8
-        // or IPv6 codes must be dropped, never emitted. Parse by record structure
-        // (`<name> IN A <code>` = four whitespace fields) so a TXT line whose
-        // escaped reason/source payload contains the substring " IN A " is never
-        // misread as an A-record.
+        // Parse optional explicit TTL before class/type so TXT content cannot
+        // masquerade as an A record. Both record forms keep the 127/8 check.
         for line in zone.lines() {
-            let mut fields = line.split_whitespace();
-            let (Some(_name), Some("IN"), Some("A"), Some(code), None) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            ) else {
-                continue;
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let record = match fields.as_slice() {
+                [_name, "IN", "A", code] => Some((300, *code)),
+                [_name, ttl, "IN", "A", code] => Some((ttl.parse::<u64>().unwrap(), *code)),
+                _ => None,
             };
+            let Some((ttl, code)) = record else { continue };
+            prop_assert!((1..=2_147_483_647).contains(&ttl));
             match code.parse::<IpAddr>() {
                 Ok(IpAddr::V4(v4)) => {
                     prop_assert_eq!(v4.octets()[0], 127, "non-loopback A code: {}", code)
@@ -135,28 +195,17 @@ proptest! {
             }
         }
 
-        for line in zone.lines() {
-            if !line.contains(" IN TXT ") {
-                continue;
-            }
-            let (Some(start), Some(end)) = (line.find('"'), line.rfind('"')) else {
-                continue;
-            };
-            if end <= start {
-                continue;
-            }
-            let payload = &line.as_bytes()[start + 1..end];
-            for (idx, &b) in payload.iter().enumerate() {
-                if b == b'"' {
-                    let mut backslashes = 0usize;
-                    let mut j = idx;
-                    while j > 0 && payload[j - 1] == b'\\' {
-                        backslashes += 1;
-                        j -= 1;
-                    }
-                    prop_assert!(backslashes % 2 == 1, "unescaped quote in TXT payload");
-                }
-            }
+        dnsbl_txt::assert_zone_txt_valid(&zone);
+        let txt_lines: Vec<_> = zone.lines().filter_map(|l| l.split_once(" IN TXT ")).collect();
+        let expected: Vec<_> = entries.iter().filter(|e| {
+            (1..=2_147_483_647).contains(&e.ttl_seconds)
+                && dnsbl_zone::metadata_fits_rdata(e)
+                && matches!(e.code.parse::<IpAddr>(), Ok(IpAddr::V4(ip)) if ip.octets()[0] == 127)
+        }).collect();
+        prop_assert_eq!(txt_lines.len(), expected.len());
+        for ((_, text), entry) in txt_lines.iter().zip(expected) {
+            let decoded = dnsbl_txt::decode_txt_rdata(text).concat();
+            prop_assert_eq!(decoded, format!("{} source={}", entry.reason, entry.source).into_bytes());
         }
     }
 }

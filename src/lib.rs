@@ -33,7 +33,8 @@ pub use waf_ids_core::{
     NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
     SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
     ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus,
-    ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
+    ThreatIndicator, event_action_class, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl,
+    score_request,
 };
 
 mod coraza_audit;
@@ -1047,12 +1048,19 @@ async fn list_events(
 ) -> Json<Vec<SecurityEvent>> {
     let data = state.inner.read().await;
     let mut events: Vec<SecurityEvent> = match &query.action {
-        Some(action) => data
-            .events
-            .iter()
-            .filter(|event| &event.action == action)
-            .cloned()
-            .collect(),
+        Some(action) => {
+            // A known class matches both gateway and engine spellings; an
+            // unknown filter keeps exact-match semantics.
+            let wanted = event_action_class(action);
+            data.events
+                .iter()
+                .filter(|event| match wanted {
+                    Some(class) => event_action_class(&event.action) == Some(class),
+                    None => &event.action == action,
+                })
+                .cloned()
+                .collect()
+        }
         None => data.events.clone(),
     };
     if let Some(limit) = query.limit {
@@ -1942,7 +1950,12 @@ fn apply_engine_enforcement_hints(
     let reason = {
         let trimmed = reason.trim();
         if trimmed.len() > 200 {
-            format!("{}…", &trimmed[..199])
+            // Keep the existing byte allowance, but never split a UTF-8 scalar.
+            let mut end = 199;
+            while !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &trimmed[..end])
         } else if trimmed.is_empty() {
             format!("{source} engine hit")
         } else {
@@ -3767,6 +3780,52 @@ mod tests {
             import_ips: true,
             allow_non_default_hosts: true,
         }
+    }
+
+    #[test]
+    fn phishing_database_empty_json_selects_valid_builtin_defaults() {
+        let request: PhishingDatabaseImportRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.feed_id, "phishing-database-active");
+        assert_eq!(
+            request.source,
+            "https://github.com/Phishing-Database/Phishing.Database"
+        );
+        assert_eq!(request.domain_url, PHISHING_DATABASE_DEFAULT_DOMAIN_URL);
+        assert_eq!(request.ip_url, PHISHING_DATABASE_DEFAULT_IP_URL);
+        assert_eq!(request.ttl_seconds, 3_600);
+        assert_eq!(request.domain_limit, 5_000);
+        assert_eq!(request.ip_limit, 5_000);
+        assert_eq!(request.severity, Severity::High);
+        assert!(request.import_domains);
+        assert!(request.import_ips);
+        assert!(!request.allow_non_default_hosts);
+        assert_eq!(validate_phishing_database_import_request(&request), Ok(()));
+
+        // Explicit false values must not be replaced by the true defaults.
+        let disabled: PhishingDatabaseImportRequest =
+            serde_json::from_str(r#"{"import_domains":false,"import_ips":false}"#).unwrap();
+        assert!(!disabled.import_domains);
+        assert!(!disabled.import_ips);
+        assert_eq!(
+            validate_phishing_database_import_request(&disabled),
+            Err("at least one of import_domains or import_ips must be true")
+        );
+    }
+
+    #[test]
+    fn kev_empty_json_selects_valid_builtin_defaults() {
+        let request: KevImportRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.feed_id, "cisa-kev");
+        assert_eq!(request.source, "feed:cisa-kev");
+        assert_eq!(request.ttl_seconds, 86_400);
+        assert_eq!(validate_kev_import_request(&request), Ok(()));
+
+        let zero_ttl: KevImportRequest = serde_json::from_str(r#"{"ttl_seconds":0}"#).unwrap();
+        assert_eq!(zero_ttl.ttl_seconds, 0);
+        assert_eq!(
+            validate_kev_import_request(&zero_ttl),
+            Err("ttl_seconds must be greater than zero")
+        );
     }
 
     fn kev_import_request() -> KevImportRequest {
@@ -5924,6 +5983,70 @@ mod tests {
             import_result.upserted_threats, 1,
             "only the non-operator-owned threat should count as upserted"
         );
+    }
+
+    /// Keep the original byte budget and fallback without UTF-8 slicing panics.
+    #[test]
+    fn engine_hint_reason_boundary_and_policy_controls() {
+        let ip = "192.0.2.201".parse().unwrap();
+        let cases = [
+            ("x".repeat(199), "x".repeat(199)),
+            ("x".repeat(200), "x".repeat(200)),
+            ("x".repeat(201), format!("{}…", "x".repeat(199))),
+            ("é".repeat(110), format!("{}…", "é".repeat(99))),
+            ("한".repeat(80), format!("{}…", "한".repeat(66))),
+            ("🛡".repeat(60), format!("{}…", "🛡".repeat(49))),
+            (
+                format!("{}é", "x".repeat(199)),
+                format!("{}…", "x".repeat(199)),
+            ),
+            ("  short 한  ".into(), "short 한".into()),
+            (" \n\t ".into(), "fixture engine hit".into()),
+        ];
+        for (input, expected) in cases {
+            let mut data = AppData::seeded();
+            assert_eq!(
+                apply_engine_enforcement_hints(
+                    &mut data,
+                    "fixture",
+                    "block",
+                    Some(ip),
+                    "/case?x=1",
+                    &input,
+                    80
+                ),
+                3
+            );
+            let entry = data
+                .dnsbl
+                .iter()
+                .find(|row| row.source == "fixture")
+                .unwrap();
+            assert_eq!(entry.reason, expected);
+            assert_eq!(entry.ttl_seconds, 3_600);
+            assert_eq!(entry.code, "127.0.0.2");
+            assert!(
+                entry.reason.len() <= 202,
+                "199 bytes plus three-byte ellipsis"
+            );
+        }
+        let mut data = AppData::seeded();
+        let original_dnsbl = data.dnsbl.clone();
+        let original_threats = data.threats.clone();
+        assert_eq!(
+            apply_engine_enforcement_hints(
+                &mut data,
+                "fixture",
+                "monitor",
+                Some(ip),
+                "/case",
+                &"한".repeat(80),
+                25
+            ),
+            0
+        );
+        assert_eq!(data.dnsbl, original_dnsbl);
+        assert_eq!(data.threats, original_threats);
     }
 
     #[tokio::test]

@@ -267,6 +267,39 @@ mod tests {
     }
 
     #[test]
+    fn ndjson_skips_blank_lines_and_reports_invalid_line_number() {
+        let body = "{\"transaction\":{\"is_interrupted\":true}}\n\n  \n{\"transaction\":{\"is_interrupted\":true}}\n";
+        let parsed = parse_coraza_audit_body(body).unwrap();
+        assert_eq!(parsed.hits.len(), 2);
+        assert_eq!(parsed.skipped, 0);
+        let error = parse_coraza_audit_body("{\"a\":1}\n\nnot-json\n").unwrap_err();
+        assert!(
+            error.starts_with("invalid Coraza audit JSON on line 3:"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reason_and_message_fallbacks_are_stable() {
+        let hit = |raw: &str| coraza_hit_from_value(&serde_json::from_str(raw).unwrap()).unwrap();
+        // Rule id and severity directly on the message, empty text.
+        let only_id = hit(r#"{"messages":[{"id":941100,"severity":5}]}"#);
+        assert_eq!(only_id.reason, "coraza/crs: rule 941100");
+        assert_eq!(only_id.score, 25);
+        assert_eq!(only_id.action, "monitor");
+        assert_eq!(only_id.path, "coraza://transaction");
+        // Text from data.msg without a rule id.
+        let data_msg = hit(r#"{"messages":[{"data":{"msg":"Scanner detected","severity":0}}]}"#);
+        assert_eq!(data_msg.reason, "coraza/crs: Scanner detected");
+        assert_eq!(data_msg.score, 80);
+        assert_eq!(data_msg.action, "block");
+        // Text from a top-level msg on the message object.
+        let first_msg = hit(r#"{"messages":[{"data":{},"msg":"Generic hit"}]}"#);
+        assert_eq!(first_msg.reason, "coraza/crs: Generic hit");
+        assert_eq!(first_msg.score, 50);
+    }
+
+    #[test]
     fn rejects_empty_body() {
         assert!(parse_coraza_audit_body(" \n").is_err());
     }
