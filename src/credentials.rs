@@ -38,10 +38,20 @@ impl CredentialSource {
 
 /// In-process map of secret credentials. Values are never logged or serialized
 /// into health/support surfaces — only the source label is exposed.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CredentialRegistry {
     values: HashMap<String, String>,
     source: CredentialSource,
+}
+
+impl std::fmt::Debug for CredentialRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialRegistry")
+            .field("credential_count", &self.values.len())
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CredentialRegistry {

@@ -304,12 +304,27 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub admin_token: Option<String>,
     pub state_path: Option<PathBuf>,
     pub dnsbl_origin: String,
     pub event_limit: usize,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field(
+                "admin_token",
+                &self.admin_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("state_path", &self.state_path)
+            .field("dnsbl_origin", &self.dnsbl_origin)
+            .field("event_limit", &self.event_limit)
+            .finish()
+    }
 }
 
 impl AppConfig {
