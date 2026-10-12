@@ -5659,6 +5659,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kev_rejected_refresh_preserves_authoritative_snapshot() {
+        let catalogs = Arc::new(Mutex::new(vec![
+            serde_json::json!({"vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2021-44228", "knownRansomwareCampaignUse": "Known"}
+            ]})
+            .to_string(),
+            serde_json::json!({"vulnerabilities": [
+                {"cveID": "CVE-2023-49105"},
+                {"cveID": "not-a-cve"}
+            ]})
+            .to_string(),
+        ]));
+        let remaining_catalogs = catalogs.clone();
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let catalogs = catalogs.clone();
+                async move { (StatusCode::OK, catalogs.lock().await.remove(0)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, feed_mock)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_kev_catalog_url(format!("http://{addr}/kev.json"));
+        let app = build_app(state.clone());
+        let payload = kev_import_request();
+        let first = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = body_text(first).await;
+        let before = serde_json::to_value(&*state.inner.read().await).unwrap();
+        let second = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        let second_status = second.status();
+        let second_body = body_text(second).await;
+        let after = serde_json::to_value(&*state.inner.read().await).unwrap();
+        let remaining = remaining_catalogs.lock().await.len();
+        stop.send(()).unwrap();
+        server.await.unwrap();
+
+        assert_eq!(first_status, StatusCode::CREATED, "{first_body}");
+        let threats = before["threats"].as_array().unwrap();
+        assert!(threats.iter().any(|t| t["value"] == "CVE-2023-49105"));
+        assert!(threats.iter().any(|t| t["value"] == "CVE-2021-44228"));
+        assert!(
+            before["audit_logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["action"] == "import_kev_feed")
+        );
+        assert_eq!(second_status, StatusCode::BAD_GATEWAY, "{second_body}");
+        assert!(second_body.contains("mostly unparsable"));
+        assert_eq!(remaining, 0, "both mock catalogs must have been fetched");
+        assert_eq!(
+            after, before,
+            "rejected refresh must preserve the complete stored state"
+        );
+    }
+
+    #[tokio::test]
     async fn feed_refresh_preserves_indicators_still_owned_by_another_feed() {
         // Two independently-managed feeds can legitimately report the same
         // indicator_type+value+source. Refreshing one feed without it must
