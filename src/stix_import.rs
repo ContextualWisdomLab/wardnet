@@ -307,6 +307,43 @@ mod tests {
     }
 
     #[test]
+    fn literal_quote_boundaries_reject_dangling_quotes_and_preserve_valid_values() {
+        for literal in [
+            "'fixture.example",
+            "\"fixture.example",
+            "fixture.example'",
+            "fixture.example\"",
+            "'",
+            "\"",
+            "'fixture.example\"",
+            "\"fixture.example'",
+        ] {
+            let pattern = format!("[domain-name:value = {literal}]");
+            let document = serde_json::json!({"type":"indicator", "pattern":pattern});
+            assert!(
+                stix_material_from_value(&document, "fixture", 600).is_err(),
+                "unexpectedly accepted {literal}"
+            );
+        }
+        for literal in [
+            "'Fixture.Example'",
+            "\"Fixture.Example\"",
+            "Fixture.Example",
+        ] {
+            let pattern = format!("[domain-name:value = {literal}]");
+            let document = serde_json::json!({"type":"indicator", "pattern":pattern});
+            let material = stix_material_from_value(&document, "fixture", 600).unwrap();
+            assert_eq!(material.threats.len(), 1);
+            assert_eq!(material.threats[0].value, "fixture.example");
+            assert_eq!(material.threats[0].indicator_type, "domain");
+            assert_eq!(material.threats[0].source, "fixture");
+            assert_eq!(material.threats[0].ttl_seconds, 600);
+            assert_eq!(material.skipped_objects, 0);
+            assert!(material.dnsbl.is_empty());
+        }
+    }
+
+    #[test]
     fn extracts_url_pattern() {
         let pattern = "[url:value = 'http://evil.example/login']";
         let pairs = extract_pattern_observables(pattern);
