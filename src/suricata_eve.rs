@@ -149,7 +149,7 @@ pub fn parse_suricata_timestamp(raw: &str) -> Option<u64> {
     }
     let second: u32 = s.get(17..19)?.parse().ok()?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || !(1..=days_in_month(year, month)).contains(&day)
         || hour > 23
         || minute > 59
         || second > 60
@@ -205,6 +205,16 @@ pub fn parse_suricata_timestamp(raw: &str) -> Option<u64> {
         + i64::from(minute) * 60
         + i64::from(second);
     u64::try_from(local_seconds.checked_sub(offset_seconds)?).ok()
+}
+
+/// Number of days in a proleptic Gregorian month (`month` already in 1..=12).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 31,
+    }
 }
 
 /// Howard Hinnant civil-from-days inverse: days since Unix epoch for a UTC date.
@@ -393,6 +403,44 @@ mod tests {
                 parse_suricata_timestamp(&format!("2024-06-15T12:34:56{suffix}")),
                 Some(1_718_454_896)
             );
+        }
+    }
+
+    #[test]
+    fn impossible_calendar_dates_are_not_rolled_into_another_day() {
+        for timestamp in [
+            "2024-02-30T12:34:56Z",
+            "2023-02-29T12:34:56Z",
+            "1900-02-29T12:34:56Z",
+            "2024-04-31T12:34:56Z",
+            "2024-06-31T12:34:56+09:00",
+            "2024-11-31 12:34:56",
+        ] {
+            assert_eq!(parse_suricata_timestamp(timestamp), None, "{timestamp}");
+        }
+        assert_eq!(
+            parse_suricata_timestamp("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800)
+        );
+        assert_eq!(
+            parse_suricata_timestamp("2000-02-29T00:00:00Z"),
+            Some(951_782_400)
+        );
+        assert_eq!(
+            parse_suricata_timestamp("2024-12-31T23:59:59Z"),
+            Some(1_735_689_599)
+        );
+        for timestamp in [
+            "2024/06-15T12:34:56Z",
+            "2024-06/15T12:34:56Z",
+            "2024-06-15X12:34:56Z",
+            "2024-06-15T12-34:56Z",
+            "2024-06-15T12:34-56Z",
+            "2024-13-15T12:34:56Z",
+            "2024-06-00T12:34:56Z",
+            "2024-06-15T24:00:00Z",
+        ] {
+            assert_eq!(parse_suricata_timestamp(timestamp), None, "{timestamp}");
         }
     }
 
