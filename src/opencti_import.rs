@@ -552,6 +552,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn maps_file_display_hashes_only_when_fixed_length_hex() {
+        for (length, expected_type) in [(32, "md5"), (40, "sha1"), (64, "sha256"), (128, "sha512")]
+        {
+            let digest = "AB".repeat(length / 2);
+            for hashes in [None, Some(serde_json::Value::Null)] {
+                let mut node = serde_json::json!({
+                    "entity_type": "StixFile",
+                    "observable_value": digest,
+                    "x_opencti_score": 80
+                });
+                if let Some(hashes) = hashes {
+                    node["hashes"] = hashes;
+                }
+                let material = opencti_material_from_value(
+                    &serde_json::json!({"entities": [node]}),
+                    "fixture",
+                    600,
+                )
+                .unwrap();
+                assert_eq!(material.threats.len(), 1);
+                assert_eq!(material.threats[0].indicator_type, expected_type);
+                assert_eq!(material.threats[0].value, digest.to_ascii_lowercase());
+                assert_eq!(material.threats[0].severity, Severity::Critical);
+                assert_eq!(material.threats[0].source, "fixture");
+                assert_eq!(material.threats[0].ttl_seconds, 600);
+                assert!(material.dnsbl.is_empty());
+                assert_eq!(material.skipped_objects, 0);
+            }
+        }
+
+        for display in ["sample.exe".to_string(), "g".repeat(64), "a".repeat(63)] {
+            let document = serde_json::json!({"entities": [{
+                "entity_type": "StixFile",
+                "observable_value": display
+            }]});
+            assert!(opencti_material_from_value(&document, "fixture", 600).is_err());
+        }
+    }
+
     /// Explicit GraphQL evidence must not fall back to a plausible display hash.
     #[test]
     fn skips_empty_or_malformed_graphql_hash_evidence() {
