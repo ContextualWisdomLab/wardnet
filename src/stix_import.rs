@@ -229,12 +229,20 @@ fn unquote_stix_string(s: &str) -> Option<String> {
     let s = s.trim();
     if s.len() >= 2 {
         let b = s.as_bytes();
-        if (b[0] == b'\'' && b[s.len() - 1] == b'\'') || (b[0] == b'"' && b[s.len() - 1] == b'"') {
-            return Some(s[1..s.len() - 1].to_string());
+        let starts_single = b[0] == b'\'';
+        let starts_double = b[0] == b'"';
+        if starts_single || starts_double {
+            let matching = (starts_single && b[s.len() - 1] == b'\'')
+                || (starts_double && b[s.len() - 1] == b'"');
+            return matching.then(|| s[1..s.len() - 1].to_string());
         }
     }
-    // Unquoted token (rare)
-    if !s.is_empty() && !s.contains(char::is_whitespace) {
+    // Unquoted token (rare), but reject a dangling quote rather than treating it as data.
+    if !s.is_empty()
+        && !s.contains(char::is_whitespace)
+        && !s.starts_with(['\'', '"'])
+        && !s.ends_with(['\'', '"'])
+    {
         return Some(s.to_string());
     }
     None
@@ -375,6 +383,8 @@ mod tests {
             "[ipv4-addr:value != '192.0.2.1']",
             "[ipv4-addr:value >= '192.0.2.1']",
             "[ipv4-addr:value = '']",
+            "[domain-name:value = 'evil.example\"]",
+            "[domain-name:value = \"evil.example']",
             "no bracket comparison",
         ] {
             let value = serde_json::json!({"type":"indicator","pattern":pattern});
