@@ -4,6 +4,7 @@
 //! [`DnsblEntry`] rows:
 //! - GraphQL-style `data.stixCyberObservables.edges[].node`
 //! - GraphQL-style `data.indicators.edges[].node` (STIX pattern or value)
+//! - GraphQL-style `data.stixDomainObjects.edges[].node`
 //! - Flat arrays / `{ "entities": [...] }` list exports
 //! - STIX 2.x bundles (delegated to the STIX importer)
 //!
@@ -761,6 +762,34 @@ mod tests {
             graph.dnsbl[0].address,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))
         );
+    }
+
+    #[test]
+    fn maps_graphql_stix_domain_object_connection() {
+        let graph = opencti_material_from_value(
+            &serde_json::json!({"data":{"stixDomainObjects":{"edges":[
+                {"node":{"entity_type":"Domain-Name","observable_value":"Domain.Example"}}
+            ]}}}),
+            "fixture",
+            60,
+        )
+        .unwrap();
+        assert_eq!(graph.threats.len(), 1);
+        assert_eq!(graph.threats[0].indicator_type, "domain");
+        assert_eq!(graph.threats[0].value, "domain.example");
+        assert!(graph.dnsbl.is_empty());
+        assert_eq!(graph.skipped_objects, 0);
+
+        let unusable = opencti_material_from_value(
+            &serde_json::json!({"data":{"stixDomainObjects":{"edges":[
+                {},
+                {"node":{"entity_type":"Text","observable_value":"ignored"}}
+            ]}}}),
+            "fixture",
+            60,
+        )
+        .unwrap_err();
+        assert!(unusable.starts_with("no OpenCTI observables/indicators could be mapped"));
     }
 
     #[test]
