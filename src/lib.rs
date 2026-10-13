@@ -33,7 +33,8 @@ pub use waf_ids_core::{
     NewAuditLogEntry, ProductEdition, ReadinessCheck, ReadinessStatus, RouteConfig, ScoredRequest,
     SecurityEvent, Severity, SignatureInfo, SocKpiSnapshot, TARGET_SALE_VALUE_KRW,
     ThreatFeedFreshness, ThreatFeedImport, ThreatFeedImportResult, ThreatFeedStatus,
-    ThreatIndicator, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl, score_request,
+    ThreatIndicator, event_action_class, export_dnsbl_zone, ip_in_network, reverse_ipv4_for_dnsbl,
+    score_request,
 };
 
 mod coraza_audit;
@@ -303,12 +304,27 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub admin_token: Option<String>,
     pub state_path: Option<PathBuf>,
     pub dnsbl_origin: String,
     pub event_limit: usize,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field(
+                "admin_token",
+                &self.admin_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("state_path", &self.state_path)
+            .field("dnsbl_origin", &self.dnsbl_origin)
+            .field("event_limit", &self.event_limit)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -1047,12 +1063,19 @@ async fn list_events(
 ) -> Json<Vec<SecurityEvent>> {
     let data = state.inner.read().await;
     let mut events: Vec<SecurityEvent> = match &query.action {
-        Some(action) => data
-            .events
-            .iter()
-            .filter(|event| &event.action == action)
-            .cloned()
-            .collect(),
+        Some(action) => {
+            // A known class matches both gateway and engine spellings; an
+            // unknown filter keeps exact-match semantics.
+            let wanted = event_action_class(action);
+            data.events
+                .iter()
+                .filter(|event| match wanted {
+                    Some(class) => event_action_class(&event.action) == Some(class),
+                    None => &event.action == action,
+                })
+                .cloned()
+                .collect()
+        }
         None => data.events.clone(),
     };
     if let Some(limit) = query.limit {
@@ -1942,7 +1965,12 @@ fn apply_engine_enforcement_hints(
     let reason = {
         let trimmed = reason.trim();
         if trimmed.len() > 200 {
-            format!("{}…", &trimmed[..199])
+            // Keep the existing byte allowance, but never split a UTF-8 scalar.
+            let mut end = 199;
+            while !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &trimmed[..end])
         } else if trimmed.is_empty() {
             format!("{source} engine hit")
         } else {
@@ -3767,6 +3795,52 @@ mod tests {
             import_ips: true,
             allow_non_default_hosts: true,
         }
+    }
+
+    #[test]
+    fn phishing_database_empty_json_selects_valid_builtin_defaults() {
+        let request: PhishingDatabaseImportRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.feed_id, "phishing-database-active");
+        assert_eq!(
+            request.source,
+            "https://github.com/Phishing-Database/Phishing.Database"
+        );
+        assert_eq!(request.domain_url, PHISHING_DATABASE_DEFAULT_DOMAIN_URL);
+        assert_eq!(request.ip_url, PHISHING_DATABASE_DEFAULT_IP_URL);
+        assert_eq!(request.ttl_seconds, 3_600);
+        assert_eq!(request.domain_limit, 5_000);
+        assert_eq!(request.ip_limit, 5_000);
+        assert_eq!(request.severity, Severity::High);
+        assert!(request.import_domains);
+        assert!(request.import_ips);
+        assert!(!request.allow_non_default_hosts);
+        assert_eq!(validate_phishing_database_import_request(&request), Ok(()));
+
+        // Explicit false values must not be replaced by the true defaults.
+        let disabled: PhishingDatabaseImportRequest =
+            serde_json::from_str(r#"{"import_domains":false,"import_ips":false}"#).unwrap();
+        assert!(!disabled.import_domains);
+        assert!(!disabled.import_ips);
+        assert_eq!(
+            validate_phishing_database_import_request(&disabled),
+            Err("at least one of import_domains or import_ips must be true")
+        );
+    }
+
+    #[test]
+    fn kev_empty_json_selects_valid_builtin_defaults() {
+        let request: KevImportRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.feed_id, "cisa-kev");
+        assert_eq!(request.source, "feed:cisa-kev");
+        assert_eq!(request.ttl_seconds, 86_400);
+        assert_eq!(validate_kev_import_request(&request), Ok(()));
+
+        let zero_ttl: KevImportRequest = serde_json::from_str(r#"{"ttl_seconds":0}"#).unwrap();
+        assert_eq!(zero_ttl.ttl_seconds, 0);
+        assert_eq!(
+            validate_kev_import_request(&zero_ttl),
+            Err("ttl_seconds must be greater than zero")
+        );
     }
 
     fn kev_import_request() -> KevImportRequest {
@@ -5600,6 +5674,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kev_rejected_refresh_preserves_authoritative_snapshot() {
+        let catalogs = Arc::new(Mutex::new(vec![
+            serde_json::json!({"vulnerabilities": [
+                {"cveID": "CVE-2023-49105", "knownRansomwareCampaignUse": "Unknown"},
+                {"cveID": "CVE-2021-44228", "knownRansomwareCampaignUse": "Known"}
+            ]})
+            .to_string(),
+            serde_json::json!({"vulnerabilities": [
+                {"cveID": "CVE-2023-49105"},
+                {"cveID": "not-a-cve"}
+            ]})
+            .to_string(),
+        ]));
+        let remaining_catalogs = catalogs.clone();
+        let feed_mock = Router::new().route(
+            "/kev.json",
+            get(move || {
+                let catalogs = catalogs.clone();
+                async move { (StatusCode::OK, catalogs.lock().await.remove(0)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, feed_mock)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        let state = AppState::seeded(Some("secret".to_string()))
+            .with_kev_catalog_url(format!("http://{addr}/kev.json"));
+        let app = build_app(state.clone());
+        let payload = kev_import_request();
+        let first = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = body_text(first).await;
+        let before = serde_json::to_value(&*state.inner.read().await).unwrap();
+        let second = app_request(
+            &app,
+            json_request(
+                Method::POST,
+                "/api/threat-intel/cisa-kev",
+                Some("secret"),
+                &payload,
+            ),
+        )
+        .await;
+        let second_status = second.status();
+        let second_body = body_text(second).await;
+        let after = serde_json::to_value(&*state.inner.read().await).unwrap();
+        let remaining = remaining_catalogs.lock().await.len();
+        stop.send(()).unwrap();
+        server.await.unwrap();
+
+        assert_eq!(first_status, StatusCode::CREATED, "{first_body}");
+        let threats = before["threats"].as_array().unwrap();
+        assert!(threats.iter().any(|t| t["value"] == "CVE-2023-49105"));
+        assert!(threats.iter().any(|t| t["value"] == "CVE-2021-44228"));
+        assert!(
+            before["audit_logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["action"] == "import_kev_feed")
+        );
+        assert_eq!(second_status, StatusCode::BAD_GATEWAY, "{second_body}");
+        assert!(second_body.contains("mostly unparsable"));
+        assert_eq!(remaining, 0, "both mock catalogs must have been fetched");
+        assert_eq!(
+            after, before,
+            "rejected refresh must preserve the complete stored state"
+        );
+    }
+
+    #[tokio::test]
     async fn feed_refresh_preserves_indicators_still_owned_by_another_feed() {
         // Two independently-managed feeds can legitimately report the same
         // indicator_type+value+source. Refreshing one feed without it must
@@ -5924,6 +6085,70 @@ mod tests {
             import_result.upserted_threats, 1,
             "only the non-operator-owned threat should count as upserted"
         );
+    }
+
+    /// Keep the original byte budget and fallback without UTF-8 slicing panics.
+    #[test]
+    fn engine_hint_reason_boundary_and_policy_controls() {
+        let ip = "192.0.2.201".parse().unwrap();
+        let cases = [
+            ("x".repeat(199), "x".repeat(199)),
+            ("x".repeat(200), "x".repeat(200)),
+            ("x".repeat(201), format!("{}…", "x".repeat(199))),
+            ("é".repeat(110), format!("{}…", "é".repeat(99))),
+            ("한".repeat(80), format!("{}…", "한".repeat(66))),
+            ("🛡".repeat(60), format!("{}…", "🛡".repeat(49))),
+            (
+                format!("{}é", "x".repeat(199)),
+                format!("{}…", "x".repeat(199)),
+            ),
+            ("  short 한  ".into(), "short 한".into()),
+            (" \n\t ".into(), "fixture engine hit".into()),
+        ];
+        for (input, expected) in cases {
+            let mut data = AppData::seeded();
+            assert_eq!(
+                apply_engine_enforcement_hints(
+                    &mut data,
+                    "fixture",
+                    "block",
+                    Some(ip),
+                    "/case?x=1",
+                    &input,
+                    80
+                ),
+                3
+            );
+            let entry = data
+                .dnsbl
+                .iter()
+                .find(|row| row.source == "fixture")
+                .unwrap();
+            assert_eq!(entry.reason, expected);
+            assert_eq!(entry.ttl_seconds, 3_600);
+            assert_eq!(entry.code, "127.0.0.2");
+            assert!(
+                entry.reason.len() <= 202,
+                "199 bytes plus three-byte ellipsis"
+            );
+        }
+        let mut data = AppData::seeded();
+        let original_dnsbl = data.dnsbl.clone();
+        let original_threats = data.threats.clone();
+        assert_eq!(
+            apply_engine_enforcement_hints(
+                &mut data,
+                "fixture",
+                "monitor",
+                Some(ip),
+                "/case",
+                &"한".repeat(80),
+                25
+            ),
+            0
+        );
+        assert_eq!(data.dnsbl, original_dnsbl);
+        assert_eq!(data.threats, original_threats);
     }
 
     #[tokio::test]

@@ -56,6 +56,15 @@ pub fn stix_material_from_value(
             skipped_objects += 1;
             continue;
         }
+        // STIX 2.1 section 3.2: revoked objects are no longer valid for their creator.
+        // Only an absent or literal `false` value is admissible enforcement evidence.
+        if !matches!(
+            obj.get("revoked"),
+            None | Some(serde_json::Value::Bool(false))
+        ) {
+            skipped_objects += 1;
+            continue;
+        }
         let pattern = obj
             .get("pattern")
             .and_then(|p| p.as_str())
@@ -196,8 +205,17 @@ fn parse_bracket_comparison(s: &str) -> Option<(String, String, usize)> {
     let eq = inner.find('=')?;
     let left = inner[..eq].trim();
     let right = inner[eq + 1..].trim();
-    let sco_type = left.split(':').next()?.trim();
-    if sco_type.is_empty() {
+    let (sco_type, property) = left.split_once(':')?;
+    let sco_type = sco_type.trim();
+    // Non-equality operators must not lose their meaning during projection.
+    if sco_type.is_empty()
+        || left.ends_with(['!', '<', '>'])
+        || right.starts_with('=')
+        || (matches!(
+            sco_type,
+            "ipv4-addr" | "ipv6-addr" | "domain-name" | "hostname" | "url"
+        ) && property.trim() != "value")
+    {
         return None;
     }
     let value = unquote_stix_string(right)?;
@@ -211,12 +229,20 @@ fn unquote_stix_string(s: &str) -> Option<String> {
     let s = s.trim();
     if s.len() >= 2 {
         let b = s.as_bytes();
-        if (b[0] == b'\'' && b[s.len() - 1] == b'\'') || (b[0] == b'"' && b[s.len() - 1] == b'"') {
-            return Some(s[1..s.len() - 1].to_string());
+        let starts_single = b[0] == b'\'';
+        let starts_double = b[0] == b'"';
+        if starts_single || starts_double {
+            let matching = (starts_single && b[s.len() - 1] == b'\'')
+                || (starts_double && b[s.len() - 1] == b'"');
+            return matching.then(|| s[1..s.len() - 1].to_string());
         }
     }
-    // Unquoted token (rare)
-    if !s.is_empty() && !s.contains(char::is_whitespace) {
+    // Unquoted token (rare), but reject a dangling quote rather than treating it as data.
+    if !s.is_empty()
+        && !s.contains(char::is_whitespace)
+        && !s.starts_with(['\'', '"'])
+        && !s.ends_with(['\'', '"'])
+    {
         return Some(s.to_string());
     }
     None
@@ -281,6 +307,43 @@ mod tests {
     }
 
     #[test]
+    fn literal_quote_boundaries_reject_dangling_quotes_and_preserve_valid_values() {
+        for literal in [
+            "'fixture.example",
+            "\"fixture.example",
+            "fixture.example'",
+            "fixture.example\"",
+            "'",
+            "\"",
+            "'fixture.example\"",
+            "\"fixture.example'",
+        ] {
+            let pattern = format!("[domain-name:value = {literal}]");
+            let document = serde_json::json!({"type":"indicator", "pattern":pattern});
+            assert!(
+                stix_material_from_value(&document, "fixture", 600).is_err(),
+                "unexpectedly accepted {literal}"
+            );
+        }
+        for literal in [
+            "'Fixture.Example'",
+            "\"Fixture.Example\"",
+            "Fixture.Example",
+        ] {
+            let pattern = format!("[domain-name:value = {literal}]");
+            let document = serde_json::json!({"type":"indicator", "pattern":pattern});
+            let material = stix_material_from_value(&document, "fixture", 600).unwrap();
+            assert_eq!(material.threats.len(), 1);
+            assert_eq!(material.threats[0].value, "fixture.example");
+            assert_eq!(material.threats[0].indicator_type, "domain");
+            assert_eq!(material.threats[0].source, "fixture");
+            assert_eq!(material.threats[0].ttl_seconds, 600);
+            assert_eq!(material.skipped_objects, 0);
+            assert!(material.dnsbl.is_empty());
+        }
+    }
+
+    #[test]
     fn extracts_url_pattern() {
         let pattern = "[url:value = 'http://evil.example/login']";
         let pairs = extract_pattern_observables(pattern);
@@ -291,8 +354,86 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_and_non_stix() {
-        assert!(parse_stix_document("", "s", 60).is_err());
-        assert!(parse_stix_document("{\"type\":\"report\"}", "s", 60).is_err());
+    fn maps_arrays_and_standalone_indicators_with_confidence_bands() {
+        for (confidence, expected) in [
+            (0, Severity::Low),
+            (25, Severity::Medium),
+            (50, Severity::High),
+            (75, Severity::Critical),
+        ] {
+            let material = stix_material_from_value(
+                &serde_json::json!([{
+                    "type":"indicator",
+                    "name":"band",
+                    "confidence":confidence,
+                    "pattern":"[hostname:value = \"Host.Example\"]"
+                }]),
+                "fixture",
+                60,
+            )
+            .unwrap();
+            assert_eq!(material.threats[0].value, "host.example");
+            assert_eq!(material.threats[0].severity, expected);
+
+            let standalone = stix_material_from_value(
+                &serde_json::json!({
+                    "type":"indicator",
+                    "pattern":"[url:value = token.example]",
+                    "confidence":confidence
+                }),
+                "fixture",
+                60,
+            )
+            .unwrap();
+            assert_eq!(standalone.threats[0].indicator_type, "url");
+            assert_eq!(standalone.threats[0].value, "token.example");
+        }
+    }
+
+    #[test]
+    fn skips_revoked_invalid_and_non_indicator_objects() {
+        let material = stix_material_from_value(
+            &serde_json::json!({"type":"bundle","objects":[
+                {"type":"malware"},
+                {"type":"indicator","revoked":true,"pattern":"[ipv4-addr:value = '192.0.2.1']"},
+                {"type":"indicator","revoked":"false","pattern":"[ipv4-addr:value = '192.0.2.2']"},
+                {"type":"indicator","pattern":""},
+                {"type":"indicator","pattern":"[ipv4-addr:value = 'not-an-ip']"},
+                {"type":"indicator","pattern":"[ipv4-addr:value = '192.0.2.3']"}
+            ]}),
+            "fixture",
+            60,
+        )
+        .unwrap();
+        assert_eq!(material.skipped_objects, 5);
+        assert_eq!(material.dnsbl.len(), 1);
+        assert_eq!(
+            material.dnsbl[0].address,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3))
+        );
+    }
+
+    #[test]
+    fn parser_rejects_unsupported_properties_operators_and_empty_documents() {
+        for pattern in [
+            "[ipv4-addr:resolves-to = '192.0.2.1']",
+            "[ipv4-addr:value != '192.0.2.1']",
+            "[ipv4-addr:value >= '192.0.2.1']",
+            "[ipv4-addr:value = '']",
+            "[domain-name:value = 'evil.example\"]",
+            "[domain-name:value = \"evil.example']",
+            "no bracket comparison",
+        ] {
+            let value = serde_json::json!({"type":"indicator","pattern":pattern});
+            assert!(
+                stix_material_from_value(&value, "fixture", 60).is_err(),
+                "{pattern}"
+            );
+        }
+        assert!(
+            stix_material_from_value(&serde_json::json!({"type":"bundle","objects":[]}), "s", 60)
+                .is_err()
+        );
+        assert!(parse_stix_document("not-json", "s", 60).is_err());
     }
 }

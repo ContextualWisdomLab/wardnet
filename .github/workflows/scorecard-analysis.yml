@@ -13,7 +13,8 @@ permissions:
 jobs:
   analysis:
     name: Scorecard Analysis
-    runs-on: ubuntu-24.04
+    # Keep the pinned analysis version; change execution placement only.
+    runs-on: [self-hosted, Linux, X64, cwlab-ci-isolated]
     permissions:
       contents: read
       security-events: write

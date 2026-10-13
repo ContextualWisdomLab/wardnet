@@ -146,4 +146,49 @@ mod tests {
         assert!(url.contains("added_after="));
         assert!(url.contains("2024"));
     }
+
+    #[test]
+    fn rejects_empty_or_unsafe_collection_inputs() {
+        assert_eq!(
+            collection_objects_url(" / ", "abc").unwrap_err(),
+            "api_root must be non-empty"
+        );
+        assert_eq!(
+            collection_objects_url("https://taxii.example/api1", " / ").unwrap_err(),
+            "collection_id must be non-empty"
+        );
+        for id in ["a?b", "a#b"] {
+            assert!(collection_objects_url("https://taxii.example/api1", id).is_err());
+        }
+    }
+
+    #[test]
+    fn filter_boundary_rejects_unsafe_values_and_keeps_plain_urls() {
+        assert_eq!(
+            with_taxii_filters("  ", None).unwrap_err(),
+            "objects_url must be non-empty"
+        );
+        let base = "https://taxii.example/api1/collections/c/objects/";
+        assert_eq!(with_taxii_filters(base, None).unwrap(), base);
+        assert_eq!(with_taxii_filters(base, Some("  ")).unwrap(), base);
+        for after in ["2024&x=1", "2024#frag", "20\n24", "20\u{7f}24"] {
+            assert_eq!(
+                with_taxii_filters(base, Some(after)).unwrap_err(),
+                "added_after contains invalid characters"
+            );
+        }
+        assert!(
+            with_taxii_filters("not a url", Some("2024-01-01T00:00:00Z"))
+                .unwrap_err()
+                .starts_with("invalid objects_url:")
+        );
+    }
+
+    #[test]
+    fn passes_through_indicator_and_array_unchanged() {
+        let indicator = r#"{"type":"indicator","id":"indicator--1"}"#;
+        assert_eq!(stix_json_from_taxii_response(indicator).unwrap(), indicator);
+        let array = r#"[{"type":"indicator"}]"#;
+        assert_eq!(stix_json_from_taxii_response(array).unwrap(), array);
+    }
 }

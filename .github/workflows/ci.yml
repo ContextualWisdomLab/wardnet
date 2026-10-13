@@ -14,9 +14,12 @@ concurrency:
 
 jobs:
   rust:
-    runs-on: ubuntu-24.04
+    # Require operator-provisioned isolated CI; never privileged control/model hosts.
+    runs-on: [self-hosted, Linux, X64, cwlab-ci-isolated]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable

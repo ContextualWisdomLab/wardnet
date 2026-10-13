@@ -46,7 +46,15 @@ This project treats a 2B KRW sale as an enterprise due-diligence threshold, not 
 - `contract_value`: annual contract value is at least 2B KRW.
 - `threat_feed_updates`: at least one imported threat feed is fresh within its TTL.
 - `gateway_enforcement`: at least one enabled gateway route exists.
-- `dnsbl_publication`: DNSBL entries are available for zone export.
+- `dnsbl_publication`: at least one stored entry can actually emit an IPv4
+  A/TXT record pair in `/dnsbl/zone`. Stored rows alone are not publication
+  evidence. IPv6-only rows, invalid loopback answers, zero/out-of-range TTLs,
+  and oversized TXT RDATA do not satisfy this check.
+  Readiness, the evidence manifest, and the support bundle use the same
+  publication predicate. Their DNSBL entry counts remain stored-evidence
+  counts; they are not published-record counts. Omitted entries remain stored
+  unchanged. A passing check does not prove authoritative DNS deployment,
+  resolver visibility, or enterprise release approval.
 - `support_evidence`: at least one security event exists for a support bundle.
 
 ## Current Boundary

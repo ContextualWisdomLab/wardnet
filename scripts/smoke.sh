@@ -31,18 +31,33 @@ cleanup() {
 trap cleanup EXIT
 
 start_server() {
-  # Compile before the health wait so rustc time is not counted as a hang.
-  cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml"
+  # Resolve the executable from Cargo's actual artifact rather than assuming a
+  # target directory. Exec it so SERVER_PID owns the gateway, not a cargo wrapper.
+  SERVER_BIN="$(cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml" \
+    --bin waf-ids-ai-soc --message-format=json | python3 -c '
+import json
+import sys
+
+executables = []
+for line in sys.stdin:
+    artifact = json.loads(line)
+    if artifact.get("reason") == "compiler-artifact" and artifact.get("executable"):
+        if artifact.get("target", {}).get("name") == "waf-ids-ai-soc":
+            executables.append(artifact["executable"])
+if len(executables) != 1:
+    raise SystemExit("expected exactly one gateway executable from cargo build")
+print(executables[0])
+')"
   (
     cd "$ROOT_DIR"
-    BIND_ADDR="127.0.0.1:$PORT" \
+    exec env BIND_ADDR="127.0.0.1:$PORT" \
       ADMIN_TOKEN="$ADMIN_TOKEN_VALUE" \
       ADMIN_TOKENS= \
       WAF_IDS_CREDENTIALS_PATH= \
       WAF_IDS_STATE_PATH="$STATE_FILE" \
       DNSBL_ORIGIN="dnsbl.test" \
       EVENT_LIMIT="5" \
-      cargo run --quiet
+      "$SERVER_BIN"
   ) >"$LOG_FILE" 2>&1 &
   SERVER_PID="$!"
 
@@ -88,7 +103,10 @@ assert_json_field "$health" 'data["event_limit"] == 5'
 assert_json_field "$health" 'data["admin_auth_configured"] is True'
 assert_json_field "$health" 'data["auth_mode"] == "production"'
 
-curl -fsS "$BASE_URL/admin" | grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway"
+# Download the complete response before checking its content. With pipefail,
+# grep -q can close the pipe after an early match and make curl exit 23.
+curl -fsS "$BASE_URL/admin" -o "$TMP_DIR/admin.html"
+grep -q "ContextualWisdomLab WAF/IDS/AI SOC Gateway" "$TMP_DIR/admin.html"
 
 unauthorized_code="$(
   curl -sS -o /dev/null -w '%{http_code}' \
@@ -209,7 +227,8 @@ fi
 zone="$(curl -fsS "$BASE_URL/dnsbl/zone")"
 grep -q '^\$ORIGIN dnsbl.test\.$' <<<"$zone"
 grep -q '^10.113.0.203 IN A 127.0.0.2$' <<<"$zone"
-grep -q '^23.100.51.198 IN A 127.0.0.4$' <<<"$zone"
+grep -q '^23.100.51.198 600 IN A 127.0.0.4$' <<<"$zone"
+grep -q '^23.100.51.198 600 IN TXT "feed scanner source=misp-seoul"$' <<<"$zone"
 
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
